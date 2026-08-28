@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+      - run: python -m pip install --upgrade pip
+      - name: Fetch ComfyUI source
+        run: git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git "$RUNNER_TEMP/comfyui-source"
+      - name: Install ComfyUI runtime
+        run: python -m pip install -r "$RUNNER_TEMP/comfyui-source/requirements.txt"
+      - run: python -m compileall -q scene_prompt_tools tests __init__.py
+      - run: python -m unittest discover -s tests -v
+      - run: npm run check:frontend
+      - run: npm run test:frontend
+      - name: Check changed range for whitespace errors
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          else
+            before="${{ github.event.before }}"
+            after="${{ github.sha }}"
+            if [[ "$before" =~ ^0+$ ]]; then
+              git diff-tree --check --no-commit-id -r "$after"
+            else
+              git diff --check "$before..$after"
+            fi
+          fi
+      - name: Fetch pull request merge metadata
+        if: github.event_name == 'pull_request'
+        run: |
+          ref="refs/remotes/origin/pull/${{ github.event.pull_request.number }}/merge"
+          git fetch --no-tags origin "refs/pull/${{ github.event.pull_request.number }}/merge:$ref"
+          echo "SCENE_PROMPT_SYNTHETIC_MERGE_REF=$ref" >> "$GITHUB_ENV"
+      - name: Check public package
+        env:
+          SCENE_PROMPT_HISTORY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SCENE_PROMPT_HISTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tests/check_public_package.py
+      - name: Load with real ComfyUI modules
+        run: RUN_REAL_COMFYUI_SMOKE=1 COMFYUI_SOURCE="$RUNNER_TEMP/comfyui-source" python tests/test_comfyui_smoke.py -v

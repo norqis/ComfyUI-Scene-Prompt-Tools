@@ -1,0 +1,19 @@
+[project]
+name = "scene-prompt-tools"
+version = "0.1.0"
+description = "Composable prompt planning and sequential generation nodes for ComfyUI"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/norqis/ComfyUI-Scene-Prompt-Tools"
+"Bug Tracker" = "https://github.com/norqis/ComfyUI-Scene-Prompt-Tools/issues"
+
+[tool.comfy]
+PublisherId = "norqis"
+DisplayName = "ComfyUI Scene Prompt Tools"

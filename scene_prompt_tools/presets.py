@@ -1,0 +1,661 @@
+import copy
+import hashlib
+import json
+import os
+import re
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+import folder_paths
+from comfy_execution.graph_utils import GraphBuilder, is_link
+
+from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
+from .plan import seed_plan
+from .nodes import (
+    SceneEmptyLatent,
+    SceneMatrix,
+    ScenePath,
+    ScenePromptMerge,
+    ScenePromptQueue,
+    ScenePromptCounter,
+)
+
+
+PRESET_SCHEMA_VERSION = 1
+PRESET_FILE_SUFFIX = ".json"
+PRESET_DIRECTORY_NAME = "scene_presets"
+PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,80}$")
+_PRESET_LOCK = threading.RLock()
+_RUN_SNAPSHOTS = {}
+_RUN_SNAPSHOTS_TTL_SECONDS = 12 * 60 * 60
+_CANCELLED_RUNS = {}
+_CANCELLED_RUNS_TTL_SECONDS = 5 * 60
+
+SAFE_NODE_CLASSES = {
+    "ScenePrompt": ScenePrompt,
+    "SceneMatrix": SceneMatrix,
+    "ScenePath": ScenePath,
+    "ScenePromptMerge": ScenePromptMerge,
+    "ScenePromptCounter": ScenePromptCounter,
+    "ScenePromptQueue": ScenePromptQueue,
+    "SceneEmptyLatent": SceneEmptyLatent,
+    "ScenePresetReference": None,
+}
+# ComfyUI serializes widget-input Primitive nodes as executable API nodes.  They
+# are only allowed while evaluating an outer Scene graph, never inside a saved
+# Preset, and only as literal value sources for safe Scene inputs.
+SAFE_VALUE_NODE_CLASSES = {
+    "PrimitiveInt": int,
+    "PrimitiveFloat": float,
+    "PrimitiveString": str,
+    "PrimitiveStringMultiline": str,
+    "PrimitiveBoolean": bool,
+}
+BOUNDARY_INPUT = "ScenePresetInput"
+BOUNDARY_OUTPUT = "ScenePresetOutput"
+BOUNDARY_CLASSES = {BOUNDARY_INPUT, BOUNDARY_OUTPUT}
+WORKFLOW_NON_EXECUTION_TYPES = {"reroute", "note", "markdownnote", "comment", "group"}
+
+
+class ScenePresetError(ValueError):
+    pass
+
+
+class ScenePresetResolutionError(ScenePresetError):
+    def __init__(self, message, node_id=None):
+        super().__init__(message)
+        self.node_id = str(node_id) if node_id is not None else None
+
+
+def preset_directory():
+    return Path(folder_paths.get_user_directory()) / "default" / PRESET_DIRECTORY_NAME
+
+
+def _clean_preset_id(value):
+    preset_id = str(value or "").strip()
+    if not PRESET_ID_RE.fullmatch(preset_id):
+        raise ScenePresetError("preset_id は英数字、_、- だけで入力してください。")
+    return preset_id
+
+
+def _preset_path(preset_id):
+    return preset_directory() / f"{_clean_preset_id(preset_id)}{PRESET_FILE_SUFFIX}"
+
+
+def _canonical_json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _content_hash(api_graph, workflow):
+    content = {"api_graph": api_graph, "workflow": workflow}
+    return hashlib.sha256(_canonical_json(content).encode("utf-8")).hexdigest()
+
+
+def _api_graph_with_titles(api_graph, workflow):
+    graph = copy.deepcopy(api_graph)
+    titles = {
+        str(node.get("id")): str(node.get("title") or "").strip()
+        for node in workflow.get("nodes", [])
+        if isinstance(node, dict) and node.get("id") is not None
+    }
+    for node_id, node in graph.get("output", {}).items():
+        if isinstance(node, dict) and titles.get(str(node_id)):
+            node["_meta"] = {"title": titles[str(node_id)]}
+    return graph
+
+
+def _read_json(path):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        raise ScenePresetError(f"Presetが見つかりません: {path.stem}") from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem} ({exc})") from exc
+
+
+def _node_label(node_id, node):
+    title = str(node.get("_meta", {}).get("title") or node.get("title") or "").strip()
+    class_type = str(node.get("class_type") or "不明なノード")
+    return f"{title or class_type} #{node_id}"
+
+
+def _node_inputs(node):
+    inputs = node.get("inputs")
+    return inputs if isinstance(inputs, dict) else {}
+
+
+def _linked_nodes(node):
+    for value in _node_inputs(node).values():
+        if is_link(value):
+            yield str(value[0])
+
+
+def _is_non_execution_workflow_node(node):
+    node_type = str(node.get("type") or "").strip().lower()
+    return node_type in WORKFLOW_NON_EXECUTION_TYPES
+
+
+def _validate_workflow_nodes(workflow, api_nodes):
+    workflow_nodes = workflow.get("nodes")
+    if not isinstance(workflow_nodes, list):
+        raise ScenePresetError("Presetの編集用ワークフローが不正です。")
+    api_node_ids = {str(node_id) for node_id in api_nodes}
+    for node in workflow_nodes:
+        if not isinstance(node, dict):
+            raise ScenePresetError("編集用ワークフローのノード形式が不正です。")
+        if _is_non_execution_workflow_node(node):
+            continue
+        node_id = node.get("id")
+        node_type = str(node.get("type") or "不明なノード")
+        if node_id is None or str(node_id) not in api_node_ids:
+            raise ScenePresetError(
+                f"編集用ワークフローの {node_type} #{node_id} は実行グラフに含まれていません。"
+            )
+
+
+def _validate_preset_graph(nodes):
+    if not isinstance(nodes, dict) or not nodes:
+        raise ScenePresetError("Presetの実行グラフがありません。")
+
+    inputs = [(node_id, node) for node_id, node in nodes.items()
+              if isinstance(node, dict) and node.get("class_type") == BOUNDARY_INPUT]
+    outputs = [(node_id, node) for node_id, node in nodes.items()
+               if isinstance(node, dict) and node.get("class_type") == BOUNDARY_OUTPUT]
+    if len(inputs) != 1:
+        raise ScenePresetError("Scene Preset Input は1個だけ必要です。")
+    if len(outputs) != 1:
+        raise ScenePresetError("Scene Preset Output は1個だけ必要です。")
+
+    input_id, input_node = inputs[0]
+    output_id, output_node = outputs[0]
+    if _node_inputs(input_node):
+        raise ScenePresetError(f"{_node_label(input_id, input_node)} に入力を接続しないでください。")
+    output_link = _node_inputs(output_node).get("scene_prompt")
+    if not is_link(output_link):
+        raise ScenePresetError(f"{_node_label(output_id, output_node)} の scene_prompt が未接続です。")
+
+    for node_id, node in nodes.items():
+        if not isinstance(node, dict):
+            raise ScenePresetError(f"ノード #{node_id} の形式が不正です。")
+        class_type = node.get("class_type")
+        if class_type not in SAFE_NODE_CLASSES and class_type not in BOUNDARY_CLASSES:
+            raise ScenePresetError(f"{_node_label(node_id, node)} はPreset内で使えません。")
+        for input_name, input_value in _node_inputs(node).items():
+            if not is_link(input_value):
+                continue
+            source_id = str(input_value[0])
+            if input_value[1] != 0:
+                raise ScenePresetError(
+                    f"{_node_label(node_id, node)} の {input_name} は出力0だけを接続してください。"
+                )
+            if source_id not in nodes:
+                raise ScenePresetError(f"{_node_label(node_id, node)} の接続先 #{source_id} がありません。")
+
+    ancestors = set()
+    visiting = []
+
+    def visit(node_id):
+        node_id = str(node_id)
+        if node_id in visiting:
+            start = visiting.index(node_id)
+            cycle = " -> ".join([*(f"#{item}" for item in visiting[start:]), f"#{node_id}"])
+            raise ScenePresetError(f"Presetの接続が循環しています: {cycle}")
+        if node_id in ancestors:
+            return
+        visiting.append(node_id)
+        for source_id in _linked_nodes(nodes[node_id]):
+            visit(source_id)
+        visiting.pop()
+        ancestors.add(node_id)
+
+    visit(output_id)
+    outside = [node_id for node_id in nodes if node_id not in ancestors and str(node_id) != str(input_id)]
+    if outside:
+        node_id = outside[0]
+        raise ScenePresetError(f"{_node_label(node_id, nodes[node_id])} はOutputへ到達していません。")
+
+    return {"input_id": str(input_id), "output_id": str(output_id), "output_link": output_link}
+
+
+def _preset_nodes(preset):
+    if not isinstance(preset, dict) or preset.get("schema_version") != PRESET_SCHEMA_VERSION:
+        raise ScenePresetError("Presetの形式が対応していません。")
+    graph = preset.get("api_graph")
+    if not isinstance(graph, dict) or not isinstance(graph.get("output"), dict):
+        raise ScenePresetError("Presetの実行グラフが不正です。")
+    return graph["output"]
+
+
+def _validate_preset_payload(preset):
+    metadata = preset.get("metadata") if isinstance(preset, dict) else None
+    if not isinstance(metadata, dict):
+        raise ScenePresetError("Presetのメタデータが不正です。")
+    _clean_preset_id(metadata.get("preset_id"))
+    revision = metadata.get("revision")
+    if not isinstance(revision, int) or revision < 1:
+        raise ScenePresetError("Presetのrevisionが不正です。")
+    expected_hash = _content_hash(preset.get("api_graph"), preset.get("workflow"))
+    if str(metadata.get("sha256") or "") != expected_hash:
+        raise ScenePresetError("Presetの内容が壊れているか、hashが一致しません。")
+    name = str(metadata.get("name") or metadata.get("preset_id"))
+    try:
+        nodes = _preset_nodes(preset)
+        _validate_workflow_nodes(preset.get("workflow"), nodes)
+        return _validate_preset_graph(nodes)
+    except ScenePresetError as exc:
+        raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
+
+
+def load_preset(preset_id):
+    path = _preset_path(preset_id)
+    preset = _read_json(path)
+    _validate_preset_payload(preset)
+    return preset
+
+
+def save_preset(payload):
+    if not isinstance(payload, dict):
+        raise ScenePresetError("保存内容が不正です。")
+    preset_id = _clean_preset_id(payload.get("preset_id"))
+    name = str(payload.get("name") or preset_id).strip() or preset_id
+    api_graph = payload.get("api_graph")
+    workflow = payload.get("workflow")
+    if not isinstance(api_graph, dict) or not isinstance(api_graph.get("output"), dict):
+        raise ScenePresetError("Presetの実行グラフがありません。")
+    if not isinstance(workflow, dict):
+        raise ScenePresetError("Presetの編集用ワークフローがありません。")
+    api_graph = _api_graph_with_titles(api_graph, workflow)
+    try:
+        _validate_workflow_nodes(workflow, api_graph["output"])
+        _validate_preset_graph(api_graph["output"])
+    except ScenePresetError as exc:
+        raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
+
+    with _PRESET_LOCK:
+        path = _preset_path(preset_id)
+        revision = 1
+        if path.exists():
+            existing = _read_json(path)
+            _validate_preset_payload(existing)
+            revision = existing["metadata"]["revision"] + 1
+        digest = _content_hash(api_graph, workflow)
+        saved = {
+            "schema_version": PRESET_SCHEMA_VERSION,
+            "metadata": {
+                "preset_id": preset_id,
+                "name": name,
+                "revision": revision,
+                "sha256": digest,
+            },
+            "workflow": copy.deepcopy(workflow),
+            "api_graph": copy.deepcopy(api_graph),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{preset_id}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(saved, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            _validate_preset_payload(_read_json(Path(temp_name)))
+            os.replace(temp_name, path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+    return saved
+
+
+def _find_references(nodes):
+    references = []
+    for node_id, node in nodes.items():
+        if isinstance(node, dict) and node.get("class_type") == "ScenePresetReference":
+            preset_id = str(_node_inputs(node).get("preset_id") or "").strip()
+            references.append((str(node_id), preset_id, node))
+    return references
+
+
+def _scene_prompt_closure(nodes, source_id):
+    closure = {}
+    visiting = set()
+
+    def visit(node_id):
+        node_id = str(node_id)
+        if node_id in closure:
+            return
+        if node_id in visiting:
+            raise ScenePresetError(f"生成グラフのScene接続が循環しています: #{node_id}")
+        node = nodes.get(node_id)
+        if not isinstance(node, dict):
+            raise ScenePresetError(f"Sceneノード #{node_id} が見つかりません。")
+        visiting.add(node_id)
+        for linked_id in _linked_nodes(node):
+            visit(linked_id)
+        visiting.remove(node_id)
+        closure[node_id] = node
+
+    visit(source_id)
+    return closure
+
+
+def _resolve_preset_tree(preset_id, resolved, stack):
+    preset_id = _clean_preset_id(preset_id)
+    if preset_id in stack:
+        cycle = " -> ".join([*stack, preset_id])
+        raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
+    if preset_id in resolved:
+        return
+    preset = load_preset(preset_id)
+    preset_name = str(preset["metadata"].get("name") or preset_id)
+    next_stack = [*stack, preset_id]
+    for _node_id, nested_id, _node in _find_references(_preset_nodes(preset)):
+        try:
+            _resolve_preset_tree(nested_id, resolved, next_stack)
+        except ScenePresetError as exc:
+            raise ScenePresetError(f"Preset「{preset_name}」: {exc}") from exc
+    resolved[preset_id] = preset
+
+
+def _purge_run_snapshots(now=None):
+    current = time.monotonic() if now is None else now
+    for run_id in [key for key, value in _RUN_SNAPSHOTS.items()
+                   if current - value["last_access"] >= _RUN_SNAPSHOTS_TTL_SECONDS]:
+        _RUN_SNAPSHOTS.pop(run_id, None)
+    for run_id in [key for key, cancelled_at in _CANCELLED_RUNS.items()
+                   if current - cancelled_at >= _CANCELLED_RUNS_TTL_SECONDS]:
+        _CANCELLED_RUNS.pop(run_id, None)
+
+
+def _assert_run_not_cancelled(run_id):
+    _purge_run_snapshots()
+    if run_id in _CANCELLED_RUNS:
+        raise ScenePresetError(f"実行「{run_id}」はキャンセルされました。")
+
+
+def _scene_node_value(nodes, node_id, resolved, stack, input_values=None):
+    node_id = str(node_id)
+    if input_values and node_id in input_values:
+        return input_values[node_id]
+    if node_id in stack:
+        raise ScenePresetError(f"Sceneグラフが循環しています: #{node_id}")
+    node = nodes.get(node_id)
+    if not isinstance(node, dict):
+        raise ScenePresetError(f"Sceneノード #{node_id} が見つかりません。")
+    class_type = node.get("class_type")
+    next_stack = {*(stack or set()), node_id}
+
+    def value(raw):
+        if not is_link(raw):
+            return raw
+        return _scene_node_value(nodes, raw[0], resolved, next_stack, input_values)
+
+    if class_type in SAFE_VALUE_NODE_CLASSES:
+        raw_value = _node_inputs(node).get("value")
+        if is_link(raw_value):
+            raise ScenePresetError(f"{_node_label(node_id, node)} の値入力は接続できません。")
+        try:
+            if class_type == "PrimitiveBoolean" and not isinstance(raw_value, bool):
+                if str(raw_value).lower() not in {"true", "false"}:
+                    raise ValueError(raw_value)
+                return str(raw_value).lower() == "true"
+            return SAFE_VALUE_NODE_CLASSES[class_type](raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ScenePresetError(f"{_node_label(node_id, node)} の値が不正です。") from exc
+    if class_type == BOUNDARY_INPUT:
+        return ScenePresetInput().build()[0]
+    if class_type == "ScenePresetReference":
+        preset_id = _clean_preset_id(_node_inputs(node).get("preset_id"))
+        preset = resolved.get(preset_id)
+        if not preset:
+            raise ScenePresetError(f"Preset「{preset_id}」のスナップショットがありません。")
+        upstream = value(_node_inputs(node).get("scene_prompt")) if is_link(_node_inputs(node).get("scene_prompt")) else None
+        return _evaluate_preset_scene(preset, resolved, upstream, set())
+    cls = SAFE_NODE_CLASSES.get(class_type)
+    if cls is None:
+        raise ScenePresetError(f"{_node_label(node_id, node)} はScene計画を計算できません。")
+    kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
+    result = getattr(cls(), cls.FUNCTION)(**kwargs)
+    return result[0]
+
+
+def _evaluate_preset_scene(preset, resolved, upstream, stack):
+    preset_id = str(preset["metadata"]["preset_id"])
+    if preset_id in stack:
+        cycle = " -> ".join([*stack, preset_id])
+        raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
+    validation = _validate_preset_payload(preset)
+    nodes = _preset_nodes(preset)
+    input_id = validation["input_id"]
+    output_link = validation["output_link"]
+    input_values = {input_id: upstream} if upstream is not None else None
+    return _scene_node_value(nodes, output_link[0], resolved, set(), input_values)
+
+
+def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None):
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        raise ScenePresetError("実行IDがありません。")
+    nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
+    if not isinstance(nodes, dict):
+        raise ScenePresetError("生成開始時のグラフを取得できませんでした。")
+    if expand_node_id is None:
+        raise ScenePresetError("Scene Prompt Expand のノードIDがありません。")
+    expand = nodes.get(str(expand_node_id))
+    source = _node_inputs(expand).get("scene_prompt") if isinstance(expand, dict) else None
+    if not is_link(source):
+        return {"presets": [], "preset_graphs": {}, "total_images": 1, "total_batches": 1}
+    scene_nodes = _scene_prompt_closure(nodes, source[0])
+    resolved = {}
+    with _PRESET_LOCK:
+        _assert_run_not_cancelled(run_id)
+        for reference_node_id, preset_id, _node in _find_references(scene_nodes):
+            try:
+                _resolve_preset_tree(preset_id, resolved, [])
+            except ScenePresetError as exc:
+                raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
+        _assert_run_not_cancelled(run_id)
+        _RUN_SNAPSHOTS[run_id] = {"presets": copy.deepcopy(resolved), "last_access": time.monotonic()}
+        _purge_run_snapshots()
+    try:
+        plan = _scene_node_value(scene_nodes, source[0], resolved, set())
+        total_images = int(plan.get("total_images") or 0)
+        total_batches = int(plan.get("total_batches") or 0)
+    except Exception:
+        release_scene_preset_snapshot(run_id)
+        raise
+    return {
+        "presets": [
+            {
+                "preset_id": preset_id,
+                "name": preset["metadata"]["name"],
+                "revision": preset["metadata"]["revision"],
+                "sha256": preset["metadata"]["sha256"],
+            }
+            for preset_id, preset in resolved.items()
+        ],
+        "preset_graphs": {
+            preset_id: {
+                "metadata": copy.deepcopy(preset["metadata"]),
+                "api_graph": copy.deepcopy(preset["api_graph"]),
+            }
+            for preset_id, preset in resolved.items()
+        },
+        "total_images": total_images,
+        "total_batches": total_batches,
+    }
+
+
+def release_scene_preset_snapshot(run_id):
+    with _PRESET_LOCK:
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            return False
+        _purge_run_snapshots()
+        _CANCELLED_RUNS[run_id] = time.monotonic()
+        return _RUN_SNAPSHOTS.pop(run_id, None) is not None
+
+
+def _snapshot_preset(run_id, preset_id):
+    run_id = str(run_id or "").strip()
+    with _PRESET_LOCK:
+        entry = _RUN_SNAPSHOTS.get(run_id)
+        if run_id:
+            if not entry:
+                raise ScenePresetError(f"実行「{run_id}」のPresetスナップショットがありません。")
+            entry["last_access"] = time.monotonic()
+            preset = entry["presets"].get(preset_id)
+            if preset:
+                return copy.deepcopy(preset)
+            raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
+    return load_preset(preset_id)
+
+
+def list_presets():
+    with _PRESET_LOCK:
+        directory = preset_directory()
+        if not directory.exists():
+            return {"presets": [], "errors": []}
+        presets = []
+        errors = []
+        for path in sorted(directory.glob(f"*{PRESET_FILE_SUFFIX}"), key=lambda item: item.name.lower()):
+            try:
+                preset = load_preset(path.stem)
+            except ScenePresetError as exc:
+                errors.append({"preset_id": path.stem, "error": str(exc)})
+                continue
+            presets.append({
+                "metadata": copy.deepcopy(preset["metadata"]),
+                "api_graph": copy.deepcopy(preset["api_graph"]),
+            })
+        return {"presets": presets, "errors": errors}
+
+
+def _replace_link(value, input_id, upstream_link, graph):
+    if not is_link(value):
+        return value
+    source_id, output_index = str(value[0]), value[1]
+    if source_id == input_id:
+        if upstream_link is not None:
+            return upstream_link
+        source = graph.lookup_node(input_id)
+        if source is None:
+            raise ScenePresetError("Scene Preset Inputを展開できません。")
+        return source.out(output_index)
+    source = graph.lookup_node(source_id)
+    if source is None:
+        raise ScenePresetError(f"Presetの接続先 #{source_id} が見つかりません。")
+    return source.out(output_index)
+
+
+def expand_preset_reference(preset_id, scene_prompt=None, run_id=""):
+    preset_id = _clean_preset_id(preset_id)
+    if run_id:
+        preset = _snapshot_preset(run_id, preset_id)
+    else:
+        resolved = {}
+        _resolve_preset_tree(preset_id, resolved, [])
+        preset = resolved[preset_id]
+    validation = _validate_preset_payload(preset)
+    nodes = _preset_nodes(preset)
+    input_id = validation["input_id"]
+    output_id = validation["output_id"]
+    graph = GraphBuilder()
+
+    input_is_referenced = any(
+        any(is_link(value) and str(value[0]) == str(input_id) for value in _node_inputs(node).values())
+        for node in nodes.values()
+        if isinstance(node, dict)
+    )
+    if scene_prompt is None and input_is_referenced:
+        graph.node(BOUNDARY_INPUT, input_id)
+    for node_id, node in nodes.items():
+        class_type = node.get("class_type")
+        if class_type not in BOUNDARY_CLASSES:
+            graph.node(class_type, str(node_id))
+
+    for node_id, node in nodes.items():
+        class_type = node.get("class_type")
+        if class_type in BOUNDARY_CLASSES:
+            continue
+        target = graph.lookup_node(str(node_id))
+        for name, value in _node_inputs(node).items():
+            target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
+        if class_type == "ScenePresetReference":
+            target.set_input("run_id", str(run_id or ""))
+
+    output_link = validation["output_link"]
+    result = _replace_link(output_link, input_id, scene_prompt, graph)
+    if is_link(result) and str(result[0]) == output_id:
+        raise ScenePresetError("Scene Preset Outputの接続が不正です。")
+    return {"result": (result,), "expand": graph.finalize()}
+
+
+class ScenePresetInput:
+    DESCRIPTION = """Scene Presetの入口です。専用ワークフローではこのノードからScene変換グラフを始め、最後にScene Preset Outputへ接続します。保存したPresetを参照したとき、外側から渡されたscene_promptがここへ入ります。"""
+    CATEGORY = "Scene/preset"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "build"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    def build(self):
+        return (seed_plan(),)
+
+
+class ScenePresetOutput:
+    DESCRIPTION = """Scene Presetの出口です。Scene Preset Inputから安全なScene変換ノードを通して接続し、保存ボタンでPresetを保存します。画像生成や保存はPreset内に置けません。"""
+    CATEGORY = "Scene/preset"
+    OUTPUT_NODE = True
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "passthrough"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset_id": ("STRING", {"default": "", "display_name": "Preset ID"}),
+                "preset_name": ("STRING", {"default": "", "display_name": "表示名"}),
+                "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt"}),
+            }
+        }
+
+    def passthrough(self, preset_id, preset_name, scene_prompt):
+        del preset_id, preset_name
+        return (scene_prompt,)
+
+
+class ScenePresetReference:
+    DESCRIPTION = """保存済みのScene Presetを参照します。画像生成を開始した時点で最新のPresetを検証して固定し、その実行中は同じrevisionを使います。Preset内のScene Matrix、Queue、Mergeなどは元のノードとして展開・実行されます。"""
+    CATEGORY = "Scene/preset"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "expand"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset_id": ("STRING", {"default": "", "display_name": "Preset ID"}),
+            },
+            "optional": {
+                "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "rawLink": True}),
+                "run_id": ("STRING", {"default": "", "hidden": True}),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, preset_id="", scene_prompt=None, run_id="", **kwargs):
+        del scene_prompt, kwargs
+        preset = _snapshot_preset(run_id, _clean_preset_id(preset_id))
+        metadata = preset["metadata"]
+        return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_id}"
+
+    def expand(self, preset_id, scene_prompt=None, run_id=""):
+        return expand_preset_reference(preset_id, scene_prompt, run_id)

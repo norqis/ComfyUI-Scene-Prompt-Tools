@@ -1,0 +1,135 @@
+import re
+import unittest
+from pathlib import Path
+
+from check_public_package import (
+    FORBIDDEN,
+    SYNTHETIC_MERGE_ENV,
+    history_privacy_failures,
+    history_revision_range,
+    synthetic_merge_metadata,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class PublicPackageTests(unittest.TestCase):
+    def test_runtime_modules_are_in_one_internal_package(self):
+        expected = {"__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py"}
+        self.assertSetEqual({path.name for path in (ROOT / "scene_prompt_tools").glob("*.py")}, expected)
+        for filename in expected - {"__init__.py"}:
+            self.assertFalse((ROOT / filename).exists())
+
+    def test_frontend_has_a_standard_test_entrypoint(self):
+        package = (ROOT / "package.json").read_text(encoding="utf-8")
+        self.assertIn('"test": "npm run check:frontend && npm run test:frontend"', package)
+
+    def test_data_directory_is_kept_but_contents_are_ignored(self):
+        self.assertTrue((ROOT / "data" / ".gitkeep").is_file())
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/data/*", gitignore)
+        self.assertIn("!/data/.gitkeep", gitignore)
+        comfyignore = (ROOT / ".comfyignore").read_text(encoding="utf-8")
+        self.assertNotIn("data/", comfyignore)
+
+    def test_registry_metadata_declares_the_mit_license(self):
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('name = "scene-prompt-tools"', pyproject)
+        self.assertIn('version = "0.1.0"', pyproject)
+        self.assertIn('PublisherId = "norqis"', pyproject)
+        self.assertIn('license = "MIT"', pyproject)
+        self.assertIn('license-files = ["LICENSE"]', pyproject)
+        self.assertIn('"License :: OSI Approved :: MIT License"', pyproject)
+        self.assertTrue((ROOT / "LICENSE").is_file())
+        self.assertFalse((ROOT / "requirements.txt").exists())
+
+    def test_forbidden_pattern_matches_every_retired_name(self):
+        candidates = (
+            "META" + "CAMP",
+            "META" + "CHAMP",
+            "meta" + "-" + "camp",
+            "meta" + "_" + "champ",
+            "Scene" + " Promp" + "ter",
+            "scene-" + "prompter",
+            "scene_" + "prompter",
+            "scene" + "Prompter",
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                self.assertIsNotNone(FORBIDDEN.search(candidate))
+
+    def test_retired_names_and_private_brand_names_are_absent(self):
+        for path in ROOT.rglob("*"):
+            if not path.is_file() or ".git" in path.parts:
+                continue
+            if path.suffix.lower() in {".pyc", ".png", ".jpg", ".jpeg", ".gif", ".zip"}:
+                continue
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIsNone(FORBIDDEN.search(path.read_text(encoding="utf-8")))
+
+    def test_runtime_uses_root_data_directory(self):
+        prompt_source = (ROOT / "scene_prompt_tools" / "prompt.py").read_text(encoding="utf-8")
+        routes_source = (ROOT / "scene_prompt_tools" / "routes.py").read_text(encoding="utf-8")
+        self.assertIn('Path(__file__).resolve().parents[1] / "data"', prompt_source)
+        self.assertIn("NODE_DIR = Path(__file__).resolve().parents[1]", routes_source)
+
+    def test_old_schema_migration_code_is_absent(self):
+        runtime_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "scene_prompt_tools").glob("*.py")
+        )
+        self.assertNotIn("legacy_keys", runtime_source)
+        self.assertNotIn("source_shape", runtime_source)
+        self.assertNotIn("_migrate", runtime_source)
+
+    def test_public_history_rejects_personal_email_but_allows_github_noreply(self):
+        self.assertEqual(history_privacy_failures([
+            ("a", "account@users.noreply.github.com", "github-actions[bot]@users.noreply.github.com"),
+            ("b", "account@users.noreply.github.com", "noreply@github.com"),
+        ]), [])
+        self.assertEqual(len(history_privacy_failures([
+            ("c", "person@example.test", "account@users.noreply.github.com"),
+            ("d", "account@users.noreply.github.com", "person@example.test"),
+        ])), 2)
+
+    def test_public_history_uses_explicit_ci_branch_range_or_local_head(self):
+        self.assertEqual(history_revision_range({}), "HEAD")
+        self.assertEqual(
+            history_revision_range({
+                "SCENE_PROMPT_HISTORY_BASE_SHA": "base",
+                "SCENE_PROMPT_HISTORY_HEAD_SHA": "head",
+            }),
+            "base..head",
+        )
+        self.assertEqual(
+            history_revision_range({
+                "SCENE_PROMPT_HISTORY_BASE_SHA": "0" * 40,
+                "SCENE_PROMPT_HISTORY_HEAD_SHA": "head",
+            }),
+            "head",
+        )
+        with self.assertRaises(ValueError):
+            history_revision_range({"SCENE_PROMPT_HISTORY_BASE_SHA": "base"})
+
+    def test_synthetic_merge_metadata_is_optional_for_local_runs(self):
+        self.assertEqual(synthetic_merge_metadata({}), [])
+        records = synthetic_merge_metadata({SYNTHETIC_MERGE_ENV: "HEAD"})
+        self.assertEqual(len(records), 1)
+        self.assertEqual(len(records[0]), 3)
+        with self.assertRaisesRegex(ValueError, "Synthetic merge ref"):
+            synthetic_merge_metadata({SYNTHETIC_MERGE_ENV: "does-not-exist"})
+
+    def test_ci_checks_event_specific_diff_ranges_with_full_history(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("github.event.before", workflow)
+        self.assertIn("SCENE_PROMPT_HISTORY_BASE_SHA", workflow)
+        self.assertIn("SCENE_PROMPT_HISTORY_HEAD_SHA", workflow)
+        self.assertIn("refs/pull/${{ github.event.pull_request.number }}/merge", workflow)
+        self.assertIn("SCENE_PROMPT_SYNTHETIC_MERGE_REF", workflow)
+
+
+if __name__ == "__main__":
+    unittest.main()

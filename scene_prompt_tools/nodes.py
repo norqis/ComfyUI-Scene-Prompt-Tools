@@ -1,0 +1,1110 @@
+import json
+import os
+import re
+import threading
+import time
+from datetime import datetime
+
+import numpy as np
+import torch
+from PIL import Image
+from PIL.PngImagePlugin import PngInfo
+
+import comfy.model_management
+import folder_paths
+from comfy.cli_args import args
+
+from .prompt import (
+    SCENE_PROMPT_TYPE,
+    _compose_prompt_parts,
+    _expand_prompt_parts,
+    _join_unique,
+    _merge_positive_negative_parts,
+    _parse_selection_json,
+    _prompt_data_change_key,
+    _prompt_data_index,
+    _scene_prompt_change_key,
+    _split_prompt,
+)
+from .plan import (
+    MAX_BATCH_SIZE,
+    MAX_DERIVED_COUNT,
+    MAX_INPUT_COUNT,
+    MAX_TOTAL_IMAGES,
+    MAX_DIMENSION,
+    MIN_BATCH_SIZE,
+    MIN_DIMENSION,
+    ScenePlanError,
+    empty_row,
+    item_for_index,
+    matrix_product,
+    merge,
+    multiply_count,
+    normalize_plan,
+    queue,
+    transform,
+)
+
+
+MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE"
+MATRIX_LINE_KEYS = {
+    "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled",
+    "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
+    "positive_parts", "negative_parts", "display_labels", "display_label_groups",
+}
+SCENE_SAVE_INFO_TYPE = "SCENE_SAVE_INFO"
+DEFAULT_LATENT = {"width": 512, "height": 512, "batch_size": 1}
+MAX_RESOLUTION = MAX_DIMENSION
+
+PATH_DIRECTORY = "フォルダに分ける"
+PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
+
+DEFAULT_MATRIX_JSON = "{\"version\":1,\"sets\":[]}"
+SCENE_PROMPT_INPUT_NAMES = tuple(f"scene_prompt{index}" for index in range(1, 11))
+BAD_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+BAD_FILENAME_PREFIX_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]+')
+WINDOWS_RESERVED_PREFIX_RE = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])\.",
+    re.IGNORECASE,
+)
+SEED_MODULO = 18446744073709551616
+SEED_MAX = SEED_MODULO - 1
+_SCENE_RUN_PLAN_CACHE = {}
+_SCENE_RUN_PLAN_CACHE_LOCK = threading.Lock()
+_SCENE_RUN_PLAN_TTL_SECONDS = 12 * 60 * 60
+
+
+def _clean_string_list(values):
+    return [str(value).strip() for value in values if str(value).strip()] if isinstance(values, list) else []
+
+
+def _require_string_list(value, name):
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a list of strings.")
+    return value
+
+
+def _clean_label_groups(values):
+    if not isinstance(values, list):
+        return []
+    groups = []
+    for group in values:
+        items = group if isinstance(group, list) else [group]
+        labels = _clean_string_list(items)
+        if labels:
+            groups.append(labels)
+    return groups
+
+
+def _normalize_path_mode(value):
+    text = str(value or "").strip()
+    if text == PATH_APPEND_TO_PREVIOUS:
+        return PATH_APPEND_TO_PREVIOUS
+    return PATH_DIRECTORY
+
+
+def _scene_bool(value, default=True):
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "off", "なし")
+    return bool(value)
+
+
+def _latent_dimension(value, default=512):
+    number = default if value is None else value
+    if type(number) is not int:
+        raise ScenePlanError("Scene Empty Latent width and height must be integers.")
+    if not MIN_DIMENSION <= number <= MAX_RESOLUTION or number % 8:
+        raise ScenePlanError(
+            f"Scene Empty Latent width and height must be multiples of 8 between {MIN_DIMENSION} and {MAX_RESOLUTION}."
+        )
+    return number
+
+
+def _latent_batch_size(value, default=1):
+    number = default if value is None else value
+    if type(number) is not int or not MIN_BATCH_SIZE <= number <= MAX_BATCH_SIZE:
+        raise ScenePlanError(
+            f"Scene Empty Latent batch_size must be an integer between {MIN_BATCH_SIZE} and {MAX_BATCH_SIZE}."
+        )
+    return number
+
+
+def _normalize_latent_config(value=None):
+    if value is None:
+        data = DEFAULT_LATENT
+    elif isinstance(value, dict) and set(value) == {"width", "height", "batch_size"}:
+        data = value
+    else:
+        raise ScenePlanError("Scene Empty Latent settings require width, height, and batch_size.")
+    return {
+        "width": _latent_dimension(data.get("width"), DEFAULT_LATENT["width"]),
+        "height": _latent_dimension(data.get("height"), DEFAULT_LATENT["height"]),
+        "batch_size": _latent_batch_size(data.get("batch_size"), DEFAULT_LATENT["batch_size"]),
+    }
+
+
+def _row_latent(row):
+    return _normalize_latent_config(row.get("latent") if isinstance(row, dict) else None)
+
+
+def _empty_latent(config):
+    latent_config = _normalize_latent_config(config)
+    latent = torch.zeros(
+        [
+            latent_config["batch_size"],
+            4,
+            latent_config["height"] // 8,
+            latent_config["width"] // 8,
+        ],
+        device=comfy.model_management.intermediate_device(),
+        dtype=comfy.model_management.intermediate_dtype(),
+    )
+    return {"samples": latent, "downscale_ratio_spacial": 8}
+
+
+def _selection_json_has_items(value):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return False
+    return any(_parse_selection_json(value).values())
+
+
+def _normalize_matrix_line_set(value, prompt_data_index=None):
+    if not isinstance(value, dict):
+        raise ValueError("Scene Matrix entries must be objects.")
+    if set(value) != MATRIX_LINE_KEYS:
+        raise ValueError("Scene Matrix entry has unsupported or missing fields.")
+    if value.get("type") != MATRIX_LINE_TYPE or value.get("version") != 1:
+        raise ValueError("Unsupported Scene Matrix entry schema.")
+    for retired_field in ("label", "id", "positive", "negative"):
+        if retired_field in value:
+            raise ValueError(f"Unsupported Scene Matrix field: {retired_field}.")
+
+    required_string_fields = (
+        "row_id",
+        "node_id",
+        "category",
+        "name",
+        "path_label",
+        "positive_base",
+        "positive_json",
+        "negative_base",
+        "negative_json",
+        "category_order",
+    )
+    for field in required_string_fields:
+        if not isinstance(value.get(field), str):
+            raise ValueError(f"Scene Matrix {field} must be a string.")
+    for field in ("row_id", "name", "path_label"):
+        if not value[field].strip():
+            raise ValueError(f"Scene Matrix {field} must be a non-empty string.")
+    if not isinstance(value.get("enabled"), bool):
+        raise ValueError("Scene Matrix entry enabled must be a boolean.")
+
+    node_id = value["node_id"].strip()
+    category = value["category"].strip()
+    name = value["name"].strip()
+    path_label = value["path_label"].strip()
+    positive_base = value["positive_base"]
+    positive_json = value["positive_json"]
+    negative_base = value["negative_base"]
+    negative_json = value["negative_json"]
+    category_order = value["category_order"]
+    display_labels = _clean_string_list(_require_string_list(value.get("display_labels"), "Scene Matrix display_labels"))
+    raw_label_groups = value.get("display_label_groups")
+    if not isinstance(raw_label_groups, list) or any(
+        not isinstance(group, list) or not all(isinstance(item, str) for item in group)
+        for group in raw_label_groups
+    ):
+        raise ValueError("Scene Matrix display_label_groups must be a list of string lists.")
+    display_label_groups = _clean_label_groups(raw_label_groups)
+    raw_positive_parts = _require_string_list(value.get("positive_parts"), "Scene Matrix positive_parts")
+    raw_negative_parts = _require_string_list(value.get("negative_parts"), "Scene Matrix negative_parts")
+    _parse_selection_json(positive_json, prompt_data_index)
+    _parse_selection_json(negative_json, prompt_data_index)
+
+    if positive_base.strip() or _selection_json_has_items(positive_json):
+        raw_positive_parts = _compose_prompt_parts(
+            positive_base,
+            positive_json,
+            category_order,
+            True,
+            0,
+            prompt_data_index,
+        )
+    if negative_base.strip() or _selection_json_has_items(negative_json):
+        raw_negative_parts = _compose_prompt_parts(
+            negative_base,
+            negative_json,
+            category_order,
+            True,
+            0,
+            prompt_data_index,
+        )
+
+    positive_parts, negative_parts = _merge_positive_negative_parts(
+        raw_positive_parts,
+        raw_negative_parts,
+        [],
+        [],
+    )
+
+    return {
+        "type": MATRIX_LINE_TYPE,
+        "version": 1,
+        "row_id": value["row_id"].strip(),
+        "node_id": node_id,
+        "category": category,
+        "name": name,
+        "path_label": path_label,
+        "enabled": value["enabled"],
+        "positive_parts": positive_parts,
+        "negative_parts": negative_parts,
+        "display_labels": display_labels,
+        "display_label_groups": display_label_groups,
+        "set_refs": [
+            {
+                "category": category,
+                "name": name,
+                "path_label": path_label,
+                "node_id": node_id,
+            }
+        ],
+        "labels": [name],
+        "path_parts": [],
+    }
+
+
+def _parse_matrix_data(matrix_json):
+    if matrix_json is None or (isinstance(matrix_json, str) and not matrix_json.strip()):
+        return {"version": 1, "sets": []}
+    if not isinstance(matrix_json, str):
+        raise ValueError("Scene Matrix JSON must be a string.")
+    try:
+        data = json.loads(matrix_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Scene Matrix JSON is invalid.") from exc
+    if not isinstance(data, dict) or set(data) != {"version", "sets"}:
+        raise ValueError("Scene Matrix JSON must be an object.")
+    if data.get("version") != 1:
+        raise ValueError("Unsupported Scene Matrix schema version.")
+    if not isinstance(data.get("sets"), list):
+        raise ValueError("Scene Matrix sets must be a list.")
+    return data
+
+
+def _parse_matrix_sets(matrix_json):
+    data = _parse_matrix_data(matrix_json)
+    raw_sets = data.get("sets", [])
+    sets = []
+    prompt_data_index = _prompt_data_index()
+    for raw_set in raw_sets:
+        matrix_line = _normalize_matrix_line_set(raw_set, prompt_data_index)
+        sets.append(matrix_line)
+    return sets
+
+
+def _matrix_has_configured_sets(matrix_json):
+    data = _parse_matrix_data(matrix_json)
+    raw_sets = data.get("sets")
+    return isinstance(raw_sets, list) and len(raw_sets) > 0
+
+
+def _append_path_part(path_parts, label, path_mode):
+    mode = _normalize_path_mode(path_mode)
+    clean_label = str(label or "").strip()
+    if not clean_label:
+        return list(path_parts)
+
+    next_parts = list(path_parts)
+    if mode == PATH_APPEND_TO_PREVIOUS and next_parts:
+        next_parts[-1] = f"{next_parts[-1]}_{clean_label}"
+    else:
+        next_parts.append(clean_label)
+    return next_parts
+
+
+def _matrix_line_output_label(matrix_row):
+    return str(matrix_row.get("name") or "Matrix 行").strip()
+
+
+def _row_path(row):
+    return "/".join(str(part).strip() for part in row.get("path_parts", []) if str(part).strip())
+
+
+def _row_label(row):
+    labels = [str(item).strip() for item in row.get("labels", []) if str(item).strip()]
+    return " / ".join(labels) or _row_path(row) or "Scene"
+
+
+def _metadata_count(value, label, maximum, default=0):
+    if value is None:
+        return default
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise ScenePlanError(f"Scene metadata {label} must be an integer between 0 and {maximum}.")
+    return value
+
+
+def _scene_count(value):
+    if type(value) is not int or not 0 <= value <= MAX_INPUT_COUNT:
+        raise ScenePlanError(f"Scene Prompt count must be an integer between 0 and {MAX_INPUT_COUNT}.")
+    return value
+
+
+def _clean_scene_run_id(run_id):
+    return str(run_id or "").strip()
+
+
+def _drop_scene_run_plan(key):
+    return _SCENE_RUN_PLAN_CACHE.pop(key, None) is not None
+
+
+def _purge_scene_run_plans(now=None):
+    current = time.monotonic() if now is None else now
+    expired = [
+        key
+        for key, entry in _SCENE_RUN_PLAN_CACHE.items()
+        if current - entry["last_access"] >= _SCENE_RUN_PLAN_TTL_SECONDS
+    ]
+    for key in expired:
+        _drop_scene_run_plan(key)
+
+
+def _scene_run_plan(run_id, scene_prompt=None):
+    run_key = _clean_scene_run_id(run_id)
+    if not run_key:
+        return normalize_plan(scene_prompt)
+
+    now = time.monotonic()
+    normalized = normalize_plan(scene_prompt)
+    with _SCENE_RUN_PLAN_CACHE_LOCK:
+        _purge_scene_run_plans(now)
+        existing = _SCENE_RUN_PLAN_CACHE.get(run_key)
+        if existing is not None:
+            existing["last_access"] = now
+            return existing["plan"]
+        _SCENE_RUN_PLAN_CACHE[run_key] = {"plan": normalized, "last_access": now}
+        _purge_scene_run_plans(now)
+        return normalized
+
+
+def release_scene_run_plan(run_id):
+    run_key = _clean_scene_run_id(run_id)
+    if not run_key:
+        return False
+    with _SCENE_RUN_PLAN_CACHE_LOCK:
+        return _drop_scene_run_plan(run_key)
+
+
+def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False):
+    plan = normalized if normalized is not None else normalize_plan(scene_prompt)
+    try:
+        return item_for_index(plan, current_index)
+    except IndexError:
+        if strict:
+            raise IndexError("生成計画に生成対象がありません。") from None
+        return {"row": {}, "count": 0, "total_batches": 0, "total_images": 0}
+
+
+def _safe_path_part(value, default_name="untitled"):
+    reserved_names = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    }
+    text = str(value or "").strip().strip(". ")
+    text = BAD_PATH_CHARS_RE.sub("_", text)
+    text = re.sub(r"\s+", " ", text).strip().strip(". ")
+    if text in ("", ".", ".."):
+        return default_name
+    if text.upper() in reserved_names:
+        text = f"{text}_"
+    return text[:80].rstrip(" .") or default_name
+
+
+def _safe_relative_parts(value):
+    parts = []
+    for raw_part in re.split(r"[\\/]+", str(value or "")):
+        stripped = raw_part.strip()
+        if not stripped or stripped in (".", ".."):
+            continue
+        parts.append(_safe_path_part(stripped))
+    return parts
+
+
+def _safe_filename_prefix(value):
+    prefix = BAD_FILENAME_PREFIX_CHARS_RE.sub("_", str(value or ""))
+    if WINDOWS_RESERVED_PREFIX_RE.match(prefix):
+        return f"_{prefix}"
+    return prefix
+
+
+def _resolve_run_dir(run_dir):
+    value = str(run_dir or "").strip().strip('"')
+    if not value or value.lower() == "auto":
+        value = datetime.now().strftime("%Y_%m%d_%H%M%S")
+    safe_parts = _safe_relative_parts(value)
+    if not safe_parts:
+        safe_parts = [datetime.now().strftime("%Y_%m%d_%H%M%S")]
+    return safe_parts
+
+
+def _is_relative_to(path, root):
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+    except ValueError:
+        return False
+
+
+def _subfolder_for_preview(directory, output_dir):
+    if not _is_relative_to(directory, output_dir):
+        return None
+    rel = os.path.relpath(directory, output_dir)
+    return "" if rel == "." else rel.replace(os.sep, "/")
+
+
+def _find_next_index(run_root, extension, padding, filename_prefix=""):
+    prefix = _safe_filename_prefix(filename_prefix)
+    pattern = re.compile(
+        rf"^{re.escape(prefix)}(\d{{{padding},}})\.{re.escape(extension)}$",
+        re.IGNORECASE,
+    )
+    highest = 0
+    if os.path.isdir(run_root):
+        for root, _dirs, files in os.walk(run_root):
+            for filename in files:
+                match = pattern.match(filename)
+                if match:
+                    highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
+_RUN_DIR_CACHE = {}
+_NEXT_INDEX_CACHE = {}
+
+
+def _next_index_cache_key(run_root, extension, padding, filename_prefix=""):
+    return (
+        os.path.abspath(run_root),
+        str(extension).lower(),
+        int(padding),
+        _safe_filename_prefix(filename_prefix),
+    )
+
+
+def _cached_next_index(run_root, extension, padding, filename_prefix=""):
+    key = _next_index_cache_key(run_root, extension, padding, filename_prefix)
+    cached = _NEXT_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    value = _find_next_index(run_root, extension, padding, filename_prefix)
+    _NEXT_INDEX_CACHE[key] = value
+    if len(_NEXT_INDEX_CACHE) > 256:
+        for expired_key in list(_NEXT_INDEX_CACHE)[:128]:
+            _NEXT_INDEX_CACHE.pop(expired_key, None)
+    return value
+
+
+def _remember_next_index(run_root, extension, padding, next_index, filename_prefix=""):
+    key = _next_index_cache_key(run_root, extension, padding, filename_prefix)
+    current = _NEXT_INDEX_CACHE.get(key, 0)
+    _NEXT_INDEX_CACHE[key] = max(int(current or 0), int(next_index or 0))
+
+
+def _auto_seed_base(seed_base):
+    seed = int(seed_base or 0)
+    if seed > 0:
+        return seed
+    return time.time_ns() % SEED_MODULO
+
+
+def _seed_change_key(seed_base):
+    seed = int(seed_base or 0)
+    if seed > 0:
+        return str(seed)
+    return str(time.time_ns())
+
+
+def _cached_run_parts(base_dir, run_dir, prompt=None, unique_id=None):
+    value = str(run_dir or "").strip().strip('"')
+    if value and value.lower() != "auto":
+        return _resolve_run_dir(value)
+
+    key = (
+        str(unique_id or ""),
+        id(prompt) if prompt is not None else 0,
+        os.path.abspath(base_dir),
+    )
+    cached = _RUN_DIR_CACHE.get(key)
+    if cached:
+        return cached
+
+    parts = _resolve_run_dir("auto")
+    _RUN_DIR_CACHE[key] = parts
+    if len(_RUN_DIR_CACHE) > 256:
+        for expired_key in list(_RUN_DIR_CACHE)[:128]:
+            _RUN_DIR_CACHE.pop(expired_key, None)
+    return parts
+
+
+def _normalize_scene_save_info(value):
+    if not isinstance(value, dict):
+        return {}
+    use_run_dir = value.get("use_run_dir", True)
+    return {
+        "run_dir": str(value.get("run_dir") or "").strip(),
+        "use_run_dir": _scene_bool(use_run_dir),
+        "path": str(value.get("path") or "").strip(),
+        "filename_prefix": _safe_filename_prefix(value.get("filename_prefix")),
+        "file_index": _metadata_count(value.get("file_index"), "file_index", MAX_DERIVED_COUNT, 0),
+        "positive": str(value.get("positive") or ""),
+        "negative": str(value.get("negative") or ""),
+        "seed": int(value.get("seed") or 0),
+        "label": str(value.get("label") or ""),
+        "row_index": _metadata_count(value.get("row_index"), "row_index", MAX_DERIVED_COUNT, 0),
+        "repeat_index": _metadata_count(value.get("repeat_index"), "repeat_index", MAX_DERIVED_COUNT, 0),
+        "repeat_count": _metadata_count(value.get("repeat_count"), "repeat_count", MAX_DERIVED_COUNT, 0),
+        "total_count": _metadata_count(value.get("total_count"), "total_count", MAX_TOTAL_IMAGES, 0),
+    }
+
+class SceneMatrix:
+    DESCRIPTION = """複数のプロンプト行を作り、入力された scene_prompt と組み合わせて生成計画を展開します。\n有効なMatrix行ごとにポジティブ・ネガティブ候補が追加され、入力行との全組み合わせが出力されます。\nMatrix行が未設定なら入力をそのまま通し、設定済みの行がすべて無効なら生成対象は0件になります。"""
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "build"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {
+            "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"}),
+        }
+
+        return {
+            "required": {
+                "matrix_json": (
+                    "STRING",
+                    {"multiline": True, "default": DEFAULT_MATRIX_JSON, "hidden": True},
+                ),
+            },
+            "optional": optional,
+        }
+
+    @classmethod
+    def IS_CHANGED(
+        cls,
+        matrix_json,
+        **kwargs,
+    ):
+        parts = [
+            matrix_json or "",
+            _prompt_data_change_key(),
+        ]
+        scene_prompt = kwargs.get("scene_prompt")
+        if isinstance(scene_prompt, dict):
+            parts.append(_scene_prompt_change_key(scene_prompt))
+        return "|".join(parts)
+
+    def build(
+        self,
+        matrix_json,
+        scene_prompt=None,
+        **kwargs,
+    ):
+        del kwargs
+        return (
+            matrix_product(
+                scene_prompt,
+                _parse_matrix_sets(matrix_json),
+                _matrix_has_configured_sets(matrix_json),
+            ),
+        )
+
+
+class ScenePath:
+    DESCRIPTION = """入力された scene_prompt の各行へ、画像保存用のパス要素を追加します。ノード名がフォルダ名として使われます。\n「フォルダに分ける」は新しい階層を追加し、「前のフォルダ名に結合」は直前の名前へアンダースコアで結合します。プロンプト本文は変更しません。\nこのノード自身はフォルダを作成しません。実際のフォルダ作成は、後段の Scene Save Image が画像を保存するときに行われます。"""
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "apply_path"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "path_name": ("STRING", {"default": "", "hidden": True}),
+                "path_mode": (
+                    [PATH_DIRECTORY, PATH_APPEND_TO_PREVIOUS],
+                    {"default": PATH_DIRECTORY, "display_name": "保存パスの扱い", "label": "保存パスの扱い"},
+                ),
+            },
+            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"})},
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, **kwargs):
+        del kwargs
+        return "|".join(
+            [
+                str(path_name or ""),
+                _scene_prompt_change_key(scene_prompt),
+                _normalize_path_mode(path_mode),
+            ]
+        )
+
+    def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY):
+        label = str(path_name or "").strip() or "Scene Path"
+        return (
+            transform(
+                scene_prompt,
+                lambda row, _item: {**row, "path_parts": _append_path_part(row.get("path_parts", []), label, path_mode)},
+            ),
+        )
+
+
+class ScenePromptQueue:
+    DESCRIPTION = """最大10個の scene_prompt を scene_prompt1 から番号順に、1つの生成計画へ連結します。\nMerge と異なり入力同士の組み合わせは作らず、各入力の行・順序・生成回数を維持したまま後ろへ追加します。\nこれはScene生成計画の並び順を作るノードであり、ComfyUI標準の実行Queueそのものではありません。"""
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "queue"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+        for index, name in enumerate(SCENE_PROMPT_INPUT_NAMES, start=1):
+            optional[name] = (
+                SCENE_PROMPT_TYPE,
+                {"display_name": f"scene_prompt{index}", "label": f"scene_prompt{index}"},
+            )
+
+        return {
+            "required": {},
+            "optional": optional,
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        parts = []
+        for name in SCENE_PROMPT_INPUT_NAMES:
+            value = kwargs.get(name)
+            if isinstance(value, dict):
+                parts.append(_scene_prompt_change_key(value))
+        return "|".join(parts)
+
+    def queue(self, **kwargs):
+        return (queue([kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES]),)
+
+
+class ScenePromptMerge:
+    DESCRIPTION = """2つの scene_prompt を組み合わせ、両方の全組み合わせを生成計画として出力します。\nポジティブ、ネガティブ、ラベル、保存パスが結合されます。潜在画像設定は scene_prompt2 側を優先し、未設定なら scene_prompt1 を継承します。\n生成回数は両方の行の値を掛け合わせます。未接続側は1行の空計画として扱われます。"""
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "merge"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "scene_prompt1": (
+                    SCENE_PROMPT_TYPE,
+                    {"display_name": "scene_prompt1", "label": "scene_prompt1"},
+                ),
+                "scene_prompt2": (
+                    SCENE_PROMPT_TYPE,
+                    {"display_name": "scene_prompt2", "label": "scene_prompt2"},
+                ),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, scene_prompt1=None, scene_prompt2=None, **kwargs):
+        return "|".join(
+            [
+                _scene_prompt_change_key(scene_prompt1),
+                _scene_prompt_change_key(scene_prompt2),
+            ]
+        )
+
+    def merge(self, scene_prompt1=None, scene_prompt2=None):
+        return (merge(scene_prompt1, scene_prompt2),)
+
+
+class ScenePromptCounter:
+    DESCRIPTION = """入力された scene_prompt の全行の生成回数へ、指定値を掛けます。\nCountを直列につなぐと値は積算されます。0を指定すると生成対象は0件になります。\n未接続なら1行の空計画から開始します。"""
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "count"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "count": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 0,
+                        "max": 10000,
+                        "display_name": "生成回数",
+                        "label": "生成回数",
+                    },
+                ),
+            },
+            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"})},
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, scene_prompt=None, count=1, **kwargs):
+        return "|".join(
+            [
+                _scene_prompt_change_key(scene_prompt),
+                str(_scene_count(count)),
+            ]
+        )
+
+    def count(self, scene_prompt=None, count=1):
+        return (multiply_count(scene_prompt, count),)
+
+
+class SceneEmptyLatent:
+    DESCRIPTION = """scene_prompt の各行へ、空の潜在画像の幅・高さ・バッチサイズを設定します。\nこのノードでは潜在画像の実体はまだ生成せず、設定だけを生成計画へ記録します。実際の空潜在画像は Scene Prompt Expand が生成します。\n幅と高さは8の倍数で指定してください。"""
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "apply_latent"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": (
+                    "INT",
+                    {
+                        "default": DEFAULT_LATENT["width"],
+                        "min": 16,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "display_name": "width",
+                        "label": "width",
+                        "tooltip": "The width of the latent images in pixels.",
+                    },
+                ),
+                "height": (
+                    "INT",
+                    {
+                        "default": DEFAULT_LATENT["height"],
+                        "min": 16,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "display_name": "height",
+                        "label": "height",
+                        "tooltip": "The height of the latent images in pixels.",
+                    },
+                ),
+                "batch_size": (
+                    "INT",
+                    {
+                        "default": DEFAULT_LATENT["batch_size"],
+                        "min": 1,
+                        "max": 4096,
+                        "display_name": "batch_size",
+                        "label": "batch_size",
+                        "tooltip": "The number of latent images in the batch.",
+                    },
+                ),
+            },
+            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"})},
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, scene_prompt=None, width=512, height=512, batch_size=1, **kwargs):
+        latent = _normalize_latent_config({"width": width, "height": height, "batch_size": batch_size})
+        return "|".join(
+            [
+                _scene_prompt_change_key(scene_prompt),
+                str(latent["width"]),
+                str(latent["height"]),
+                str(latent["batch_size"]),
+            ]
+        )
+
+    def apply_latent(self, scene_prompt=None, width=512, height=512, batch_size=1):
+        latent = _normalize_latent_config({"width": width, "height": height, "batch_size": batch_size})
+        return (transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)}),)
+
+
+class ScenePromptExpand:
+    DESCRIPTION = """Scene生成計画から、現在の生成番号に該当する1件を取り出して展開します。\nポジティブ、ネガティブ、保存用メタ情報、シード、空の潜在画像を出力し、{A|B|C} 形式の候補もこの段階でシードに基づいて確定します。\n連続生成では計画全体を1枚ずつ処理し、複数の実行要求はFIFOで順番に実行されます。このノード自身は画像を保存しません。"""
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = ("STRING", "STRING", SCENE_SAVE_INFO_TYPE, "INT", "LATENT")
+    RETURN_NAMES = ("ポジティブ", "ネガティブ", "メタ情報", "シード", "潜在画像")
+    FUNCTION = "expand"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "current_index": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 1000000000,
+                        "display_name": "生成番号",
+                        "label": "生成番号",
+                    },
+                ),
+                "run_id": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "display_name": "実行ID",
+                        "label": "実行ID",
+                    },
+                ),
+                "seed_base": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": SEED_MAX,
+                        "display_name": "シード基準",
+                        "label": "シード基準",
+                    },
+                ),
+                "timestamp_dir": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display_name": "タイムスタンプディレクトリ",
+                        "label": "タイムスタンプディレクトリ",
+                    },
+                ),
+            },
+            "optional": {
+                "prefix": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "display_name": "ファイル名プレフィックス",
+                        "label": "ファイル名プレフィックス",
+                    },
+                ),
+                "scene_prompt": (
+                    SCENE_PROMPT_TYPE,
+                    {"display_name": "scene_prompt", "label": "scene_prompt"},
+                ),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(
+        cls,
+        current_index=0,
+        run_id="",
+        seed_base=0,
+        timestamp_dir=True,
+        prefix="",
+        scene_prompt=None,
+    ):
+        plan = _scene_run_plan(run_id, scene_prompt)
+        return "|".join(
+            [
+                _scene_prompt_change_key(plan),
+                str(current_index),
+                str(run_id or ""),
+                _seed_change_key(seed_base),
+                str(_scene_bool(timestamp_dir)),
+                _safe_filename_prefix(prefix),
+            ]
+        )
+
+    def expand(
+        self,
+        current_index=0,
+        run_id="",
+        seed_base=0,
+        timestamp_dir=True,
+        prefix="",
+        scene_prompt=None,
+    ):
+        separator = ", "
+        plan = _scene_run_plan(run_id, scene_prompt)
+        item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
+        row = item["row"]
+        global_index = int(item.get("global_index", 0) or 0)
+        seed = (_auto_seed_base(seed_base) + global_index) % SEED_MODULO
+        positive_parts = _expand_prompt_parts(row.get("positive_parts", []), seed, "positive")
+        negative_parts = _expand_prompt_parts(row.get("negative_parts", []), seed, "negative")
+        positive_parts, negative_parts = _merge_positive_negative_parts(
+            positive_parts,
+            negative_parts,
+            [],
+            [],
+        )
+        positive = _join_unique(positive_parts, separator)
+        negative = _join_unique(negative_parts, separator)
+        latent_config = _row_latent(row)
+        latent = _empty_latent(latent_config)
+        use_run_dir = _scene_bool(timestamp_dir)
+        directory_run_id = str(run_id or "auto").split("__", 1)[0]
+        run_dir = "/".join(_resolve_run_dir(directory_run_id)) if use_run_dir else ""
+        repeat_count = _metadata_count(item["count"], "repeat_count", MAX_DERIVED_COUNT)
+
+        save_info = {
+            "type": SCENE_SAVE_INFO_TYPE,
+            "version": 1,
+            "run_dir": run_dir,
+            "use_run_dir": use_run_dir,
+            "path": _row_path(row),
+            "filename_prefix": _safe_filename_prefix(prefix),
+            "file_index": global_index + 1,
+            "positive": positive,
+            "negative": negative,
+            "seed": seed,
+            "label": item["label"],
+            "row_index": _metadata_count(item["row_index"], "row_index", MAX_DERIVED_COUNT),
+            "repeat_index": _metadata_count(item["repeat_index"], "repeat_index", MAX_DERIVED_COUNT),
+            "repeat_count": repeat_count,
+            "total_count": _metadata_count(item["total_images"], "total_count", MAX_TOTAL_IMAGES),
+            "latent": latent_config,
+        }
+
+        return (positive, negative, save_info, seed, latent)
+
+
+
+class SceneSaveImage:
+    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。メタデータが有効なら、ワークフロー、プロンプト、シード、Scene保存情報もPNGへ記録します。"""
+    def __init__(self):
+        self.output_dir = folder_paths.get_output_directory()
+        self.type = "output"
+        self.compress_level = 4
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"display_name": "画像", "label": "画像"}),
+                "path": ("STRING", {"default": "", "display_name": "保存パス", "label": "保存パス"}),
+            },
+            "optional": {
+                "scene_info": (SCENE_SAVE_INFO_TYPE, {"display_name": "メタ情報", "label": "メタ情報"}),
+            },
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("画像", "保存先")
+    FUNCTION = "save_images"
+    OUTPUT_NODE = True
+    CATEGORY = "Scene/output"
+
+    def save_images(
+        self,
+        images,
+        path,
+        scene_info=None,
+        prompt=None,
+        extra_pnginfo=None,
+        unique_id=None,
+    ):
+        extension = "png"
+        padding = 5
+        overwrite = False
+        info = _normalize_scene_save_info(scene_info)
+        filename_prefix = info.get("filename_prefix", "")
+        base_root = folder_paths.get_output_directory()
+        base_path_parts = _safe_relative_parts(path)
+        scene_path_parts = _safe_relative_parts(info.get("path"))
+        run_base_root = os.path.join(base_root, *base_path_parts)
+        if info and not info.get("use_run_dir", True):
+            run_parts = []
+        else:
+            run_parts = _safe_relative_parts(info.get("run_dir")) or _cached_run_parts(
+                run_base_root, "auto", prompt, unique_id
+            )
+        run_root = os.path.join(run_base_root, *run_parts)
+        output_dir = os.path.join(run_root, *scene_path_parts)
+        os.makedirs(output_dir, exist_ok=True)
+
+        if info.get("file_index"):
+            counter = max(1, int(info["file_index"]))
+        else:
+            counter = _cached_next_index(run_root, extension, padding, filename_prefix)
+
+        results = []
+        saved_paths = []
+        preview_subfolder = _subfolder_for_preview(output_dir, self.output_dir)
+        prompt_metadata = None
+        extra_pnginfo_metadata = []
+        if not args.disable_metadata:
+            if prompt is not None:
+                prompt_metadata = json.dumps(prompt, separators=(",", ":"))
+            if extra_pnginfo is not None:
+                extra_pnginfo_metadata = [
+                    (key, json.dumps(extra_pnginfo[key], separators=(",", ":")))
+                    for key in extra_pnginfo
+                ]
+
+        for image in images:
+            while True:
+                filename = f"{filename_prefix}{counter:0{padding}d}.{extension}"
+                output_path = os.path.join(output_dir, filename)
+                if overwrite or not os.path.exists(output_path):
+                    break
+                counter += 1
+
+            image_array = 255.0 * image.cpu().numpy()
+            img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
+
+            metadata = None
+            if not args.disable_metadata:
+                metadata = PngInfo()
+                if prompt_metadata is not None:
+                    metadata.add_text("prompt", prompt_metadata)
+                for key, value in extra_pnginfo_metadata:
+                    metadata.add_text(key, value)
+                if info:
+                    relative_path = "/".join([*base_path_parts, *run_parts, *scene_path_parts])
+                    scene_metadata = {
+                        "positive": info.get("positive", ""),
+                        "negative": info.get("negative", ""),
+                        "seed": info.get("seed", 0),
+                        "base_path": "/".join(base_path_parts),
+                        "path": "/".join(scene_path_parts),
+                        "run_relative_path": relative_path,
+                        "full_path": relative_path,
+                        "run_dir": "/".join(run_parts),
+                        "filename_prefix": filename_prefix,
+                        "file_index": counter,
+                        "label": info.get("label", ""),
+                        "row_index": info.get("row_index", 0),
+                        "repeat_index": info.get("repeat_index", 0),
+                        "repeat_count": info.get("repeat_count", 0),
+                        "total_count": info.get("total_count", 0),
+                    }
+                    metadata.add_text("scene_info", json.dumps(scene_metadata, ensure_ascii=False, separators=(",", ":")))
+                    if scene_metadata["positive"]:
+                        metadata.add_text("scene_positive", scene_metadata["positive"])
+                    if scene_metadata["negative"]:
+                        metadata.add_text("scene_negative", scene_metadata["negative"])
+                    metadata.add_text("scene_seed", str(scene_metadata["seed"]))
+
+            img.save(output_path, pnginfo=metadata, compress_level=self.compress_level)
+            saved_paths.append(output_path)
+            if preview_subfolder is not None:
+                preview_ref = {"filename": filename, "subfolder": preview_subfolder, "type": self.type}
+                results.append(preview_ref)
+            counter += 1
+
+        _remember_next_index(run_root, extension, padding, counter, filename_prefix)
+
+        return {"ui": {"images": results}, "result": (images, "\n".join(saved_paths))}

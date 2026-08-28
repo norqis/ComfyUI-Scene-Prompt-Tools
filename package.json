@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "npm run check:frontend && npm run test:frontend",
+    "test:frontend": "node tests/test_scene_batch_fifo.cjs && node tests/test_scene_prompt_state.mjs && node tests/test_scene_queue_counts.cjs",
+    "check:frontend": "node --check web/scene_prompt_ui.js && node --check web/scene_prompt_state.js && node --check web/scene_prompt_style.js"
+  }
+}
