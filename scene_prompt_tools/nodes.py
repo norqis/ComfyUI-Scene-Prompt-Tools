@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import re
@@ -52,6 +53,14 @@ MATRIX_LINE_KEYS = {
     "positive_parts", "negative_parts", "display_labels", "display_label_groups",
 }
 SCENE_SAVE_INFO_TYPE = "SCENE_SAVE_INFO"
+SAVE_METADATA_WORKFLOW = "ワークフロー全体"
+SAVE_METADATA_PROMPT_ONLY = "プロンプトのみ"
+SAVE_METADATA_EXECUTION_PATH = "生成経路ノードのみ"
+SAVE_METADATA_CHOICES = (
+    SAVE_METADATA_WORKFLOW,
+    SAVE_METADATA_PROMPT_ONLY,
+    SAVE_METADATA_EXECUTION_PATH,
+)
 DEFAULT_LATENT = {"width": 512, "height": 512, "batch_size": 1}
 MAX_RESOLUTION = MAX_DIMENSION
 
@@ -103,6 +112,91 @@ def _scene_bool(value, default=True):
     if isinstance(value, str):
         return value.strip().lower() not in ("0", "false", "no", "off", "なし")
     return bool(value)
+
+
+def _prompt_link_source(value, node_id, input_name):
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or not isinstance(value[0], str):
+        return None
+    source_id, output_index = value
+    if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+        raise ValueError(
+            f"Scene Save Image の生成経路を保存できません: ノード {node_id} の入力 {input_name} の接続先が不正です。"
+        )
+    return source_id
+
+
+def _prompt_ancestor_ids(prompt, target_id):
+    if not isinstance(prompt, dict):
+        raise ValueError("Scene Save Image の生成経路を保存できません: prompt がノード辞書ではありません。")
+    target_id = str(target_id or "")
+    if not target_id or target_id not in prompt:
+        raise ValueError(
+            "Scene Save Image の生成経路を保存できません: 保存対象のノードIDが prompt にありません。"
+        )
+
+    ancestors = set()
+    pending = [target_id]
+    while pending:
+        node_id = pending.pop()
+        if node_id in ancestors:
+            continue
+        node = prompt.get(node_id)
+        if not isinstance(node, dict):
+            raise ValueError(
+                f"Scene Save Image の生成経路を保存できません: ノード {node_id} の定義が不正です。"
+            )
+        inputs = node.get("inputs", {})
+        if not isinstance(inputs, dict):
+            raise ValueError(
+                f"Scene Save Image の生成経路を保存できません: ノード {node_id} の inputs が不正です。"
+            )
+        ancestors.add(node_id)
+        for input_name, value in inputs.items():
+            source_id = _prompt_link_source(value, node_id, input_name)
+            if source_id is None:
+                continue
+            if source_id not in prompt:
+                raise ValueError(
+                    f"Scene Save Image の生成経路を保存できません: ノード {node_id} の入力 {input_name} が存在しないノード {source_id} を参照しています。"
+                )
+            pending.append(source_id)
+    return ancestors
+
+
+def _slice_prompt_for_output(prompt, target_id):
+    ancestor_ids = _prompt_ancestor_ids(prompt, target_id)
+    return {
+        node_id: copy.deepcopy(node)
+        for node_id, node in prompt.items()
+        if node_id in ancestor_ids
+    }
+
+
+def _metadata_for_save_mode(prompt, extra_pnginfo, unique_id, metadata_mode):
+    if metadata_mode not in SAVE_METADATA_CHOICES:
+        raise ValueError("Scene Save Image のメタデータ保存モードが不正です。")
+    if extra_pnginfo is not None and not isinstance(extra_pnginfo, dict):
+        raise ValueError("Scene Save Image の extra_pnginfo が不正です。")
+
+    if metadata_mode == SAVE_METADATA_WORKFLOW:
+        saved_prompt = copy.deepcopy(prompt) if prompt is not None else None
+        saved_extra = copy.deepcopy(extra_pnginfo) if extra_pnginfo is not None else None
+    else:
+        saved_prompt = (
+            None
+            if metadata_mode == SAVE_METADATA_PROMPT_ONLY
+            else _slice_prompt_for_output(prompt, unique_id)
+        )
+        saved_extra = (
+            None
+            if extra_pnginfo is None
+            else {
+                key: copy.deepcopy(value)
+                for key, value in extra_pnginfo.items()
+                if key != "workflow"
+            }
+        )
+    return saved_prompt, saved_extra
 
 
 def _latent_dimension(value, default=512):
@@ -976,7 +1070,7 @@ class ScenePromptExpand:
 
 
 class SceneSaveImage:
-    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。メタデータが有効なら、ワークフロー、プロンプト、シード、Scene保存情報もPNGへ記録します。"""
+    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は、画面配置まで残す「ワークフロー全体」、Scene情報だけを残す「プロンプトのみ」、この保存ノードへつながる生成経路だけを残す「生成経路ノードのみ」から選べます。"""
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
@@ -988,6 +1082,15 @@ class SceneSaveImage:
             "required": {
                 "images": ("IMAGE", {"display_name": "画像", "label": "画像"}),
                 "path": ("STRING", {"default": "", "display_name": "保存パス", "label": "保存パス"}),
+                "metadata_mode": (
+                    SAVE_METADATA_CHOICES,
+                    {
+                        "default": SAVE_METADATA_WORKFLOW,
+                        "display_name": "メタデータ保存",
+                        "label": "メタデータ保存",
+                        "tooltip": "PNGに保存するComfyUIのワークフロー情報を選びます。",
+                    },
+                ),
             },
             "optional": {
                 "scene_info": (SCENE_SAVE_INFO_TYPE, {"display_name": "メタ情報", "label": "メタ情報"}),
@@ -1005,6 +1108,7 @@ class SceneSaveImage:
         self,
         images,
         path,
+        metadata_mode=SAVE_METADATA_WORKFLOW,
         scene_info=None,
         prompt=None,
         extra_pnginfo=None,
@@ -1039,12 +1143,18 @@ class SceneSaveImage:
         prompt_metadata = None
         extra_pnginfo_metadata = []
         if not args.disable_metadata:
-            if prompt is not None:
-                prompt_metadata = json.dumps(prompt, separators=(",", ":"))
-            if extra_pnginfo is not None:
+            saved_prompt, saved_extra_pnginfo = _metadata_for_save_mode(
+                prompt,
+                extra_pnginfo,
+                unique_id,
+                metadata_mode,
+            )
+            if saved_prompt is not None:
+                prompt_metadata = json.dumps(saved_prompt, separators=(",", ":"))
+            if saved_extra_pnginfo is not None:
                 extra_pnginfo_metadata = [
-                    (key, json.dumps(extra_pnginfo[key], separators=(",", ":")))
-                    for key in extra_pnginfo
+                    (key, json.dumps(value, separators=(",", ":")))
+                    for key, value in saved_extra_pnginfo.items()
                 ]
 
         for image in images:

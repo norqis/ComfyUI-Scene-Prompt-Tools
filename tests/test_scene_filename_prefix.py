@@ -332,6 +332,118 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             file_indexes.append(scene_metadata["file_index"])
         self.assertEqual(len(file_indexes), len(set(file_indexes)))
 
+    def test_save_metadata_mode_choices_are_ordered_and_default_to_full_workflow(self):
+        metadata_mode = self.nodes.SceneSaveImage.INPUT_TYPES()["required"]["metadata_mode"]
+        self.assertEqual(
+            metadata_mode[0],
+            (
+                "ワークフロー全体",
+                "プロンプトのみ",
+                "生成経路ノードのみ",
+            ),
+        )
+        self.assertEqual(metadata_mode[1]["default"], "ワークフロー全体")
+
+    def test_save_metadata_modes_write_expected_png_metadata_without_mutating_inputs(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        prompt = {
+            "checkpoint": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "sampler_a": {"class_type": "KSampler", "inputs": {"model": ["checkpoint", 0]}},
+            "sampler_b": {"class_type": "KSampler", "inputs": {"model": ["checkpoint", 0]}},
+            "save_a": {"class_type": "SceneSaveImage", "inputs": {"images": ["sampler_a", 0]}},
+            "save_b": {"class_type": "SceneSaveImage", "inputs": {"images": ["sampler_b", 0]}},
+        }
+        extra_pnginfo = {
+            "workflow": {"nodes": [{"id": "save_a", "pos": [200, 100]}]},
+            "custom": {"keep": ["this", "value"]},
+        }
+        original_prompt = json.loads(json.dumps(prompt))
+        original_extra = json.loads(json.dumps(extra_pnginfo))
+        saver = self.nodes.SceneSaveImage()
+
+        saved = {}
+        for file_index, mode in enumerate(self.nodes.SAVE_METADATA_CHOICES, start=1):
+            result = saver.save_images(
+                [image],
+                "",
+                metadata_mode=mode,
+                scene_info={
+                    "use_run_dir": False,
+                    "file_index": file_index,
+                    "positive": "positive text",
+                    "negative": "negative text",
+                    "seed": 42,
+                },
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+                unique_id="save_a",
+            )
+            with Image.open(Path(result["result"][1])) as png:
+                saved[mode] = dict(png.text)
+
+        full = saved["ワークフロー全体"]
+        self.assertEqual(json.loads(full["prompt"]), prompt)
+        self.assertEqual(json.loads(full["workflow"]), extra_pnginfo["workflow"])
+        self.assertEqual(json.loads(full["custom"]), extra_pnginfo["custom"])
+
+        prompt_only = saved["プロンプトのみ"]
+        self.assertNotIn("prompt", prompt_only)
+        self.assertNotIn("workflow", prompt_only)
+        self.assertEqual(json.loads(prompt_only["custom"]), extra_pnginfo["custom"])
+
+        execution_path = saved["生成経路ノードのみ"]
+        self.assertNotIn("workflow", execution_path)
+        self.assertEqual(set(json.loads(execution_path["prompt"])), {"checkpoint", "sampler_a", "save_a"})
+        self.assertEqual(json.loads(execution_path["custom"]), extra_pnginfo["custom"])
+
+        for metadata in saved.values():
+            self.assertEqual(json.loads(metadata["scene_info"])["positive"], "positive text")
+            self.assertEqual(metadata["scene_positive"], "positive text")
+            self.assertEqual(metadata["scene_negative"], "negative text")
+            self.assertEqual(metadata["scene_seed"], "42")
+        self.assertEqual(prompt, original_prompt)
+        self.assertEqual(extra_pnginfo, original_extra)
+
+    def test_generation_path_metadata_is_specific_to_each_save_node(self):
+        prompt = {
+            "shared": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "left": {"class_type": "KSampler", "inputs": {"model": ["shared", 0]}},
+            "right": {"class_type": "KSampler", "inputs": {"model": ["shared", 0]}},
+            "save_left": {"class_type": "SceneSaveImage", "inputs": {"images": ["left", 0]}},
+            "save_right": {"class_type": "SceneSaveImage", "inputs": {"images": ["right", 0]}},
+        }
+        self.assertEqual(set(self.nodes._slice_prompt_for_output(prompt, "save_left")), {"shared", "left", "save_left"})
+        self.assertEqual(set(self.nodes._slice_prompt_for_output(prompt, "save_right")), {"shared", "right", "save_right"})
+
+    def test_generation_path_metadata_rejects_unknown_target_and_invalid_links(self):
+        prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {"images": ["missing", 0]}}}
+        with self.assertRaisesRegex(ValueError, "保存対象のノードID"):
+            self.nodes._slice_prompt_for_output(prompt, "unknown")
+        with self.assertRaisesRegex(ValueError, "存在しないノード missing"):
+            self.nodes._slice_prompt_for_output(prompt, "save")
+        prompt["save"]["inputs"]["images"] = ["other", -1]
+        with self.assertRaisesRegex(ValueError, "接続先が不正"):
+            self.nodes._slice_prompt_for_output(prompt, "save")
+
+    def test_disable_metadata_skips_all_scene_save_metadata(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        original_value = self.nodes.args.disable_metadata
+        self.nodes.args.disable_metadata = True
+        try:
+            result = self.nodes.SceneSaveImage().save_images(
+                [image],
+                "",
+                metadata_mode="生成経路ノードのみ",
+                scene_info={"use_run_dir": False, "file_index": 1, "positive": "kept out"},
+                prompt={"save": {"class_type": "SceneSaveImage", "inputs": {}}},
+                extra_pnginfo={"workflow": {"nodes": []}},
+                unique_id="save",
+            )
+        finally:
+            self.nodes.args.disable_metadata = original_value
+        with Image.open(Path(result["result"][1])) as png:
+            self.assertEqual(dict(png.text), {})
+
     def test_all_registered_scene_nodes_have_japanese_descriptions(self):
         package = _load_node_package(Path(self.temp_dir.name))
 

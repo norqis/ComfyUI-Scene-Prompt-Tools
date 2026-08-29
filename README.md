@@ -22,6 +22,7 @@ git clone https://github.com/norqis/ComfyUI-Scene-Prompt-Tools.git
 - **Scene Empty Latent** records image size and batch size.
 - **Scene Prompt Expand** emits one planned batch at a time.
 - **Scene Preset** nodes save and reuse plan fragments.
+- **Scene Save Image** saves PNGs with one of three metadata modes: full workflow, prompt only, or only the nodes used to produce that image.
 
 Prompt items and saved prompt collections are stored in the current ComfyUI user's public data directory, outside the replaceable custom-node installation.
 
