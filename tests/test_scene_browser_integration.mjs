@@ -28,6 +28,15 @@ export const api = {
   fetchApi: async (url, options = {}) => {
     calls.push({ url, options });
     let payload = { items: [] };
+    if (url.includes("/scene_prompt/items")) payload = { items: [{
+      id: "summer",
+      label: "Summer",
+      prompt: "summer dress",
+      description: "",
+      category_path: ["Outfit"],
+      category_key: "Outfit",
+      category_label: "Outfit",
+    }] };
     if (url.includes("/runs/prepare")) payload = { run_handle: "browser-run" };
     if (url.includes("/runs/claim")) payload = { claimed: true };
     if (url.includes("/runs/release")) payload = { released: true };
@@ -111,6 +120,64 @@ try {
     assert.equal(result.extension, "ScenePrompt.UI");
     assert.notEqual(result.externalDisplay, "none");
     assert.equal(result.ownedDisplay, "none");
+
+    await page.evaluate(async () => {
+        class ScenePromptNode {
+            constructor() {
+                this.id = 1;
+                this.type = "ScenePrompt";
+                this.comfyClass = "ScenePrompt";
+                this.size = [420, 300];
+                this.inputs = [];
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                this.graph = window.app.graph;
+                this.widgets = [
+                    { name: "prompt_name", type: "text", value: "Prompt", options: {} },
+                    { name: "positive_base", type: "text", value: "", options: {} },
+                    { name: "positive_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
+                    { name: "negative_base", type: "text", value: "", options: {} },
+                    { name: "negative_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
+                    { name: "category_order", type: "text", value: "", options: {} },
+                    { name: "seed", type: "number", value: 0, options: {} },
+                    { name: "randomize", type: "toggle", value: true, options: {} },
+                    { name: "run_handle", type: "text", value: "", options: {} },
+                ];
+                this.widgets_values = this.widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            addInput(name, type) { this.inputs.push({ name, type, link: null }); }
+            addOutput(name, type) { this.outputs.push({ name, type, links: [] }); }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(ScenePromptNode, { name: "ScenePrompt" });
+        const node = new ScenePromptNode();
+        window.app.graph._nodes = [node];
+        node.onNodeCreated();
+        window.__scenePromptTestNode = node;
+        node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
+    });
+    await page.getByText("Outfit", { exact: false }).click();
+    const candidate = page.locator(".pc-candidate").filter({ hasText: "Summer" });
+    await candidate.click();
+    await assert.doesNotReject(async () => candidate.waitFor({ state: "visible" }));
+    assert.equal(await candidate.locator('input[type="checkbox"]').isChecked(), true);
+    assert.equal(await candidate.evaluate((element) => element.classList.contains("pc-selected-item")), true);
+    const selectedState = await page.evaluate(() => {
+        const node = window.__scenePromptTestNode;
+        const widget = node.widgets.find((candidateWidget) => candidateWidget.name === "positive_json");
+        return {
+            widget: JSON.parse(widget.value),
+            stored: JSON.parse(node.widgets_values[node.widgets.indexOf(widget)]),
+        };
+    });
+    assert.equal(selectedState.widget.categories.Outfit[0].id, "summer");
+    assert.equal(Object.hasOwn(selectedState.widget.categories.Outfit[0], "weight"), false);
+    assert.deepEqual(selectedState.stored, selectedState.widget);
 
     await createPreparedRun(page);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));

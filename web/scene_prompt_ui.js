@@ -668,7 +668,7 @@ function normalizeWeight(value) {
 }
 
 function weightForStorage(value) {
-    const weight = normalizeWeight(value);
+    const weight = normalizeWeight(value ?? 1);
     if (Math.abs(weight - 1) < 0.0005) {
         return null;
     }
