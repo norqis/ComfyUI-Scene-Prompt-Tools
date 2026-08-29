@@ -72,7 +72,8 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertIs(presets.GraphBuilder, GraphBuilder)
         self.assertEqual(GraphBuilder.__module__, "comfy_execution.graph_utils")
         self.assertIn("/scene_prompt/items", paths)
-        self.assertIn("/scene_presets/resolve", paths)
+        self.assertIn("/scene_prompt/runs/prepare", paths)
+        self.assertIn("/scene_prompt/runs/release", paths)
 
 
 if __name__ == "__main__":

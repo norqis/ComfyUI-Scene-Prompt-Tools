@@ -163,8 +163,7 @@ let scenePresetListPromise = null;
 let scenePresetListLatestPromise = null;
 let scenePresetListCacheCurrent = false;
 let scenePresetNotificationTimer = null;
-let scenePromptUserId = null;
-let scenePromptUserIdPromise = null;
+const sceneRunHandlesByPromptId = new Map();
 
 const VISIBLE_INPUT_NAMES = new Set(["scene_prompt"]);
 const INTERNAL_INPUT_NAMES = new Set([
@@ -6725,7 +6724,6 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
     }
     const prompt = await graphToPrompt();
     const snapshot = sliceSceneBatchPrompt(cloneScenePromptPayload(prompt || {}), expandNodeId);
-    await applyScenePromptUserId(snapshot);
     const expandPrompt = snapshot?.output?.[String(expandNodeId)];
     if (!snapshot?.output || !expandPrompt?.inputs) {
         throw new Error("Scene Prompt Expand のプロンプトを取得できませんでした。");
@@ -6733,38 +6731,45 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
     return snapshot;
 }
 
-async function currentScenePromptUserId() {
-    if (scenePromptUserId) {
-        return scenePromptUserId;
-    }
-    if (!scenePromptUserIdPromise) {
-        scenePromptUserIdPromise = api.fetchApi("/scene_prompt/user")
-            .then((response) => readApiJson(response, "ユーザー情報を取得できませんでした"))
-            .then((data) => {
-                if (!data?.user_id) {
-                    throw new Error("ユーザー情報を取得できませんでした");
-                }
-                scenePromptUserId = String(data.user_id);
-                return scenePromptUserId;
-            })
-            .finally(() => { scenePromptUserIdPromise = null; });
-    }
-    return scenePromptUserIdPromise;
+function sceneRunTargetNodes(apiGraph) {
+    return Object.values(apiGraph?.output || {}).filter((node) => (
+        ["ScenePrompt", "SceneMatrix", "ScenePresetReference", "ScenePromptExpand"].includes(node?.class_type)
+    ));
 }
 
-async function applyScenePromptUserId(apiGraph) {
+function applySceneRunHandle(apiGraph, runHandle) {
     const targetNodes = Object.values(apiGraph?.output || {}).filter((node) => (
         ["ScenePrompt", "SceneMatrix", "ScenePresetReference", "ScenePromptExpand"].includes(node?.class_type)
     ));
-    if (!targetNodes.length) {
-        return apiGraph;
-    }
-    const userId = await currentScenePromptUserId();
     for (const node of targetNodes) {
         node.inputs = node.inputs || {};
-        node.inputs.user_id = userId;
+        node.inputs.run_handle = runHandle;
+        delete node.inputs.user_id;
     }
     return apiGraph;
+}
+
+function sceneExpandIdForPrompt(apiGraph) {
+    return Object.entries(apiGraph?.output || {}).find(([, node]) => node?.class_type === "ScenePromptExpand")?.[0] || null;
+}
+
+async function prepareSceneRunContext(apiGraph, expandNodeId = null) {
+    if (!sceneRunTargetNodes(apiGraph).length) {
+        return null;
+    }
+    const response = await api.fetchApi("/scene_prompt/runs/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId || sceneExpandIdForPrompt(apiGraph) }),
+    });
+    const data = await readApiJson(response, "Scene Promptの実行準備に失敗しました");
+    if (!response.ok || !data?.run_handle) {
+        const error = new Error(data?.error || "Scene Promptの実行準備に失敗しました");
+        error.scenePresetReferenceId = data?.node_id ? String(data.node_id) : "";
+        throw error;
+    }
+    applySceneRunHandle(apiGraph, String(data.run_handle));
+    return data;
 }
 
 function promptDescendantIds(nodes, sourceId) {
@@ -6832,18 +6837,6 @@ function sliceSceneBatchPrompt(prompt, expandNodeId) {
     return snapshot;
 }
 
-function applyScenePresetRunId(apiGraph, runId, expandNodeId) {
-    const referenceIds = new Set(scenePresetReferenceIdsForExpand(apiGraph, expandNodeId));
-    for (const referenceId of referenceIds) {
-        const promptNode = apiGraph?.output?.[referenceId];
-        if (!promptNode) {
-            continue;
-        }
-        promptNode.inputs = promptNode.inputs || {};
-        promptNode.inputs.run_id = runId;
-    }
-}
-
 function showSceneNotification(message) {
     console.info("[Scene Prompt]", message);
     if (typeof document === "undefined") {
@@ -6873,25 +6866,15 @@ async function resolveScenePresetsForRun(run, snapshot, expandNodeId) {
     }
     const referenceIds = scenePresetReferenceIdsForExpand(snapshot, expandNodeId);
     clearScenePresetReferenceErrors({ nodeIds: referenceIds });
-    const response = await api.fetchApi("/scene_presets/resolve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run_id: run.runId, api_graph: snapshot, expand_node_id: expandNodeId }),
-        signal: run.resolveController?.signal,
-    });
-    const data = await readApiJson(response, "Presetの検証に失敗しました");
-    if (!response.ok) {
-        const error = new Error(data.error || "Presetの検証に失敗しました");
-        error.scenePresetReferenceId = data.node_id ? String(data.node_id) : "";
-        throw error;
-    }
+    const data = await prepareSceneRunContext(snapshot, expandNodeId);
     if (run.cancelled) {
+        releaseSceneRunHandle(data?.run_handle);
         return null;
     }
     clearScenePresetReferenceErrors({ nodeIds: referenceIds });
     run.presetGraphs = new Map(Object.entries(data.preset_graphs || {}));
     run.presetSnapshots = Array.isArray(data.presets) ? data.presets : [];
-    applyScenePresetRunId(snapshot, run.runId, expandNodeId);
+    run.runHandle = String(data.run_handle);
     return data;
 }
 
@@ -6900,7 +6883,7 @@ function releaseCancelledSceneBatchRun(run) {
         return;
     }
     run.snapshotReleased = true;
-    releaseSceneBatchPlan(run.runId);
+    releaseSceneRunHandle(run.runHandle);
 }
 
 function cancelSceneBatchRunPreparation(run) {
@@ -7095,8 +7078,15 @@ function installSceneBatchPromptCapture() {
     }
     const originalQueuePrompt = api.queuePrompt.bind(api);
     api.queuePrompt = async function (number, prompt) {
-        if (prompt?.output) {
-            await applyScenePromptUserId(prompt);
+        let preparedRunHandle = "";
+        if (prompt?.output && sceneRunTargetNodes(prompt).length) {
+            const existingHandle = sceneRunTargetNodes(prompt)
+                .map((node) => String(node?.inputs?.run_handle || ""))
+                .find(Boolean);
+            if (!existingHandle) {
+                const prepared = await prepareSceneRunContext(prompt);
+                preparedRunHandle = String(prepared?.run_handle || "");
+            }
         }
         let run = sceneBatchRun;
         let expandPrompt = prompt?.output?.[String(run?.nodeId)];
@@ -7124,8 +7114,13 @@ function installSceneBatchPromptCapture() {
         try {
             result = await originalQueuePrompt(...arguments);
         } catch (error) {
+            releaseSceneRunHandle(preparedRunHandle);
             showPromptValidationErrorFromThrown(error);
             throw error;
+        }
+        const promptId = scenePromptIdFromValue(result);
+        if (preparedRunHandle && promptId) {
+            sceneRunHandlesByPromptId.set(promptId, preparedRunHandle);
         }
         if (matchesFirstBatchPrompt) {
             acceptSceneBatchPrompt(run, result);
@@ -7181,13 +7176,28 @@ function rememberSceneBatchTerminalEvent(type, detail) {
 }
 
 function releaseSceneBatchPlan(runId) {
-    if (!runId) {
+    const key = String(runId || "");
+    releaseSceneRunHandle(sceneBatchRunsById.get(key)?.runHandle || sceneBatchDetachedRuns.get(key)?.runHandle);
+}
+
+function releaseCompletedSceneRun(detail) {
+    const promptId = scenePromptIdFromValue(detail);
+    const runHandle = promptId ? sceneRunHandlesByPromptId.get(promptId) : "";
+    if (!runHandle) {
         return;
     }
-    api.fetchApi("/scene_prompt/run_plan/release", {
+    sceneRunHandlesByPromptId.delete(promptId);
+    releaseSceneRunHandle(runHandle);
+}
+
+function releaseSceneRunHandle(runHandle) {
+    if (!runHandle) {
+        return;
+    }
+    api.fetchApi("/scene_prompt/runs/release", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run_id: runId }),
+        body: JSON.stringify({ run_handle: runHandle }),
     }).catch((error) => console.warn("[Scene Prompt] 生成計画の解放に失敗しました。", error));
 }
 
@@ -7244,8 +7254,9 @@ function releaseDetachedSceneBatchRun(run, promptId) {
     }
     clearDetachedSceneBatchRun(run);
     clearPendingSceneBatchReleasesForRun(run.runId);
-    sceneBatchRunsById.delete(run.runId);
+    sceneBatchRunsById.set(run.runId, run);
     releaseSceneBatchPlan(run.runId);
+    sceneBatchRunsById.delete(run.runId);
     activateNextSceneBatchRun();
 }
 
@@ -7353,8 +7364,8 @@ function releasePendingSceneBatchPlan(detail) {
     const run = sceneBatchDetachedRuns.get(entry.runId) || sceneBatchRunsById.get(entry.runId);
     clearDetachedSceneBatchRun(run);
     clearPendingSceneBatchReleasesForRun(entry.runId);
-    sceneBatchRunsById.delete(entry.runId);
     releaseSceneBatchPlan(entry.runId);
+    sceneBatchRunsById.delete(entry.runId);
     activateNextSceneBatchRun();
 }
 
@@ -7558,6 +7569,7 @@ function createSceneBatchRun(node, total) {
         totalImages: null,
         nextIndex: 0,
         runId: `${sceneBatchRunId()}__${planId}`,
+        runHandle: "",
         waiting: false,
         queueing: false,
         currentPromptId: "",
@@ -7682,8 +7694,8 @@ async function queueNextSceneBatchItem() {
             showSceneBatchError("連続生成を開始できませんでした。", error);
         } else {
             clearDetachedSceneBatchRun(run);
-            sceneBatchRunsById.delete(run.runId);
             releaseSceneBatchPlan(run.runId);
+            sceneBatchRunsById.delete(run.runId);
             activateNextSceneBatchRun();
         }
     } finally {
@@ -8812,16 +8824,19 @@ app.registerExtension({
             rememberSceneBatchTerminalEvent("success", detail);
             continueSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
+            releaseCompletedSceneRun(detail);
         });
         api.addEventListener("execution_error", ({ detail }) => {
             rememberSceneBatchTerminalEvent("error", detail);
             failSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
+            releaseCompletedSceneRun(detail);
         });
         api.addEventListener("execution_interrupted", ({ detail }) => {
             rememberSceneBatchTerminalEvent("interrupted", detail);
             failSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
+            releaseCompletedSceneRun(detail);
         });
     },
 

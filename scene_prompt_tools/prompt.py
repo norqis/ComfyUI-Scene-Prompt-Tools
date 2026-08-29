@@ -6,6 +6,7 @@ import time
 from collections import OrderedDict
 from .plan import make_plan, normalize_plan
 from .storage import prompt_data_directory
+from .runs import require_run_context
 
 
 DEFAULT_CATEGORY_ORDER = ""
@@ -516,6 +517,18 @@ def _parse_selection_json(selection_json, data_index=None):
     return categories
 
 
+def _selection_json_has_items(selection_json):
+    if selection_json is None or (isinstance(selection_json, str) and not selection_json.strip()):
+        return False
+    if not isinstance(selection_json, str):
+        return True
+    try:
+        value = json.loads(selection_json)
+    except json.JSONDecodeError:
+        return True
+    return isinstance(value, dict) and any(value.get("categories", {}).values())
+
+
 def _scene_prompt_change_key(value):
     if not isinstance(value, dict) or value.get("type") != SCENE_PROMPT_TYPE:
         return ""
@@ -626,7 +639,7 @@ class _ScenePromptBase:
                     },
                 ),
                 "randomize": ("BOOLEAN", {"default": True, "hidden": True}),
-                "user_id": ("STRING", {"default": "default", "hidden": True}),
+                "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
             "optional": {
                 "scene_prompt": (
@@ -648,7 +661,7 @@ class _ScenePromptBase:
         seed,
         randomize,
         scene_prompt=None,
-        user_id="default",
+        run_handle="",
         **kwargs,
     ):
         return "|".join(
@@ -662,7 +675,7 @@ class _ScenePromptBase:
                 str(randomize),
                 str(seed),
                 _scene_prompt_change_key(scene_prompt),
-                _prompt_data_change_key(user_id),
+                str(run_handle or ""),
             ]
         )
 
@@ -677,12 +690,16 @@ class _ScenePromptBase:
         seed,
         randomize,
         scene_prompt=None,
-        user_id="default",
+        run_handle="",
         **kwargs,
     ):
         del kwargs
         label = str(prompt_name or "").strip() or "Scene Prompt"
-        prompt_data_index = _prompt_data_index(user_id)
+        has_selection = _selection_json_has_items(positive_json) or _selection_json_has_items(negative_json)
+        prompt_data_index = (
+            require_run_context(run_handle)["prompt_data_index"]
+            if has_selection else {"by_key": {}, "by_id": {}}
+        )
         positive_parts = _compose_prompt_parts(
             positive_base,
             positive_json,

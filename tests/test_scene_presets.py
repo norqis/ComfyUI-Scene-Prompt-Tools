@@ -558,7 +558,7 @@ class ScenePresetTests(unittest.TestCase):
         self.assertIn(("alice", "same-run"), self.module._RUN_SNAPSHOTS)
         self.assertIn(("bob", "same-run"), self.module._RUN_SNAPSHOTS)
 
-    def test_snapshot_cache_evicts_oldest_entry_at_limit(self):
+    def test_snapshot_cache_rejects_new_active_entry_at_limit(self):
         self.module._RUN_SNAPSHOTS.clear()
         self.module._CANCELLED_RUNS.clear()
         original_limit = self.module._RUN_SNAPSHOTS_MAX_ENTRIES
@@ -570,10 +570,10 @@ class ScenePresetTests(unittest.TestCase):
             self.module.snapshot_presets_for_run("one", graph_data, "11")
             self.module.snapshot_presets_for_run("two", graph_data, "11")
             self.module.snapshot_presets_for_run("one", graph_data, "11")
-            self.module.snapshot_presets_for_run("three", graph_data, "11")
+            with self.assertRaisesRegex(self.module.ScenePresetError, "上限"):
+                self.module.snapshot_presets_for_run("three", graph_data, "11")
             self.assertIn(("default", "one"), self.module._RUN_SNAPSHOTS)
-            self.assertIn(("default", "three"), self.module._RUN_SNAPSHOTS)
-            self.assertNotIn(("default", "two"), self.module._RUN_SNAPSHOTS)
+            self.assertIn(("default", "two"), self.module._RUN_SNAPSHOTS)
             for run_id in ("cancel-one", "cancel-two", "cancel-three"):
                 self.module.release_scene_preset_snapshot(run_id)
             self.assertEqual(list(self.module._CANCELLED_RUNS), [("default", "cancel-two"), ("default", "cancel-three")])
@@ -582,6 +582,13 @@ class ScenePresetTests(unittest.TestCase):
             self.module._CANCELLED_RUNS_MAX_ENTRIES = original_cancel_limit
             self.module._RUN_SNAPSHOTS.clear()
             self.module._CANCELLED_RUNS.clear()
+
+    def test_preset_node_rejects_missing_run_handle(self):
+        self.save("standalone", basic_nodes())
+        with self.assertRaisesRegex(ValueError, "実行コンテキスト"):
+            self.module.ScenePresetReference().expand("standalone")
+        with self.assertRaisesRegex(ValueError, "実行コンテキスト"):
+            self.module.ScenePresetReference().expand("standalone", run_handle="forged")
 
 
 if __name__ == "__main__":

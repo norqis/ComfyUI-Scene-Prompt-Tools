@@ -298,28 +298,17 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(metadata["repeat_count"], 100_000_000)
         self.assertEqual(metadata["total_count"], 100_000_000)
 
-    def test_scene_run_plan_cache_is_partitioned_and_lru_bounded(self):
-        self.nodes._SCENE_RUN_PLAN_CACHE.clear()
-        original_limit = self.nodes._SCENE_RUN_PLAN_CACHE_MAX_ENTRIES
-        self.nodes._SCENE_RUN_PLAN_CACHE_MAX_ENTRIES = 2
-        try:
-            first = _scene_prompt(self.nodes)
-            second = self.nodes.transform(first, lambda row, _item: {**row, "positive_parts": ["second"]})
-            with mock.patch.object(self.nodes, "normalize_plan", wraps=self.nodes.normalize_plan) as normalize:
-                self.nodes._scene_run_plan("one", first, "alice")
-                self.nodes._scene_run_plan("one", second, "alice")
-                self.nodes._scene_run_plan("one", second, "bob")
-                self.assertEqual(normalize.call_count, 2)
-
-            self.nodes._scene_run_plan("two", first, "alice")
-            self.nodes._scene_run_plan("one", first, "alice")
-            self.nodes._scene_run_plan("three", first, "alice")
-            self.assertIn(("alice", "one"), self.nodes._SCENE_RUN_PLAN_CACHE)
-            self.assertIn(("alice", "three"), self.nodes._SCENE_RUN_PLAN_CACHE)
-            self.assertNotIn(("alice", "two"), self.nodes._SCENE_RUN_PLAN_CACHE)
-        finally:
-            self.nodes._SCENE_RUN_PLAN_CACHE_MAX_ENTRIES = original_limit
-            self.nodes._SCENE_RUN_PLAN_CACHE.clear()
+    def test_scene_run_plan_is_immutable_per_context(self):
+        runs = sys.modules[f"{self.nodes.__package__}.runs"]
+        runs.RUN_CONTEXTS.clear()
+        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        first = _scene_prompt(self.nodes)
+        second = self.nodes.transform(first, lambda row, _item: {**row, "positive_parts": ["second"]})
+        self.assertEqual(self.nodes._scene_run_plan(handle, first)["rows"][0]["row"]["positive_parts"], ["test"])
+        self.assertEqual(self.nodes._scene_run_plan(handle, second)["rows"][0]["row"]["positive_parts"], ["test"])
+        runs.release_run_context(handle, "alice")
+        with self.assertRaises(runs.SceneRunError):
+            self.nodes._scene_run_plan(handle, first)
 
     def test_concurrent_saves_reserve_distinct_filenames_and_keep_metadata(self):
         image = torch.zeros((16, 16, 3), dtype=torch.float32)

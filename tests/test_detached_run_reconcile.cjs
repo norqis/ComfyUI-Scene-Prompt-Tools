@@ -100,20 +100,12 @@ async function testStillQueuedAndFetchFailureRemainBlocked() {
     assert.deepEqual(failed.released, []);
 }
 
-async function testNonSceneQueueSkipsUserLookup() {
-    const context = {
-        Object,
-        userRequests: 0,
-        async currentScenePromptUserId() {
-            context.userRequests += 1;
-            throw new Error("user endpoint unavailable");
-        },
-    };
+function testNonSceneQueueSkipsRunPreparation() {
+    const context = { Object };
     vm.createContext(context);
-    vm.runInContext(functionSource("applyScenePromptUserId"), context);
+    vm.runInContext(functionSource("sceneRunTargetNodes"), context);
     const graph = { output: { "1": { class_type: "KSampler", inputs: {} } } };
-    assert.equal(await context.applyScenePromptUserId(graph), graph);
-    assert.equal(context.userRequests, 0);
+    assert.equal(context.sceneRunTargetNodes(graph).length, 0);
 }
 
 function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
@@ -153,7 +145,7 @@ Promise.resolve()
     .then(testHistoryTerminalReleasesOnceAndResumesFifo)
     .then(testAbsentFromHistoryAndQueueReleases)
     .then(testStillQueuedAndFetchFailureRemainBlocked)
-    .then(testNonSceneQueueSkipsUserLookup)
+    .then(testNonSceneQueueSkipsRunPreparation)
     .then(testRemovalCleanupRunsOnceAndPreservesPreviousHandler)
     .then(() => console.log("detached Scene Prompt run reconciliation tests passed"))
     .catch((error) => {

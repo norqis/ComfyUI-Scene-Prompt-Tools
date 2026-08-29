@@ -6,6 +6,7 @@ import html
 import json
 import re
 import shutil
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -215,25 +216,53 @@ def write_data(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: 
         collisions = [path for path, _items in payloads if path.exists()]
         if collisions:
             raise FileExistsError(f"Destination already contains prompt data: {collisions[0]}")
-    if mode == "clean" and output_dir.exists():
-        shutil.rmtree(output_dir)
+    parent = output_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.stage-", dir=parent))
+    backup = output_dir.with_name(f".{output_dir.name}.backup-{stable_suffix(str(stage))}")
     prepared = []
-    for prompt_file, items in payloads:
-        if mode == "merge" and prompt_file.exists():
-            existing = json.loads(prompt_file.read_text(encoding="utf-8"))
-            if not isinstance(existing, list):
-                raise ValueError(f"Destination file is not a JSON array: {prompt_file}")
-            items = dedupe_items([*existing, *items])
-        prepared.append((prompt_file, items))
+    installed = False
+    try:
+        if mode in {"abort", "merge", "replace"} and output_dir.exists():
+            shutil.copytree(output_dir, stage, dirs_exist_ok=True)
+        for prompt_file, items in payloads:
+            staged_file = stage / prompt_file.relative_to(output_dir)
+            if mode == "merge" and staged_file.exists():
+                existing = json.loads(staged_file.read_text(encoding="utf-8"))
+                if not isinstance(existing, list):
+                    raise ValueError(f"Destination file is not a JSON array: {prompt_file}")
+                items = dedupe_items([*existing, *items])
+            _atomic_write_json(staged_file, items)
+            prepared.append((staged_file, items))
 
-    for prompt_file, items in prepared:
-        _atomic_write_json(prompt_file, items)
+        for staged_file, _items in prepared:
+            parsed = json.loads(staged_file.read_text(encoding="utf-8"))
+            if not isinstance(parsed, list):
+                raise ValueError(f"Staged file is not a JSON array: {staged_file.name}")
 
-    return (
-        len({path.parent.parent for path, _items in prepared}),
-        len(prepared),
-        sum(len(items) for _path, items in prepared),
-    )
+        if backup.exists():
+            shutil.rmtree(backup)
+        if output_dir.exists():
+            output_dir.replace(backup)
+        try:
+            stage.replace(output_dir)
+            installed = True
+        except Exception:
+            if backup.exists() and not output_dir.exists():
+                backup.replace(output_dir)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
+        return (
+            len({path.parent.parent for path, _items in prepared}),
+            len(prepared),
+            sum(len(items) for _path, items in prepared),
+        )
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+        if not installed and backup.exists() and not output_dir.exists():
+            backup.replace(output_dir)
 
 
 def parse_args() -> argparse.Namespace:

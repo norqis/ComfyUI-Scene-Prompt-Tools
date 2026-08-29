@@ -3,7 +3,6 @@ import os
 import re
 import threading
 import time
-from collections import OrderedDict
 from datetime import datetime
 
 import numpy as np
@@ -22,8 +21,6 @@ from .prompt import (
     _join_unique,
     _merge_positive_negative_parts,
     _parse_selection_json,
-    _prompt_data_change_key,
-    _prompt_data_index,
     _scene_prompt_change_key,
     _split_prompt,
 )
@@ -45,6 +42,7 @@ from .plan import (
     queue,
     transform,
 )
+from .runs import require_run_context, set_run_plan
 
 
 MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE"
@@ -70,12 +68,6 @@ WINDOWS_RESERVED_PREFIX_RE = re.compile(
 )
 SEED_MODULO = 18446744073709551616
 SEED_MAX = SEED_MODULO - 1
-_SCENE_RUN_PLAN_CACHE = OrderedDict()
-_SCENE_RUN_PLAN_CACHE_LOCK = threading.Lock()
-_SCENE_RUN_PLAN_TTL_SECONDS = 12 * 60 * 60
-_SCENE_RUN_PLAN_CACHE_MAX_ENTRIES = 256
-
-
 def _clean_string_list(values):
     return [str(value).strip() for value in values if str(value).strip()] if isinstance(values, list) else []
 
@@ -169,7 +161,13 @@ def _empty_latent(config):
 def _selection_json_has_items(value):
     if value is None or (isinstance(value, str) and not value.strip()):
         return False
-    return any(_parse_selection_json(value).values())
+    if not isinstance(value, str):
+        return True
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        return True
+    return isinstance(data, dict) and any(data.get("categories", {}).values())
 
 
 def _normalize_matrix_line_set(value, prompt_data_index=None):
@@ -296,11 +294,15 @@ def _parse_matrix_data(matrix_json):
     return data
 
 
-def _parse_matrix_sets(matrix_json, user_id="default"):
+def _parse_matrix_sets(matrix_json, run_handle=""):
     data = _parse_matrix_data(matrix_json)
     raw_sets = data.get("sets", [])
     sets = []
-    prompt_data_index = _prompt_data_index(user_id)
+    has_selection = any(
+        _selection_json_has_items(value.get("positive_json")) or _selection_json_has_items(value.get("negative_json"))
+        for value in raw_sets if isinstance(value, dict)
+    )
+    prompt_data_index = require_run_context(run_handle)["prompt_data_index"] if has_selection else {"by_key": {}, "by_id": {}}
     for raw_set in raw_sets:
         matrix_line = _normalize_matrix_line_set(raw_set, prompt_data_index)
         sets.append(matrix_line)
@@ -354,60 +356,9 @@ def _scene_count(value):
     return value
 
 
-def _scene_run_cache_key(run_id, user_id="default"):
-    return str(user_id or "default"), str(run_id or "").strip()
-
-
-def _drop_scene_run_plan(key):
-    return _SCENE_RUN_PLAN_CACHE.pop(key, None) is not None
-
-
-def _purge_scene_run_plans(now=None):
-    current = time.monotonic() if now is None else now
-    expired = [
-        key
-        for key, entry in _SCENE_RUN_PLAN_CACHE.items()
-        if current - entry["last_access"] >= _SCENE_RUN_PLAN_TTL_SECONDS
-    ]
-    for key in expired:
-        _drop_scene_run_plan(key)
-    while len(_SCENE_RUN_PLAN_CACHE) > _SCENE_RUN_PLAN_CACHE_MAX_ENTRIES:
-        _SCENE_RUN_PLAN_CACHE.popitem(last=False)
-
-
-def _scene_run_plan(run_id, scene_prompt=None, user_id="default"):
-    run_id = str(run_id or "").strip()
-    if not run_id:
-        return normalize_plan(scene_prompt)
-    run_key = _scene_run_cache_key(run_id, user_id)
-
-    now = time.monotonic()
-    with _SCENE_RUN_PLAN_CACHE_LOCK:
-        _purge_scene_run_plans(now)
-        existing = _SCENE_RUN_PLAN_CACHE.get(run_key)
-        if existing is not None:
-            existing["last_access"] = now
-            _SCENE_RUN_PLAN_CACHE.move_to_end(run_key)
-            return existing["plan"]
+def _scene_run_plan(run_handle, scene_prompt=None):
     normalized = normalize_plan(scene_prompt)
-    with _SCENE_RUN_PLAN_CACHE_LOCK:
-        _purge_scene_run_plans(now)
-        existing = _SCENE_RUN_PLAN_CACHE.get(run_key)
-        if existing is not None:
-            existing["last_access"] = now
-            _SCENE_RUN_PLAN_CACHE.move_to_end(run_key)
-            return existing["plan"]
-        _SCENE_RUN_PLAN_CACHE[run_key] = {"plan": normalized, "last_access": now}
-        _purge_scene_run_plans(now)
-        return normalized
-
-
-def release_scene_run_plan(run_id, user_id="default"):
-    if not str(run_id or "").strip():
-        return False
-    run_key = _scene_run_cache_key(run_id, user_id)
-    with _SCENE_RUN_PLAN_CACHE_LOCK:
-        return _drop_scene_run_plan(run_key)
+    return set_run_plan(run_handle, normalized) if str(run_handle or "").strip() else normalized
 
 
 def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False):
@@ -619,7 +570,7 @@ class SceneMatrix:
                     "STRING",
                     {"multiline": True, "default": DEFAULT_MATRIX_JSON, "hidden": True},
                 ),
-                "user_id": ("STRING", {"default": "default", "hidden": True}),
+                "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
             "optional": optional,
         }
@@ -628,12 +579,12 @@ class SceneMatrix:
     def IS_CHANGED(
         cls,
         matrix_json,
-        user_id="default",
+        run_handle="",
         **kwargs,
     ):
         parts = [
             matrix_json or "",
-            _prompt_data_change_key(user_id),
+            str(run_handle or ""),
         ]
         scene_prompt = kwargs.get("scene_prompt")
         if isinstance(scene_prompt, dict):
@@ -643,7 +594,7 @@ class SceneMatrix:
     def build(
         self,
         matrix_json,
-        user_id="default",
+        run_handle="",
         scene_prompt=None,
         **kwargs,
     ):
@@ -651,7 +602,7 @@ class SceneMatrix:
         return (
             matrix_product(
                 scene_prompt,
-                _parse_matrix_sets(matrix_json, user_id),
+                _parse_matrix_sets(matrix_json, run_handle),
                 _matrix_has_configured_sets(matrix_json),
             ),
         )
@@ -938,7 +889,7 @@ class ScenePromptExpand:
                 ),
             },
             "hidden": {
-                "user_id": ("STRING", {"default": "default", "hidden": True}),
+                "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -951,9 +902,9 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
-        user_id="default",
+        run_handle="",
     ):
-        plan = _scene_run_plan(run_id, scene_prompt, user_id)
+        plan = _scene_run_plan(run_handle, scene_prompt)
         return "|".join(
             [
                 _scene_prompt_change_key(plan),
@@ -973,10 +924,10 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
-        user_id="default",
+        run_handle="",
     ):
         separator = ", "
-        plan = _scene_run_plan(run_id, scene_prompt, user_id)
+        plan = _scene_run_plan(run_handle, scene_prompt)
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
         global_index = int(item.get("global_index", 0) or 0)

@@ -77,6 +77,43 @@ class ImportSceneHtmlTests(unittest.TestCase):
         self.module.write_data(self.grouped, destination, "replace")
         self.assertEqual(json.loads(target.read_text(encoding="utf-8"))[0]["label"], "One")
 
+    def test_staging_failure_preserves_existing_clean_destination(self):
+        destination = self.root / "data"
+        original = destination / "existing" / "prompt.json"
+        original.parent.mkdir(parents=True)
+        original.write_text(json.dumps([{"label": "Keep", "prompt": "keep"}]), encoding="utf-8")
+        real_write = self.module._atomic_write_json
+        calls = 0
+
+        def fail_second_write(path, data):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated staging failure")
+            return real_write(path, data)
+
+        with mock.patch.object(self.module, "_atomic_write_json", side_effect=fail_second_write):
+            with self.assertRaisesRegex(OSError, "staging failure"):
+                self.module.write_data(self.grouped, destination, "clean")
+        self.assertEqual(json.loads(original.read_text(encoding="utf-8"))[0]["label"], "Keep")
+
+    def test_commit_failure_restores_existing_destination(self):
+        destination = self.root / "data"
+        original = destination / "existing" / "prompt.json"
+        original.parent.mkdir(parents=True)
+        original.write_text(json.dumps([{"label": "Keep", "prompt": "keep"}]), encoding="utf-8")
+        replace = Path.replace
+
+        def fail_stage_commit(path, target):
+            if path.name.startswith(".data.stage-") and Path(target) == destination:
+                raise OSError("simulated commit failure")
+            return replace(path, target)
+
+        with mock.patch.object(Path, "replace", new=fail_stage_commit):
+            with self.assertRaisesRegex(OSError, "commit failure"):
+                self.module.write_data(self.grouped, destination, "clean")
+        self.assertEqual(json.loads(original.read_text(encoding="utf-8"))[0]["label"], "Keep")
+
     def test_dry_run_leaves_output_absent(self):
         source = self.root / "html"
         source.mkdir()

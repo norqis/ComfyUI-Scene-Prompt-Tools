@@ -3,6 +3,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -158,6 +159,59 @@ class PromptDataRouteTests(unittest.TestCase):
             self.routes._load_items = original
         self.assertEqual(response["status"], 200)
         self.assertEqual(response["payload"], {"items": []})
+
+    def test_prepare_route_creates_owner_bound_opaque_context(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+        graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+        response = asyncio.run(prepare(Request("alice", {"user_id": "bob", "api_graph": graph})))
+        self.assertEqual(response["status"], 200)
+        handle = response["payload"]["run_handle"]
+        self.assertNotEqual(handle, "alice")
+        self.assertNotIn("user_id", response["payload"])
+
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        self.assertEqual(runs.require_run_context(handle)["user_id"], "alice")
+        self.assertFalse(asyncio.run(release(Request("bob", {"run_handle": handle})))["payload"]["released"])
+        self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
+        with self.assertRaises(runs.SceneRunError):
+            runs.require_run_context(handle)
+
+    def test_stale_threaded_read_cannot_restore_a_cleared_cache(self):
+        path = self.routes._data_dir("alice") / "Category" / "prompt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([{"label": "Old", "prompt": "old"}]), encoding="utf-8")
+        self.routes._clear_prompt_caches("alice")
+        started = threading.Event()
+        continue_read = threading.Event()
+        original = self.routes._read_items
+
+        def delayed_read(*args, **kwargs):
+            value = original(*args, **kwargs)
+            started.set()
+            self.assertTrue(continue_read.wait(2))
+            return value
+
+        self.routes._read_items = delayed_read
+        result = {}
+        worker = threading.Thread(target=lambda: result.setdefault("items", self.routes._load_items("alice")))
+        worker.start()
+        self.assertTrue(started.wait(2))
+        path.write_text(json.dumps([{"label": "New", "prompt": "new"}]), encoding="utf-8")
+        self.routes._clear_prompt_caches("alice")
+        continue_read.set()
+        worker.join(2)
+        self.routes._read_items = original
+        self.assertEqual([item["label"] for item in result["items"]], ["New"])
+        self.assertEqual([item["label"] for item in self.routes._load_items("alice")], ["New"])
 
 
 if __name__ == "__main__":

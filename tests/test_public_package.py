@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicPackageTests(unittest.TestCase):
     def test_runtime_modules_are_in_one_internal_package(self):
-        expected = {"__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "storage.py"}
+        expected = {"__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py"}
         self.assertSetEqual({path.name for path in (ROOT / "scene_prompt_tools").glob("*.py")}, expected)
         for filename in expected - {"__init__.py"}:
             self.assertFalse((ROOT / filename).exists())
@@ -133,7 +133,7 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn("SCENE_PROMPT_HISTORY_HEAD_SHA", workflow)
         self.assertIn("refs/pull/${{ github.event.pull_request.number }}/merge", workflow)
         self.assertIn("SCENE_PROMPT_SYNTHETIC_MERGE_REF", workflow)
-        self.assertNotIn("cache: pip", workflow)
+        self.assertIn("cache: pip", workflow)
         self.assertNotIn("cache: npm", workflow)
         self.assertIn('python -m pip install "numpy<3" "Pillow<12"', workflow)
         self.assertIn("python3 - <<'PY'", workflow)
