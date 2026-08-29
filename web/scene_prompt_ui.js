@@ -6750,10 +6750,6 @@ function applySceneRunHandle(apiGraph, runHandle) {
     return apiGraph;
 }
 
-function sceneExpandIdForPrompt(apiGraph) {
-    return Object.entries(apiGraph?.output || {}).find(([, node]) => node?.class_type === "ScenePromptExpand")?.[0] || null;
-}
-
 async function prepareSceneRunContext(apiGraph, expandNodeId = null) {
     if (!sceneRunTargetNodes(apiGraph).length) {
         return null;
@@ -6761,7 +6757,7 @@ async function prepareSceneRunContext(apiGraph, expandNodeId = null) {
     const response = await api.fetchApi("/scene_prompt/runs/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId || sceneExpandIdForPrompt(apiGraph) }),
+        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId }),
     });
     const data = await readApiJson(response, "Scene Promptの実行準備に失敗しました");
     if (!response.ok || !data?.run_handle) {
@@ -7400,9 +7396,13 @@ async function reconcileActiveSceneBatchRun(run) {
         if (!historyResponse.ok) {
             throw new Error(history.error || "連続生成の状態を確認できませんでした");
         }
-        if (sceneQueueContainsPrompt(history, promptId)) {
+        const historyStatus = sceneHistoryStatus(history, promptId);
+        if (historyStatus === "success") {
             continueSceneBatchRun({ prompt_id: promptId });
-            scheduleNextSceneBatchItem(run);
+            return;
+        }
+        if (historyStatus === "error") {
+            failSceneBatchRun({ prompt_id: promptId });
             return;
         }
         const queueResponse = await api.fetchApi("/queue");
@@ -7422,6 +7422,18 @@ async function reconcileActiveSceneBatchRun(run) {
             scheduleActiveSceneBatchReconcile(run);
         }
     }
+}
+
+function sceneHistoryStatus(history, promptId) {
+    const entry = history?.[String(promptId)];
+    const status = String(entry?.status?.status_str || "").toLowerCase();
+    if (status === "success" || entry?.status?.completed === true) {
+        return "success";
+    }
+    if (status === "error" || entry?.status?.completed === false) {
+        return "error";
+    }
+    return "";
 }
 
 function rememberDetachedSceneBatchRun(run) {

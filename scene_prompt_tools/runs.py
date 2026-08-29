@@ -13,6 +13,10 @@ MAX_RUN_CONTEXTS = 256
 MAX_PREPARED_PER_USER = 8
 MAX_ACTIVE_PER_USER = 32
 PREPARED_TTL_SECONDS = 120
+# Active contexts are touched by every Scene node evaluation. Twelve hours is
+# intentionally much longer than ordinary image runs, while eventually
+# recovering slots after a browser or ComfyUI client disappears.
+ACTIVE_IDLE_TTL_SECONDS = 12 * 60 * 60
 
 
 class SceneRunError(ValueError):
@@ -22,8 +26,8 @@ class SceneRunError(ValueError):
 class RunContextStore:
     """Owns opaque handles created by authenticated HTTP requests.
 
-    Prepared contexts expire quickly. Claimed contexts are never evicted: they
-    remain valid until the client releases them after a terminal queue event.
+    Prepared contexts expire quickly. Active contexts stay alive while Scene
+    nodes use them and expire only after a conservative idle interval.
     """
 
     def __init__(
@@ -32,25 +36,33 @@ class RunContextStore:
         prepared_limit=MAX_PREPARED_PER_USER,
         active_limit=MAX_ACTIVE_PER_USER,
         prepared_ttl_seconds=PREPARED_TTL_SECONDS,
+        active_idle_ttl_seconds=ACTIVE_IDLE_TTL_SECONDS,
     ):
         self.maximum = maximum
         self.prepared_limit = prepared_limit
         self.active_limit = active_limit
         self.prepared_ttl_seconds = prepared_ttl_seconds
+        self.active_idle_ttl_seconds = active_idle_ttl_seconds
         self._entries = {}
         self._lock = threading.RLock()
 
-    def _purge_prepared_locked(self, now):
+    def _purge_expired_locked(self, now):
         expired = []
         for handle, entry in list(self._entries.items()):
-            if entry["state"] == "prepared" and now - entry["created_at"] >= self.prepared_ttl_seconds:
+            is_prepared_expired = entry["state"] == "prepared" and now - entry["created_at"] >= self.prepared_ttl_seconds
+            is_active_idle = entry["state"] == "active" and now - entry["last_access"] >= self.active_idle_ttl_seconds
+            if is_prepared_expired or is_active_idle:
                 self._entries.pop(handle, None)
                 expired.append((handle, entry["user_id"]))
         return expired
 
     def purge_expired(self):
         with self._lock:
-            return self._purge_prepared_locked(time.monotonic())
+            return self._purge_expired_locked(time.monotonic())
+
+    @staticmethod
+    def _touch_locked(entry, now):
+        entry["last_access"] = now
 
     def _counts_locked(self, user_id):
         states = Counter(entry["state"] for entry in self._entries.values() if entry["user_id"] == str(user_id))
@@ -76,6 +88,7 @@ class RunContextStore:
                 "state": "prepared",
                 "prompt_id": "",
                 "created_at": now,
+                "last_access": now,
             }
             return handle
 
@@ -87,6 +100,7 @@ class RunContextStore:
             entry = self._entries.get(value)
             if entry is None:
                 raise SceneRunError("実行コンテキストが見つかりません。画像生成を開始し直してください。")
+            self._touch_locked(entry, time.monotonic())
             return entry
 
     def replace_prompt_data_index(self, handle, prompt_data_index):
@@ -116,9 +130,11 @@ class RunContextStore:
             if entry is None or entry["user_id"] != str(user_id):
                 return False
             if entry["state"] == "active":
+                self._touch_locked(entry, time.monotonic())
                 return entry["prompt_id"] == prompt_value
             entry["state"] = "active"
             entry["prompt_id"] = prompt_value
+            self._touch_locked(entry, time.monotonic())
             return True
 
     def release(self, handle, user_id):

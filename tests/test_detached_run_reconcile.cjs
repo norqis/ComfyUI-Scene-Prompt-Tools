@@ -100,6 +100,47 @@ async function testStillQueuedAndFetchFailureRemainBlocked() {
     assert.deepEqual(failed.released, []);
 }
 
+function activeReconcileContext(history) {
+    const run = { runId: "active", currentPromptId: "prompt-active", waiting: true };
+    const context = {
+        String,
+        encodeURIComponent,
+        console: { warn() {} },
+        sceneBatchRun: run,
+        api: { async fetchApi() { return response(history); } },
+        async readApiJson(value) { return value.payload; },
+        sceneQueueContainsPrompt() { return false; },
+        continued: 0,
+        failed: 0,
+        scheduled: 0,
+        continueSceneBatchRun() { context.continued += 1; run.waiting = false; },
+        failSceneBatchRun() { context.failed += 1; run.waiting = false; },
+        scheduleActiveSceneBatchReconcile() { context.scheduled += 1; },
+    };
+    vm.createContext(context);
+    for (const name of ["sceneHistoryStatus", "reconcileActiveSceneBatchRun"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    return context;
+}
+
+async function testMissedTerminalHistoryUsesItsActualStatus() {
+    const success = activeReconcileContext({
+        "prompt-active": { status: { status_str: "success", completed: true } },
+    });
+    await success.reconcileActiveSceneBatchRun(success.sceneBatchRun);
+    assert.equal(success.continued, 1);
+    assert.equal(success.failed, 0);
+    assert.equal(success.scheduled, 0, "continueSceneBatchRun owns scheduling");
+
+    const error = activeReconcileContext({
+        "prompt-active": { status: { status_str: "error", completed: false } },
+    });
+    await error.reconcileActiveSceneBatchRun(error.sceneBatchRun);
+    assert.equal(error.continued, 0);
+    assert.equal(error.failed, 1);
+}
+
 function testNonSceneQueueSkipsRunPreparation() {
     const context = { Object };
     vm.createContext(context);
@@ -145,6 +186,7 @@ Promise.resolve()
     .then(testHistoryTerminalReleasesOnceAndResumesFifo)
     .then(testAbsentFromHistoryAndQueueReleases)
     .then(testStillQueuedAndFetchFailureRemainBlocked)
+    .then(testMissedTerminalHistoryUsesItsActualStatus)
     .then(testNonSceneQueueSkipsRunPreparation)
     .then(testRemovalCleanupRunsOnceAndPreservesPreviousHandler)
     .then(() => console.log("detached Scene Prompt run reconciliation tests passed"))

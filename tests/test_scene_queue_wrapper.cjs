@@ -20,6 +20,7 @@ function functionSource(name) {
 
 const context = {
     Object,
+    JSON,
     String,
     Map,
     sceneBatchRun: null,
@@ -93,6 +94,26 @@ context.installSceneBatchPromptCapture();
         ["opaque-handle", "fast-handle"],
         "a completion arriving before the queue response releases the claimed handle once",
     );
+
+    for (const name of ["applySceneRunHandle", "prepareSceneRunContext"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    let preparedPayload = null;
+    context.api.fetchApi = async (_path, options) => {
+        preparedPayload = JSON.parse(options.body);
+        return { ok: true, payload: { run_handle: "two-expand-handle" } };
+    };
+    const multiExpand = {
+        output: {
+            "1": { class_type: "ScenePrompt", inputs: {} },
+            "10": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["1", 0] } },
+            "20": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["1", 0] } },
+        },
+    };
+    await context.prepareSceneRunContext(multiExpand);
+    assert.equal(preparedPayload.expand_node_id, null, "standard Queue prepares all Expand branches, not the first one");
+    assert.equal(multiExpand.output["10"].inputs.run_handle, "two-expand-handle");
+    assert.equal(multiExpand.output["20"].inputs.run_handle, "two-expand-handle");
     console.log("Scene Prompt queue wrapper wiring tests passed.");
 })().catch((error) => {
     console.error(error);

@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -29,7 +30,7 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.require(first)["user_id"], "alice")
         self.assertEqual(store.require(second)["user_id"], "bob")
 
-    def test_claim_is_idempotent_and_active_contexts_are_not_expired(self):
+    def test_claim_is_idempotent_and_active_contexts_stay_until_idle_ttl(self):
         store = RUNS.RunContextStore(maximum=3, prepared_limit=2, active_limit=1, prepared_ttl_seconds=999)
         handle = store.create("alice", {"by_key": {}, "by_id": {}})
         self.assertTrue(store.claim(handle, "alice", "prompt-1"))
@@ -39,6 +40,28 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.require(handle)["state"], "active")
         with self.assertRaisesRegex(RUNS.SceneRunError, "実行中または準備済み"):
             store.create("alice", {"by_key": {}, "by_id": {}})
+
+    def test_idle_active_contexts_expire_but_recently_used_contexts_do_not(self):
+        expiring = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=0)
+        old = expiring.create("alice", {"by_key": {}, "by_id": {}})
+        self.assertTrue(expiring.claim(old, "alice", "prompt-old"))
+        self.assertEqual(expiring.purge_expired(), [(old, "alice")])
+        self.assertTrue(expiring.create("alice", {"by_key": {}, "by_id": {}}))
+
+        live = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=999)
+        handle = live.create("alice", {"by_key": {}, "by_id": {}})
+        self.assertTrue(live.claim(handle, "alice", "prompt-live"))
+        live.require(handle)
+        self.assertEqual(live.purge_expired(), [])
+
+    def test_scene_node_access_refreshes_the_active_idle_deadline(self):
+        store = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=10)
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 3, 6, 9, 18]):
+            handle = store.create("alice", {"by_key": {}, "by_id": {}})
+            store.require(handle)
+            self.assertTrue(store.claim(handle, "alice", "prompt-1"))
+            store.set_plan(handle, "expand-1", {"rows": []})
+            self.assertEqual(store.purge_expired(), [])
 
     def test_prepared_contexts_expire_and_plans_are_expand_specific(self):
         expiring = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=0)

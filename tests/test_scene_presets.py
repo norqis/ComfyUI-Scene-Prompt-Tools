@@ -391,6 +391,24 @@ class ScenePresetTests(unittest.TestCase):
             self.module.snapshot_presets_for_run("run-other-closure", api_graph, "21")
         self.assertEqual(error.exception.node_id, "20")
 
+    def test_standard_queue_snapshot_covers_every_expand_branch(self):
+        self.save("first", basic_nodes("first branch"))
+        self.save("second", basic_nodes("second branch"))
+        api_graph = graph({
+            "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "first"}},
+            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "second"}},
+            "21": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["20", 0]}},
+        })
+
+        snapshot = self.module.snapshot_presets_for_run("queue-run", api_graph)
+
+        self.assertEqual({item["preset_id"] for item in snapshot["presets"]}, {"first", "second"})
+        first = self.module.expand_preset_reference("first", ["outer", 0], "queue-run")
+        second = self.module.expand_preset_reference("second", ["outer", 0], "queue-run")
+        self.assertTrue(first["expand"])
+        self.assertTrue(second["expand"])
+
     def test_nested_preset_failure_keeps_outer_reference_node_id(self):
         outer_nodes = basic_nodes()
         outer_nodes["2"] = {
