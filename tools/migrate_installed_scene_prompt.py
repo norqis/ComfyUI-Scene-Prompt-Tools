@@ -1,4 +1,4 @@
-"""One-time migration from the retired node installation to v0.2.3.
+"""One-time migration from the retired node installation to v0.2.4.
 
 This script is deliberately separate from the custom-node runtime.  It accepts
 only the old on-disk format and writes only the current format.
@@ -578,8 +578,8 @@ def build_stage(source_data: Path, workflow_dir: Path, stage: Path) -> dict[str,
     stage.mkdir(parents=True)
     resolver = migrate_data(source_data, stage / "data")
     workflow_files = sorted(workflow_dir.glob("*.json"))
-    if len(workflow_files) != 3:
-        raise MigrationError(f"Expected 3 workflow files, found {len(workflow_files)}")
+    if not workflow_files:
+        raise MigrationError(f"No workflow files found: {workflow_dir}")
     for source in workflow_files:
         migrate_workflow(source, stage / "workflows" / source.name, resolver)
     manifest = {
@@ -623,7 +623,7 @@ def apply_stage(stage: Path, comfy_root: Path, source_node: Path) -> None:
 
 
 def _arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Migrate the installed retired node to Scene Prompt Tools v0.2.3.")
+    parser = argparse.ArgumentParser(description="Migrate the installed retired node to Scene Prompt Tools v0.2.4.")
     parser.add_argument("--comfy-root", type=Path, required=True)
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--dry-run", action="store_true")
