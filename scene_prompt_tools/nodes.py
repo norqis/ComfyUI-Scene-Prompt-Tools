@@ -572,13 +572,17 @@ def _remember_next_index(run_root, extension, padding, next_index, filename_pref
 
 
 def _reserve_output_path(directory, extension, padding, counter, filename_prefix=""):
-    """Reserve a unique filename before PIL writes it, across local processes."""
+    """Reserve a unique output name without exposing an unfinished PNG."""
     prefix = _safe_filename_prefix(filename_prefix)
     while True:
         filename = f"{prefix}{counter:0{padding}d}.{extension}"
         path = os.path.join(directory, filename)
+        reservation_path = f"{path}.scene-save-reservation"
+        if os.path.exists(path):
+            counter += 1
+            continue
         try:
-            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            descriptor = os.open(reservation_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             counter += 1
             continue
@@ -586,7 +590,14 @@ def _reserve_output_path(directory, extension, padding, counter, filename_prefix
             raise
         else:
             os.close(descriptor)
-            return path, filename, counter
+            if os.path.exists(path):
+                try:
+                    os.unlink(reservation_path)
+                except OSError:
+                    pass
+                counter += 1
+                continue
+            return path, reservation_path, filename, counter
 
 
 def _auto_seed_base(seed_base):
@@ -1139,7 +1150,7 @@ class SceneSaveImage:
 
         results = []
         saved_paths = []
-        reserved_paths = []
+        reservation_paths = []
         temp_paths = []
         preview_subfolder = _subfolder_for_preview(output_dir, self.output_dir)
         prompt_metadata = None
@@ -1166,11 +1177,11 @@ class SceneSaveImage:
                 img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
 
                 with _FILENAME_RESERVATION_LOCK:
-                    output_path, filename, counter = _reserve_output_path(
+                    output_path, reservation_path, filename, counter = _reserve_output_path(
                         output_dir, extension, padding, counter, filename_prefix
                     )
-                reserved_paths.append(output_path)
-                descriptor, temp_path = tempfile.mkstemp(prefix=".scene-save-", suffix=".png", dir=output_dir)
+                reservation_paths.append(reservation_path)
+                descriptor, temp_path = tempfile.mkstemp(prefix=".scene-save-", suffix=".tmp", dir=output_dir)
                 os.close(descriptor)
                 temp_paths.append(temp_path)
                 metadata = None
@@ -1205,18 +1216,22 @@ class SceneSaveImage:
                         if scene_metadata["negative"]:
                             metadata.add_text("scene_negative", scene_metadata["negative"])
                         metadata.add_text("scene_seed", str(scene_metadata["seed"]))
-                img.save(temp_path, pnginfo=metadata, compress_level=self.compress_level)
+                img.save(temp_path, format="PNG", pnginfo=metadata, compress_level=self.compress_level)
                 with Image.open(temp_path) as check:
                     check.verify()
+                if os.path.exists(output_path):
+                    raise FileExistsError(f"output filename was claimed while saving: {output_path}")
                 os.replace(temp_path, output_path)
                 temp_paths.remove(temp_path)
                 saved_paths.append(output_path)
+                os.unlink(reservation_path)
+                reservation_paths.remove(reservation_path)
                 if preview_subfolder is not None:
                     preview_ref = {"filename": filename, "subfolder": preview_subfolder, "type": self.type}
                     results.append(preview_ref)
                 counter += 1
         except Exception:
-            for candidate in [*temp_paths, *reserved_paths]:
+            for candidate in [*temp_paths, *reservation_paths, *saved_paths]:
                 try:
                     os.unlink(candidate)
                 except OSError:

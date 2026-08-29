@@ -3,6 +3,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -400,6 +401,71 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         target = Path(self.temp_dir.name) / "atomic"
         self.assertEqual(list(target.glob("*.png")), [])
         self.assertEqual(list(target.glob(".scene-save-*.png")), [])
+        self.assertEqual(list(target.glob("*.scene-save-reservation")), [])
+
+    def test_save_does_not_publish_png_until_it_is_verified(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        save_started = threading.Event()
+        allow_save = threading.Event()
+        original_save = Image.Image.save
+
+        def block_save(instance, fp, *args, **kwargs):
+            save_started.set()
+            self.assertTrue(allow_save.wait(timeout=5))
+            return original_save(instance, fp, *args, **kwargs)
+
+        with mock.patch.object(Image.Image, "save", block_save):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    self.nodes.SceneSaveImage().save_images,
+                    [image],
+                    "incomplete",
+                    scene_info={"use_run_dir": False, "file_index": 1},
+                )
+                self.assertTrue(save_started.wait(timeout=5))
+                target = Path(self.temp_dir.name) / "incomplete"
+                self.assertEqual(list(target.glob("*.png")), [])
+                self.assertEqual(len(list(target.glob("*.scene-save-reservation"))), 1)
+                allow_save.set()
+                result = future.result(timeout=5)
+
+        self.assertEqual(Path(result["result"][1]).name, "00001.png")
+        self.assertEqual(len(list(target.glob("*.png"))), 1)
+        self.assertEqual(list(target.glob("*.scene-save-reservation")), [])
+
+    def test_reservation_collision_uses_next_filename_without_png_placeholder(self):
+        target = Path(self.temp_dir.name) / "collision"
+        target.mkdir()
+        (target / "00001.png.scene-save-reservation").touch()
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+
+        result = self.nodes.SceneSaveImage().save_images(
+            [image], "collision", scene_info={"use_run_dir": False, "file_index": 1}
+        )
+
+        self.assertEqual(Path(result["result"][1]).name, "00002.png")
+        self.assertFalse((target / "00001.png").exists())
+
+    def test_competing_final_png_is_not_overwritten_after_reservation(self):
+        target = Path(self.temp_dir.name) / "competing"
+        target.mkdir()
+        output_path = target / "00001.png"
+        original_save = Image.Image.save
+
+        def create_competing_png(instance, fp, *args, **kwargs):
+            original_save(instance, fp, *args, **kwargs)
+            original_save(Image.new("RGB", (1, 1), "red"), output_path, format="PNG")
+
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        with mock.patch.object(Image.Image, "save", create_competing_png):
+            with self.assertRaises(FileExistsError):
+                self.nodes.SceneSaveImage().save_images(
+                    [image], "competing", scene_info={"use_run_dir": False, "file_index": 1}
+                )
+
+        with Image.open(output_path) as existing:
+            self.assertEqual(existing.getpixel((0, 0)), (255, 0, 0))
+        self.assertEqual(list(target.glob("*.scene-save-reservation")), [])
 
     def test_save_metadata_mode_choices_are_ordered_and_default_to_full_workflow(self):
         metadata_mode = self.nodes.SceneSaveImage.INPUT_TYPES()["required"]["metadata_mode"]
