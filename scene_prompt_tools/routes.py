@@ -558,6 +558,7 @@ def define_routes():
                 api_graph,
                 prompt_index,
                 snapshot.get("preset_graphs", {}),
+                expand_node_id,
             )
             replace_run_prompt_data_index(handle, projection)
             return web.json_response({"run_handle": handle, **snapshot})

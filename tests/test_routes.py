@@ -228,6 +228,59 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
         self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
 
+    def test_prepare_ignores_stale_selections_outside_selected_expand_branch(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        path = self.routes._data_dir("alice") / "Style" / "prompt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([
+            {"id": "current", "label": "Current", "prompt": "current"},
+        ]), encoding="utf-8")
+        current = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "current", "label": "Current", "prompt": "current",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        stale = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "stale", "label": "Stale", "prompt": "stale",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        scene_inputs = {
+            "prompt_name": "Current branch",
+            "positive_base": "",
+            "positive_json": current,
+            "negative_base": "",
+            "negative_json": "{\"version\":1,\"categories\":{}}",
+            "category_order": "",
+            "seed": 0,
+            "randomize": True,
+        }
+        graph = {"output": {
+            "1": {"class_type": "ScenePrompt", "inputs": scene_inputs},
+            "2": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+            "3": {"class_type": "ScenePrompt", "inputs": {"positive_json": stale}},
+            "4": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["3", 0]}},
+        }}
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+
+        response = asyncio.run(prepare(Request("alice", {
+            "api_graph": graph,
+            "expand_node_id": "2",
+        })))
+
+        self.assertEqual(response["status"], 200, response["payload"])
+        handle = response["payload"]["run_handle"]
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        projected = runs.require_run_context(handle)["prompt_data_index"]
+        self.assertEqual(set(projected["by_id"]), {("Style", "current")})
+        self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
+
     def test_expiration_removes_contexts_and_preset_snapshots_once_and_bounds_caches(self):
         runs = sys.modules[f"{self.routes.__package__}.runs"]
         presets = sys.modules[f"{self.routes.__package__}.presets"]
