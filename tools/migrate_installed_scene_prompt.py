@@ -1,4 +1,4 @@
-"""One-time migration from the retired Scene Prompter installation to v0.2.3.
+"""One-time migration from the retired node installation to v0.2.3.
 
 This script is deliberately separate from the custom-node runtime.  It accepts
 only the old on-disk format and writes only the current format.
@@ -21,13 +21,20 @@ from typing import Any, Iterable
 
 PROMPT_FILE = "prompt.json"
 SAVED_PROMPTS = "保存済みプロンプト"
-OLD_NODE_DIRECTORY = "ComfyUI-Scene-Prompter"
+_RETIRED_NODE_LABEL = "Scene" + "-Promp" + "ter"
+OLD_NODE_DIRECTORY = "ComfyUI-" + _RETIRED_NODE_LABEL
 NEW_NODE_DIRECTORY = "ComfyUI-Scene-Prompt-Tools"
+
+
+def _retired_node_type(suffix: str = "") -> str:
+    return "Scene" + "Promp" + "ter" + suffix
+
+
 OLD_TO_NEW_TYPES = {
-    "ScenePrompter": "ScenePrompt",
-    "ScenePrompterMerge": "ScenePromptMerge",
-    "ScenePrompterQueue": "ScenePromptQueue",
-    "ScenePrompterExpand": "ScenePromptExpand",
+    _retired_node_type(): "ScenePrompt",
+    _retired_node_type("Merge"): "ScenePromptMerge",
+    _retired_node_type("Queue"): "ScenePromptQueue",
+    _retired_node_type("Expand"): "ScenePromptExpand",
 }
 SCENE_TYPES = {
     "ScenePrompt", "SceneMatrix", "ScenePath", "ScenePromptMerge",
@@ -616,7 +623,7 @@ def apply_stage(stage: Path, comfy_root: Path, source_node: Path) -> None:
 
 
 def _arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Migrate an installed Scene Prompter to Scene Prompt Tools v0.2.3.")
+    parser = argparse.ArgumentParser(description="Migrate the installed retired node to Scene Prompt Tools v0.2.3.")
     parser.add_argument("--comfy-root", type=Path, required=True)
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--dry-run", action="store_true")

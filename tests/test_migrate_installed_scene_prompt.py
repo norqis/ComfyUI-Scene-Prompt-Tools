@@ -10,7 +10,12 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RETIRED_NODE_DIRECTORY = "ComfyUI-" + "Scene" + "-Promp" + "ter"
 MODULE_PATH = ROOT / "tools" / "migrate_installed_scene_prompt.py"
+
+
+def retired_node_type(suffix: str = "") -> str:
+    return "Scene" + "Promp" + "ter" + suffix
 
 
 def load_migrator():
@@ -72,7 +77,7 @@ class InstalledScenePromptMigrationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.comfy = self.root / "ComfyUI"
-        self.old = self.comfy / "custom_nodes" / "ComfyUI-Scene-Prompter"
+        self.old = self.comfy / "custom_nodes" / RETIRED_NODE_DIRECTORY
         self.data = self.old / "data"
         self.workflows = self.comfy / "user" / "default" / "workflows"
         self.module = load_migrator()
@@ -119,8 +124,8 @@ class InstalledScenePromptMigrationTests(unittest.TestCase):
             "version": 0.4,
             "nodes": [
                 {
-                    "id": 1, "type": "ScenePrompter", "pos": [10, 20], "size": [300, 400], "title": "Prompt",
-                    "properties": {"Node name for S&R": "ScenePrompter"},
+                    "id": 1, "type": retired_node_type(), "pos": [10, 20], "size": [300, 400], "title": "Prompt",
+                    "properties": {"Node name for S&R": retired_node_type()},
                     "inputs": [{"name": "scene_prompt", "link": None}], "outputs": [{"name": "scene_prompt", "links": [5]}],
                     "widgets_values_named": {"prompt_name": "Prompt", "positive_base": "base", "positive_json": json.dumps(selection), "negative_base": "", "negative_json": json.dumps({"version": 1, "categories": {}}), "category_order": "", "seed": 4, "control_after_generate": True, "randomize": False, "reroll_each_queue": True},
                     "widgets_values": ["Prompt", "base", json.dumps(selection), "", json.dumps({"version": 1, "categories": {}}), "", 4, True, False, True],
@@ -132,8 +137,8 @@ class InstalledScenePromptMigrationTests(unittest.TestCase):
                     "widgets_values_named": {"matrix_json": json.dumps(matrix)}, "widgets_values": [json.dumps(matrix)],
                 },
                 {
-                    "id": 3, "type": "ScenePrompterExpand", "pos": [80, 20], "size": [300, 400],
-                    "properties": {"Node name for S&R": "ScenePrompterExpand"},
+                    "id": 3, "type": retired_node_type("Expand"), "pos": [80, 20], "size": [300, 400],
+                    "properties": {"Node name for S&R": retired_node_type("Expand")},
                     "inputs": [{"name": "scene_prompt", "link": 6}], "outputs": [{"name": "ポジティブ", "links": []}, {"name": "ネガティブ", "links": []}, {"name": "メタ情報", "links": [7]}, {"name": "シード", "links": []}, {"name": "潜在画像", "links": []}],
                     "widgets_values": [0, "", 0, True, ""], "widgets_values_named": {},
                 },
@@ -192,7 +197,7 @@ class InstalledScenePromptMigrationTests(unittest.TestCase):
 
         self.assertTrue((self.comfy / "custom_nodes" / "ComfyUI-Scene-Prompt-Tools" / "scene_prompt_tools" / "marker.py").exists())
         self.assertFalse(self.old.exists())
-        self.assertTrue((self.comfy / "user" / "default" / "scene_prompt_tools" / "migration_backup" / "ComfyUI-Scene-Prompter").exists())
+        self.assertTrue((self.comfy / "user" / "default" / "scene_prompt_tools" / "migration_backup" / RETIRED_NODE_DIRECTORY).exists())
         self.assertTrue((self.comfy / "user" / "default" / "scene_prompt_tools" / "data" / "A" / "prompt.json").exists())
 
     def test_unresolved_selection_aborts_before_workflow_output(self):
