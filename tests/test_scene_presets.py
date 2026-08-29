@@ -267,10 +267,25 @@ class ScenePresetTests(unittest.TestCase):
     def test_nested_cycle_is_rejected_when_snapshotting(self):
         a_nodes = basic_nodes()
         a_nodes["2"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "preset_b", "scene_prompt": ["1", 0]}}
-        self.save("preset_a", a_nodes)
         b_nodes = basic_nodes()
         b_nodes["2"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "preset_a", "scene_prompt": ["1", 0]}}
-        self.save("preset_b", b_nodes)
+        for preset_id, nodes in (("preset_a", a_nodes), ("preset_b", b_nodes)):
+            api_graph = graph(nodes)
+            workflow = {"version": 1, "nodes": []}
+            payload = {
+                "schema_version": self.module.PRESET_SCHEMA_VERSION,
+                "metadata": {
+                    "preset_id": preset_id,
+                    "name": preset_id,
+                    "revision": 1,
+                    "sha256": self.module._content_hash(api_graph, workflow),
+                },
+                "workflow": workflow,
+                "api_graph": api_graph,
+            }
+            path = self.module._preset_path(preset_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
         with self.assertRaisesRegex(self.module.ScenePresetError, "循環"):
             self.module.snapshot_presets_for_run("run-cycle", graph({
                 "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "preset_a"}},
@@ -375,14 +390,44 @@ class ScenePresetTests(unittest.TestCase):
             "class_type": "ScenePresetReference",
             "inputs": {"preset_id": "missing_nested", "scene_prompt": ["1", 0]},
         }
-        self.save("outer", outer_nodes)
-        api_graph = graph({
-            "42": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "outer"}},
-            "43": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["42", 0]}},
-        })
         with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "missing_nested") as error:
-            self.module.snapshot_presets_for_run("run-nested-error", api_graph, "43")
-        self.assertEqual(error.exception.node_id, "42")
+            self.save("outer", outer_nodes)
+        self.assertEqual(error.exception.node_id, "2")
+
+    def test_save_rejects_runtime_invalid_count_with_node_id(self):
+        nodes = basic_nodes()
+        nodes["4"] = {
+            "class_type": "ScenePromptCounter",
+            "inputs": {"scene_prompt": ["2", 0], "count": "not-an-int"},
+        }
+        nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+        with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "integer") as error:
+            self.save("invalid_count", nodes)
+        self.assertEqual(error.exception.node_id, "4")
+
+    def test_repeated_resolve_keeps_the_first_snapshot_and_response(self):
+        self.save("fixed", basic_nodes("first"))
+        api_graph = graph({
+            "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
+            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+        })
+        first = self.module.snapshot_presets_for_run("same-run", api_graph, "11")
+        self.save("fixed", basic_nodes("second"))
+        second = self.module.snapshot_presets_for_run("same-run", api_graph, "11")
+        self.assertEqual(second, first)
+        snapshot = self.module._snapshot_preset("same-run", "fixed")
+        self.assertEqual(snapshot["metadata"]["revision"], 1)
+
+    def test_unlinked_expand_run_is_snapshotted_and_cannot_be_reused_after_release(self):
+        api_graph = graph({
+            "11": {"class_type": "ScenePromptExpand", "inputs": {}},
+        })
+        first = self.module.snapshot_presets_for_run("unlinked-run", api_graph, "11")
+        second = self.module.snapshot_presets_for_run("unlinked-run", api_graph, "11")
+        self.assertEqual(second, first)
+        self.assertTrue(self.module.release_scene_preset_snapshot("unlinked-run"))
+        with self.assertRaisesRegex(self.module.ScenePresetError, "キャンセル"):
+            self.module.snapshot_presets_for_run("unlinked-run", api_graph, "11")
 
     def test_empty_top_level_reference_keeps_its_node_id(self):
         api_graph = graph({

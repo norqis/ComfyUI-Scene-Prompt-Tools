@@ -93,11 +93,9 @@ def main():
         return 1
     failures = history_privacy_failures(privacy_records)
     files = tracked_files()
-    if Path("data/.gitkeep") not in files:
-        failures.append("data/.gitkeep must be tracked")
     for path in files:
-        if path.parts and path.parts[0] == "data" and path.name != ".gitkeep":
-            failures.append(f"prompt data must not be tracked: {path}")
+        if path.parts and path.parts[0] == "data":
+            failures.append(f"custom-node data files must not be tracked: {path}")
         if path.suffix.lower() in SKIP_SUFFIXES:
             failures.append(f"generated or binary file must not be tracked: {path}")
             continue

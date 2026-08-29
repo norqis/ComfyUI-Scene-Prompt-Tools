@@ -22,10 +22,10 @@ from .presets import (
     save_preset,
     snapshot_presets_for_run,
 )
+from .storage import prompt_data_directory
 
 
-NODE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = NODE_DIR / "data"
+DATA_DIR = prompt_data_directory()
 SAVED_PROMPTS_DIR = DATA_DIR / SAVED_PROMPTS_FOLDER
 PROMPT_FILE_NAME = "prompt.json"
 DATA_WRITE_LOCK = threading.Lock()
@@ -81,12 +81,12 @@ def _read_items(path, category_path):
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON: {path}") from exc
+        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON.") from exc
     except OSError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' cannot be read: {path}") from exc
+        raise ValueError(f"Prompt data file '{path.name}' cannot be read.") from exc
 
     if not isinstance(data, list):
-        raise ValueError(f"Prompt data file '{path.name}' must be a JSON array: {path}")
+        raise ValueError(f"Prompt data file '{path.name}' must be a JSON array.")
 
     normalized = []
     for index, item in enumerate(data):
@@ -163,12 +163,12 @@ def _read_prompt_payload(path):
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON: {path}") from exc
+        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON.") from exc
     except OSError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' cannot be read: {path}") from exc
+        raise ValueError(f"Prompt data file '{path.name}' cannot be read.") from exc
 
     if not isinstance(data, list):
-        raise ValueError(f"Prompt data file '{path.name}' must be a JSON array: {path}")
+        raise ValueError(f"Prompt data file '{path.name}' must be a JSON array.")
     return [
         validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
         for index, item in enumerate(data)
@@ -341,7 +341,7 @@ def _normalize_saved_item(item, prompt_file, index):
             f"Saved prompt file '{prompt_file.name}' item {index}",
         )
     except ValueError as exc:
-        raise ValueError(f"{exc}: {prompt_file}") from exc
+        raise ValueError(str(exc)) from exc
 
 
 def _read_saved_prompt(prompt_file):
@@ -349,18 +349,18 @@ def _read_saved_prompt(prompt_file):
         with prompt_file.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Saved prompt file '{prompt_file.name}' is invalid JSON: {prompt_file}") from exc
+        raise ValueError(f"Saved prompt file '{prompt_file.name}' is invalid JSON.") from exc
     except OSError as exc:
-        raise ValueError(f"Saved prompt file '{prompt_file.name}' cannot be read: {prompt_file}") from exc
+        raise ValueError(f"Saved prompt file '{prompt_file.name}' cannot be read.") from exc
 
     if not isinstance(data, dict) or set(data) != {"name", "description", "items"}:
-        raise ValueError(f"Saved prompt file '{prompt_file.name}' must be an object: {prompt_file}")
+        raise ValueError(f"Saved prompt file '{prompt_file.name}' must be an object.")
     if not isinstance(data.get("name"), str) or not data["name"].strip():
-        raise ValueError(f"Saved prompt file '{prompt_file.name}' requires a non-empty name: {prompt_file}")
+        raise ValueError(f"Saved prompt file '{prompt_file.name}' requires a non-empty name.")
     if "description" in data and not isinstance(data["description"], str):
-        raise ValueError(f"Saved prompt file '{prompt_file.name}' has an invalid description: {prompt_file}")
+        raise ValueError(f"Saved prompt file '{prompt_file.name}' has an invalid description.")
     if not isinstance(data.get("items"), list) or not data["items"]:
-        raise ValueError(f"Saved prompt file '{prompt_file.name}' requires a non-empty items list: {prompt_file}")
+        raise ValueError(f"Saved prompt file '{prompt_file.name}' requires a non-empty items list.")
 
     items = [_normalize_saved_item(item, prompt_file, index) for index, item in enumerate(data["items"])]
 
@@ -493,6 +493,8 @@ def define_routes():
         try:
             saved = save_preset(await request.json())
             return web.json_response({"metadata": saved["metadata"]})
+        except ScenePresetResolutionError as exc:
+            return web.json_response({"error": str(exc), "node_id": exc.node_id}, status=400)
         except ScenePresetError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:

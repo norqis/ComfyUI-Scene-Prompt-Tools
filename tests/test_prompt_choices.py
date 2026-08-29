@@ -1,12 +1,17 @@
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+folder_paths = types.ModuleType("folder_paths")
+folder_paths.get_user_directory = lambda: str(ROOT / ".test-user")
+sys.modules.setdefault("folder_paths", folder_paths)
 
 from scene_prompt_tools.prompt import _choice_rng, _compose_prompt_parts, _expand_prompt_parts, _parse_selection_json, _read_prompt_items
 
