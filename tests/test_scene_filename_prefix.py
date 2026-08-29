@@ -5,7 +5,9 @@ import sys
 import tempfile
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
@@ -32,6 +34,7 @@ def _install_comfy_stubs(output_dir):
     folder_paths = types.ModuleType("folder_paths")
     folder_paths.get_output_directory = lambda: str(output_dir)
     folder_paths.get_user_directory = lambda: str(output_dir / "user")
+    folder_paths.get_public_user_directory = lambda user_id: str(output_dir / "user" / user_id)
 
     sys.modules["comfy"] = comfy
     sys.modules["comfy.model_management"] = model_management
@@ -294,6 +297,38 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             metadata = json.loads(saved_image.text["scene_info"])
         self.assertEqual(metadata["repeat_count"], 100_000_000)
         self.assertEqual(metadata["total_count"], 100_000_000)
+
+    def test_scene_run_plan_is_immutable_per_context(self):
+        runs = sys.modules[f"{self.nodes.__package__}.runs"]
+        runs.RUN_CONTEXTS.clear()
+        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        first = _scene_prompt(self.nodes)
+        second = self.nodes.transform(first, lambda row, _item: {**row, "positive_parts": ["second"]})
+        self.assertEqual(self.nodes._scene_run_plan(handle, first)["rows"][0]["row"]["positive_parts"], ["test"])
+        self.assertEqual(self.nodes._scene_run_plan(handle, second)["rows"][0]["row"]["positive_parts"], ["test"])
+        runs.release_run_context(handle, "alice")
+        with self.assertRaises(runs.SceneRunError):
+            self.nodes._scene_run_plan(handle, first)
+
+    def test_concurrent_saves_reserve_distinct_filenames_and_keep_metadata(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        scene_info = {"use_run_dir": False, "file_index": 1, "filename_prefix": "parallel_", "positive": "test"}
+
+        def save_one(_index):
+            return self.nodes.SceneSaveImage().save_images([image], "", scene_info=scene_info)["result"][1]
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            paths = [Path(value) for value in pool.map(save_one, range(16))]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertTrue(all(path.exists() for path in paths))
+        file_indexes = []
+        for path in paths:
+            with Image.open(path) as saved:
+                scene_metadata = json.loads(saved.text["scene_info"])
+            self.assertEqual(scene_metadata["positive"], "test")
+            self.assertEqual(scene_metadata["file_index"], int(path.stem.rsplit("_", 1)[1]))
+            file_indexes.append(scene_metadata["file_index"])
+        self.assertEqual(len(file_indexes), len(set(file_indexes)))
 
     def test_all_registered_scene_nodes_have_japanese_descriptions(self):
         package = _load_node_package(Path(self.temp_dir.name))

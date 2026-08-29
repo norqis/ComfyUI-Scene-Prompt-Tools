@@ -8,6 +8,7 @@ from check_public_package import (
     history_privacy_failures,
     history_revision_range,
     synthetic_merge_metadata,
+    tracked_files,
 )
 
 
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicPackageTests(unittest.TestCase):
     def test_runtime_modules_are_in_one_internal_package(self):
-        expected = {"__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "storage.py"}
+        expected = {"__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py"}
         self.assertSetEqual({path.name for path in (ROOT / "scene_prompt_tools").glob("*.py")}, expected)
         for filename in expected - {"__init__.py"}:
             self.assertFalse((ROOT / filename).exists())
@@ -28,13 +29,18 @@ class PublicPackageTests(unittest.TestCase):
     def test_user_data_is_not_stored_in_the_custom_node_directory(self):
         self.assertFalse(any((ROOT / "data").glob("**/*")))
         storage_source = (ROOT / "scene_prompt_tools" / "storage.py").read_text(encoding="utf-8")
-        self.assertIn("folder_paths.get_user_directory()", storage_source)
+        self.assertIn("folder_paths.get_public_user_directory", storage_source)
         self.assertIn('STORAGE_DIRECTORY_NAME = "scene_prompt_tools"', storage_source)
+        self.assertNotIn("get_public_user_directory", (ROOT / "scene_prompt_tools" / "presets.py").read_text(encoding="utf-8"))
+
+    def test_generated_tool_caches_are_ignored(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(".ruff_cache/", gitignore)
 
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.1.1"', pyproject)
+        self.assertIn('version = "0.1.2"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
@@ -58,19 +64,18 @@ class PublicPackageTests(unittest.TestCase):
                 self.assertIsNotNone(FORBIDDEN.search(candidate))
 
     def test_retired_names_and_private_brand_names_are_absent(self):
-        for path in ROOT.rglob("*"):
-            if not path.is_file() or ".git" in path.parts:
-                continue
+        for relative_path in tracked_files():
+            path = ROOT / relative_path
             if path.suffix.lower() in {".pyc", ".png", ".jpg", ".jpeg", ".gif", ".zip"}:
                 continue
-            with self.subTest(path=path.relative_to(ROOT)):
+            with self.subTest(path=relative_path):
                 self.assertIsNone(FORBIDDEN.search(path.read_text(encoding="utf-8")))
 
     def test_runtime_uses_comfyui_user_data_directory(self):
         prompt_source = (ROOT / "scene_prompt_tools" / "prompt.py").read_text(encoding="utf-8")
         routes_source = (ROOT / "scene_prompt_tools" / "routes.py").read_text(encoding="utf-8")
-        self.assertIn("prompt_data_directory()", prompt_source)
-        self.assertIn("prompt_data_directory()", routes_source)
+        self.assertIn("prompt_data_directory(user_id)", prompt_source)
+        self.assertIn("prompt_data_directory(user_id)", routes_source)
         self.assertNotIn('Path(__file__).resolve().parents[1] / "data"', prompt_source + routes_source)
 
     def test_old_schema_migration_code_is_absent(self):
@@ -128,6 +133,10 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn("SCENE_PROMPT_HISTORY_HEAD_SHA", workflow)
         self.assertIn("refs/pull/${{ github.event.pull_request.number }}/merge", workflow)
         self.assertIn("SCENE_PROMPT_SYNTHETIC_MERGE_REF", workflow)
+        self.assertIn("cache: pip", workflow)
+        self.assertNotIn("cache: npm", workflow)
+        self.assertIn('python -m pip install "numpy<3" "Pillow<12"', workflow)
+        self.assertIn("python3 - <<'PY'", workflow)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ const context = {
     queueNextSceneBatchItem() {
         context.activated.push(context.sceneBatchRun.runId);
     },
+    releaseSceneRunHandle() {},
 };
 vm.createContext(context);
 for (const name of [
@@ -222,6 +223,27 @@ async function testScenePresetResolution() {
             return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : fallback;
         },
         clearScenePresetReferenceErrors() {},
+        async prepareSceneRunContext(_snapshot, expandNodeId) {
+            assert.equal(expandNodeId, "10");
+            return {
+                run_handle: "opaque-run-handle",
+                presets: [{ preset_id: "preset-a", revision: 2 }],
+                preset_graphs: {
+                    "preset-a": {
+                        metadata: { sha256: "abc" },
+                        api_graph: {
+                            output: {
+                                "1": { class_type: "ScenePresetInput", inputs: {} },
+                                "2": { class_type: "SceneMatrix", inputs: { matrix_json: "{\"version\":1,\"sets\":[{\"enabled\":true},{\"enabled\":true}]}", scene_prompt: ["1", 0] } },
+                                "3": { class_type: "ScenePromptCounter", inputs: { count: 3, scene_prompt: ["2", 0] } },
+                                "4": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["3", 0] } },
+                            },
+                        },
+                    },
+                },
+            };
+        },
+        releaseSceneRunHandle() {},
         async apiResponse(data, ok = true) {
             return { ok, status: ok ? 200 : 400, async text() { return JSON.stringify(data); } };
         },
@@ -252,7 +274,6 @@ async function testScenePresetResolution() {
     for (const name of [
         "readApiJson",
         "scenePresetReferenceIdsForExpand",
-        "applyScenePresetRunId",
         "resolveScenePresetsForRun",
         "scenePresetGraphNodes",
         "apiLink",
@@ -274,14 +295,14 @@ async function testScenePresetResolution() {
     };
     const run = { runId: "run-a" };
     await presetContext.resolveScenePresetsForRun(run, snapshot, "10");
-    assert.equal(snapshot.output["9"].inputs.run_id, "run-a");
+    assert.equal(run.runHandle, "opaque-run-handle");
     assert.equal(run.presetSnapshots[0].revision, 2);
     presetContext.scenePresetDisplayGraphs = run.presetGraphs;
     const presetStats = presetContext.scenePresetStats("preset-a", null);
     assert.equal(presetStats.rows, 2);
     assert.equal(presetStats.total, 6);
 
-    presetContext.api.fetchApi = async () => presetContext.apiResponse({ error: "Presetが壊れています" }, false);
+    presetContext.prepareSceneRunContext = async () => { throw new Error("Presetが壊れています"); };
     await assert.rejects(
         () => presetContext.resolveScenePresetsForRun({ runId: "run-a" }, snapshot, "10"),
         /Presetが壊れています/,
@@ -436,11 +457,11 @@ async function testSelectedExpandBranchOnlyQueues() {
         "apiLink",
         "apiInput",
         "cloneScenePromptPayload",
-        "scenePresetReferenceIdsForExpand",
+        "sceneRunTargetNodes",
+        "applySceneRunHandle",
         "promptDescendantIds",
         "promptAncestorIds",
         "sliceSceneBatchPrompt",
-        "applyScenePresetRunId",
         "createSceneBatchPromptSnapshot",
     ]) {
         vm.runInContext(functionSource(name), branchContext);
@@ -461,11 +482,11 @@ async function testSelectedExpandBranchOnlyQueues() {
     branchContext.app = { async graphToPrompt() { return fullPrompt; } };
     const selected = await branchContext.createSceneBatchPromptSnapshot("2");
     assert.deepEqual(Object.keys(selected.output).sort(), ["1", "2", "3", "4", "5"]);
-    branchContext.applyScenePresetRunId(selected, "run-A", "2");
-    assert.equal(selected.output["1"].inputs.run_id, "run-A");
+    branchContext.applySceneRunHandle(selected, "opaque-handle");
+    assert.equal(selected.output["1"].inputs.run_handle, "opaque-handle");
     assert.equal(selected.output["5"].class_type, "SaveImage");
     assert.equal(selected.output["10"], undefined);
-    assert.equal(fullPrompt.output["10"].inputs.run_id, undefined);
+    assert.equal(fullPrompt.output["10"].inputs.run_handle, undefined);
 
     const merged = structuredClone(fullPrompt);
     merged.output["4"].inputs.negative = ["11", 0];
@@ -487,7 +508,7 @@ async function testCancelledPresetResolutionReleasesOnce() {
         sceneBatchPendingRuns: [],
         sceneBatchRunsById: new Map(),
         releaseCalls: 0,
-        releaseSceneBatchPlan() { cancelledContext.releaseCalls += 1; },
+        releaseSceneRunHandle() { cancelledContext.releaseCalls += 1; },
         sceneNodeForRun() { return null; },
         refreshSceneBatchRunNode() {},
         resetSceneExpandRunControls() {},
@@ -516,15 +537,9 @@ async function testCancelledPresetResolutionReleasesOnce() {
     assert.equal(cancelledContext.releaseCalls, 1);
     assert.equal(cancelledContext.sceneBatchRunsById.has(run.runId), false);
 
-    cancelledContext.api = {
-        async fetchApi() {
-            return { ok: true, async json() { return { presets: [], preset_graphs: {}, total_images: 1 }; } };
-        },
-    };
-    cancelledContext.readApiJson = async (response) => response.json();
+    cancelledContext.prepareSceneRunContext = async () => ({ run_handle: "unused", presets: [], preset_graphs: {}, total_images: 1 });
     cancelledContext.clearScenePresetReferenceErrors = () => { throw new Error("cancelled run must not alter UI"); };
     cancelledContext.scenePresetReferenceIdsForExpand = () => [];
-    cancelledContext.applyScenePresetRunId = () => { throw new Error("cancelled run must not mutate prompt"); };
     vm.runInContext(functionSource("resolveScenePresetsForRun"), cancelledContext);
     const resolved = await cancelledContext.resolveScenePresetsForRun(run, { output: {} }, "2");
     assert.equal(resolved, null);
@@ -561,15 +576,11 @@ async function testPresetResolveClearsOnlyItsOwnReferences() {
         JSON,
         app: { graph: { _nodes: nodes, setDirtyCanvas() {} } },
         isScenePresetReferenceNode(node) { return node.presetReference; },
-        async readApiJson(response) { return response.json(); },
-        api: {
-            async fetchApi(_path, options) {
-                const expand = JSON.parse(options.body).expand_node_id;
-                if (String(expand) === "4") {
-                    return { ok: false, async json() { return { error: "B is broken", node_id: "3" }; } };
-                }
-                return { ok: true, async json() { return { presets: [], preset_graphs: {}, total_images: 1 }; } };
-            },
+        async prepareSceneRunContext(_snapshot, expand) {
+            if (String(expand) === "4") {
+                throw new Error("B is broken");
+            }
+            return { run_handle: "handle-A", presets: [], preset_graphs: {}, total_images: 1 };
         },
     };
     vm.createContext(resolveContext);
@@ -577,7 +588,6 @@ async function testPresetResolveClearsOnlyItsOwnReferences() {
         "apiLink",
         "apiInput",
         "scenePresetReferenceIdsForExpand",
-        "applyScenePresetRunId",
         "markScenePresetReferenceErrors",
         "clearScenePresetReferenceErrors",
         "resolveScenePresetsForRun",

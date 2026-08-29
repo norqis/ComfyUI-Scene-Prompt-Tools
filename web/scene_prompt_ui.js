@@ -163,6 +163,7 @@ let scenePresetListPromise = null;
 let scenePresetListLatestPromise = null;
 let scenePresetListCacheCurrent = false;
 let scenePresetNotificationTimer = null;
+const sceneRunHandlesByPromptId = new Map();
 
 const VISIBLE_INPUT_NAMES = new Set(["scene_prompt"]);
 const INTERNAL_INPUT_NAMES = new Set([
@@ -6730,6 +6731,47 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
     return snapshot;
 }
 
+function sceneRunTargetNodes(apiGraph) {
+    return Object.values(apiGraph?.output || {}).filter((node) => (
+        ["ScenePrompt", "SceneMatrix", "ScenePresetReference", "ScenePromptExpand"].includes(node?.class_type)
+    ));
+}
+
+function applySceneRunHandle(apiGraph, runHandle) {
+    const targetNodes = Object.values(apiGraph?.output || {}).filter((node) => (
+        ["ScenePrompt", "SceneMatrix", "ScenePresetReference", "ScenePromptExpand"].includes(node?.class_type)
+    ));
+    for (const node of targetNodes) {
+        node.inputs = node.inputs || {};
+        node.inputs.run_handle = runHandle;
+        delete node.inputs.user_id;
+    }
+    return apiGraph;
+}
+
+function sceneExpandIdForPrompt(apiGraph) {
+    return Object.entries(apiGraph?.output || {}).find(([, node]) => node?.class_type === "ScenePromptExpand")?.[0] || null;
+}
+
+async function prepareSceneRunContext(apiGraph, expandNodeId = null) {
+    if (!sceneRunTargetNodes(apiGraph).length) {
+        return null;
+    }
+    const response = await api.fetchApi("/scene_prompt/runs/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId || sceneExpandIdForPrompt(apiGraph) }),
+    });
+    const data = await readApiJson(response, "Scene Promptの実行準備に失敗しました");
+    if (!response.ok || !data?.run_handle) {
+        const error = new Error(data?.error || "Scene Promptの実行準備に失敗しました");
+        error.scenePresetReferenceId = data?.node_id ? String(data.node_id) : "";
+        throw error;
+    }
+    applySceneRunHandle(apiGraph, String(data.run_handle));
+    return data;
+}
+
 function promptDescendantIds(nodes, sourceId) {
     const targets = new Map();
     for (const [nodeId, node] of Object.entries(nodes || {})) {
@@ -6795,18 +6837,6 @@ function sliceSceneBatchPrompt(prompt, expandNodeId) {
     return snapshot;
 }
 
-function applyScenePresetRunId(apiGraph, runId, expandNodeId) {
-    const referenceIds = new Set(scenePresetReferenceIdsForExpand(apiGraph, expandNodeId));
-    for (const referenceId of referenceIds) {
-        const promptNode = apiGraph?.output?.[referenceId];
-        if (!promptNode) {
-            continue;
-        }
-        promptNode.inputs = promptNode.inputs || {};
-        promptNode.inputs.run_id = runId;
-    }
-}
-
 function showSceneNotification(message) {
     console.info("[Scene Prompt]", message);
     if (typeof document === "undefined") {
@@ -6836,25 +6866,15 @@ async function resolveScenePresetsForRun(run, snapshot, expandNodeId) {
     }
     const referenceIds = scenePresetReferenceIdsForExpand(snapshot, expandNodeId);
     clearScenePresetReferenceErrors({ nodeIds: referenceIds });
-    const response = await api.fetchApi("/scene_presets/resolve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run_id: run.runId, api_graph: snapshot, expand_node_id: expandNodeId }),
-        signal: run.resolveController?.signal,
-    });
-    const data = await readApiJson(response, "Presetの検証に失敗しました");
-    if (!response.ok) {
-        const error = new Error(data.error || "Presetの検証に失敗しました");
-        error.scenePresetReferenceId = data.node_id ? String(data.node_id) : "";
-        throw error;
-    }
+    const data = await prepareSceneRunContext(snapshot, expandNodeId);
     if (run.cancelled) {
+        releaseSceneRunHandle(data?.run_handle);
         return null;
     }
     clearScenePresetReferenceErrors({ nodeIds: referenceIds });
     run.presetGraphs = new Map(Object.entries(data.preset_graphs || {}));
     run.presetSnapshots = Array.isArray(data.presets) ? data.presets : [];
-    applyScenePresetRunId(snapshot, run.runId, expandNodeId);
+    run.runHandle = String(data.run_handle);
     return data;
 }
 
@@ -6863,7 +6883,7 @@ function releaseCancelledSceneBatchRun(run) {
         return;
     }
     run.snapshotReleased = true;
-    releaseSceneBatchPlan(run.runId);
+    releaseSceneRunHandle(run.runHandle);
 }
 
 function cancelSceneBatchRunPreparation(run) {
@@ -7058,6 +7078,16 @@ function installSceneBatchPromptCapture() {
     }
     const originalQueuePrompt = api.queuePrompt.bind(api);
     api.queuePrompt = async function (number, prompt) {
+        let preparedRunHandle = "";
+        if (prompt?.output && sceneRunTargetNodes(prompt).length) {
+            const existingHandle = sceneRunTargetNodes(prompt)
+                .map((node) => String(node?.inputs?.run_handle || ""))
+                .find(Boolean);
+            if (!existingHandle) {
+                const prepared = await prepareSceneRunContext(prompt);
+                preparedRunHandle = String(prepared?.run_handle || "");
+            }
+        }
         let run = sceneBatchRun;
         let expandPrompt = prompt?.output?.[String(run?.nodeId)];
         const matchesActivePlan = !!run?.firstApiPending
@@ -7084,8 +7114,13 @@ function installSceneBatchPromptCapture() {
         try {
             result = await originalQueuePrompt(...arguments);
         } catch (error) {
+            releaseSceneRunHandle(preparedRunHandle);
             showPromptValidationErrorFromThrown(error);
             throw error;
+        }
+        const promptId = scenePromptIdFromValue(result);
+        if (preparedRunHandle && promptId) {
+            sceneRunHandlesByPromptId.set(promptId, preparedRunHandle);
         }
         if (matchesFirstBatchPrompt) {
             acceptSceneBatchPrompt(run, result);
@@ -7141,13 +7176,28 @@ function rememberSceneBatchTerminalEvent(type, detail) {
 }
 
 function releaseSceneBatchPlan(runId) {
-    if (!runId) {
+    const key = String(runId || "");
+    releaseSceneRunHandle(sceneBatchRunsById.get(key)?.runHandle || sceneBatchDetachedRuns.get(key)?.runHandle);
+}
+
+function releaseCompletedSceneRun(detail) {
+    const promptId = scenePromptIdFromValue(detail);
+    const runHandle = promptId ? sceneRunHandlesByPromptId.get(promptId) : "";
+    if (!runHandle) {
         return;
     }
-    api.fetchApi("/scene_prompt/run_plan/release", {
+    sceneRunHandlesByPromptId.delete(promptId);
+    releaseSceneRunHandle(runHandle);
+}
+
+function releaseSceneRunHandle(runHandle) {
+    if (!runHandle) {
+        return;
+    }
+    api.fetchApi("/scene_prompt/runs/release", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run_id: runId }),
+        body: JSON.stringify({ run_handle: runHandle }),
     }).catch((error) => console.warn("[Scene Prompt] 生成計画の解放に失敗しました。", error));
 }
 
@@ -7175,6 +7225,81 @@ function markSceneBatchReleaseBlocked(run, message) {
     showSceneBatchError(message);
 }
 
+function sceneQueueContainsPrompt(value, promptId) {
+    if (value == null) {
+        return false;
+    }
+    if (typeof value === "string" || typeof value === "number") {
+        return String(value) === String(promptId);
+    }
+    if (Array.isArray(value)) {
+        return value.some((item) => sceneQueueContainsPrompt(item, promptId));
+    }
+    if (typeof value === "object") {
+        return Object.entries(value).some(([key, item]) => (
+            String(key) === String(promptId) || sceneQueueContainsPrompt(item, promptId)
+        ));
+    }
+    return false;
+}
+
+function releaseDetachedSceneBatchRun(run, promptId) {
+    if (!run || run.detachedReleased) {
+        return;
+    }
+    run.detachedReleased = true;
+    if (promptId && sceneBatchPendingReleases.has(promptId)) {
+        releasePendingSceneBatchPlan({ prompt_id: promptId });
+        return;
+    }
+    clearDetachedSceneBatchRun(run);
+    clearPendingSceneBatchReleasesForRun(run.runId);
+    sceneBatchRunsById.set(run.runId, run);
+    releaseSceneBatchPlan(run.runId);
+    sceneBatchRunsById.delete(run.runId);
+    activateNextSceneBatchRun();
+}
+
+async function reconcileDetachedSceneBatchRun(run) {
+    if (!run?.runId || run.reconciling) {
+        return false;
+    }
+    const promptId = String(run.currentPromptId || "");
+    if (!promptId) {
+        return false;
+    }
+    run.reconciling = true;
+    try {
+        const historyResponse = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
+        const history = await readApiJson(historyResponse, "連続生成の状態を確認できませんでした");
+        if (!historyResponse.ok) {
+            throw new Error(history.error || "連続生成の状態を確認できませんでした");
+        }
+        const hasHistory = sceneQueueContainsPrompt(history, promptId);
+        if (hasHistory) {
+            releaseDetachedSceneBatchRun(run, promptId);
+            return true;
+        }
+        const queueResponse = await api.fetchApi("/queue");
+        const queue = await readApiJson(queueResponse, "連続生成の状態を確認できませんでした");
+        if (!queueResponse.ok) {
+            throw new Error(queue.error || "連続生成の状態を確認できませんでした");
+        }
+        if (!sceneQueueContainsPrompt(queue, promptId)) {
+            releaseDetachedSceneBatchRun(run, promptId);
+            return true;
+        }
+        markSceneBatchReleaseBlocked(run, "前の連続生成はまだ実行待ちです。終了後にもう一度確認してください。");
+        return false;
+    } catch (error) {
+        markSceneBatchReleaseBlocked(run, "前の連続生成の状態を確認できません。接続を確認して、もう一度押してください。");
+        console.warn("[Scene Prompt] 連続生成の状態確認に失敗しました。", error);
+        return false;
+    } finally {
+        run.reconciling = false;
+    }
+}
+
 function rememberPendingSceneBatchRelease(promptId, runId) {
     if (!promptId || !runId) {
         return;
@@ -7187,10 +7312,7 @@ function rememberPendingSceneBatchRelease(promptId, runId) {
     entry.timer = setTimeout(() => {
         if (sceneBatchPendingReleases.get(promptId) === entry) {
             const run = sceneBatchDetachedRuns.get(runId) || sceneBatchRunsById.get(runId);
-            markSceneBatchReleaseBlocked(
-                run,
-                "前の連続生成の終了確認が取れません。安全のため、待機中の連続生成は自動開始しません。",
-            );
+            reconcileDetachedSceneBatchRun(run);
         }
     }, 5 * 60 * 1000);
     sceneBatchPendingReleases.set(promptId, entry);
@@ -7206,10 +7328,7 @@ function rememberDetachedSceneBatchRun(run) {
     sceneBatchDetachedRuns.set(run.runId, run);
     run.detachedTimer = setTimeout(() => {
         if (sceneBatchDetachedRuns.get(run.runId) === run) {
-            markSceneBatchReleaseBlocked(
-                run,
-                "前の連続生成の停止完了を確認できません。安全のため、待機中の連続生成は自動開始しません。",
-            );
+            reconcileDetachedSceneBatchRun(run);
         }
     }, 5 * 60 * 1000);
 }
@@ -7245,8 +7364,8 @@ function releasePendingSceneBatchPlan(detail) {
     const run = sceneBatchDetachedRuns.get(entry.runId) || sceneBatchRunsById.get(entry.runId);
     clearDetachedSceneBatchRun(run);
     clearPendingSceneBatchReleasesForRun(entry.runId);
-    sceneBatchRunsById.delete(entry.runId);
     releaseSceneBatchPlan(entry.runId);
+    sceneBatchRunsById.delete(entry.runId);
     activateNextSceneBatchRun();
 }
 
@@ -7450,6 +7569,7 @@ function createSceneBatchRun(node, total) {
         totalImages: null,
         nextIndex: 0,
         runId: `${sceneBatchRunId()}__${planId}`,
+        runHandle: "",
         waiting: false,
         queueing: false,
         currentPromptId: "",
@@ -7574,8 +7694,8 @@ async function queueNextSceneBatchItem() {
             showSceneBatchError("連続生成を開始できませんでした。", error);
         } else {
             clearDetachedSceneBatchRun(run);
-            sceneBatchRunsById.delete(run.runId);
             releaseSceneBatchPlan(run.runId);
+            sceneBatchRunsById.delete(run.runId);
             activateNextSceneBatchRun();
         }
     } finally {
@@ -7598,7 +7718,11 @@ function startSceneBatchRun(node) {
         cancelPendingSceneBatchRun(existingRun);
         return;
     }
-    if (existingStatus === "stopping" || existingStatus === "blocked") {
+    if (existingStatus === "blocked") {
+        reconcileDetachedSceneBatchRun(existingRun);
+        return;
+    }
+    if (existingStatus === "stopping") {
         showSceneBatchError("この連続生成は停止処理中です。完了後に再実行してください。");
         return;
     }
@@ -8483,14 +8607,6 @@ function attachSceneUtilityNode(node, nodeName) {
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
     if (isSceneExpandNodeName(nodeName)) {
-        if (!node.scenePromptRemovalInstalled) {
-            const previousOnRemoved = node.onRemoved;
-            node.onRemoved = function (...args) {
-                cancelSceneBatchRunForNode(this);
-                return previousOnRemoved?.apply(this, args);
-            };
-            node.scenePromptRemovalInstalled = true;
-        }
         if (!sceneBatchRunForNode(node)) {
             resetSceneExpandRunControls(node, { mark: false });
         }
@@ -8510,7 +8626,41 @@ function attachSceneUtilityNode(node, nodeName) {
     }
 }
 
+function popupContextReferencesNode(context, node) {
+    for (let current = context; current; current = current.parent?.context || null) {
+        if (current.node === node) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function installSceneNodeRemovalCleanup(node, nodeName) {
+    if (node.scenePromptRemovalInstalled) {
+        return;
+    }
+    const previousOnRemoved = node.onRemoved;
+    node.onRemoved = function (...args) {
+        sceneTitleSyncNodes.delete(this);
+        sceneLoadedRefreshNodes.delete(this);
+        sceneDownstreamRefreshSources.delete(this);
+        clearSceneFitHeightTimer(this);
+        clearTimeout(this.sceneRefreshTimer);
+        this.sceneRefreshTimer = null;
+        this.scenePendingRefreshOptions = null;
+        if (popupContextReferencesNode(activePopupContext, this)) {
+            closeAllPopups();
+        }
+        if (isSceneExpandNodeName(nodeName)) {
+            cancelSceneBatchRunForNode(this);
+        }
+        return previousOnRemoved?.apply(this, args);
+    };
+    node.scenePromptRemovalInstalled = true;
+}
+
 function attachSceneNode(node, nodeName) {
+    installSceneNodeRemovalCleanup(node, nodeName);
     if (isScenePresetOutputNode(node) || SCENE_PRESET_OUTPUT_NODE_NAMES.has(nodeName)) {
         attachScenePresetOutput(node);
     } else if (isScenePresetReferenceNode(node) || SCENE_PRESET_REFERENCE_NODE_NAMES.has(nodeName)) {
@@ -8674,16 +8824,19 @@ app.registerExtension({
             rememberSceneBatchTerminalEvent("success", detail);
             continueSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
+            releaseCompletedSceneRun(detail);
         });
         api.addEventListener("execution_error", ({ detail }) => {
             rememberSceneBatchTerminalEvent("error", detail);
             failSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
+            releaseCompletedSceneRun(detail);
         });
         api.addEventListener("execution_interrupted", ({ detail }) => {
             rememberSceneBatchTerminalEvent("interrupted", detail);
             failSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
+            releaseCompletedSceneRun(detail);
         });
     },
 

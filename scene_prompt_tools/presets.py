@@ -6,13 +6,14 @@ import re
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
-import folder_paths
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
 from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
 from .plan import seed_plan
+from .storage import public_user_directory
 from .nodes import (
     SceneEmptyLatent,
     SceneMatrix,
@@ -21,6 +22,7 @@ from .nodes import (
     ScenePromptQueue,
     ScenePromptCounter,
 )
+from .runs import require_run_context
 
 
 PRESET_SCHEMA_VERSION = 1
@@ -28,10 +30,12 @@ PRESET_FILE_SUFFIX = ".json"
 PRESET_DIRECTORY_NAME = "scene_presets"
 PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,80}$")
 _PRESET_LOCK = threading.RLock()
-_RUN_SNAPSHOTS = {}
+_RUN_SNAPSHOTS = OrderedDict()
 _RUN_SNAPSHOTS_TTL_SECONDS = 12 * 60 * 60
-_CANCELLED_RUNS = {}
+_RUN_SNAPSHOTS_MAX_ENTRIES = 256
+_CANCELLED_RUNS = OrderedDict()
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
+_CANCELLED_RUNS_MAX_ENTRIES = 256
 
 SAFE_NODE_CLASSES = {
     "ScenePrompt": ScenePrompt,
@@ -69,8 +73,11 @@ class ScenePresetResolutionError(ScenePresetError):
         self.node_id = str(node_id) if node_id is not None else None
 
 
-def preset_directory():
-    return Path(folder_paths.get_user_directory()) / "default" / PRESET_DIRECTORY_NAME
+def preset_directory(user_id="default"):
+    try:
+        return public_user_directory(user_id) / PRESET_DIRECTORY_NAME
+    except ValueError as exc:
+        raise ScenePresetError("Preset保存先を利用できません。") from exc
 
 
 def _clean_preset_id(value):
@@ -80,8 +87,8 @@ def _clean_preset_id(value):
     return preset_id
 
 
-def _preset_path(preset_id):
-    return preset_directory() / f"{_clean_preset_id(preset_id)}{PRESET_FILE_SUFFIX}"
+def _preset_path(preset_id, user_id="default"):
+    return preset_directory(user_id) / f"{_clean_preset_id(preset_id)}{PRESET_FILE_SUFFIX}"
 
 
 def _canonical_json(value):
@@ -260,14 +267,14 @@ def _validate_preset_payload(preset):
         raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
 
 
-def load_preset(preset_id):
-    path = _preset_path(preset_id)
+def load_preset(preset_id, user_id="default"):
+    path = _preset_path(preset_id, user_id)
     preset = _read_json(path)
     _validate_preset_payload(preset)
     return preset
 
 
-def save_preset(payload):
+def save_preset(payload, user_id="default"):
     if not isinstance(payload, dict):
         raise ScenePresetError("保存内容が不正です。")
     preset_id = _clean_preset_id(payload.get("preset_id"))
@@ -289,7 +296,7 @@ def save_preset(payload):
         raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
 
     with _PRESET_LOCK:
-        path = _preset_path(preset_id)
+        path = _preset_path(preset_id, user_id)
         revision = 1
         if path.exists():
             existing = _read_json(path)
@@ -355,19 +362,19 @@ def _scene_prompt_closure(nodes, source_id):
     return closure
 
 
-def _resolve_preset_tree(preset_id, resolved, stack):
+def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
     preset_id = _clean_preset_id(preset_id)
     if preset_id in stack:
         cycle = " -> ".join([*stack, preset_id])
         raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
     if preset_id in resolved:
         return
-    preset = load_preset(preset_id)
+    preset = load_preset(preset_id, user_id)
     preset_name = str(preset["metadata"].get("name") or preset_id)
     next_stack = [*stack, preset_id]
     for _node_id, nested_id, _node in _find_references(_preset_nodes(preset)):
         try:
-            _resolve_preset_tree(nested_id, resolved, next_stack)
+            _resolve_preset_tree(nested_id, resolved, next_stack, user_id)
         except ScenePresetError as exc:
             raise ScenePresetError(f"Preset「{preset_name}」: {exc}") from exc
     resolved[preset_id] = preset
@@ -381,15 +388,21 @@ def _purge_run_snapshots(now=None):
     for run_id in [key for key, cancelled_at in _CANCELLED_RUNS.items()
                    if current - cancelled_at >= _CANCELLED_RUNS_TTL_SECONDS]:
         _CANCELLED_RUNS.pop(run_id, None)
+    while len(_CANCELLED_RUNS) > _CANCELLED_RUNS_MAX_ENTRIES:
+        _CANCELLED_RUNS.popitem(last=False)
 
 
-def _assert_run_not_cancelled(run_id):
+def _run_cache_key(run_id, user_id="default"):
+    return str(user_id or "default"), str(run_id or "").strip()
+
+
+def _assert_run_not_cancelled(run_id, user_id="default"):
     _purge_run_snapshots()
-    if run_id in _CANCELLED_RUNS:
+    if _run_cache_key(run_id, user_id) in _CANCELLED_RUNS:
         raise ScenePresetError(f"実行「{run_id}」はキャンセルされました。")
 
 
-def _scene_node_value_impl(nodes, node_id, resolved, stack, input_values=None):
+def _scene_node_value_impl(nodes, node_id, resolved, stack, input_values=None, user_id="default", run_handle=""):
     node_id = str(node_id)
     if input_values and node_id in input_values:
         return input_values[node_id]
@@ -404,7 +417,7 @@ def _scene_node_value_impl(nodes, node_id, resolved, stack, input_values=None):
     def value(raw):
         if not is_link(raw):
             return raw
-        return _scene_node_value(nodes, raw[0], resolved, next_stack, input_values)
+        return _scene_node_value(nodes, raw[0], resolved, next_stack, input_values, user_id, run_handle)
 
     if class_type in SAFE_VALUE_NODE_CLASSES:
         raw_value = _node_inputs(node).get("value")
@@ -426,18 +439,20 @@ def _scene_node_value_impl(nodes, node_id, resolved, stack, input_values=None):
         if not preset:
             raise ScenePresetError(f"Preset「{preset_id}」のスナップショットがありません。")
         upstream = value(_node_inputs(node).get("scene_prompt")) if is_link(_node_inputs(node).get("scene_prompt")) else None
-        return _evaluate_preset_scene(preset, resolved, upstream, set())
+        return _evaluate_preset_scene(preset, resolved, upstream, set(), user_id, run_handle)
     cls = SAFE_NODE_CLASSES.get(class_type)
     if cls is None:
         raise ScenePresetError(f"{_node_label(node_id, node)} はScene計画を計算できません。")
     kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
+    if class_type in {"ScenePrompt", "SceneMatrix"}:
+        kwargs["run_handle"] = run_handle
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     return result[0]
 
 
-def _scene_node_value(nodes, node_id, resolved, stack, input_values=None):
+def _scene_node_value(nodes, node_id, resolved, stack, input_values=None, user_id="default", run_handle=""):
     try:
-        return _scene_node_value_impl(nodes, node_id, resolved, stack, input_values)
+        return _scene_node_value_impl(nodes, node_id, resolved, stack, input_values, user_id, run_handle)
     except ScenePresetResolutionError:
         raise
     except (ScenePresetError, TypeError, ValueError, KeyError) as exc:
@@ -449,7 +464,7 @@ def _scene_node_value(nodes, node_id, resolved, stack, input_values=None):
         ) from exc
 
 
-def _evaluate_preset_scene(preset, resolved, upstream, stack):
+def _evaluate_preset_scene(preset, resolved, upstream, stack, user_id="default", run_handle=""):
     preset_id = str(preset["metadata"]["preset_id"])
     if preset_id in stack:
         cycle = " -> ".join([*stack, preset_id])
@@ -459,44 +474,40 @@ def _evaluate_preset_scene(preset, resolved, upstream, stack):
     input_id = validation["input_id"]
     output_link = validation["output_link"]
     input_values = {input_id: upstream} if upstream is not None else None
-    return _scene_node_value(nodes, output_link[0], resolved, set(), input_values)
+    return _scene_node_value(nodes, output_link[0], resolved, set(), input_values, user_id, run_handle)
 
 
-def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None):
+def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="default"):
     run_id = str(run_id or "").strip()
     if not run_id:
         raise ScenePresetError("実行IDがありません。")
     nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
     if not isinstance(nodes, dict):
         raise ScenePresetError("生成開始時のグラフを取得できませんでした。")
-    if expand_node_id is None:
-        raise ScenePresetError("Scene Prompt Expand のノードIDがありません。")
-    expand = nodes.get(str(expand_node_id))
+    expand = nodes.get(str(expand_node_id)) if expand_node_id is not None else None
     source = _node_inputs(expand).get("scene_prompt") if isinstance(expand, dict) else None
+    cache_key = _run_cache_key(run_id, user_id)
     with _PRESET_LOCK:
-        _assert_run_not_cancelled(run_id)
-        existing = _RUN_SNAPSHOTS.get(run_id)
+        _assert_run_not_cancelled(run_id, user_id)
+        existing = _RUN_SNAPSHOTS.get(cache_key)
         if existing:
             existing["last_access"] = time.monotonic()
+            _RUN_SNAPSHOTS.move_to_end(cache_key)
             return copy.deepcopy(existing["response"])
-        if not is_link(source):
-            response = {"presets": [], "preset_graphs": {}, "total_images": 1, "total_batches": 1}
-            _RUN_SNAPSHOTS[run_id] = {
-                "presets": {},
-                "response": copy.deepcopy(response),
-                "last_access": time.monotonic(),
-            }
-            _purge_run_snapshots()
-            return response
-        scene_nodes = _scene_prompt_closure(nodes, source[0])
+        if len(_RUN_SNAPSHOTS) >= _RUN_SNAPSHOTS_MAX_ENTRIES:
+            raise ScenePresetError("実行コンテキストが上限に達しています。実行中の生成が終わってから再試行してください。")
+        scene_nodes = _scene_prompt_closure(nodes, source[0]) if is_link(source) else nodes
         resolved = {}
         for reference_node_id, preset_id, _node in _find_references(scene_nodes):
             try:
-                _resolve_preset_tree(preset_id, resolved, [])
+                _resolve_preset_tree(preset_id, resolved, [], user_id)
             except ScenePresetError as exc:
                 raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
-        _assert_run_not_cancelled(run_id)
-        plan = _scene_node_value(scene_nodes, source[0], resolved, set())
+        _assert_run_not_cancelled(run_id, user_id)
+        plan = (
+            _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id)
+            if is_link(source) else {"total_images": 1, "total_batches": 1}
+        )
         response = {
             "presets": [
                 {
@@ -517,7 +528,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None):
             "total_images": int(plan.get("total_images") or 0),
             "total_batches": int(plan.get("total_batches") or 0),
         }
-        _RUN_SNAPSHOTS[run_id] = {
+        _RUN_SNAPSHOTS[cache_key] = {
             "presets": copy.deepcopy(resolved),
             "response": copy.deepcopy(response),
             "last_access": time.monotonic(),
@@ -526,41 +537,46 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None):
         return response
 
 
-def release_scene_preset_snapshot(run_id):
+def release_scene_preset_snapshot(run_id, user_id="default"):
     with _PRESET_LOCK:
         run_id = str(run_id or "").strip()
         if not run_id:
             return False
         _purge_run_snapshots()
-        _CANCELLED_RUNS[run_id] = time.monotonic()
-        return _RUN_SNAPSHOTS.pop(run_id, None) is not None
+        cache_key = _run_cache_key(run_id, user_id)
+        _CANCELLED_RUNS[cache_key] = time.monotonic()
+        released = _RUN_SNAPSHOTS.pop(cache_key, None) is not None
+        _purge_run_snapshots()
+        return released
 
 
-def _snapshot_preset(run_id, preset_id):
+def _snapshot_preset(run_id, preset_id, user_id="default"):
     run_id = str(run_id or "").strip()
     with _PRESET_LOCK:
-        entry = _RUN_SNAPSHOTS.get(run_id)
+        cache_key = _run_cache_key(run_id, user_id)
+        entry = _RUN_SNAPSHOTS.get(cache_key)
         if run_id:
             if not entry:
                 raise ScenePresetError(f"実行「{run_id}」のPresetスナップショットがありません。")
             entry["last_access"] = time.monotonic()
+            _RUN_SNAPSHOTS.move_to_end(cache_key)
             preset = entry["presets"].get(preset_id)
             if preset:
                 return copy.deepcopy(preset)
             raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
-    return load_preset(preset_id)
+    return load_preset(preset_id, user_id)
 
 
-def list_presets():
+def list_presets(user_id="default"):
     with _PRESET_LOCK:
-        directory = preset_directory()
+        directory = preset_directory(user_id)
         if not directory.exists():
             return {"presets": [], "errors": []}
         presets = []
         errors = []
         for path in sorted(directory.glob(f"*{PRESET_FILE_SUFFIX}"), key=lambda item: item.name.lower()):
             try:
-                preset = load_preset(path.stem)
+                preset = load_preset(path.stem, user_id)
             except ScenePresetError as exc:
                 errors.append({"preset_id": path.stem, "error": str(exc)})
                 continue
@@ -588,13 +604,17 @@ def _replace_link(value, input_id, upstream_link, graph):
     return source.out(output_index)
 
 
-def expand_preset_reference(preset_id, scene_prompt=None, run_id=""):
+def expand_preset_reference(preset_id, scene_prompt=None, run_handle="", _require_context=False):
     preset_id = _clean_preset_id(preset_id)
-    if run_id:
-        preset = _snapshot_preset(run_id, preset_id)
+    if _require_context:
+        user_id = require_run_context(run_handle)["user_id"]
+        preset = _snapshot_preset(run_handle, preset_id, user_id)
+    elif run_handle:
+        preset = _snapshot_preset(run_handle, preset_id)
     else:
+        user_id = "default"
         resolved = {}
-        _resolve_preset_tree(preset_id, resolved, [])
+        _resolve_preset_tree(preset_id, resolved, [], user_id)
         preset = resolved[preset_id]
     validation = _validate_preset_payload(preset)
     nodes = _preset_nodes(preset)
@@ -621,8 +641,10 @@ def expand_preset_reference(preset_id, scene_prompt=None, run_id=""):
         target = graph.lookup_node(str(node_id))
         for name, value in _node_inputs(node).items():
             target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
+        if class_type in {"ScenePrompt", "SceneMatrix"}:
+            target.set_input("run_handle", str(run_handle))
         if class_type == "ScenePresetReference":
-            target.set_input("run_id", str(run_id or ""))
+            target.set_input("run_handle", str(run_handle))
 
     output_link = validation["output_link"]
     result = _replace_link(output_link, input_id, scene_prompt, graph)
@@ -684,16 +706,17 @@ class ScenePresetReference:
             },
             "optional": {
                 "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "rawLink": True}),
-                "run_id": ("STRING", {"default": "", "hidden": True}),
+                "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
     @classmethod
-    def IS_CHANGED(cls, preset_id="", scene_prompt=None, run_id="", **kwargs):
+    def IS_CHANGED(cls, preset_id="", scene_prompt=None, run_handle="", **kwargs):
         del scene_prompt, kwargs
-        preset = _snapshot_preset(run_id, _clean_preset_id(preset_id))
+        context = require_run_context(run_handle)
+        preset = _snapshot_preset(run_handle, _clean_preset_id(preset_id), context["user_id"])
         metadata = preset["metadata"]
-        return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_id}"
+        return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_handle}"
 
-    def expand(self, preset_id, scene_prompt=None, run_id=""):
-        return expand_preset_reference(preset_id, scene_prompt, run_id)
+    def expand(self, preset_id, scene_prompt=None, run_handle=""):
+        return expand_preset_reference(preset_id, scene_prompt, run_handle, _require_context=True)

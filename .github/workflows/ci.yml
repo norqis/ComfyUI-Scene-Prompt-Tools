@@ -4,12 +4,46 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install "numpy<3" "Pillow<12"
+      - run: python -m compileall -q scene_prompt_tools tests __init__.py
+      - run: python -m unittest discover -s tests -v
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+      - run: npm run check:frontend
+      - run: npm run test:frontend
+
+  package:
+    name: Public package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -19,18 +53,6 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-      - run: python -m pip install --upgrade pip
-      - name: Fetch ComfyUI source
-        run: git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git "$RUNNER_TEMP/comfyui-source"
-      - name: Install ComfyUI runtime
-        run: python -m pip install -r "$RUNNER_TEMP/comfyui-source/requirements.txt"
-      - run: python -m compileall -q scene_prompt_tools tests __init__.py
-      - run: python -m unittest discover -s tests -v
-      - run: npm run check:frontend
-      - run: npm run test:frontend
       - name: Check changed range for whitespace errors
         shell: bash
         run: |
@@ -56,5 +78,55 @@ jobs:
           SCENE_PROMPT_HISTORY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           SCENE_PROMPT_HISTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: python tests/check_public_package.py
+
+  comfy-smoke:
+    name: ComfyUI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Fetch ComfyUI source
+        run: |
+          git clone https://github.com/Comfy-Org/ComfyUI.git "$RUNNER_TEMP/comfyui-source"
+          git -C "$RUNNER_TEMP/comfyui-source" checkout --detach e7051b03758a1247e3adb84a5b784ffacb9a23bd
+      - name: Install ComfyUI runtime
+        run: python -m pip install -r "$RUNNER_TEMP/comfyui-source/requirements.txt"
       - name: Load with real ComfyUI modules
         run: RUN_REAL_COMFYUI_SMOKE=1 COMFYUI_SOURCE="$RUNNER_TEMP/comfyui-source" python tests/test_comfyui_smoke.py -v
+
+  latest-comfy-smoke:
+    name: Latest ComfyUI compatibility
+    if: github.event_name == 'schedule'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git "$RUNNER_TEMP/comfyui-source"
+      - run: python -m pip install -r "$RUNNER_TEMP/comfyui-source/requirements.txt"
+      - run: RUN_REAL_COMFYUI_SMOKE=1 COMFYUI_SOURCE="$RUNNER_TEMP/comfyui-source" python tests/test_comfyui_smoke.py -v
+
+  test:
+    name: test
+    if: always()
+    needs: [python, frontend, package, comfy-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all checks
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          results = {name: data["result"] for name, data in json.loads(os.environ["NEEDS"]).items()}
+          print(results)
+          sys.exit(any(result != "success" for result in results.values()))
+          PY

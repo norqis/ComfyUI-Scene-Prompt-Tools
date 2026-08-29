@@ -5,13 +5,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from bisect import bisect_right
 
 
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
 PLAN_VERSION = 1
 MAX_INPUT_COUNT = 10_000
 MAX_DERIVED_COUNT = 1_000_000_000
+MAX_PLAN_ROWS = 100_000
 MIN_DIMENSION = 16
 MAX_DIMENSION = 16_384
 MIN_BATCH_SIZE = 1
@@ -153,6 +153,8 @@ def _clone_sources(sources):
 
 
 def _build_plan(items, sources):
+    if len(items) > MAX_PLAN_ROWS:
+        raise ScenePlanError(f"Scene Prompt plan cannot contain more than {MAX_PLAN_ROWS} rows.")
     batch_cursor = 0
     total_images = 0
     rows = []
@@ -207,7 +209,10 @@ def normalize_plan(value):
         raise ScenePlanError("Unsupported Scene Prompt plan version.")
     if not isinstance(value["rows"], list):
         raise ScenePlanError("Scene Prompt plan rows must be a list.")
+    if len(value["rows"]) > MAX_PLAN_ROWS:
+        raise ScenePlanError(f"Scene Prompt plan cannot contain more than {MAX_PLAN_ROWS} rows.")
     items = []
+    start_index = 0
     for index, item in enumerate(value["rows"]):
         if not isinstance(item, dict):
             raise ScenePlanError("Scene Prompt plan items must be objects.")
@@ -215,13 +220,14 @@ def normalize_plan(value):
         row = _clone_row(item["row"])
         count = _require_int(item["count"], "Scene Prompt plan count", 0, MAX_DERIVED_COUNT)
         expected = {
-            "start_index": sum(current["count"] for current in items), "row_index": index,
+            "start_index": start_index, "row_index": index,
             "label": row_label(row), "queue_index": 0, "source_id": "", "source_title": "",
         }
         for key, expected_value in expected.items():
             if item[key] != expected_value or (key != "label" and type(item[key]) is not type(expected_value)):
                 raise ScenePlanError(f"Scene Prompt plan {key} is invalid.")
         items.append({"row": row, "count": count})
+        start_index += count
     expected_plan = _build_plan(items, value["sources"])
     for key in ("total_batches", "total_images", "change_key", "sources"):
         expected_type = int if key in {"total_batches", "total_images"} else type(expected_plan[key])
@@ -290,6 +296,9 @@ def merge_rows(left, right):
 def merge(left, right):
     first = normalize_plan(left)
     second = normalize_plan(right)
+    row_count = len(first["rows"]) * len(second["rows"])
+    if row_count > MAX_PLAN_ROWS:
+        raise ScenePlanError(f"Scene Prompt merge would create more than {MAX_PLAN_ROWS} rows.")
     rows = []
     for left_item in first["rows"]:
         for right_item in second["rows"]:
@@ -304,6 +313,9 @@ def queue(values):
     connected = [normalize_plan(value) for value in values if value is not None]
     if not connected:
         return seed_plan()
+    row_count = sum(len(plan["rows"]) for plan in connected)
+    if row_count > MAX_PLAN_ROWS:
+        raise ScenePlanError(f"Scene Prompt queue cannot contain more than {MAX_PLAN_ROWS} rows.")
     rows = []
     sources = []
     for index, plan in enumerate(connected, start=1):
@@ -329,6 +341,9 @@ def matrix_product(plan, matrix_rows, configured):
         return source
     if not active:
         return make_plan([])
+    row_count = len(source["rows"]) * len(active)
+    if row_count > MAX_PLAN_ROWS:
+        raise ScenePlanError(f"Scene Matrix would create more than {MAX_PLAN_ROWS} rows.")
     rows = []
     for base in source["rows"]:
         for matrix_row in active:
@@ -339,15 +354,27 @@ def matrix_product(plan, matrix_rows, configured):
     return make_plan(rows)
 
 
-def item_for_index(plan, index):
-    source = normalize_plan(plan)
+def item_for_normalized_plan(plan, index):
+    """Look up an item in a plan already validated by ``normalize_plan``."""
+    source = plan
     if type(index) is not int or not 0 <= index < source["total_batches"]:
         raise IndexError("Generation index is outside the plan.")
-    non_empty = [item for item in source["rows"] if item["count"] > 0]
-    starts = [item["start_index"] for item in non_empty]
-    item = copy.deepcopy(non_empty[bisect_right(starts, index) - 1])
+    rows = source["rows"]
+    lower = 0
+    upper = len(rows)
+    while lower < upper:
+        middle = (lower + upper) // 2
+        if rows[middle]["start_index"] <= index:
+            lower = middle + 1
+        else:
+            upper = middle
+    item = copy.deepcopy(rows[lower - 1])
     item["repeat_index"] = index - item["start_index"] + 1
     item["global_index"] = index
     item["total_batches"] = source["total_batches"]
     item["total_images"] = source["total_images"]
     return item
+
+
+def item_for_index(plan, index):
+    return item_for_normalized_plan(normalize_plan(plan), index)

@@ -26,6 +26,7 @@ def load_nodes(output_dir):
     folder_paths = types.ModuleType("folder_paths")
     folder_paths.get_output_directory = lambda: str(output_dir)
     folder_paths.get_user_directory = lambda: str(output_dir / "user")
+    folder_paths.get_public_user_directory = lambda user_id: str(output_dir / "user" / user_id)
     sys.modules.update({
         "comfy": comfy,
         "comfy.model_management": management,

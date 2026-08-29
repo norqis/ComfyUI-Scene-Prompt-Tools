@@ -23,9 +23,16 @@ git clone https://github.com/norqis/ComfyUI-Scene-Prompt-Tools.git
 - **Scene Prompt Expand** emits one planned batch at a time.
 - **Scene Preset** nodes save and reuse plan fragments.
 
-Prompt items and saved prompt collections are stored in `ComfyUI/user/default/scene_prompt_tools/data`.
-This keeps user data outside the replaceable custom-node installation. Version 0.1.1 does not read the former `custom_nodes/ComfyUI-Scene-Prompt-Tools/data` location.
-When updating from 0.1.0, move the contents of the former `data` directory to the new location once.
+Prompt items and saved prompt collections are stored in the current ComfyUI user's public data directory, outside the replaceable custom-node installation.
+
+## Import prompt data
+
+```bash
+python tools/import_scene_html.py --input path/to/html --output path/to/data --dry-run
+python tools/import_scene_html.py --input path/to/html --output path/to/data --merge
+```
+
+Existing `prompt.json` files are left unchanged unless `--merge`, `--replace`, or `--clean` is specified.
 
 ## Tests
 
