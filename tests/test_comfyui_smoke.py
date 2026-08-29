@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +78,78 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertIn("/scene_prompt/runs/prepare", paths)
         self.assertIn("/scene_prompt/runs/claim", paths)
         self.assertIn("/scene_prompt/runs/release", paths)
+
+    def test_scene_save_image_writes_each_metadata_mode_with_real_comfyui_modules(self):
+        from PIL import Image
+        import torch
+        import execution
+        import nodes as comfy_nodes
+
+        nodes = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.nodes"]
+        prompt = {
+            "1": {
+                "class_type": "EmptyImage",
+                "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0},
+            },
+            "2": {
+                "class_type": "EmptyImage",
+                "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0},
+            },
+            "4": {
+                "class_type": "SceneSaveImage",
+                "inputs": {
+                    "images": ["1", 0],
+                    "path": "",
+                    "metadata_mode": "生成経路ノードのみ",
+                },
+            },
+        }
+        extra_pnginfo = {
+            "prompt": {"reserved": "ignored outside full workflow"},
+            "workflow": {"nodes": [{"id": "4", "pos": [1, 2]}]},
+            "custom": {"kept": True},
+        }
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            nodes.folder_paths, "get_output_directory", return_value=directory
+        ):
+            saved = {}
+            for index, mode in enumerate(nodes.SAVE_METADATA_CHOICES, start=1):
+                result = nodes.SceneSaveImage().save_images(
+                    [torch.zeros((16, 16, 3), dtype=torch.float32)],
+                    "",
+                    metadata_mode=mode,
+                    scene_info={"use_run_dir": False, "file_index": index, "seed": 7},
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                    unique_id=4,
+                )
+                with Image.open(result["result"][1]) as image:
+                    saved[mode] = dict(image.text)
+
+        self.assertEqual(json.loads(saved[nodes.SAVE_METADATA_WORKFLOW]["prompt"]), prompt)
+        self.assertIn("workflow", saved[nodes.SAVE_METADATA_WORKFLOW])
+        self.assertEqual(json.loads(saved[nodes.SAVE_METADATA_WORKFLOW]["custom"]), {"kept": True})
+
+        self.assertNotIn("prompt", saved[nodes.SAVE_METADATA_PROMPT_ONLY])
+        self.assertNotIn("workflow", saved[nodes.SAVE_METADATA_PROMPT_ONLY])
+        self.assertEqual(json.loads(saved[nodes.SAVE_METADATA_PROMPT_ONLY]["custom"]), {"kept": True})
+
+        execution_path = json.loads(saved[nodes.SAVE_METADATA_EXECUTION_PATH]["prompt"])
+        self.assertNotIn("workflow", saved[nodes.SAVE_METADATA_EXECUTION_PATH])
+        self.assertEqual(set(execution_path), {"1", "4"})
+        self.assertEqual(json.loads(saved[nodes.SAVE_METADATA_EXECUTION_PATH]["custom"]), {"kept": True})
+        for node in execution_path.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and len(value) == 2:
+                    self.assertIn(str(value[0]), execution_path)
+
+        with mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, {"SceneSaveImage": nodes.SceneSaveImage}):
+            valid, error, outputs, _node_errors = asyncio.run(
+                execution.validate_prompt("scene-save-metadata-smoke", execution_path, None)
+            )
+        self.assertTrue(valid, error)
+        self.assertIn("4", outputs)
 
 
 if __name__ == "__main__":

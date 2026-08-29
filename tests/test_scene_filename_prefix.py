@@ -347,14 +347,15 @@ class SceneFilenamePrefixTests(unittest.TestCase):
     def test_save_metadata_modes_write_expected_png_metadata_without_mutating_inputs(self):
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
         prompt = {
-            "checkpoint": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
-            "sampler_a": {"class_type": "KSampler", "inputs": {"model": ["checkpoint", 0]}},
-            "sampler_b": {"class_type": "KSampler", "inputs": {"model": ["checkpoint", 0]}},
-            "save_a": {"class_type": "SceneSaveImage", "inputs": {"images": ["sampler_a", 0]}},
-            "save_b": {"class_type": "SceneSaveImage", "inputs": {"images": ["sampler_b", 0]}},
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "2": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
+            "3": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
+            "4": {"class_type": "SceneSaveImage", "inputs": {"images": ["2", 0]}},
+            "5": {"class_type": "SceneSaveImage", "inputs": {"images": ["3", 0]}},
         }
         extra_pnginfo = {
-            "workflow": {"nodes": [{"id": "save_a", "pos": [200, 100]}]},
+            "prompt": {"reserved": "must not override the submitted prompt"},
+            "workflow": {"nodes": [{"id": "4", "pos": [200, 100]}]},
             "custom": {"keep": ["this", "value"]},
         }
         original_prompt = json.loads(json.dumps(prompt))
@@ -376,7 +377,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 },
                 prompt=prompt,
                 extra_pnginfo=extra_pnginfo,
-                unique_id="save_a",
+                unique_id=4,
             )
             with Image.open(Path(result["result"][1])) as png:
                 saved[mode] = dict(png.text)
@@ -393,7 +394,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
 
         execution_path = saved["生成経路ノードのみ"]
         self.assertNotIn("workflow", execution_path)
-        self.assertEqual(set(json.loads(execution_path["prompt"])), {"checkpoint", "sampler_a", "save_a"})
+        self.assertEqual(set(json.loads(execution_path["prompt"])), {"1", "2", "4"})
         self.assertEqual(json.loads(execution_path["custom"]), extra_pnginfo["custom"])
 
         for metadata in saved.values():
@@ -403,6 +404,39 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             self.assertEqual(metadata["scene_seed"], "42")
         self.assertEqual(prompt, original_prompt)
         self.assertEqual(extra_pnginfo, original_extra)
+
+    def test_non_full_metadata_excludes_only_lowercase_reserved_extra_keys(self):
+        prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {}}}
+        extra_pnginfo = {
+            "prompt": {"reserved": True},
+            "workflow": {"nodes": []},
+            "Prompt": {"keep": True},
+            "Workflow": {"keep": True},
+            "custom": {"keep": True},
+        }
+        for mode in (self.nodes.SAVE_METADATA_PROMPT_ONLY, self.nodes.SAVE_METADATA_EXECUTION_PATH):
+            with self.subTest(mode=mode):
+                saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+                    prompt, extra_pnginfo, "save", mode
+                )
+                self.assertNotIn("prompt", saved_extra)
+                self.assertNotIn("workflow", saved_extra)
+                self.assertEqual(saved_extra["Prompt"], {"keep": True})
+                self.assertEqual(saved_extra["Workflow"], {"keep": True})
+                self.assertEqual(saved_extra["custom"], {"keep": True})
+                if mode == self.nodes.SAVE_METADATA_PROMPT_ONLY:
+                    self.assertIsNone(saved_prompt)
+                else:
+                    self.assertEqual(saved_prompt, prompt)
+
+    def test_full_metadata_reuses_inputs_without_mutating_them(self):
+        prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {}}}
+        extra_pnginfo = {"workflow": {"nodes": []}, "custom": {"value": 1}}
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt, extra_pnginfo, "save", self.nodes.SAVE_METADATA_WORKFLOW
+        )
+        self.assertIs(saved_prompt, prompt)
+        self.assertIs(saved_extra, extra_pnginfo)
 
     def test_generation_path_metadata_is_specific_to_each_save_node(self):
         prompt = {
@@ -414,6 +448,20 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         }
         self.assertEqual(set(self.nodes._slice_prompt_for_output(prompt, "save_left")), {"shared", "left", "save_left"})
         self.assertEqual(set(self.nodes._slice_prompt_for_output(prompt, "save_right")), {"shared", "right", "save_right"})
+
+    def test_generation_path_metadata_keeps_each_internal_link_source(self):
+        prompt = {
+            "shared": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "left": {"class_type": "KSampler", "inputs": {"model": ["shared", 0]}},
+            "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["left", 0]}},
+            "other": {"class_type": "KSampler", "inputs": {"model": ["shared", 0]}},
+        }
+        saved = self.nodes._slice_prompt_for_output(prompt, "save")
+        self.assertEqual(set(saved), {"shared", "left", "save"})
+        for node in saved.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and len(value) == 2:
+                    self.assertIn(str(value[0]), saved)
 
     def test_generation_path_metadata_rejects_unknown_target_and_invalid_links(self):
         prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {"images": ["missing", 0]}}}

@@ -1,4 +1,3 @@
-import copy
 import json
 import os
 import re
@@ -166,7 +165,7 @@ def _prompt_ancestor_ids(prompt, target_id):
 def _slice_prompt_for_output(prompt, target_id):
     ancestor_ids = _prompt_ancestor_ids(prompt, target_id)
     return {
-        node_id: copy.deepcopy(node)
+        node_id: node
         for node_id, node in prompt.items()
         if node_id in ancestor_ids
     }
@@ -179,23 +178,22 @@ def _metadata_for_save_mode(prompt, extra_pnginfo, unique_id, metadata_mode):
         raise ValueError("Scene Save Image の extra_pnginfo が不正です。")
 
     if metadata_mode == SAVE_METADATA_WORKFLOW:
-        saved_prompt = copy.deepcopy(prompt) if prompt is not None else None
-        saved_extra = copy.deepcopy(extra_pnginfo) if extra_pnginfo is not None else None
-    else:
-        saved_prompt = (
-            None
-            if metadata_mode == SAVE_METADATA_PROMPT_ONLY
-            else _slice_prompt_for_output(prompt, unique_id)
-        )
-        saved_extra = (
-            None
-            if extra_pnginfo is None
-            else {
-                key: copy.deepcopy(value)
-                for key, value in extra_pnginfo.items()
-                if key != "workflow"
-            }
-        )
+        return prompt, extra_pnginfo
+
+    saved_prompt = (
+        None
+        if metadata_mode == SAVE_METADATA_PROMPT_ONLY
+        else _slice_prompt_for_output(prompt, unique_id)
+    )
+    saved_extra = (
+        None
+        if extra_pnginfo is None
+        else {
+            key: value
+            for key, value in extra_pnginfo.items()
+            if key not in {"prompt", "workflow"}
+        }
+    )
     return saved_prompt, saved_extra
 
 
@@ -1070,7 +1068,7 @@ class ScenePromptExpand:
 
 
 class SceneSaveImage:
-    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は、画面配置まで残す「ワークフロー全体」、Scene情報だけを残す「プロンプトのみ」、この保存ノードへつながる生成経路だけを残す「生成経路ノードのみ」から選べます。"""
+    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「プロンプトのみ」「生成経路ノードのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。生成経路ノードのみはこの保存ノードへの入力接続を逆走した祖先を保存するため、Lazy入力の未使用枝を含む場合があり、配置やグループは保存しません。"""
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
@@ -1088,7 +1086,7 @@ class SceneSaveImage:
                         "default": SAVE_METADATA_WORKFLOW,
                         "display_name": "メタデータ保存",
                         "label": "メタデータ保存",
-                        "tooltip": "PNGに保存するComfyUIのワークフロー情報を選びます。",
+                        "tooltip": "ワークフロー全体: 配置を含む全体を保存。プロンプトのみ: ワークフローは保存しない。生成経路ノードのみ: この保存ノードへの入力接続を逆走した祖先だけを保存し、配置やグループは保存しない。",
                     },
                 ),
             },
@@ -1155,6 +1153,7 @@ class SceneSaveImage:
                 extra_pnginfo_metadata = [
                     (key, json.dumps(value, separators=(",", ":")))
                     for key, value in saved_extra_pnginfo.items()
+                    if key != "prompt" or prompt_metadata is None
                 ]
 
         for image in images:
