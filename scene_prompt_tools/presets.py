@@ -360,6 +360,23 @@ def _scene_prompt_closure(nodes, source_id):
     return closure
 
 
+def _scene_nodes_for_expand(nodes, expand_node_id):
+    if expand_node_id is None:
+        return nodes, None
+
+    expand_id = str(expand_node_id)
+    expand = nodes.get(expand_id)
+    if not isinstance(expand, dict):
+        raise ScenePresetError(f"Scene Prompt Expand #{expand_id} が見つかりません。")
+    if expand.get("class_type") != "ScenePromptExpand":
+        raise ScenePresetError(f"#{expand_id} は Scene Prompt Expand ではありません。")
+
+    source = _node_inputs(expand).get("scene_prompt")
+    if not is_link(source):
+        return {}, None
+    return _scene_prompt_closure(nodes, source[0]), source
+
+
 def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
     preset_id = _clean_preset_id(preset_id)
     if preset_id in stack:
@@ -479,8 +496,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
     nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
     if not isinstance(nodes, dict):
         raise ScenePresetError("生成開始時のグラフを取得できませんでした。")
-    expand = nodes.get(str(expand_node_id)) if expand_node_id is not None else None
-    source = _node_inputs(expand).get("scene_prompt") if isinstance(expand, dict) else None
+    scene_nodes, source = _scene_nodes_for_expand(nodes, expand_node_id)
     cache_key = _run_cache_key(run_id, user_id)
     with _PRESET_LOCK:
         _assert_run_not_cancelled(run_id, user_id)
@@ -489,7 +505,6 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             existing["last_access"] = time.monotonic()
             _RUN_SNAPSHOTS.move_to_end(cache_key)
             return copy.deepcopy(existing["response"])
-        scene_nodes = _scene_prompt_closure(nodes, source[0]) if is_link(source) else nodes
         resolved = {}
         for reference_node_id, preset_id, _node in _find_references(scene_nodes):
             try:
@@ -499,7 +514,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
         _assert_run_not_cancelled(run_id, user_id)
         plan = (
             _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id)
-            if is_link(source) else {"total_images": 1, "total_batches": 1}
+            if source is not None else {"total_images": 1, "total_batches": 1}
         )
         response = {
             "presets": [

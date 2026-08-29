@@ -32,7 +32,12 @@ def install_comfy_execution_stub():
     graph_utils = types.ModuleType("comfy_execution.graph_utils")
 
     def is_link(value):
-        return isinstance(value, (list, tuple)) and len(value) == 2
+        return (
+            isinstance(value, list)
+            and len(value) == 2
+            and isinstance(value[0], str)
+            and isinstance(value[1], (int, float))
+        )
 
     class GraphNode:
         def __init__(self, class_type, node_id):

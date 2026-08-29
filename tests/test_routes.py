@@ -281,6 +281,101 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertEqual(set(projected["by_id"]), {("Style", "current")})
         self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
 
+    def test_unlinked_expand_ignores_disconnected_stale_selections(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        stale = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "stale", "label": "Stale", "prompt": "stale",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        graph = {"output": {
+            "1": {"class_type": "ScenePrompt", "inputs": {"positive_json": stale}},
+            "2": {"class_type": "ScenePromptExpand", "inputs": {}},
+            "3": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+        }}
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+
+        response = asyncio.run(prepare(Request("alice", {
+            "api_graph": graph,
+            "expand_node_id": "2",
+        })))
+
+        self.assertEqual(response["status"], 200, response["payload"])
+        handle = response["payload"]["run_handle"]
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        self.assertEqual(runs.require_run_context(handle)["prompt_data_index"], {"by_key": {}, "by_id": {}})
+        self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
+
+    def test_explicit_expand_rejects_missing_wrong_and_invalid_upstream_nodes(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        index = {"by_key": {}, "by_id": {}}
+        self.assertRaisesRegex(
+            ValueError,
+            "Scene Prompt Expand #missing が見つかりません。",
+            self.routes.project_prompt_data_index,
+            {"output": {}}, index, None, "missing",
+        )
+        self.assertRaisesRegex(
+            ValueError,
+            "#1 は Scene Prompt Expand ではありません。",
+            self.routes.project_prompt_data_index,
+            {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}, index, None, "1",
+        )
+        self.assertRaisesRegex(
+            ValueError,
+            "Sceneノード #missing が見つかりません。",
+            self.routes.project_prompt_data_index,
+            {"output": {"1": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["missing", 0]}}}},
+            index, None, "1",
+        )
+        self.assertRaisesRegex(
+            ValueError,
+            "生成グラフのScene接続が循環しています: #1",
+            self.routes.project_prompt_data_index,
+            {"output": {
+                "1": {"class_type": "ScenePrompt", "inputs": {"scene_prompt": ["2", 0]}},
+                "2": {"class_type": "ScenePrompt", "inputs": {"scene_prompt": ["1", 0]}},
+                "3": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+            }},
+            index, None, "3",
+        )
+        self.assertEqual(
+            self.routes.project_prompt_data_index(
+                {"output": {"1": {"class_type": "ScenePromptExpand", "inputs": {
+                    "scene_prompt": ("missing", 0),
+                }}}},
+                index, None, "1",
+            ),
+            {"by_key": {}, "by_id": {}},
+        )
+
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        for expand_node_id, expected in (("missing", "Scene Prompt Expand #missing が見つかりません。"), (
+            "1", "#1 は Scene Prompt Expand ではありません。",
+        )):
+            with self.subTest(expand_node_id=expand_node_id):
+                graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+                response = asyncio.run(prepare(Request("alice", {
+                    "api_graph": graph,
+                    "expand_node_id": expand_node_id,
+                })))
+                self.assertEqual(response["status"], 400)
+                self.assertEqual(response["payload"]["error"], expected)
+
     def test_expiration_removes_contexts_and_preset_snapshots_once_and_bounds_caches(self):
         runs = sys.modules[f"{self.routes.__package__}.runs"]
         presets = sys.modules[f"{self.routes.__package__}.presets"]

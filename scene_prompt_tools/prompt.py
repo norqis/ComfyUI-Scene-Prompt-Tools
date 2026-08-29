@@ -35,6 +35,15 @@ _PROMPT_INDEX_LOCK = threading.RLock()
 _PROMPT_SIGNATURE_TTL_SECONDS = 0.5
 
 
+def _is_link(value):
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and isinstance(value[0], str)
+        and isinstance(value[1], (int, float))
+    )
+
+
 def _split_prompt(text):
     parts = []
     current = []
@@ -428,11 +437,18 @@ def _prompt_data_index(user_id="default"):
 def _expand_branch_nodes(api_graph, expand_node_id):
     """Return the upstream input closure for one Scene Prompt Expand node."""
     nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
-    expand = nodes.get(str(expand_node_id)) if isinstance(nodes, dict) else None
+    if not isinstance(nodes, dict):
+        raise ValueError("生成開始時のグラフを取得できませんでした。")
+    expand_id = str(expand_node_id)
+    expand = nodes.get(expand_id)
+    if not isinstance(expand, dict):
+        raise ValueError(f"Scene Prompt Expand #{expand_id} が見つかりません。")
+    if expand.get("class_type") != "ScenePromptExpand":
+        raise ValueError(f"#{expand_id} は Scene Prompt Expand ではありません。")
     inputs = expand.get("inputs") if isinstance(expand, dict) else None
     source = inputs.get("scene_prompt") if isinstance(inputs, dict) else None
-    if not isinstance(source, (list, tuple)) or len(source) != 2:
-        return nodes if isinstance(nodes, dict) else {}
+    if not _is_link(source):
+        return {}
 
     closure = {}
     visiting = set()
@@ -442,14 +458,14 @@ def _expand_branch_nodes(api_graph, expand_node_id):
         if node_id in closure:
             return
         if node_id in visiting:
-            raise ValueError(f"Scene Prompt connection is cyclic at #{node_id}.")
+            raise ValueError(f"生成グラフのScene接続が循環しています: #{node_id}")
         node = nodes.get(node_id)
         if not isinstance(node, dict):
-            raise ValueError(f"Scene Prompt node #{node_id} was not found.")
+            raise ValueError(f"Sceneノード #{node_id} が見つかりません。")
         visiting.add(node_id)
         inputs = node.get("inputs")
         for value in inputs.values() if isinstance(inputs, dict) else ():
-            if isinstance(value, (list, tuple)) and len(value) == 2:
+            if _is_link(value):
                 visit(value[0])
         visiting.remove(node_id)
         closure[node_id] = node
