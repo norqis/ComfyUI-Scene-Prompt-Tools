@@ -584,7 +584,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
         resolved = {}
         for reference_node_id, preset_id, _node in _find_references(scene_nodes):
             try:
-                _resolve_preset_tree(preset_id, resolved, [], user_id)
+                _resolve_preset_tree(preset_id, resolved, [], user_id, len(scene_nodes))
             except ScenePresetError as exc:
                 raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
         _assert_run_not_cancelled(run_id, user_id)

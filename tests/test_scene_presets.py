@@ -533,6 +533,41 @@ class ScenePresetTests(unittest.TestCase):
             self.module.snapshot_presets_for_run("too-deep-run", api_graph, "101")
         self.assertEqual(error.exception.node_id, "100")
 
+    def test_snapshot_counts_outer_scene_nodes_with_nested_preset(self):
+        self.save("nested-small", basic_nodes("nested"))
+
+        def outer_graph(counter_count):
+            nodes = {}
+            previous = None
+            for index in range(counter_count):
+                node_id = f"outer-{index}"
+                inputs = {"count": 1}
+                if previous is not None:
+                    inputs["scene_prompt"] = [previous, 0]
+                nodes[node_id] = {"class_type": "ScenePromptCounter", "inputs": inputs}
+                previous = node_id
+            nodes["outer-reference"] = {
+                "class_type": "ScenePresetReference",
+                "inputs": {"preset_id": "nested-small", "scene_prompt": [previous, 0]},
+            }
+            nodes["outer-expand"] = {
+                "class_type": "ScenePromptExpand",
+                "inputs": {"scene_prompt": ["outer-reference", 0]},
+            }
+            return graph(nodes)
+
+        at_limit = self.module.snapshot_presets_for_run(
+            "outer-at-limit", outer_graph(124), "outer-expand"
+        )
+        self.assertEqual([preset["preset_id"] for preset in at_limit["presets"]], ["nested-small"])
+
+        with self.assertRaisesRegex(
+            self.module.ScenePresetResolutionError,
+            "累積ノード数",
+        ) as error:
+            self.module.snapshot_presets_for_run("outer-over-limit", outer_graph(125), "outer-expand")
+        self.assertEqual(error.exception.node_id, "outer-reference")
+
     def test_nested_presets_resolve_with_the_request_user(self):
         inner = basic_nodes("alice-inner")
         outer = basic_nodes()
