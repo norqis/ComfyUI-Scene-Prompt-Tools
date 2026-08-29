@@ -312,6 +312,52 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         with self.assertRaises(runs.SceneRunError):
             self.nodes._scene_run_plan(handle, first)
 
+    def test_is_changed_does_not_register_a_seed_plan_before_expand(self):
+        runs = sys.modules[f"{self.nodes.__package__}.runs"]
+        runs.RUN_CONTEXTS.clear()
+        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        unique_id = "expand-1"
+        try:
+            self.nodes.ScenePromptExpand.IS_CHANGED(
+                current_index=0,
+                scene_prompt=None,
+                run_handle=handle,
+                unique_id=unique_id,
+            )
+            self.assertEqual(runs.require_run_context(handle)["plans"], {})
+
+            plan = self.nodes.SceneEmptyLatent().apply_latent(
+                _scene_prompt(self.nodes, 2),
+                width=896,
+                height=1344,
+                batch_size=1,
+            )[0]
+            expander = self.nodes.ScenePromptExpand()
+            first = expander.expand(
+                current_index=0,
+                timestamp_dir=False,
+                scene_prompt=plan,
+                run_handle=handle,
+                unique_id=unique_id,
+            )
+            second = expander.expand(
+                current_index=1,
+                timestamp_dir=False,
+                scene_prompt=plan,
+                run_handle=handle,
+                unique_id=unique_id,
+            )
+
+            self.assertEqual(first[2]["total_count"], 2)
+            self.assertEqual(second[2]["total_count"], 2)
+            self.assertEqual(first[4]["samples"].shape, (1, 4, 168, 112))
+            self.assertEqual(second[4]["samples"].shape, (1, 4, 168, 112))
+            self.assertEqual(first[2]["file_index"], 1)
+            self.assertEqual(second[2]["file_index"], 2)
+            self.assertEqual(runs.require_run_context(handle)["plans"][unique_id], plan)
+        finally:
+            runs.release_run_context(handle, "alice")
+
     def test_concurrent_saves_reserve_distinct_filenames_and_keep_metadata(self):
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
         scene_info = {"use_run_dir": False, "file_index": 1, "filename_prefix": "parallel_", "positive": "test"}

@@ -151,6 +151,51 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertTrue(valid, error)
         self.assertIn("4", outputs)
 
+    def test_expand_is_changed_does_not_register_a_seed_plan(self):
+        nodes = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.nodes"]
+        runs = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.runs"]
+        runs.RUN_CONTEXTS.clear()
+        handle = runs.create_run_context("smoke", {"by_key": {}, "by_id": {}})
+        unique_id = "expand-1"
+        try:
+            nodes.ScenePromptExpand.IS_CHANGED(
+                current_index=0,
+                scene_prompt=None,
+                run_handle=handle,
+                unique_id=unique_id,
+            )
+            self.assertEqual(runs.require_run_context(handle)["plans"], {})
+
+            plan = nodes.SceneEmptyLatent().apply_latent(
+                nodes.ScenePromptCounter().count(count=2)[0],
+                width=896,
+                height=1344,
+                batch_size=1,
+            )[0]
+            expander = nodes.ScenePromptExpand()
+            first = expander.expand(
+                current_index=0,
+                timestamp_dir=False,
+                scene_prompt=plan,
+                run_handle=handle,
+                unique_id=unique_id,
+            )
+            second = expander.expand(
+                current_index=1,
+                timestamp_dir=False,
+                scene_prompt=plan,
+                run_handle=handle,
+                unique_id=unique_id,
+            )
+
+            self.assertEqual(first[2]["total_count"], 2)
+            self.assertEqual(second[2]["total_count"], 2)
+            self.assertEqual(first[4]["samples"].shape, (1, 4, 168, 112))
+            self.assertEqual(second[4]["samples"].shape, (1, 4, 168, 112))
+            self.assertEqual(runs.require_run_context(handle)["plans"][unique_id], plan)
+        finally:
+            runs.release_run_context(handle, "smoke")
+
 
 if __name__ == "__main__":
     unittest.main()
