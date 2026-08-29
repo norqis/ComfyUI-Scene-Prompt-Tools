@@ -233,7 +233,7 @@ class PromptDataRouteTests(unittest.TestCase):
             }
         }
         save_preset = self.routes._test_routes[("POST", "/scene_presets/save")]
-        response = asyncio.run(save_preset(Request({"preset_id": "route", "name": "Route", "api_graph": graph, "workflow": {"nodes": []}})))
+        response = asyncio.run(save_preset(Request({"preset_id": "route", "name": "Route", "output_node_id": "3", "api_graph": graph, "workflow": {"nodes": []}})))
         self.assertEqual(response["status"], 200)
         list_presets = self.routes._test_routes[("GET", "/scene_presets/list")]
         self.assertEqual(asyncio.run(list_presets(Request()))["payload"]["presets"][0]["metadata"]["preset_id"], "route")

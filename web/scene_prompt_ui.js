@@ -3493,6 +3493,23 @@ function findSceneWidget(node, role) {
     return node.widgets?.find((widget) => widget.sceneRole === role);
 }
 
+function addSceneCustomWidget(node, widget) {
+    if (typeof node.addCustomWidget === "function") {
+        return node.addCustomWidget(widget);
+    }
+    node.widgets = node.widgets || [];
+    node.widgets.push(widget);
+    return widget;
+}
+
+function triggerSceneWidgetDraws(node) {
+    for (const widget of node.widgets || []) {
+        if (widget?.sceneRole) {
+            widget.triggerDraw?.();
+        }
+    }
+}
+
 function addSceneButton(node, role, name, callback) {
     const existing = findSceneWidget(node, role);
     if (existing) {
@@ -3806,9 +3823,7 @@ function addSelectedListWidget(node, options = {}) {
     if (options.name) {
         widget.name = options.name;
     }
-    node.widgets = node.widgets || [];
-    node.widgets.push(widget);
-    return widget;
+    return addSceneCustomWidget(node, widget);
 }
 
 function visibleWidgetTotalHeight(node, options = {}) {
@@ -4760,9 +4775,7 @@ function addMatrixListWidget(node) {
             drawMatrixList(ctx, drawNode, width, y, height);
         },
     };
-    node.widgets = node.widgets || [];
-    node.widgets.push(widget);
-    return widget;
+    return addSceneCustomWidget(node, widget);
 }
 
 function scenePromptMergeDisplayCacheKey(node, width = null) {
@@ -4903,9 +4916,7 @@ function addScenePromptMergeListWidget(node) {
             drawScenePromptMergeList(ctx, drawNode, width, y, height);
         },
     };
-    node.widgets = node.widgets || [];
-    node.widgets.push(widget);
-    return widget;
+    return addSceneCustomWidget(node, widget);
 }
 
 function downstreamNodes(node) {
@@ -6413,9 +6424,7 @@ function addScenePromptQueueListWidget(node) {
             drawScenePromptQueueList(ctx, drawNode, width, y, height);
         },
     };
-    node.widgets = node.widgets || [];
-    node.widgets.push(widget);
-    return widget;
+    return addSceneCustomWidget(node, widget);
 }
 
 function sceneExpandCounts(node) {
@@ -6612,9 +6621,7 @@ function addSceneExpandCountWidget(node) {
             drawSceneExpandCount(ctx, drawNode, width, y, height);
         },
     };
-    node.widgets = node.widgets || [];
-    node.widgets.push(widget);
-    return widget;
+    return addSceneCustomWidget(node, widget);
 }
 
 function showSceneBatchError(message, error = null) {
@@ -8192,6 +8199,7 @@ function refreshScenePromptNode(node, options = {}) {
             setNodeSize(node, desiredWidth, sceneAutoFitHeight(desiredHeight), { minWidth: 1 });
         }
     }
+    triggerSceneWidgetDraws(node);
     node.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas?.(true, true);
     app.canvas?.setDirty?.(true, true);
@@ -8248,6 +8256,7 @@ function refreshPromptMatrixNode(node, options = {}) {
             node.sceneForceNaturalWidgetHeight = false;
         }
     }
+    triggerSceneWidgetDraws(node);
     node.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas?.(true, true);
     app.canvas?.setDirty?.(true, true);
@@ -8760,7 +8769,13 @@ async function saveScenePreset(node) {
         const response = await api.fetchApi("/scene_presets/save", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ preset_id: presetId, name, api_graph: apiGraph, workflow }),
+            body: JSON.stringify({
+                preset_id: presetId,
+                name,
+                output_node_id: String(node.id),
+                api_graph: apiGraph,
+                workflow,
+            }),
         });
         const data = await readApiJson(response, "Presetの保存に失敗しました");
         if (!response.ok) {
