@@ -118,6 +118,44 @@ async function testPresetListFailureInReverseResponseOrder() {
     assert.equal(context.scenePresetDisplayGraphs.size, 0);
 }
 
+async function testStalePresetListFailureAdoptsLatestSuccessInNormalResponseOrder() {
+    const first = deferred();
+    const second = deferred();
+    const context = presetListRaceContext(first, second);
+    const oldRequest = context.loadScenePresetList(true);
+    const newRequest = context.loadScenePresetList(true);
+    let oldRequestSettled = false;
+    oldRequest.then(
+        () => { oldRequestSettled = true; },
+        () => { oldRequestSettled = true; },
+    );
+    first.resolve({ ok: false, payload: { error: "stale failed" } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(oldRequestSettled, false);
+    second.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "new" } }], errors: [] } });
+    const [oldResult, newResult] = await Promise.all([oldRequest, newRequest]);
+    assert.equal(oldResult[0].preset_id, "new");
+    assert.equal(newResult[0].preset_id, "new");
+    assert.equal(context.scenePresetList[0].preset_id, "new");
+    assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
+}
+
+async function testStalePresetListFailureAdoptsLatestSuccessInReverseResponseOrder() {
+    const first = deferred();
+    const second = deferred();
+    const context = presetListRaceContext(first, second);
+    const oldRequest = context.loadScenePresetList(true);
+    const newRequest = context.loadScenePresetList(true);
+    second.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "new" } }], errors: [] } });
+    const newResult = await newRequest;
+    first.resolve({ ok: false, payload: { error: "stale failed" } });
+    const oldResult = await oldRequest;
+    assert.equal(oldResult[0].preset_id, "new");
+    assert.equal(newResult[0].preset_id, "new");
+    assert.equal(context.scenePresetList[0].preset_id, "new");
+    assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
+}
+
 async function testPresetListRetriesAfterLatestFailure() {
     const initial = deferred();
     const failed = deferred();
@@ -205,6 +243,8 @@ Promise.resolve()
     .then(testPresetListRaceInReverseResponseOrder)
     .then(testPresetListFailureInNormalResponseOrder)
     .then(testPresetListFailureInReverseResponseOrder)
+    .then(testStalePresetListFailureAdoptsLatestSuccessInNormalResponseOrder)
+    .then(testStalePresetListFailureAdoptsLatestSuccessInReverseResponseOrder)
     .then(testPresetListRetriesAfterLatestFailure)
     .then(testNodeRemovalCancelsItsRun)
     .then(testMatrixToggleSavesOnlyEnabledState)

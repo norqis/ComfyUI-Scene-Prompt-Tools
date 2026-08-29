@@ -8160,11 +8160,11 @@ async function loadScenePresetList(force = false) {
     const request = (async () => {
         const response = await api.fetchApi("/scene_presets/list");
         const data = await readApiJson(response, "Preset一覧を取得できませんでした");
-        if (!response.ok) {
-            throw new Error(data.error || "Preset一覧を取得できませんでした");
-        }
         if (generation !== scenePresetListRequestGeneration) {
             return scenePresetListLatestPromise;
+        }
+        if (!response.ok) {
+            throw new Error(data.error || "Preset一覧を取得できませんでした");
         }
         const entries = Array.isArray(data.presets) ? data.presets : [];
         scenePresetDisplayGraphs = new Map(entries.map((entry) => [
