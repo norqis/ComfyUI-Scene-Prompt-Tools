@@ -22,7 +22,7 @@ from .nodes import (
     ScenePromptQueue,
     ScenePromptCounter,
 )
-from .runs import require_run_context
+from .runs import peek_run_context, require_run_context
 
 
 PRESET_SCHEMA_VERSION = 1
@@ -34,6 +34,12 @@ _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
 _CANCELLED_RUNS_MAX_ENTRIES = 256
+# Scene plan evaluation is intentionally direct and recursive. Keep the
+# accepted graph size comfortably below the depth where coverage tracing can
+# exhaust Python's stack, so the save-time limit remains a reliable contract.
+MAX_PRESET_NODES = 128
+MAX_PRESET_REFERENCE_DEPTH = 64
+MAX_PRESET_REFERENCE_NODE_DEPTH = MAX_PRESET_NODES
 
 SAFE_NODE_CLASSES = {
     "ScenePrompt": ScenePrompt,
@@ -117,8 +123,10 @@ def _read_json(path):
             return json.load(handle)
     except FileNotFoundError:
         raise ScenePresetError(f"Presetが見つかりません: {path.stem}") from None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem} ({exc})") from exc
+    except json.JSONDecodeError as exc:
+        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
+    except OSError as exc:
+        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
 
 
 def _node_label(node_id, node):
@@ -164,6 +172,8 @@ def _validate_workflow_nodes(workflow, api_nodes):
 def _validate_preset_graph(nodes):
     if not isinstance(nodes, dict) or not nodes:
         raise ScenePresetError("Presetの実行グラフがありません。")
+    if len(nodes) > MAX_PRESET_NODES:
+        raise ScenePresetError(f"Presetのノード数は{MAX_PRESET_NODES}個までです。")
 
     inputs = [(node_id, node) for node_id, node in nodes.items()
               if isinstance(node, dict) and node.get("class_type") == BOUNDARY_INPUT]
@@ -201,22 +211,27 @@ def _validate_preset_graph(nodes):
 
     ancestors = set()
     visiting = []
-
-    def visit(node_id):
-        node_id = str(node_id)
-        if node_id in visiting:
+    visiting_set = set()
+    stack = [(str(output_id), False)]
+    while stack:
+        node_id, leaving = stack.pop()
+        if leaving:
+            visiting.pop()
+            visiting_set.remove(node_id)
+            ancestors.add(node_id)
+            continue
+        if node_id in ancestors:
+            continue
+        if node_id in visiting_set:
             start = visiting.index(node_id)
             cycle = " -> ".join([*(f"#{item}" for item in visiting[start:]), f"#{node_id}"])
             raise ScenePresetError(f"Presetの接続が循環しています: {cycle}")
-        if node_id in ancestors:
-            return
         visiting.append(node_id)
-        for source_id in _linked_nodes(nodes[node_id]):
-            visit(source_id)
-        visiting.pop()
-        ancestors.add(node_id)
-
-    visit(output_id)
+        visiting_set.add(node_id)
+        stack.append((node_id, True))
+        linked = list(_linked_nodes(nodes[node_id]))
+        for source_id in reversed(linked):
+            stack.append((source_id, False))
     outside = [node_id for node_id in nodes if node_id not in ancestors and str(node_id) != str(input_id)]
     if outside:
         node_id = outside[0]
@@ -225,12 +240,66 @@ def _validate_preset_graph(nodes):
     return {"input_id": str(input_id), "output_id": str(output_id), "output_link": output_link}
 
 
-def _validate_preset_runtime(nodes):
+def _validate_literal_input(node_id, node, input_name, value, definition):
+    declared_type, options = definition[0], definition[1] if len(definition) > 1 else {}
+    label = f"{_node_label(node_id, node)} の {input_name}"
+    if isinstance(declared_type, (list, tuple)):
+        if value not in declared_type:
+            raise ScenePresetResolutionError(f"{label} の値が不正です。", node_id)
+        return
+    if declared_type == "STRING":
+        valid = isinstance(value, str)
+    elif declared_type == "BOOLEAN":
+        valid = isinstance(value, bool)
+    elif declared_type == "INT":
+        valid = isinstance(value, int) and not isinstance(value, bool)
+    elif declared_type == "FLOAT":
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+    else:
+        return
+    if not valid:
+        if declared_type == "INT":
+            raise ScenePresetResolutionError(f"{label} must be an integer.", node_id)
+        raise ScenePresetResolutionError(f"{label} の型が不正です。", node_id)
+    if declared_type in {"INT", "FLOAT"}:
+        if "min" in options and value < options["min"]:
+            raise ScenePresetResolutionError(f"{label} は最小値未満です。", node_id)
+        if "max" in options and value > options["max"]:
+            raise ScenePresetResolutionError(f"{label} は最大値を超えています。", node_id)
+
+
+def _validate_preset_input_values(nodes):
+    for node_id, node in nodes.items():
+        class_type = node.get("class_type") if isinstance(node, dict) else None
+        cls = (
+            ScenePresetReference
+            if class_type == "ScenePresetReference"
+            else SAFE_NODE_CLASSES.get(class_type)
+        )
+        if cls is None:
+            continue
+        declared = cls.INPUT_TYPES()
+        definitions = {}
+        for section in ("required", "optional", "hidden"):
+            definitions.update(declared.get(section, {}))
+        for input_name, value in _node_inputs(node).items():
+            if input_name not in definitions:
+                raise ScenePresetResolutionError(
+                    f"{_node_label(node_id, node)} に未対応の入力 {input_name} があります。",
+                    node_id,
+                )
+            if is_link(value):
+                continue
+            _validate_literal_input(node_id, node, input_name, value, definitions[input_name])
+
+
+def _validate_preset_runtime(nodes, user_id="default"):
     validation = _validate_preset_graph(nodes)
+    _validate_preset_input_values(nodes)
     resolved = {}
     for reference_node_id, preset_id, _node in _find_references(nodes):
         try:
-            _resolve_preset_tree(preset_id, resolved, [])
+            _resolve_preset_tree(preset_id, resolved, [], user_id, len(nodes))
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
     _scene_node_value(nodes, validation["output_link"][0], resolved, set())
@@ -287,7 +356,7 @@ def save_preset(payload, user_id="default"):
     try:
         _validate_workflow_nodes(workflow, api_graph["output"])
         _validate_preset_graph(api_graph["output"])
-        _validate_preset_runtime(api_graph["output"])
+        _validate_preset_runtime(api_graph["output"], user_id)
     except ScenePresetResolutionError as exc:
         raise ScenePresetResolutionError(f"Preset「{name}」: {exc}", exc.node_id) from exc
     except ScenePresetError as exc:
@@ -377,8 +446,10 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     return _scene_prompt_closure(nodes, source[0]), source
 
 
-def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
+def _resolve_preset_tree(preset_id, resolved, stack, user_id="default", node_depth=0):
     preset_id = _clean_preset_id(preset_id)
+    if len(stack) >= MAX_PRESET_REFERENCE_DEPTH:
+        raise ScenePresetError(f"Preset参照の深さは{MAX_PRESET_REFERENCE_DEPTH}個までです。")
     if preset_id in stack:
         cycle = " -> ".join([*stack, preset_id])
         raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
@@ -386,10 +457,15 @@ def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
         return
     preset = load_preset(preset_id, user_id)
     preset_name = str(preset["metadata"].get("name") or preset_id)
+    next_node_depth = node_depth + len(_preset_nodes(preset))
+    if next_node_depth > MAX_PRESET_REFERENCE_NODE_DEPTH:
+        raise ScenePresetError(
+            f"Preset参照内の累積ノード数は{MAX_PRESET_REFERENCE_NODE_DEPTH}個までです。"
+        )
     next_stack = [*stack, preset_id]
     for _node_id, nested_id, _node in _find_references(_preset_nodes(preset)):
         try:
-            _resolve_preset_tree(nested_id, resolved, next_stack, user_id)
+            _resolve_preset_tree(nested_id, resolved, next_stack, user_id, next_node_depth)
         except ScenePresetError as exc:
             raise ScenePresetError(f"Preset「{preset_name}」: {exc}") from exc
     resolved[preset_id] = preset
@@ -508,7 +584,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
         resolved = {}
         for reference_node_id, preset_id, _node in _find_references(scene_nodes):
             try:
-                _resolve_preset_tree(preset_id, resolved, [], user_id)
+                _resolve_preset_tree(preset_id, resolved, [], user_id, len(scene_nodes))
             except ScenePresetError as exc:
                 raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
         _assert_run_not_cancelled(run_id, user_id)
@@ -573,6 +649,21 @@ def _snapshot_preset(run_id, preset_id, user_id="default"):
                 return copy.deepcopy(preset)
             raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
     return load_preset(preset_id, user_id)
+
+
+def _peek_snapshot_preset(run_id, preset_id, user_id="default"):
+    """Read a prepared snapshot without extending TTL or changing LRU order."""
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        raise ScenePresetError("実行コンテキストがありません。画像生成を開始し直してください。")
+    with _PRESET_LOCK:
+        entry = _RUN_SNAPSHOTS.get(_run_cache_key(run_id, user_id))
+        if not entry:
+            raise ScenePresetError(f"実行「{run_id}」のPresetスナップショットがありません。")
+        preset = entry["presets"].get(preset_id)
+        if not preset:
+            raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
+        return preset
 
 
 def list_presets(user_id="default"):
@@ -721,8 +812,8 @@ class ScenePresetReference:
     @classmethod
     def IS_CHANGED(cls, preset_id="", scene_prompt=None, run_handle="", **kwargs):
         del scene_prompt, kwargs
-        context = require_run_context(run_handle)
-        preset = _snapshot_preset(run_handle, _clean_preset_id(preset_id), context["user_id"])
+        context = peek_run_context(run_handle)
+        preset = _peek_snapshot_preset(run_handle, _clean_preset_id(preset_id), context["user_id"])
         metadata = preset["metadata"]
         return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_handle}"
 

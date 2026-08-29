@@ -134,7 +134,10 @@ let promptItems = null;
 let savedPrompts = null;
 let promptItemsPromise = null;
 let savedPromptsPromise = null;
-let savedPromptsRequestId = 0;
+let promptItemsLatestPromise = null;
+let savedPromptsLatestPromise = null;
+let promptItemsRequestGeneration = 0;
+let savedPromptsRequestGeneration = 0;
 let activePopup = null;
 let activePopupContext = null;
 let sceneBatchRun = null;
@@ -168,6 +171,7 @@ let scenePresetNotificationTimer = null;
 const sceneRunHandlesByPromptId = new Map();
 const sceneRunTerminalPromptIds = new Map();
 const sceneRunHandleReconcileTimers = new Map();
+const sceneRunReleaseStates = new Map();
 const SCENE_RUN_TERMINAL_MAX = 256;
 const SCENE_RUN_TERMINAL_RETENTION_MS = 10 * 60 * 1000;
 let sceneRunTerminalOverflowUntil = 0;
@@ -193,68 +197,77 @@ function clamp(value, min, max) {
 
 import { injectStyle } from "./scene_prompt_style.js";
 
-async function loadPromptItems() {
-    if (promptItems) {
+async function loadPromptItems(force = false) {
+    if (promptItems && !force) {
         return promptItems;
     }
-    if (!promptItemsPromise) {
-        promptItemsPromise = (async () => {
-            try {
-                const response = await api.fetchApi("/scene_prompt/items");
-                const data = await readApiJson(response, "候補データの読込に失敗しました");
-                if (!response.ok) {
-                    throw new Error(data.error || "候補データの読込に失敗しました");
-                }
-                if (!Array.isArray(data.items)) {
-                    throw new Error("候補データの応答形式が不正です。");
-                }
-                promptItems = data.items;
-            } catch (error) {
-                console.error("[Scene Prompt] 候補データの読込に失敗しました", error);
-                showSceneBatchError("候補データを読み込めませんでした。", error);
-                throw error;
-            } finally {
-                promptItemsPromise = null;
-            }
-            return promptItems;
-        })();
+    if (!force && promptItemsPromise) {
+        return promptItemsPromise;
     }
-    return promptItemsPromise;
+    const generation = ++promptItemsRequestGeneration;
+    let request = null;
+    const latest = () => promptItemsLatestPromise === request ? promptItems : promptItemsLatestPromise;
+    request = (async () => {
+        try {
+            const response = await api.fetchApi(`/scene_prompt/items${force ? "?reload=1" : ""}`);
+            if (generation !== promptItemsRequestGeneration) return latest();
+            const data = await readApiJson(response, "候補データの読込に失敗しました");
+            if (generation !== promptItemsRequestGeneration) return latest();
+            if (!response.ok) throw new Error(data.error || "候補データの読込に失敗しました");
+            if (!Array.isArray(data.items)) throw new Error("候補データの応答形式が不正です。");
+            promptItems = data.items;
+            return promptItems;
+        } catch (error) {
+            if (generation !== promptItemsRequestGeneration) return latest();
+            console.error("[Scene Prompt] 候補データの読込に失敗しました", error);
+            showSceneBatchError("候補データを読み込めませんでした。", error);
+            throw error;
+        }
+    })();
+    promptItemsPromise = request;
+    promptItemsLatestPromise = request;
+    try {
+        return await request;
+    } finally {
+        if (promptItemsPromise === request) promptItemsPromise = null;
+    }
 }
 
 async function loadSavedPrompts(force = false) {
     if (savedPrompts && !force) {
         return savedPrompts;
     }
-    if (!savedPromptsPromise) {
-        const requestId = ++savedPromptsRequestId;
-        savedPromptsPromise = (async () => {
-            try {
-                const response = await api.fetchApi("/scene_prompt/saved_prompts");
-                const data = await readApiJson(response, "保存済みプロンプトの読込に失敗しました");
-                if (!response.ok) {
-                    throw new Error(data.error || "保存済みプロンプトの読込に失敗しました");
-                }
-                if (!Array.isArray(data.saved_prompts)) {
-                    throw new Error("保存済みプロンプトの応答形式が不正です。");
-                }
-                if (requestId === savedPromptsRequestId) {
-                    savedPrompts = data.saved_prompts;
-                    clearSceneSelectedListLayoutCaches();
-                }
-            } catch (error) {
-                console.error("[Scene Prompt] 保存済みプロンプトの読込に失敗しました", error);
-                showSceneBatchError("保存済みプロンプトを読み込めませんでした。", error);
-                throw error;
-            } finally {
-                if (requestId === savedPromptsRequestId) {
-                    savedPromptsPromise = null;
-                }
-            }
-            return savedPrompts;
-        })();
+    if (!force && savedPromptsPromise) {
+        return savedPromptsPromise;
     }
-    return savedPromptsPromise;
+    const generation = ++savedPromptsRequestGeneration;
+    let request = null;
+    const latest = () => savedPromptsLatestPromise === request ? savedPrompts : savedPromptsLatestPromise;
+    request = (async () => {
+        try {
+            const response = await api.fetchApi(`/scene_prompt/saved_prompts${force ? "?reload=1" : ""}`);
+            if (generation !== savedPromptsRequestGeneration) return latest();
+            const data = await readApiJson(response, "保存済みプロンプトの読込に失敗しました");
+            if (generation !== savedPromptsRequestGeneration) return latest();
+            if (!response.ok) throw new Error(data.error || "保存済みプロンプトの読込に失敗しました");
+            if (!Array.isArray(data.saved_prompts)) throw new Error("保存済みプロンプトの応答形式が不正です。");
+            savedPrompts = data.saved_prompts;
+            clearSceneSelectedListLayoutCaches();
+            return savedPrompts;
+        } catch (error) {
+            if (generation !== savedPromptsRequestGeneration) return latest();
+            console.error("[Scene Prompt] 保存済みプロンプトの読込に失敗しました", error);
+            showSceneBatchError("保存済みプロンプトを読み込めませんでした。", error);
+            throw error;
+        }
+    })();
+    savedPromptsPromise = request;
+    savedPromptsLatestPromise = request;
+    try {
+        return await request;
+    } finally {
+        if (savedPromptsPromise === request) savedPromptsPromise = null;
+    }
 }
 function clearSceneSelectedListLayoutCaches() {
     for (const node of app.graph?._nodes || []) {
@@ -287,6 +300,7 @@ async function readApiJson(response, errorMessage) {
 }
 
 async function saveCurrentPrompt(name, description, items) {
+    const generation = ++savedPromptsRequestGeneration;
     const response = await api.fetchApi("/scene_prompt/saved_prompts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -296,12 +310,15 @@ async function saveCurrentPrompt(name, description, items) {
     if (!response.ok) {
         throw new Error(data.error || "プロンプトまとめの保存に失敗しました");
     }
-    savedPrompts = Array.isArray(data.saved_prompts) ? data.saved_prompts : [];
+    if (generation === savedPromptsRequestGeneration) {
+        savedPrompts = Array.isArray(data.saved_prompts) ? data.saved_prompts : null;
+    }
     clearSceneSelectedListLayoutCaches();
     return data.saved_prompt;
 }
 
 async function createPromptItem(payload) {
+    const generation = ++promptItemsRequestGeneration;
     const response = await api.fetchApi("/scene_prompt/items", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -311,11 +328,14 @@ async function createPromptItem(payload) {
     if (!response.ok) {
         throw new Error(data.error || "プロンプト作成に失敗しました");
     }
-    promptItems = Array.isArray(data.items) ? data.items : null;
+    if (generation === promptItemsRequestGeneration) {
+        promptItems = Array.isArray(data.items) ? data.items : null;
+    }
     return data.item;
 }
 
 async function updatePromptItem(payload) {
+    const generation = ++promptItemsRequestGeneration;
     const response = await api.fetchApi("/scene_prompt/items", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -325,7 +345,9 @@ async function updatePromptItem(payload) {
     if (!response.ok) {
         throw new Error(data.error || "プロンプト更新に失敗しました");
     }
-    promptItems = Array.isArray(data.items) ? data.items : null;
+    if (generation === promptItemsRequestGeneration) {
+        promptItems = Array.isArray(data.items) ? data.items : null;
+    }
     return data.item;
 }
 
@@ -1844,7 +1866,7 @@ function openPopupShell(node, titleText, options = {}) {
             setActiveStateWidget(node, stateWidgetName);
             promptItems = null;
             savedPrompts = null;
-            const [items] = await Promise.all([loadPromptItems(), loadSavedPrompts(true)]);
+            const [items] = await Promise.all([loadPromptItems(true), loadSavedPrompts(true)]);
             if (matrixLineDraftContextFor(node, stateWidgetName)) {
                 pruneStateToData(node, readStateFromWidget(node, stateWidgetName), items, { stateWidgetName });
             } else {
@@ -3101,6 +3123,7 @@ function hideWidget(widget) {
     const element = widget.inputEl || widget.element || widget.domElement;
     const container = element?.closest?.(".dom-widget") || element;
     if (container?.style) {
+        container.classList?.add("scene-prompt-owned-widget");
         container.style.setProperty("display", "none", "important");
     }
 }
@@ -3125,6 +3148,7 @@ function showWidget(widget) {
     const element = widget.inputEl || widget.element || widget.domElement;
     const container = element?.closest?.(".dom-widget") || element;
     if (container?.style) {
+        container.classList?.remove("scene-prompt-owned-widget");
         container.style.removeProperty("display");
     }
 }
@@ -7124,6 +7148,8 @@ function installSceneBatchPromptCapture() {
         const promptId = scenePromptIdFromValue(result);
         if (preparedRunHandle && promptId) {
             registerQueuedSceneRunHandle(promptId, preparedRunHandle);
+        } else if (preparedRunHandle) {
+            releaseSceneRunHandle(preparedRunHandle);
         }
         if (matchesFirstBatchPrompt) {
             acceptSceneBatchPrompt(run, result);
@@ -7323,15 +7349,73 @@ function registerQueuedSceneRunHandle(promptId, runHandle) {
     });
 }
 
-function releaseSceneRunHandle(runHandle) {
-    if (!runHandle) {
+function releaseSceneRunHandle(runHandle, options = {}) {
+    const key = String(runHandle || "");
+    if (!key) {
+        return Promise.resolve(false);
+    }
+    const keepalive = !!options.keepalive;
+    const state = sceneRunReleaseStates.get(key) || {};
+    const lane = keepalive ? "keepalive" : "normal";
+    if (state[lane]) {
+        return state[lane];
+    }
+    const release = (async () => {
+        let lastError = null;
+        const attempts = keepalive ? 1 : 3;
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            try {
+                const response = await api.fetchApi("/scene_prompt/runs/release", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ run_handle: key }),
+                    keepalive,
+                });
+                const data = await readApiJson(response, "生成計画の解放に失敗しました");
+                if (!response.ok) {
+                    throw new Error(data.error || "生成計画の解放に失敗しました");
+                }
+                return !!data.released;
+            } catch (error) {
+                lastError = error;
+                if (attempt < attempts && !keepalive) {
+                    await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+                }
+            }
+        }
+        console.warn("[Scene Prompt] 生成計画の解放に失敗しました。", lastError);
+        return false;
+    })();
+    state[lane] = release;
+    sceneRunReleaseStates.set(key, state);
+    release.finally(() => {
+        if (state[lane] === release) {
+            state[lane] = null;
+        }
+        if (!state.normal && !state.keepalive) {
+            sceneRunReleaseStates.delete(key);
+        }
+    });
+    return release;
+}
+
+function releaseSceneRunsOnPageHide(event) {
+    if (event?.persisted) {
         return;
     }
-    api.fetchApi("/scene_prompt/runs/release", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run_handle: runHandle }),
-    }).catch((error) => console.warn("[Scene Prompt] 生成計画の解放に失敗しました。", error));
+    const handles = new Set(sceneRunReleaseStates.keys());
+    for (const handle of sceneRunHandlesByPromptId.values()) {
+        handles.add(handle);
+    }
+    for (const run of sceneBatchRunsById.values()) {
+        if (run?.runHandle) handles.add(run.runHandle);
+    }
+    for (const run of sceneBatchDetachedRuns.values()) {
+        if (run?.runHandle) handles.add(run.runHandle);
+    }
+    for (const handle of handles) {
+        releaseSceneRunHandle(handle, { keepalive: true });
+    }
 }
 
 function clearPendingSceneBatchReleasesForRun(runId) {
@@ -9075,6 +9159,7 @@ app.registerExtension({
         }
         window.__ScenePromptUISetupInstalled = true;
         scheduleScenePromptQueueSyncInstall();
+        window.addEventListener("pagehide", releaseSceneRunsOnPageHide);
         api.addEventListener("execution_start", () => {
             if (!sceneBatchRun) {
                 clearSceneSavePreviews();

@@ -1,5 +1,6 @@
 import importlib
 import json
+import copy
 import sys
 import tempfile
 import threading
@@ -120,6 +121,24 @@ class ScenePresetTests(unittest.TestCase):
             "api_graph": graph(nodes),
             "workflow": workflow or {"version": 1, "nodes": []},
         }, user_id)
+
+    def write_preset_without_runtime_validation(self, preset_id, nodes, user_id="default"):
+        workflow = {"version": 1, "nodes": []}
+        api_graph = graph(nodes)
+        payload = {
+            "schema_version": self.module.PRESET_SCHEMA_VERSION,
+            "metadata": {
+                "preset_id": preset_id,
+                "name": preset_id,
+                "revision": 1,
+                "sha256": self.module._content_hash(api_graph, workflow),
+            },
+            "workflow": workflow,
+            "api_graph": api_graph,
+        }
+        path = self.module._preset_path(preset_id, user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_save_is_atomic_and_revision_hash_increase(self):
         first = self.save("preset_a", basic_nodes("first"))
@@ -430,6 +449,203 @@ class ScenePresetTests(unittest.TestCase):
             self.save("invalid_count", nodes)
         self.assertEqual(error.exception.node_id, "4")
 
+    def test_save_accepts_only_current_scene_path_choices_and_valid_numeric_range(self):
+        choices = self.nodes.ScenePath.INPUT_TYPES()["required"]["path_mode"][0]
+        for index, path_mode in enumerate(choices):
+            nodes = basic_nodes()
+            nodes["4"] = {
+                "class_type": "ScenePath",
+                "inputs": {"scene_prompt": ["2", 0], "path_name": "chapter", "path_mode": path_mode},
+            }
+            nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+            self.save(f"valid-path-mode-{index}", nodes)
+
+        for path_mode in ("directory", "append", "broken"):
+            nodes = basic_nodes()
+            nodes["4"] = {
+                "class_type": "ScenePath",
+                "inputs": {"scene_prompt": ["2", 0], "path_name": "chapter", "path_mode": path_mode},
+            }
+            nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+            with self.subTest(path_mode=path_mode), self.assertRaises(self.module.ScenePresetResolutionError) as error:
+                self.save(f"invalid-path-mode-{path_mode}", nodes)
+            self.assertEqual(error.exception.node_id, "4")
+
+        nodes = basic_nodes()
+        nodes["4"] = {
+            "class_type": "SceneEmptyLatent",
+            "inputs": {"scene_prompt": ["2", 0], "width": 1, "height": 1216, "batch_size": 1},
+        }
+        nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+        with self.assertRaises(self.module.ScenePresetResolutionError) as error:
+            self.save("invalid-latent-width", nodes)
+        self.assertEqual(error.exception.node_id, "4")
+
+    def test_nested_counter_chain_has_a_controlled_resolution_limit(self):
+        previous_preset_id = None
+        def counter_preset_nodes(nested_preset_id, counter_count=20):
+            nodes = {"1": {"class_type": "ScenePresetInput", "inputs": {}}}
+            source = ["1", 0]
+            if nested_preset_id is not None:
+                nodes["2"] = {
+                    "class_type": "ScenePresetReference",
+                    "inputs": {"preset_id": nested_preset_id, "scene_prompt": source},
+                }
+                source = ["2", 0]
+            for counter_index in range(counter_count):
+                node_id = str(10 + counter_index)
+                nodes[node_id] = {
+                    "class_type": "ScenePromptCounter",
+                    "inputs": {"scene_prompt": source, "count": 1},
+                }
+                source = [node_id, 0]
+            nodes["3"] = {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": source}}
+            return nodes
+
+        self.assertEqual(self.module.MAX_PRESET_REFERENCE_NODE_DEPTH, self.module.MAX_PRESET_NODES)
+        for preset_index in range(5):
+            nodes = counter_preset_nodes(previous_preset_id)
+            preset_id = f"nested-{preset_index}"
+            self.write_preset_without_runtime_validation(preset_id, nodes)
+            previous_preset_id = preset_id
+
+        at_limit_nodes = counter_preset_nodes(previous_preset_id, counter_count=11)
+        saved = self.save("nested-at-limit", at_limit_nodes)
+        self.assertEqual(saved["metadata"]["preset_id"], "nested-at-limit")
+
+        final_nodes = counter_preset_nodes("nested-at-limit", counter_count=1)
+        with self.assertRaisesRegex(
+            self.module.ScenePresetResolutionError,
+            "累積ノード数",
+        ) as error:
+            self.save("nested-over-limit", final_nodes)
+        self.assertEqual(error.exception.node_id, "2")
+
+        self.write_preset_without_runtime_validation("nested-runtime-final", final_nodes)
+        api_graph = graph({
+            "100": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "nested-runtime-final"}},
+            "101": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["100", 0]}},
+        })
+        with self.assertRaisesRegex(
+            self.module.ScenePresetResolutionError,
+            "累積ノード数",
+        ) as error:
+            self.module.snapshot_presets_for_run("too-deep-run", api_graph, "101")
+        self.assertEqual(error.exception.node_id, "100")
+
+    def test_snapshot_counts_outer_scene_nodes_with_nested_preset(self):
+        self.save("nested-small", basic_nodes("nested"))
+
+        def outer_graph(counter_count):
+            nodes = {}
+            previous = None
+            for index in range(counter_count):
+                node_id = f"outer-{index}"
+                inputs = {"count": 1}
+                if previous is not None:
+                    inputs["scene_prompt"] = [previous, 0]
+                nodes[node_id] = {"class_type": "ScenePromptCounter", "inputs": inputs}
+                previous = node_id
+            nodes["outer-reference"] = {
+                "class_type": "ScenePresetReference",
+                "inputs": {"preset_id": "nested-small", "scene_prompt": [previous, 0]},
+            }
+            nodes["outer-expand"] = {
+                "class_type": "ScenePromptExpand",
+                "inputs": {"scene_prompt": ["outer-reference", 0]},
+            }
+            return graph(nodes)
+
+        at_limit = self.module.snapshot_presets_for_run(
+            "outer-at-limit", outer_graph(124), "outer-expand"
+        )
+        self.assertEqual([preset["preset_id"] for preset in at_limit["presets"]], ["nested-small"])
+
+        with self.assertRaisesRegex(
+            self.module.ScenePresetResolutionError,
+            "累積ノード数",
+        ) as error:
+            self.module.snapshot_presets_for_run("outer-over-limit", outer_graph(125), "outer-expand")
+        self.assertEqual(error.exception.node_id, "outer-reference")
+
+    def test_nested_presets_resolve_with_the_request_user(self):
+        inner = basic_nodes("alice-inner")
+        outer = basic_nodes()
+        outer["2"] = {
+            "class_type": "ScenePresetReference",
+            "inputs": {"preset_id": "inner", "scene_prompt": ["1", 0]},
+        }
+        self.save("inner", inner, user_id="alice")
+        self.save("outer", outer, user_id="alice")
+        self.save("inner", basic_nodes("bob-inner"), user_id="bob")
+        self.save("outer", outer, user_id="bob")
+        graph_data = graph({
+            "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "outer"}},
+            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+        })
+        runs = sys.modules[f"{self.module.__package__}.runs"]
+        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        self.module.snapshot_presets_for_run(handle, graph_data, "11", "alice")
+        resolved = self.module._RUN_SNAPSHOTS[("alice", handle)]["presets"]
+        value = self.module._scene_node_value(
+            graph_data["output"], "10", resolved, set(), user_id="alice", run_handle=handle
+        )
+        self.assertEqual(value["rows"][0]["row"]["positive_parts"], ["alice-inner"])
+        runs.release_run_context(handle, "alice")
+        self.module.release_scene_preset_snapshot(handle, "alice")
+
+    def test_reference_is_changed_is_read_only_for_run_and_snapshot_state(self):
+        self.save("fixed", basic_nodes("first"), user_id="alice")
+        graph_data = graph({
+            "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
+            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+        })
+        runs = sys.modules[f"{self.module.__package__}.runs"]
+        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        try:
+            self.module.snapshot_presets_for_run(handle, graph_data, "11", "alice")
+            before_runs = copy.deepcopy(runs.RUN_CONTEXTS._entries)
+            before_snapshots = copy.deepcopy(self.module._RUN_SNAPSHOTS)
+            first = self.module.ScenePresetReference.IS_CHANGED("fixed", run_handle=handle)
+            second = self.module.ScenePresetReference.IS_CHANGED("fixed", run_handle=handle)
+            self.assertEqual(first, second)
+            self.assertEqual(runs.RUN_CONTEXTS._entries, before_runs)
+            self.assertEqual(self.module._RUN_SNAPSHOTS, before_snapshots)
+        finally:
+            runs.release_run_context(handle, "alice")
+            self.module.release_scene_preset_snapshot(handle, "alice")
+
+    def test_preset_graph_limit_is_a_controlled_error(self):
+        nodes = basic_nodes()
+        previous = "2"
+        for index in range(self.module.MAX_PRESET_NODES - len(nodes) + 1):
+            node_id = str(10 + index)
+            nodes[node_id] = {
+                "class_type": "ScenePromptCounter",
+                "inputs": {"scene_prompt": [previous, 0], "count": 1},
+            }
+            previous = node_id
+        nodes["3"]["inputs"]["scene_prompt"] = [previous, 0]
+        with self.assertRaisesRegex(self.module.ScenePresetError, "ノード数"):
+            self.save("too-deep", nodes)
+
+    def test_long_linear_preset_at_limit_does_not_overflow_python_stack(self):
+        self.assertEqual(self.module.MAX_PRESET_NODES, 128)
+        nodes = basic_nodes()
+        previous = "2"
+        counter_count = self.module.MAX_PRESET_NODES - len(nodes)
+        for index in range(counter_count):
+            node_id = str(10 + index)
+            nodes[node_id] = {
+                "class_type": "ScenePromptCounter",
+                "inputs": {"scene_prompt": [previous, 0], "count": 1},
+            }
+            previous = node_id
+        nodes["3"]["inputs"]["scene_prompt"] = [previous, 0]
+
+        saved = self.save("linear-at-limit", nodes)
+        self.assertEqual(saved["metadata"]["preset_id"], "linear-at-limit")
+
     def test_repeated_resolve_keeps_the_first_snapshot_and_response(self):
         self.save("fixed", basic_nodes("first"))
         api_graph = graph({
@@ -512,7 +728,7 @@ class ScenePresetTests(unittest.TestCase):
         }
         nodes["6"] = {"class_type": "ScenePromptMerge", "inputs": {"scene_prompt1": ["4", 0], "scene_prompt2": ["5", 0]}}
         nodes["7"] = {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["6", 0], "count": 2}}
-        nodes["8"] = {"class_type": "ScenePath", "inputs": {"scene_prompt": ["7", 0], "path_name": "preset_path", "path_mode": "directory"}}
+        nodes["8"] = {"class_type": "ScenePath", "inputs": {"scene_prompt": ["7", 0], "path_name": "preset_path", "path_mode": self.nodes.PATH_DIRECTORY}}
         nodes["9"] = {"class_type": "SceneEmptyLatent", "inputs": {"scene_prompt": ["8", 0], "width": 832, "height": 1216, "batch_size": 1}}
         nodes["10"] = {"class_type": "ScenePromptQueue", "inputs": {"scene_prompt1": ["9", 0], "scene_prompt2": ["4", 0]}}
         nodes["3"]["inputs"]["scene_prompt"] = ["10", 0]

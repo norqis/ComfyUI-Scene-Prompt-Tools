@@ -114,6 +114,29 @@ class ImportSceneHtmlTests(unittest.TestCase):
                 self.module.write_data(self.grouped, destination, "clean")
         self.assertEqual(json.loads(original.read_text(encoding="utf-8"))[0]["label"], "Keep")
 
+    def test_backup_cleanup_failure_before_commit_preserves_destination(self):
+        destination = self.root / "data"
+        original = destination / "existing" / "prompt.json"
+        original.parent.mkdir(parents=True)
+        original.write_text(json.dumps([{"label": "Keep", "prompt": "keep"}]), encoding="utf-8")
+        backup = destination.with_name(".data.backup-stale")
+        backup.mkdir()
+        (backup / "stale.txt").write_text("stale", encoding="utf-8")
+        remove_tree = self.module.shutil.rmtree
+
+        def fail_backup_cleanup(path, *args, **kwargs):
+            if Path(path) == backup:
+                raise OSError("simulated backup cleanup failure")
+            return remove_tree(path, *args, **kwargs)
+
+        with mock.patch.object(self.module, "stable_suffix", return_value="stale"), mock.patch.object(
+            self.module.shutil, "rmtree", side_effect=fail_backup_cleanup,
+        ):
+            with self.assertRaisesRegex(OSError, "backup cleanup failure"):
+                self.module.write_data(self.grouped, destination, "clean")
+        self.assertEqual(json.loads(original.read_text(encoding="utf-8"))[0]["label"], "Keep")
+        self.assertTrue(backup.exists())
+
     def test_dry_run_leaves_output_absent(self):
         source = self.root / "html"
         source.mkdir()

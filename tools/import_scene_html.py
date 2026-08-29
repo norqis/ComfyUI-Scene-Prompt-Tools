@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -252,7 +252,7 @@ def write_data(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: 
                 backup.replace(output_dir)
             raise
         if backup.exists():
-            shutil.rmtree(backup)
+            shutil.rmtree(backup, ignore_errors=True)
         return (
             len({path.parent.parent for path, _items in prepared}),
             len(prepared),

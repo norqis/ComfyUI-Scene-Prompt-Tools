@@ -30,6 +30,21 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.require(first)["user_id"], "alice")
         self.assertEqual(store.require(second)["user_id"], "bob")
 
+    def test_create_purges_expired_entries_before_capacity_check(self):
+        expired = []
+        store = RUNS.RunContextStore(
+            maximum=1,
+            prepared_limit=1,
+            prepared_ttl_seconds=10,
+            expiration_callback=lambda handle, user_id: expired.append((handle, user_id)),
+        )
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11, 11]):
+            old = store.create("alice", {"by_key": {}, "by_id": {}})
+            fresh = store.create("alice", {"by_key": {}, "by_id": {}})
+        self.assertNotEqual(old, fresh)
+        self.assertEqual(expired, [(old, "alice")])
+        self.assertEqual(store._entries[fresh]["user_id"], "alice")
+
     def test_claim_is_idempotent_and_active_contexts_stay_until_idle_ttl(self):
         store = RUNS.RunContextStore(maximum=3, prepared_limit=2, active_limit=1, prepared_ttl_seconds=999)
         handle = store.create("alice", {"by_key": {}, "by_id": {}})

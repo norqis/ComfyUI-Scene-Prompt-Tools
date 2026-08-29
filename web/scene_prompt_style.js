@@ -451,7 +451,7 @@ export function injectStyle() {
             font-size: 11px;
             overflow-wrap: anywhere;
         }
-        .dom-widget:has(textarea[placeholder="category_order"]) {
+        .scene-prompt-owned-widget:has(textarea[placeholder="category_order"]) {
             display: none !important;
             pointer-events: none !important;
             visibility: hidden !important;

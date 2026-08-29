@@ -40,7 +40,7 @@ class PublicPackageTests(unittest.TestCase):
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.2.2"', pyproject)
+        self.assertIn('version = "0.2.3"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
@@ -86,6 +86,14 @@ class PublicPackageTests(unittest.TestCase):
         self.assertNotIn("legacy_keys", runtime_source)
         self.assertNotIn("source_shape", runtime_source)
         self.assertNotIn("_migrate", runtime_source)
+
+    def test_public_text_sources_have_no_utf8_bom(self):
+        for relative_path in tracked_files():
+            path = ROOT / relative_path
+            if path.suffix.lower() not in {".py", ".js", ".json", ".md", ".toml", ".yml", ".yaml"}:
+                continue
+            with self.subTest(path=relative_path):
+                self.assertFalse(path.read_bytes().startswith(b"\xef\xbb\xbf"))
 
     def test_public_history_rejects_personal_email_but_allows_github_noreply(self):
         self.assertEqual(history_privacy_failures([
@@ -135,7 +143,8 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn("SCENE_PROMPT_SYNTHETIC_MERGE_REF", workflow)
         self.assertIn("cache: pip", workflow)
         self.assertNotIn("cache: npm", workflow)
-        self.assertIn('python -m pip install "numpy<3" "Pillow<12"', workflow)
+        self.assertIn('python -m pip install "numpy<3" "Pillow<12" "coverage<8"', workflow)
+        self.assertIn("coverage report -m", workflow)
         self.assertIn("python3 - <<'PY'", workflow)
 
 

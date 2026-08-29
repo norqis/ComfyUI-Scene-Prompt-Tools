@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib.util
 import json
 import os
@@ -195,6 +196,78 @@ class RealComfyUISmokeTests(unittest.TestCase):
             self.assertEqual(runs.require_run_context(handle)["plans"][unique_id], plan)
         finally:
             runs.release_run_context(handle, "smoke")
+
+    def test_preset_is_changed_cache_keeps_run_and_snapshot_read_only(self):
+        import execution
+        import nodes as comfy_nodes
+        from comfy_execution.graph import DynamicPrompt
+
+        presets = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.presets"]
+        runs = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.runs"]
+        preset_graph = {
+            "output": {
+                "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                "2": {
+                    "class_type": "ScenePrompt",
+                    "inputs": {
+                        "scene_prompt": ["1", 0],
+                        "prompt_name": "cache smoke",
+                        "positive_base": "test",
+                        "positive_json": '{"version":1,"categories":{}}',
+                        "negative_base": "",
+                        "negative_json": '{"version":1,"categories":{}}',
+                        "category_order": "",
+                        "seed": 0,
+                        "randomize": True,
+                    },
+                },
+                "3": {
+                    "class_type": "ScenePresetOutput",
+                    "inputs": {"preset_id": "cache", "scene_prompt": ["2", 0]},
+                },
+            }
+        }
+        api_graph = {
+            "output": {
+                "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "cache"}},
+                "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            presets, "preset_directory", return_value=Path(directory)
+        ):
+            runs.RUN_CONTEXTS.clear()
+            presets._RUN_SNAPSHOTS.clear()
+            handle = runs.create_run_context("default", {"by_key": {}, "by_id": {}})
+            try:
+                presets.save_preset(
+                    {"preset_id": "cache", "name": "Cache", "api_graph": preset_graph, "workflow": {"nodes": []}}
+                )
+                presets.snapshot_presets_for_run(handle, api_graph, "11")
+                before_runs = copy.deepcopy(runs.RUN_CONTEXTS._entries)
+                before_snapshots = copy.deepcopy(presets._RUN_SNAPSHOTS)
+                prompt = DynamicPrompt(
+                    {
+                        "1": {
+                            "class_type": "ScenePresetReference",
+                            "inputs": {"preset_id": "cache", "run_handle": handle},
+                        }
+                    }
+                )
+                cache = execution.IsChangedCache("cache-smoke", prompt, execution.CacheSet().outputs)
+                with mock.patch.dict(
+                    comfy_nodes.NODE_CLASS_MAPPINGS,
+                    {"ScenePresetReference": presets.ScenePresetReference},
+                    clear=False,
+                ):
+                    first = asyncio.run(cache.get("1"))
+                    second = asyncio.run(cache.get("1"))
+                self.assertEqual(first, second)
+                self.assertEqual(runs.RUN_CONTEXTS._entries, before_runs)
+                self.assertEqual(presets._RUN_SNAPSHOTS, before_snapshots)
+            finally:
+                runs.release_run_context(handle, "default")
+                presets.release_scene_preset_snapshot(handle, "default")
 
 
 if __name__ == "__main__":

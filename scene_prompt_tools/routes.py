@@ -1,6 +1,8 @@
 import json
 import asyncio
+import os
 import re
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -135,42 +137,58 @@ def _read_items(path, category_path):
     return normalized
 
 
-def _load_items(user_id="default"):
+def _cache_value(value, key, with_errors):
+    return value if with_errors else value[key]
+
+
+def _load_items(user_id="default", force=False, with_errors=False):
     data_dir = _data_dir(user_id)
     saved_prompts_dir = _saved_prompts_dir(user_id)
     while True:
         with DATA_CACHE_LOCK:
             generation = _cache_generation(user_id)
             cache = _cache_for(_ITEMS_CACHE, user_id)
-            cached = _cache_get_unexpired(cache)
+            cached = None if force else _cache_get_unexpired(cache)
             if cached is not None:
-                return cached
+                return _cache_value(cached, "items", with_errors)
 
         signature = _prompt_file_signature(data_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            cached = _cache_get(cache, signature)
+            cached = None if force else _cache_get(cache, signature)
             if cached is not None:
-                return cached
+                return _cache_value(cached, "items", with_errors)
 
         items = []
+        errors = []
         if data_dir.exists():
             for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
                 category_path = list(prompt_file.parent.relative_to(data_dir).parts)
                 if category_path and category_path[0] != saved_prompts_dir.name:
-                    items.extend(_read_items(prompt_file, category_path))
+                    try:
+                        items.extend(_read_items(prompt_file, category_path))
+                    except ValueError as exc:
+                        errors.append({"file": prompt_file.relative_to(data_dir).as_posix(), "error": str(exc)})
 
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            return _cache_set(cache, signature, items)
+            value = {"items": items, "errors": errors}
+            return _cache_value(_cache_set(cache, signature, value), "items", with_errors)
 
 
-def _safe_folder_name(name):
-    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name or "").strip())
-    value = re.sub(r"\s+", " ", value).strip(" .")
-    return value[:80] or "untitled"
+def _folder_component(value, field):
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} is required")
+    if text in {".", ".."} or re.search(r'[<>:"/\\|?*\x00-\x1f]', text):
+        raise ValueError(f"{field} contains unsupported path characters")
+    if text != text.strip(" ."):
+        raise ValueError(f"{field} cannot start or end with a dot or space")
+    if len(text) > 80:
+        raise ValueError(f"{field} must be 80 characters or fewer")
+    return text
 
 
 def _safe_id(name):
@@ -223,11 +241,19 @@ def _read_prompt_payload(path):
 
 def _write_prompt_payload(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    temp.replace(path)
+    descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        with open(temp_name, "r", encoding="utf-8") as handle:
+            json.load(handle)
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
 def _unique_child_dir(parent, folder_name):
@@ -253,11 +279,12 @@ def _create_prompt_item(payload, user_id="default"):
     prompt = str(payload.get("prompt") or "").strip()
     description = str(payload.get("description") or "").strip()
 
-    if not category:
-        raise ValueError("category is required")
+    category = _folder_component(category, "category")
+    if subcategory:
+        subcategory = _folder_component(subcategory, "subcategory")
     data_dir = _data_dir(user_id)
     saved_prompts_dir = _saved_prompts_dir(user_id)
-    if _safe_folder_name(category) == saved_prompts_dir.name:
+    if category == saved_prompts_dir.name:
         raise ValueError("reserved category name")
     if not label:
         raise ValueError("name is required")
@@ -265,9 +292,9 @@ def _create_prompt_item(payload, user_id="default"):
         raise ValueError("prompt is required")
 
     with DATA_WRITE_LOCK:
-        parts = [_safe_folder_name(category)]
+        parts = [category]
         if subcategory:
-            parts.append(_safe_folder_name(subcategory))
+            parts.append(subcategory)
         target_dir = data_dir.joinpath(*parts)
         target = target_dir / PROMPT_FILE_NAME
         data = _read_prompt_payload(target)
@@ -327,7 +354,7 @@ def _update_prompt_item(payload, user_id="default"):
     category_path = payload.get("category_path")
     if not isinstance(category_path, list):
         raise ValueError("category_path is required")
-    safe_parts = [_safe_folder_name(part) for part in category_path if str(part or "").strip()]
+    safe_parts = [_folder_component(part, "category_path") for part in category_path if str(part or "").strip()]
     data_dir = _data_dir(user_id)
     if not safe_parts or safe_parts[0] == _saved_prompts_dir(user_id).name:
         raise ValueError("invalid category_path")
@@ -425,33 +452,38 @@ def _read_saved_prompt(prompt_file, saved_prompts_dir):
     }
 
 
-def _load_saved_prompts(user_id="default"):
+def _load_saved_prompts(user_id="default", force=False, with_errors=False):
     saved_prompts_dir = _saved_prompts_dir(user_id)
     while True:
         with DATA_CACHE_LOCK:
             generation = _cache_generation(user_id)
             cache = _cache_for(_SAVED_PROMPTS_CACHE, user_id)
-            cached = _cache_get_unexpired(cache)
+            cached = None if force else _cache_get_unexpired(cache)
             if cached is not None:
-                return cached
+                return _cache_value(cached, "saved_prompts", with_errors)
 
         signature = _prompt_file_signature(saved_prompts_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            cached = _cache_get(cache, signature)
+            cached = None if force else _cache_get(cache, signature)
             if cached is not None:
-                return cached
+                return _cache_value(cached, "saved_prompts", with_errors)
 
         saved = []
+        errors = []
         if saved_prompts_dir.exists():
             for prompt_file in sorted(saved_prompts_dir.rglob(PROMPT_FILE_NAME)):
-                saved.append(_read_saved_prompt(prompt_file, saved_prompts_dir))
+                try:
+                    saved.append(_read_saved_prompt(prompt_file, saved_prompts_dir))
+                except ValueError as exc:
+                    errors.append({"file": prompt_file.relative_to(saved_prompts_dir).as_posix(), "error": str(exc)})
 
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            return _cache_set(cache, signature, saved)
+            value = {"saved_prompts": saved, "errors": errors}
+            return _cache_value(_cache_set(cache, signature, value), "saved_prompts", with_errors)
 
 
 def _save_prompt_payload(payload, user_id="default"):
@@ -468,7 +500,7 @@ def _save_prompt_payload(payload, user_id="default"):
     items = [_normalize_saved_item(item, Path("request"), index) for index, item in enumerate(raw_items)]
 
     with DATA_WRITE_LOCK:
-        folder_name = _safe_folder_name(name)
+        folder_name = _folder_component(name, "name")
         target_dir = _unique_child_dir(_saved_prompts_dir(user_id), folder_name)
         target = target_dir / PROMPT_FILE_NAME
         data = {
@@ -493,7 +525,11 @@ def define_routes():
     async def scene_prompt_items(request):
         try:
             user_id = _request_user_id(request)
-            return web.json_response({"items": await asyncio.to_thread(_load_items, user_id)})
+            force = request.query.get("reload") == "1"
+            if force:
+                await asyncio.to_thread(_clear_prompt_caches, user_id)
+            payload = await asyncio.to_thread(_load_items, user_id, force, True)
+            return web.json_response(payload)
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
 
@@ -501,7 +537,11 @@ def define_routes():
     async def scene_prompt_saved_prompts(request):
         try:
             user_id = _request_user_id(request)
-            return web.json_response({"saved_prompts": await asyncio.to_thread(_load_saved_prompts, user_id)})
+            force = request.query.get("reload") == "1"
+            if force:
+                await asyncio.to_thread(_clear_prompt_caches, user_id)
+            payload = await asyncio.to_thread(_load_saved_prompts, user_id, force, True)
+            return web.json_response(payload)
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
 
@@ -515,11 +555,11 @@ def define_routes():
             return web.json_response({"error": str(exc)}, status=400)
 
         try:
-            saved_prompts = await asyncio.to_thread(_load_saved_prompts, user_id)
+            saved_prompts = await asyncio.to_thread(_load_saved_prompts, user_id, True, True)
         except Exception as exc:
-            return web.json_response({"error": f"Saved prompt was written, but reload failed: {exc}"}, status=500)
+            return web.json_response({"saved_prompt": saved, "warning": "保存後の一覧再読込に失敗しました。"})
 
-        return web.json_response({"saved_prompt": saved, "saved_prompts": saved_prompts})
+        return web.json_response({"saved_prompt": saved, **saved_prompts})
 
     @PromptServer.instance.routes.post("/scene_prompt/items")
     async def scene_prompt_create_item(request):
@@ -534,11 +574,11 @@ def define_routes():
             return web.json_response({"error": str(exc)}, status=400)
 
         try:
-            items = await asyncio.to_thread(_load_items, user_id)
+            items = await asyncio.to_thread(_load_items, user_id, True, True)
         except Exception as exc:
-            return web.json_response({"error": f"Prompt item was written, but reload failed: {exc}"}, status=500)
+            return web.json_response({"item": item, "warning": "保存後の一覧再読込に失敗しました。"})
 
-        return web.json_response({"item": item, "items": items})
+        return web.json_response({"item": item, **items})
 
     @PromptServer.instance.routes.post("/scene_prompt/runs/prepare")
     async def scene_prompt_prepare_run(request):
