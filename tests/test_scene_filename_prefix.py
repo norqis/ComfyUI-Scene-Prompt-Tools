@@ -212,26 +212,22 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.nodes._parse_matrix_sets(invalid_parts)
 
-    def test_matrix_backend_requires_the_complete_current_frontend_schema(self):
-        required_fields = (
-            "type",
-            "version",
-            "row_id",
-            "node_id",
-            "category",
-            "name",
-            "path_label",
-            "enabled",
-            "positive_base",
-            "positive_json",
-            "negative_base",
-            "negative_json",
-            "category_order",
-            "positive_parts",
-            "negative_parts",
-            "display_labels",
-            "display_label_groups",
-        )
+    def test_matrix_backend_normalizes_known_legacy_omissions(self):
+        legacy = {
+            "row_id": "old-row",
+            "name": "Old",
+            "path_label": "Old",
+            "positive_json": json.dumps({"version": 1, "categories": {"Style": [{
+                "label": "Vivid", "prompt": "vivid",
+            }]}}),
+        }
+        parsed = self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [legacy]}))[0]
+        self.assertTrue(parsed["enabled"])
+        self.assertEqual(parsed["positive_parts"], ["vivid"])
+        self.assertEqual(parsed["display_label_groups"], [])
+
+    def test_matrix_backend_rejects_unknown_or_missing_required_fields(self):
+        required_fields = ("row_id", "name", "path_label")
         for field in required_fields:
             invalid = _matrix_line("A")
             invalid.pop(field)
@@ -239,11 +235,9 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [invalid]}))
 
-        for retired_field in ("label", "id", "positive", "negative"):
-            invalid = _matrix_line("A", **{retired_field: "retired"})
-            with self.subTest(retired=retired_field):
-                with self.assertRaises(ValueError):
-                    self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [invalid]}))
+        invalid = _matrix_line("A", unknown=True)
+        with self.assertRaises(ValueError):
+            self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [invalid]}))
 
         invalid = _matrix_line("A", enabled="true")
         with self.assertRaises(ValueError):

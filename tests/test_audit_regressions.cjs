@@ -306,6 +306,33 @@ function testMatrixToggleSavesOnlyEnabledState() {
     assert.equal(context.written.sets[0].positive_base, "saved");
 }
 
+function testMatrixStateUsesFirstValidStoredValue() {
+    const context = {
+        String,
+        parseMatrixState(value) {
+            if (value === "broken") throw new Error("broken state");
+            return { value, sets: value === "empty" ? [] : [value] };
+        },
+        serializeMatrixState(state) { return state.value; },
+        serializedMatrixJsonValue() { return "memory"; },
+        createMatrixState() { return { value: "empty" }; },
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("currentMatrixJsonValue"), context);
+    assert.equal(
+        context.currentMatrixJsonValue({ properties: { scene_matrix_json: "property" } }, { value: "broken" }),
+        "property",
+    );
+    assert.equal(
+        context.currentMatrixJsonValue({ properties: { scene_matrix_json: "broken" } }, { value: "widget" }),
+        "widget",
+    );
+    assert.equal(
+        context.currentMatrixJsonValue({ properties: { scene_matrix_json: "property" } }, { value: "empty" }),
+        "property",
+    );
+}
+
 function testSourceOwnershipBoundaries() {
     assert.doesNotMatch(functionSource("hideInternalDomWidgets"), /document\.querySelectorAll/);
     const cleanup = functionSource("installSceneNodeRemovalCleanup");
@@ -417,6 +444,7 @@ Promise.resolve()
     .then(testPresetListRetriesAfterLatestFailure)
     .then(testNodeRemovalCancelsItsRun)
     .then(testMatrixToggleSavesOnlyEnabledState)
+    .then(testMatrixStateUsesFirstValidStoredValue)
     .then(testSourceOwnershipBoundaries)
     .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)
     .then(testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost)

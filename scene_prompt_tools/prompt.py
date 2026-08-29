@@ -12,6 +12,7 @@ SELECTION_ITEM_REQUIRED_KEYS = {
     "label", "prompt", "category_path", "category_key", "category_label",
 }
 SELECTION_ITEM_OPTIONAL_KEYS = {"id", "description", "weight", "selected_parts"}
+SELECTION_ITEM_KNOWN_KEYS = SELECTION_ITEM_REQUIRED_KEYS | SELECTION_ITEM_OPTIONAL_KEYS
 SELECTED_PART_REQUIRED_KEYS = {"index", "text"}
 SELECTED_PART_OPTIONAL_KEYS = {"weight"}
 MIN_WEIGHT = 0.05
@@ -213,22 +214,34 @@ def _validate_selected_part(part, prompt_parts, label):
 
 
 def _validate_selection_item(item, category, label):
-    _require_exact_keys(item, SELECTION_ITEM_REQUIRED_KEYS, SELECTION_ITEM_OPTIONAL_KEYS, label)
+    if not isinstance(item, dict):
+        raise ValueError(f"{label} must be an object.")
+    unknown_keys = set(item) - SELECTION_ITEM_KNOWN_KEYS
+    if unknown_keys or not {"label", "prompt"}.issubset(item):
+        raise ValueError(f"{label} has unsupported or missing fields.")
+
+    category_path = _legacy_category_path(category, label)
+    for field in ("category_path", "category_key", "category_label"):
+        if field not in item:
+            continue
+        if field == "category_path":
+            value = item[field]
+            if not isinstance(value, list) or not value or any(
+                not isinstance(part, str) or not part.strip() for part in value
+            ):
+                raise ValueError(f"{label} category_path must be a non-empty list of strings.")
+            if value != category_path:
+                raise ValueError(f"{label} category fields are inconsistent.")
+        elif _require_nonempty_string(item[field], f"{label} {field}") != category:
+            raise ValueError(f"{label} category fields are inconsistent.")
+
     result = {
         "label": _require_nonempty_string(item["label"], f"{label} label"),
         "prompt": _require_nonempty_string(item["prompt"], f"{label} prompt"),
-        "category_path": item["category_path"],
-        "category_key": _require_nonempty_string(item["category_key"], f"{label} category_key"),
-        "category_label": _require_nonempty_string(item["category_label"], f"{label} category_label"),
+        "category_path": category_path,
+        "category_key": category,
+        "category_label": category,
     }
-    if not isinstance(result["category_path"], list) or not result["category_path"] or any(
-        not isinstance(part, str) or not part.strip() for part in result["category_path"]
-    ):
-        raise ValueError(f"{label} category_path must be a non-empty list of strings.")
-    if result["category_key"] != category or result["category_key"] != " > ".join(result["category_path"]):
-        raise ValueError(f"{label} category fields are inconsistent.")
-    if result["category_label"] != result["category_key"]:
-        raise ValueError(f"{label} category_label is inconsistent.")
     if "id" in item:
         result["id"] = _require_nonempty_string(item["id"], f"{label} id")
     if "description" in item:
@@ -251,6 +264,15 @@ def _validate_selection_item(item, category, label):
             raise ValueError(f"{label} selected_parts must not repeat an index.")
         result["selected_parts"] = parts
     return result
+
+
+def _legacy_category_path(category, label):
+    if not isinstance(category, str) or not category.strip():
+        raise ValueError(f"{label} category must be a non-empty string.")
+    path = category.split(" > ")
+    if any(not part.strip() for part in path):
+        raise ValueError(f"{label} category is invalid.")
+    return path
 
 
 def _parse_selection_json(selection_json):

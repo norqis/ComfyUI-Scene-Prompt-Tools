@@ -104,6 +104,36 @@ def test_selection_entries_are_strict():
             raise AssertionError("invalid selection item must be rejected")
 
 
+def test_legacy_selection_entries_normalize_without_prompt_data_lookup():
+    legacy = {"version": 1, "categories": {"Outfit > School": [{
+        "label": "Summer", "prompt": "summer uniform",
+    }]}}
+    item = _parse_selection_json(json.dumps(legacy))["Outfit > School"][0]
+    assert item == {
+        "label": "Summer",
+        "prompt": "summer uniform",
+        "category_path": ["Outfit", "School"],
+        "category_key": "Outfit > School",
+        "category_label": "Outfit > School",
+    }
+
+
+def test_selection_rejects_unknown_or_conflicting_legacy_values():
+    base = {"label": "Summer", "prompt": "summer uniform"}
+    for item in (
+        {**base, "unknown": True},
+        {**base, "category_key": "Wrong"},
+        {**base, "category_path": ["Outfit"]},
+        {**base, "category_label": "Wrong"},
+    ):
+        try:
+            _parse_selection_json(json.dumps({"version": 1, "categories": {"Outfit > School": [item]}}))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid legacy selection JSON must be rejected")
+
+
 def selection_item(prompt, **overrides):
     item = {
         "id": "stable-item",
@@ -139,6 +169,8 @@ class PromptChoiceTests(unittest.TestCase):
     def test_current_data_schema(self):
         test_selection_state_accepts_only_version_one_categories_schema()
         test_selection_entries_are_strict()
+        test_legacy_selection_entries_normalize_without_prompt_data_lookup()
+        test_selection_rejects_unknown_or_conflicting_legacy_values()
 
     def test_selection_values_are_stored(self):
         test_selection_keeps_its_stored_prompt_and_partial_selection()
