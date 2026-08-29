@@ -4,16 +4,15 @@ import random
 import re
 import time
 from collections import OrderedDict
-from pathlib import Path
-
 from .plan import make_plan, normalize_plan
+from .storage import prompt_data_directory
 
 
 DEFAULT_CATEGORY_ORDER = ""
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
 DEFAULT_SELECTED_JSON = "{\"version\":1,\"categories\":{}}"
 PROMPT_FILE_NAME = "prompt.json"
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+DATA_DIR = prompt_data_directory()
 SAVED_PROMPTS_FOLDER = "保存済みプロンプト"
 PROMPT_ITEM_REQUIRED_KEYS = {"label", "prompt"}
 PROMPT_ITEM_OPTIONAL_KEYS = {"id", "description"}
@@ -253,12 +252,12 @@ def _read_prompt_items(path, category_path):
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON: {path}") from exc
+        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON.") from exc
     except OSError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' cannot be read: {path}") from exc
+        raise ValueError(f"Prompt data file '{path.name}' cannot be read.") from exc
 
     if not isinstance(data, list):
-        raise ValueError(f"Prompt data file '{path.name}' must be a JSON array: {path}")
+        raise ValueError(f"Prompt data file '{path.name}' must be a JSON array.")
 
     category_key = " > ".join(category_path)
     normalized = []

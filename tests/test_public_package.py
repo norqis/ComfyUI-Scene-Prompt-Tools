@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicPackageTests(unittest.TestCase):
     def test_runtime_modules_are_in_one_internal_package(self):
-        expected = {"__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py"}
+        expected = {"__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "storage.py"}
         self.assertSetEqual({path.name for path in (ROOT / "scene_prompt_tools").glob("*.py")}, expected)
         for filename in expected - {"__init__.py"}:
             self.assertFalse((ROOT / filename).exists())
@@ -25,18 +25,16 @@ class PublicPackageTests(unittest.TestCase):
         package = (ROOT / "package.json").read_text(encoding="utf-8")
         self.assertIn('"test": "npm run check:frontend && npm run test:frontend"', package)
 
-    def test_data_directory_is_kept_but_contents_are_ignored(self):
-        self.assertTrue((ROOT / "data" / ".gitkeep").is_file())
-        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-        self.assertIn("/data/*", gitignore)
-        self.assertIn("!/data/.gitkeep", gitignore)
-        comfyignore = (ROOT / ".comfyignore").read_text(encoding="utf-8")
-        self.assertNotIn("data/", comfyignore)
+    def test_user_data_is_not_stored_in_the_custom_node_directory(self):
+        self.assertFalse(any((ROOT / "data").glob("**/*")))
+        storage_source = (ROOT / "scene_prompt_tools" / "storage.py").read_text(encoding="utf-8")
+        self.assertIn("folder_paths.get_user_directory()", storage_source)
+        self.assertIn('STORAGE_DIRECTORY_NAME = "scene_prompt_tools"', storage_source)
 
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.1.0"', pyproject)
+        self.assertIn('version = "0.1.1"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
@@ -68,11 +66,12 @@ class PublicPackageTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT)):
                 self.assertIsNone(FORBIDDEN.search(path.read_text(encoding="utf-8")))
 
-    def test_runtime_uses_root_data_directory(self):
+    def test_runtime_uses_comfyui_user_data_directory(self):
         prompt_source = (ROOT / "scene_prompt_tools" / "prompt.py").read_text(encoding="utf-8")
         routes_source = (ROOT / "scene_prompt_tools" / "routes.py").read_text(encoding="utf-8")
-        self.assertIn('Path(__file__).resolve().parents[1] / "data"', prompt_source)
-        self.assertIn("NODE_DIR = Path(__file__).resolve().parents[1]", routes_source)
+        self.assertIn("prompt_data_directory()", prompt_source)
+        self.assertIn("prompt_data_directory()", routes_source)
+        self.assertNotIn('Path(__file__).resolve().parents[1] / "data"', prompt_source + routes_source)
 
     def test_old_schema_migration_code_is_absent(self):
         runtime_source = "\n".join(

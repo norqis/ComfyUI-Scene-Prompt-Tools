@@ -158,6 +158,8 @@ let sceneLastPromptValidationErrorAt = 0;
 let scenePresetDisplayGraphs = new Map();
 let scenePresetList = null;
 let scenePresetListErrors = [];
+let scenePresetListRequestGeneration = 0;
+let scenePresetListPromise = null;
 let scenePresetNotificationTimer = null;
 
 const VISIBLE_INPUT_NAMES = new Set(["scene_prompt"]);
@@ -3086,6 +3088,11 @@ function hideWidget(widget) {
     widget.type = "hidden";
     widget.computeSize = () => [0, 0];
     widget.draw = () => {};
+    const element = widget.inputEl || widget.element || widget.domElement;
+    const container = element?.closest?.(".dom-widget") || element;
+    if (container?.style) {
+        container.style.setProperty("display", "none", "important");
+    }
 }
 
 function showWidget(widget) {
@@ -3104,6 +3111,11 @@ function showWidget(widget) {
     }
     if (widget.sceneHiddenStoredDraw) {
         widget.draw = widget.sceneHiddenStoredDraw;
+    }
+    const element = widget.inputEl || widget.element || widget.domElement;
+    const container = element?.closest?.(".dom-widget") || element;
+    if (container?.style) {
+        container.style.removeProperty("display");
     }
 }
 
@@ -3218,26 +3230,14 @@ function hideSceneUtilityWidgets(node, nodeName) {
 }
 
 function hideInternalDomWidgets() {
-    const hiddenPlaceholders = new Set([
-        "prompt_name",
-        "path_name",
-        "positive_json",
-        "negative_json",
-        "matrix_json",
-        "current_index",
-        "run_id",
-        "seed_base",
-        "category_order",
-    ]);
-    for (const textarea of document.querySelectorAll(".dom-widget textarea")) {
-        if (!hiddenPlaceholders.has(textarea.placeholder)) {
+    for (const node of app.graph?._nodes || []) {
+        if (!nodeClassNames(node).some((name) => NODE_NAMES.has(name))) {
             continue;
         }
-        const widget = textarea.closest(".dom-widget");
-        if (widget) {
-            widget.style.setProperty("display", "none", "important");
-            widget.style.setProperty("pointer-events", "none", "important");
-            widget.style.setProperty("visibility", "hidden", "important");
+        for (const widget of node.widgets || []) {
+            if (widget?.hidden || widget?.type === "hidden") {
+                hideWidget(widget);
+            }
         }
     }
 }
@@ -7083,16 +7083,6 @@ function installSceneBatchPromptCapture() {
             result = await originalQueuePrompt(...arguments);
         } catch (error) {
             showPromptValidationErrorFromThrown(error);
-            if (matchesFirstBatchPrompt) {
-                if (sceneBatchRun === run) {
-                    stopSceneBatchRun({ forceRelease: true });
-                } else {
-                    clearDetachedSceneBatchRun(run);
-                    sceneBatchRunsById.delete(run.runId);
-                    releaseSceneBatchPlan(run.runId);
-                    activateNextSceneBatchRun();
-                }
-            }
             throw error;
         }
         if (matchesFirstBatchPrompt) {
@@ -7340,6 +7330,20 @@ function stopSceneBatchRun(options = {}) {
     }
     if (!deferRelease) {
         activateNextSceneBatchRun();
+    }
+}
+
+function cancelSceneBatchRunForNode(node) {
+    const run = sceneBatchRunForNode(node);
+    if (!run) {
+        return;
+    }
+    if (sceneBatchRun === run) {
+        stopSceneBatchRun();
+        return;
+    }
+    if (sceneBatchPendingRuns.includes(run)) {
+        cancelPendingSceneBatchRun(run);
     }
 }
 
@@ -7975,6 +7979,19 @@ function saveMatrixLineDrafts(node, drafts) {
     writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
 }
 
+function saveMatrixLineEnabled(node, draft) {
+    const state = readMatrixState(node);
+    const rowId = String(draft?.row_id || "");
+    const index = (state.sets || []).findIndex((line) => String(line?.row_id || "") === rowId);
+    if (index < 0) {
+        return;
+    }
+    const sets = state.sets.map((line, lineIndex) => (
+        lineIndex === index ? { ...line, enabled: draft.enabled !== false } : line
+    ));
+    writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
+}
+
 function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
     const draft = drafts[index];
     if (!draft) {
@@ -8058,7 +8075,7 @@ function openSceneMatrixLinesPopup(node) {
             toggle.title = draft.enabled === false ? "この行は生成されません" : "この行は生成対象です";
             toggle.addEventListener("click", () => {
                 draft.enabled = draft.enabled === false;
-                saveMatrixLineDrafts(node, drafts);
+                saveMatrixLineEnabled(node, draft);
                 renderRows();
             });
             actions.appendChild(toggle);
@@ -8133,19 +8150,36 @@ async function loadScenePresetList(force = false) {
     if (!force && Array.isArray(scenePresetList)) {
         return scenePresetList;
     }
-    const response = await api.fetchApi("/scene_presets/list");
-    const data = await readApiJson(response, "Preset一覧を取得できませんでした");
-    if (!response.ok) {
-        throw new Error(data.error || "Preset一覧を取得できませんでした");
+    if (!force && scenePresetListPromise) {
+        return scenePresetListPromise;
     }
-    const entries = Array.isArray(data.presets) ? data.presets : [];
-    scenePresetDisplayGraphs = new Map(entries.map((entry) => [
-        String(entry?.metadata?.preset_id || ""),
-        entry,
-    ]).filter(([presetId]) => presetId));
-    scenePresetList = entries.map((entry) => entry.metadata).filter(Boolean);
-    scenePresetListErrors = Array.isArray(data.errors) ? data.errors : [];
-    return scenePresetList;
+    const generation = ++scenePresetListRequestGeneration;
+    const request = (async () => {
+        const response = await api.fetchApi("/scene_presets/list");
+        const data = await readApiJson(response, "Preset一覧を取得できませんでした");
+        if (!response.ok) {
+            throw new Error(data.error || "Preset一覧を取得できませんでした");
+        }
+        if (generation !== scenePresetListRequestGeneration) {
+            return scenePresetList || [];
+        }
+        const entries = Array.isArray(data.presets) ? data.presets : [];
+        scenePresetDisplayGraphs = new Map(entries.map((entry) => [
+            String(entry?.metadata?.preset_id || ""),
+            entry,
+        ]).filter(([presetId]) => presetId));
+        scenePresetList = entries.map((entry) => entry.metadata).filter(Boolean);
+        scenePresetListErrors = Array.isArray(data.errors) ? data.errors : [];
+        return scenePresetList;
+    })();
+    scenePresetListPromise = request;
+    try {
+        return await request;
+    } finally {
+        if (scenePresetListPromise === request) {
+            scenePresetListPromise = null;
+        }
+    }
 }
 
 function selectedScenePreset(node, presets = scenePresetList || []) {
@@ -8434,6 +8468,14 @@ function attachSceneUtilityNode(node, nodeName) {
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
     if (isSceneExpandNodeName(nodeName)) {
+        if (!node.scenePromptRemovalInstalled) {
+            const previousOnRemoved = node.onRemoved;
+            node.onRemoved = function (...args) {
+                cancelSceneBatchRunForNode(this);
+                return previousOnRemoved?.apply(this, args);
+            };
+            node.scenePromptRemovalInstalled = true;
+        }
         if (!sceneBatchRunForNode(node)) {
             resetSceneExpandRunControls(node, { mark: false });
         }

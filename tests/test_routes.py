@@ -25,6 +25,7 @@ def load_routes(data_dir):
     cli_args.args = types.SimpleNamespace(disable_metadata=False)
     folder_paths = types.ModuleType("folder_paths")
     folder_paths.get_output_directory = lambda: str(data_dir / "output")
+    folder_paths.get_user_directory = lambda: str(data_dir / "user")
 
     aiohttp = types.ModuleType("aiohttp")
     aiohttp.web = types.SimpleNamespace(json_response=lambda *_args, **_kwargs: None)
@@ -75,6 +76,10 @@ class PromptDataRouteTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, r"prompt\.json.*invalid JSON"):
             self.routes._read_prompt_payload(path)
+        try:
+            self.routes._read_prompt_payload(path)
+        except ValueError as exc:
+            self.assertNotIn(str(self.data_dir), str(exc))
 
     def test_corrupt_saved_prompt_is_reported_with_filename(self):
         path = self.data_dir / self.routes.SAVED_PROMPTS_FOLDER / "saved" / "prompt.json"

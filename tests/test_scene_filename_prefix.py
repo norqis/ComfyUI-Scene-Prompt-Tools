@@ -31,6 +31,7 @@ def _install_comfy_stubs(output_dir):
 
     folder_paths = types.ModuleType("folder_paths")
     folder_paths.get_output_directory = lambda: str(output_dir)
+    folder_paths.get_user_directory = lambda: str(output_dir / "user")
 
     sys.modules["comfy"] = comfy
     sys.modules["comfy.model_management"] = model_management
