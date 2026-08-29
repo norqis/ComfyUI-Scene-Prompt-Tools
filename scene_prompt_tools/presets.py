@@ -34,12 +34,12 @@ _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
 _CANCELLED_RUNS_MAX_ENTRIES = 256
-# Keep validation below Python's practical recursion depth as scene evaluation
-# is intentionally small and direct. Larger preset graphs are not useful for
-# this node family and now fail with a clear save-time error.
-MAX_PRESET_NODES = 256
+# Scene plan evaluation is intentionally direct and recursive. Keep the
+# accepted graph size comfortably below the depth where coverage tracing can
+# exhaust Python's stack, so the save-time limit remains a reliable contract.
+MAX_PRESET_NODES = 128
 MAX_PRESET_REFERENCE_DEPTH = 64
-MAX_PRESET_REFERENCE_NODE_DEPTH = 256
+MAX_PRESET_REFERENCE_NODE_DEPTH = MAX_PRESET_NODES
 
 SAFE_NODE_CLASSES = {
     "ScenePrompt": ScenePrompt,
@@ -299,7 +299,7 @@ def _validate_preset_runtime(nodes, user_id="default"):
     resolved = {}
     for reference_node_id, preset_id, _node in _find_references(nodes):
         try:
-            _resolve_preset_tree(preset_id, resolved, [], user_id)
+            _resolve_preset_tree(preset_id, resolved, [], user_id, len(nodes))
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
     _scene_node_value(nodes, validation["output_link"][0], resolved, set())

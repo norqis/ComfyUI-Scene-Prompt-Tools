@@ -483,7 +483,7 @@ class ScenePresetTests(unittest.TestCase):
 
     def test_nested_counter_chain_has_a_controlled_resolution_limit(self):
         previous_preset_id = None
-        def counter_preset_nodes(nested_preset_id):
+        def counter_preset_nodes(nested_preset_id, counter_count=20):
             nodes = {"1": {"class_type": "ScenePresetInput", "inputs": {}}}
             source = ["1", 0]
             if nested_preset_id is not None:
@@ -492,7 +492,7 @@ class ScenePresetTests(unittest.TestCase):
                     "inputs": {"preset_id": nested_preset_id, "scene_prompt": source},
                 }
                 source = ["2", 0]
-            for counter_index in range(20):
+            for counter_index in range(counter_count):
                 node_id = str(10 + counter_index)
                 nodes[node_id] = {
                     "class_type": "ScenePromptCounter",
@@ -502,18 +502,23 @@ class ScenePresetTests(unittest.TestCase):
             nodes["3"] = {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": source}}
             return nodes
 
-        for preset_index in range(15):
+        self.assertEqual(self.module.MAX_PRESET_REFERENCE_NODE_DEPTH, self.module.MAX_PRESET_NODES)
+        for preset_index in range(5):
             nodes = counter_preset_nodes(previous_preset_id)
             preset_id = f"nested-{preset_index}"
             self.write_preset_without_runtime_validation(preset_id, nodes)
             previous_preset_id = preset_id
 
-        final_nodes = counter_preset_nodes(previous_preset_id)
+        at_limit_nodes = counter_preset_nodes(previous_preset_id, counter_count=11)
+        saved = self.save("nested-at-limit", at_limit_nodes)
+        self.assertEqual(saved["metadata"]["preset_id"], "nested-at-limit")
+
+        final_nodes = counter_preset_nodes("nested-at-limit", counter_count=1)
         with self.assertRaisesRegex(
             self.module.ScenePresetResolutionError,
             "累積ノード数",
         ) as error:
-            self.save("nested-save-final", final_nodes)
+            self.save("nested-over-limit", final_nodes)
         self.assertEqual(error.exception.node_id, "2")
 
         self.write_preset_without_runtime_validation("nested-runtime-final", final_nodes)
@@ -578,7 +583,7 @@ class ScenePresetTests(unittest.TestCase):
     def test_preset_graph_limit_is_a_controlled_error(self):
         nodes = basic_nodes()
         previous = "2"
-        for index in range(self.module.MAX_PRESET_NODES):
+        for index in range(self.module.MAX_PRESET_NODES - len(nodes) + 1):
             node_id = str(10 + index)
             nodes[node_id] = {
                 "class_type": "ScenePromptCounter",
@@ -590,6 +595,7 @@ class ScenePresetTests(unittest.TestCase):
             self.save("too-deep", nodes)
 
     def test_long_linear_preset_at_limit_does_not_overflow_python_stack(self):
+        self.assertEqual(self.module.MAX_PRESET_NODES, 128)
         nodes = basic_nodes()
         previous = "2"
         counter_count = self.module.MAX_PRESET_NODES - len(nodes)
