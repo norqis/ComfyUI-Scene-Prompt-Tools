@@ -27,9 +27,7 @@ function deferred() {
     return { promise, resolve };
 }
 
-async function testPresetListRace() {
-    const first = deferred();
-    const second = deferred();
+function presetListRaceContext(first, second) {
     const responses = [first.promise, second.promise];
     const context = {
         Array,
@@ -44,12 +42,41 @@ async function testPresetListRace() {
     };
     vm.createContext(context);
     vm.runInContext(functionSource("loadScenePresetList"), context);
+    return context;
+}
+
+async function testPresetListRaceInNormalResponseOrder() {
+    const first = deferred();
+    const second = deferred();
+    const context = presetListRaceContext(first, second);
+    const oldRequest = context.loadScenePresetList(true);
+    const newRequest = context.loadScenePresetList(true);
+    let oldRequestSettled = false;
+    oldRequest.finally(() => { oldRequestSettled = true; });
+    first.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "old" } }], errors: [] } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(oldRequestSettled, false);
+    second.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "new" } }], errors: [] } });
+    const [oldResult, newResult] = await Promise.all([oldRequest, newRequest]);
+    assert.equal(oldResult[0].preset_id, "new");
+    assert.equal(newResult[0].preset_id, "new");
+    assert.equal(context.scenePresetList[0].preset_id, "new");
+    assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
+    assert.equal(context.scenePresetDisplayGraphs.has("old"), false);
+}
+
+async function testPresetListRaceInReverseResponseOrder() {
+    const first = deferred();
+    const second = deferred();
+    const context = presetListRaceContext(first, second);
     const oldRequest = context.loadScenePresetList(true);
     const newRequest = context.loadScenePresetList(true);
     second.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "new" } }], errors: [] } });
-    await newRequest;
+    const newResult = await newRequest;
     first.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "old" } }], errors: [] } });
-    await oldRequest;
+    const oldResult = await oldRequest;
+    assert.equal(oldResult[0].preset_id, "new");
+    assert.equal(newResult[0].preset_id, "new");
     assert.equal(context.scenePresetList[0].preset_id, "new");
     assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
     assert.equal(context.scenePresetDisplayGraphs.has("old"), false);
@@ -115,7 +142,8 @@ function testSourceOwnershipBoundaries() {
 }
 
 Promise.resolve()
-    .then(testPresetListRace)
+    .then(testPresetListRaceInNormalResponseOrder)
+    .then(testPresetListRaceInReverseResponseOrder)
     .then(testNodeRemovalCancelsItsRun)
     .then(testMatrixToggleSavesOnlyEnabledState)
     .then(testSourceOwnershipBoundaries)

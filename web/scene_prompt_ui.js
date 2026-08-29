@@ -8161,6 +8161,9 @@ async function loadScenePresetList(force = false) {
             throw new Error(data.error || "Preset一覧を取得できませんでした");
         }
         if (generation !== scenePresetListRequestGeneration) {
+            if (scenePresetListPromise && scenePresetListPromise !== request) {
+                return scenePresetListPromise;
+            }
             return scenePresetList || [];
         }
         const entries = Array.isArray(data.presets) ? data.presets : [];
