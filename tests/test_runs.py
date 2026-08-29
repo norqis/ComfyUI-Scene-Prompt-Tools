@@ -63,6 +63,30 @@ class RunContextTests(unittest.TestCase):
             store.set_plan(handle, "expand-1", {"rows": []})
             self.assertEqual(store.purge_expired(), [])
 
+    def test_require_rejects_expired_context_before_touching_it(self):
+        prepared = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=10)
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
+            handle = prepared.create("alice", {"by_key": {}, "by_id": {}})
+            with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
+                prepared.require(handle)
+        with self.assertRaises(RUNS.SceneRunError):
+            prepared.require(handle)
+
+        active = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=10)
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 1, 12]):
+            handle = active.create("alice", {"by_key": {}, "by_id": {}})
+            self.assertTrue(active.claim(handle, "alice", "prompt-1"))
+            with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
+                active.require(handle)
+
+    def test_claim_cannot_revive_an_expired_prepared_context(self):
+        store = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=10)
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
+            handle = store.create("alice", {"by_key": {}, "by_id": {}})
+            self.assertFalse(store.claim(handle, "alice", "prompt-late"))
+        with self.assertRaises(RUNS.SceneRunError):
+            store.require(handle)
+
     def test_prepared_contexts_expire_and_plans_are_expand_specific(self):
         expiring = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=0)
         old = expiring.create("alice", {"by_key": {}, "by_id": {}})

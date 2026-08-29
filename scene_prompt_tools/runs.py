@@ -49,12 +49,15 @@ class RunContextStore:
     def _purge_expired_locked(self, now):
         expired = []
         for handle, entry in list(self._entries.items()):
-            is_prepared_expired = entry["state"] == "prepared" and now - entry["created_at"] >= self.prepared_ttl_seconds
-            is_active_idle = entry["state"] == "active" and now - entry["last_access"] >= self.active_idle_ttl_seconds
-            if is_prepared_expired or is_active_idle:
+            if self._is_expired_locked(entry, now):
                 self._entries.pop(handle, None)
                 expired.append((handle, entry["user_id"]))
         return expired
+
+    def _is_expired_locked(self, entry, now):
+        if entry["state"] == "prepared":
+            return now - entry["created_at"] >= self.prepared_ttl_seconds
+        return entry["state"] == "active" and now - entry["last_access"] >= self.active_idle_ttl_seconds
 
     def purge_expired(self):
         with self._lock:
@@ -100,7 +103,11 @@ class RunContextStore:
             entry = self._entries.get(value)
             if entry is None:
                 raise SceneRunError("実行コンテキストが見つかりません。画像生成を開始し直してください。")
-            self._touch_locked(entry, time.monotonic())
+            now = time.monotonic()
+            if self._is_expired_locked(entry, now):
+                self._entries.pop(value, None)
+                raise SceneRunError("実行コンテキストの有効期限が切れました。画像生成を開始し直してください。")
+            self._touch_locked(entry, now)
             return entry
 
     def replace_prompt_data_index(self, handle, prompt_data_index):
@@ -129,12 +136,16 @@ class RunContextStore:
             entry = self._entries.get(value)
             if entry is None or entry["user_id"] != str(user_id):
                 return False
+            now = time.monotonic()
+            if self._is_expired_locked(entry, now):
+                self._entries.pop(value, None)
+                return False
             if entry["state"] == "active":
-                self._touch_locked(entry, time.monotonic())
+                self._touch_locked(entry, now)
                 return entry["prompt_id"] == prompt_value
             entry["state"] = "active"
             entry["prompt_id"] = prompt_value
-            self._touch_locked(entry, time.monotonic())
+            self._touch_locked(entry, now)
             return True
 
     def release(self, handle, user_id):

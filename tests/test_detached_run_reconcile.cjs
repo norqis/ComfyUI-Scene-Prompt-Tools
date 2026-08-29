@@ -36,6 +36,19 @@ function reconcileContext(responses) {
         sceneBatchPendingReleases: new Map(),
         sceneBatchDetachedRuns: new Map(),
         sceneBatchRunsById: new Map(),
+        sceneBatchPendingRuns: [],
+        sceneBatchRun: null,
+        SCENE_DETACHED_RETRY_MS: 30_000,
+        SCENE_DETACHED_MAX_RETRIES: 20,
+        scheduled: [],
+        setTimeout(callback, delay) {
+            const timer = { callback, delay };
+            context.scheduled.push(timer);
+            return timer;
+        },
+        clearTimeout(timer) {
+            context.scheduled = context.scheduled.filter((entry) => entry !== timer);
+        },
         released: [],
         activated: 0,
         blocked: [],
@@ -55,13 +68,18 @@ function reconcileContext(responses) {
         clearPendingSceneBatchReleasesForRun() {},
         releaseSceneBatchPlan(runId) { context.released.push(runId); },
         activateNextSceneBatchRun() { context.activated += 1; },
+        findWidget(node, name) { return node?.widgets?.find((widget) => widget.name === name); },
     };
     vm.createContext(context);
     for (const name of [
         "sceneQueueContainsPrompt",
         "markSceneBatchReleaseBlocked",
         "releaseDetachedSceneBatchRun",
+        "scheduleDetachedSceneBatchReconcile",
         "reconcileDetachedSceneBatchRun",
+        "sceneBatchNodeRunId",
+        "sceneBatchRunForNode",
+        "cancelSceneBatchRunForNode",
     ]) vm.runInContext(functionSource(name), context);
     return context;
 }
@@ -89,15 +107,48 @@ async function testAbsentFromHistoryAndQueueReleases() {
 async function testStillQueuedAndFetchFailureRemainBlocked() {
     const queued = reconcileContext([response({}), response({ queue_running: [[0, "prompt-queued"]] })]);
     const queuedRun = { runId: "run-queued", currentPromptId: "prompt-queued" };
+    queued.sceneBatchDetachedRuns.set(queuedRun.runId, queuedRun);
     assert.equal(await queued.reconcileDetachedSceneBatchRun(queuedRun), false);
     assert.equal(queuedRun.releaseBlocked, true);
     assert.deepEqual(queued.released, []);
+    assert.equal(queued.scheduled.length, 1);
+    assert.equal(queued.scheduled[0].delay, 30_000);
+    queuedRun.detachedTimer = null;
+    queuedRun.detachedRetryCount = 20;
+    queued.scheduled.length = 0;
+    queued.scheduleDetachedSceneBatchReconcile(queuedRun);
+    assert.equal(queued.scheduled.length, 0, "automatic detached retries are bounded");
 
     const failed = reconcileContext([new Error("offline")]);
     const failedRun = { runId: "run-failed", currentPromptId: "prompt-failed" };
+    failed.sceneBatchDetachedRuns.set(failedRun.runId, failedRun);
     assert.equal(await failed.reconcileDetachedSceneBatchRun(failedRun), false);
     assert.equal(failedRun.releaseBlocked, true);
     assert.deepEqual(failed.released, []);
+    assert.equal(failed.scheduled.length, 1);
+}
+
+async function testDeletingBlockedDetachedNodeReconcilesAndResumesFifo() {
+    const context = reconcileContext([response({}), response({ queue_running: [], queue_pending: [] })]);
+    const graph = {};
+    const node = { id: 7, graph, widgets: [{ name: "run_id", value: "deleted-run" }] };
+    const run = {
+        runId: "deleted-run",
+        nodeId: 7,
+        node,
+        graph,
+        currentPromptId: "deleted-prompt",
+        releaseBlocked: true,
+    };
+    context.sceneBatchRunsById.set(run.runId, run);
+    context.sceneBatchDetachedRuns.set(run.runId, run);
+
+    context.cancelSceneBatchRunForNode(node);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(run.nodeRemoved, true);
+    assert.deepEqual(context.released, ["deleted-run"]);
+    assert.equal(context.activated, 1);
 }
 
 function activeReconcileContext(history) {
@@ -186,6 +237,7 @@ Promise.resolve()
     .then(testHistoryTerminalReleasesOnceAndResumesFifo)
     .then(testAbsentFromHistoryAndQueueReleases)
     .then(testStillQueuedAndFetchFailureRemainBlocked)
+    .then(testDeletingBlockedDetachedNodeReconcilesAndResumesFifo)
     .then(testMissedTerminalHistoryUsesItsActualStatus)
     .then(testNonSceneQueueSkipsRunPreparation)
     .then(testRemovalCleanupRunsOnceAndPreservesPreviousHandler)
