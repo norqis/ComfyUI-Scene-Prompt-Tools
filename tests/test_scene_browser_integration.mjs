@@ -149,6 +149,11 @@ try {
                 this.widgets.push(widget);
                 return widget;
             }
+            addCustomWidget(widget) {
+                widget.triggerDraw = () => { widget.drawCount = (widget.drawCount || 0) + 1; };
+                this.widgets.push(widget);
+                return widget;
+            }
             addInput(name, type) { this.inputs.push({ name, type, link: null }); }
             addOutput(name, type) { this.outputs.push({ name, type, links: [] }); }
             setDirtyCanvas() {}
@@ -173,11 +178,34 @@ try {
         return {
             widget: JSON.parse(widget.value),
             stored: JSON.parse(node.widgets_values[node.widgets.indexOf(widget)]),
+            selectedList: (() => {
+                const list = node.widgets.find((candidateWidget) => candidateWidget.sceneRole === "positive_selected_list");
+                const canvas = document.createElement("canvas");
+                canvas.width = 420;
+                canvas.height = Math.ceil(list.computedHeight || 1);
+                const context = canvas.getContext("2d");
+                list.draw(context, node, 420, 0, list.computedHeight);
+                const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+                let paintedPixels = 0;
+                for (let index = 3; index < pixels.length; index += 4) {
+                    if (pixels[index] > 0) paintedPixels += 1;
+                }
+                return {
+                    value: list.value,
+                    height: list.computedHeight,
+                    drawCount: list.drawCount || 0,
+                    paintedPixels,
+                };
+            })(),
         };
     });
     assert.equal(selectedState.widget.categories.Outfit[0].id, "summer");
     assert.equal(Object.hasOwn(selectedState.widget.categories.Outfit[0], "weight"), false);
     assert.deepEqual(selectedState.stored, selectedState.widget);
+    assert.equal(selectedState.selectedList.value, "1カテゴリ / 1候補");
+    assert.ok(selectedState.selectedList.height > 0);
+    assert.ok(selectedState.selectedList.drawCount > 0);
+    assert.ok(selectedState.selectedList.paintedPixels > 0);
 
     await createPreparedRun(page);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));

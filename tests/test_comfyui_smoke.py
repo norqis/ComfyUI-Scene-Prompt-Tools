@@ -241,7 +241,13 @@ class RealComfyUISmokeTests(unittest.TestCase):
             handle = runs.create_run_context("default", {"by_key": {}, "by_id": {}})
             try:
                 presets.save_preset(
-                    {"preset_id": "cache", "name": "Cache", "api_graph": preset_graph, "workflow": {"nodes": []}}
+                    {
+                        "preset_id": "cache",
+                        "name": "Cache",
+                        "output_node_id": "3",
+                        "api_graph": preset_graph,
+                        "workflow": {"nodes": []},
+                    }
                 )
                 presets.snapshot_presets_for_run(handle, api_graph, "11")
                 before_runs = copy.deepcopy(runs.RUN_CONTEXTS._entries)

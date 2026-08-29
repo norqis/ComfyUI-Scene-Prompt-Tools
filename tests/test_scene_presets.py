@@ -114,10 +114,16 @@ class ScenePresetTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def save(self, preset_id, nodes, name=None, workflow=None, user_id="default"):
+    def save(self, preset_id, nodes, name=None, workflow=None, user_id="default", output_node_id=None):
+        if output_node_id is None:
+            output_node_id = next((
+                str(node_id) for node_id, node in nodes.items()
+                if isinstance(node, dict) and node.get("class_type") == "ScenePresetOutput"
+            ), "3")
         return self.module.save_preset({
             "preset_id": preset_id,
             "name": name or preset_id,
+            "output_node_id": output_node_id,
             "api_graph": graph(nodes),
             "workflow": workflow or {"version": 1, "nodes": []},
         }, user_id)
@@ -188,16 +194,55 @@ class ScenePresetTests(unittest.TestCase):
             self.save("corrupt", basic_nodes("second"))
         self.assertEqual(path.read_text(encoding="utf-8"), original)
 
-    def test_validation_rejects_missing_boundary_and_unused_node(self):
+    def test_validation_rejects_missing_output_and_ignores_disconnected_nodes(self):
         nodes = basic_nodes()
         del nodes["3"]
-        with self.assertRaisesRegex(self.module.ScenePresetError, "Output"):
+        with self.assertRaisesRegex(self.module.ScenePresetError, "保存元"):
             self.save("missing_output", nodes)
 
         nodes = basic_nodes()
         nodes["4"] = {"class_type": "ScenePrompt", "inputs": {}}
-        with self.assertRaisesRegex(self.module.ScenePresetError, "到達"):
-            self.save("unused", nodes)
+        saved = self.save("unused", nodes)
+        self.assertSetEqual(set(saved["api_graph"]["output"]), {"1", "2", "3"})
+
+    def test_save_prunes_disconnected_workflow_nodes_and_links(self):
+        nodes = basic_nodes()
+        nodes["12"] = {"class_type": "ScenePrompt", "inputs": {}}
+        workflow = {
+            "version": 1,
+            "nodes": [
+                {"id": 1, "type": "ScenePresetInput"},
+                {"id": 2, "type": "ScenePrompt"},
+                {"id": 3, "type": "ScenePresetOutput"},
+                {"id": 12, "type": "ScenePrompt", "title": "パニック・恐怖"},
+            ],
+            "links": [
+                [1, 1, 0, 2, 0, "SCENE_PROMPT"],
+                [2, 2, 0, 3, 0, "SCENE_PROMPT"],
+                [3, 12, 0, 12, 0, "SCENE_PROMPT"],
+            ],
+        }
+        saved = self.save("connected_only", nodes, workflow=workflow)
+        self.assertEqual([node["id"] for node in saved["workflow"]["nodes"]], [1, 2, 3])
+        self.assertEqual([link[0] for link in saved["workflow"]["links"]], [1, 2])
+
+    def test_save_uses_the_output_node_that_requested_the_save(self):
+        nodes = basic_nodes("first")
+        nodes["4"] = {
+            "class_type": "ScenePrompt",
+            "inputs": {
+                **nodes["2"]["inputs"],
+                "positive_base": "second",
+                "scene_prompt": ["1", 0],
+            },
+        }
+        nodes["5"] = {
+            "class_type": "ScenePresetOutput",
+            "inputs": {"scene_prompt": ["4", 0]},
+        }
+        saved = self.save("second_output", nodes, output_node_id="5")
+        self.assertSetEqual(set(saved["api_graph"]["output"]), {"1", "4", "5"})
+        self.assertEqual(saved["api_graph"]["output"]["4"]["inputs"]["positive_base"], "second")
 
     def test_validation_rejects_cycle_and_nonzero_output_index(self):
         nodes = basic_nodes()
@@ -211,7 +256,7 @@ class ScenePresetTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.ScenePresetError, "出力0"):
             self.save("bad_output", nodes)
 
-    def test_workflow_rejects_unexecuted_nodes_and_ignores_annotations(self):
+    def test_workflow_ignores_disconnected_execution_nodes_and_annotations(self):
         workflow = {
             "version": 1,
             "nodes": [
@@ -223,11 +268,8 @@ class ScenePresetTests(unittest.TestCase):
                 {"id": 92, "type": "KSampler"},
             ],
         }
-        with self.assertRaisesRegex(self.module.ScenePresetError, "KSampler #92"):
-            self.save("workflow_side_effect", basic_nodes(), workflow=workflow)
-
-        workflow["nodes"] = workflow["nodes"][:-1]
-        self.save("workflow_annotations", basic_nodes(), workflow=workflow)
+        saved = self.save("workflow_side_effect", basic_nodes(), workflow=workflow)
+        self.assertEqual([node["id"] for node in saved["workflow"]["nodes"]], [1, 2, 3])
 
     def test_node_expansion_keeps_existing_scene_nodes_and_links(self):
         nodes = basic_nodes()
@@ -772,7 +814,7 @@ class ScenePresetTests(unittest.TestCase):
         }
         nodes["5"] = {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["4", 0]}}
         del nodes["3"]
-        self.save("total", nodes)
+        self.save("total", nodes, output_node_id="5")
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "total"}},
             "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},

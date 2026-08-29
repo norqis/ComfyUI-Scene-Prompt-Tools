@@ -169,6 +169,49 @@ def _validate_workflow_nodes(workflow, api_nodes):
             )
 
 
+def _connected_preset_nodes(nodes, output_node_id):
+    if not isinstance(nodes, dict) or not nodes:
+        raise ScenePresetError("Presetの実行グラフがありません。")
+    output_id = str(output_node_id or "").strip()
+    output_node = nodes.get(output_id)
+    if not isinstance(output_node, dict) or output_node.get("class_type") != BOUNDARY_OUTPUT:
+        raise ScenePresetError("保存元のScene Preset Outputが見つかりません。")
+
+    connected = set()
+    stack = [output_id]
+    while stack:
+        node_id = stack.pop()
+        if node_id in connected:
+            continue
+        node = nodes.get(node_id)
+        if not isinstance(node, dict):
+            raise ScenePresetError(f"接続先 #{node_id} がありません。")
+        connected.add(node_id)
+        stack.extend(_linked_nodes(node))
+    return {node_id: copy.deepcopy(node) for node_id, node in nodes.items() if str(node_id) in connected}
+
+
+def _connected_preset_workflow(workflow, node_ids):
+    result = copy.deepcopy(workflow)
+    if not isinstance(result.get("nodes"), list):
+        raise ScenePresetError("Presetの編集用ワークフローが不正です。")
+    connected = {str(node_id) for node_id in node_ids}
+    result["nodes"] = [
+        node for node in result["nodes"]
+        if isinstance(node, dict) and str(node.get("id")) in connected
+    ]
+    links = result.get("links")
+    if isinstance(links, list):
+        result["links"] = [
+            link for link in links
+            if isinstance(link, list)
+            and len(link) >= 4
+            and str(link[1]) in connected
+            and str(link[3]) in connected
+        ]
+    return result
+
+
 def _validate_preset_graph(nodes):
     if not isinstance(nodes, dict) or not nodes:
         raise ScenePresetError("Presetの実行グラフがありません。")
@@ -179,14 +222,14 @@ def _validate_preset_graph(nodes):
               if isinstance(node, dict) and node.get("class_type") == BOUNDARY_INPUT]
     outputs = [(node_id, node) for node_id, node in nodes.items()
                if isinstance(node, dict) and node.get("class_type") == BOUNDARY_OUTPUT]
-    if len(inputs) != 1:
-        raise ScenePresetError("Scene Preset Input は1個だけ必要です。")
+    if len(inputs) > 1:
+        raise ScenePresetError("Scene Preset Input は1個までです。")
     if len(outputs) != 1:
         raise ScenePresetError("Scene Preset Output は1個だけ必要です。")
 
-    input_id, input_node = inputs[0]
+    input_id, input_node = inputs[0] if inputs else (None, None)
     output_id, output_node = outputs[0]
-    if _node_inputs(input_node):
+    if input_node is not None and _node_inputs(input_node):
         raise ScenePresetError(f"{_node_label(input_id, input_node)} に入力を接続しないでください。")
     output_link = _node_inputs(output_node).get("scene_prompt")
     if not is_link(output_link):
@@ -232,12 +275,11 @@ def _validate_preset_graph(nodes):
         linked = list(_linked_nodes(nodes[node_id]))
         for source_id in reversed(linked):
             stack.append((source_id, False))
-    outside = [node_id for node_id in nodes if node_id not in ancestors and str(node_id) != str(input_id)]
-    if outside:
-        node_id = outside[0]
-        raise ScenePresetError(f"{_node_label(node_id, nodes[node_id])} はOutputへ到達していません。")
-
-    return {"input_id": str(input_id), "output_id": str(output_id), "output_link": output_link}
+    return {
+        "input_id": str(input_id) if input_id is not None else None,
+        "output_id": str(output_id),
+        "output_link": output_link,
+    }
 
 
 def _validate_literal_input(node_id, node, input_name, value, definition):
@@ -346,13 +388,16 @@ def save_preset(payload, user_id="default"):
         raise ScenePresetError("保存内容が不正です。")
     preset_id = _clean_preset_id(payload.get("preset_id"))
     name = str(payload.get("name") or preset_id).strip() or preset_id
+    output_node_id = str(payload.get("output_node_id") or "").strip()
     api_graph = payload.get("api_graph")
     workflow = payload.get("workflow")
     if not isinstance(api_graph, dict) or not isinstance(api_graph.get("output"), dict):
         raise ScenePresetError("Presetの実行グラフがありません。")
     if not isinstance(workflow, dict):
         raise ScenePresetError("Presetの編集用ワークフローがありません。")
-    api_graph = _api_graph_with_titles(api_graph, workflow)
+    connected_nodes = _connected_preset_nodes(api_graph["output"], output_node_id)
+    workflow = _connected_preset_workflow(workflow, connected_nodes)
+    api_graph = _api_graph_with_titles({**api_graph, "output": connected_nodes}, workflow)
     try:
         _validate_workflow_nodes(workflow, api_graph["output"])
         _validate_preset_graph(api_graph["output"])
