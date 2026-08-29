@@ -27,8 +27,8 @@ function deferred() {
     return { promise, resolve };
 }
 
-function presetListRaceContext(first, second) {
-    const responses = [first.promise, second.promise];
+function presetListRaceContext(...requests) {
+    const responses = requests.map((request) => request.promise);
     const context = {
         Array,
         Map,
@@ -37,7 +37,13 @@ function presetListRaceContext(first, second) {
         scenePresetDisplayGraphs: new Map(),
         scenePresetListRequestGeneration: 0,
         scenePresetListPromise: null,
-        api: { fetchApi: () => responses.shift() },
+        scenePresetListLatestPromise: null,
+        scenePresetListCacheCurrent: false,
+        fetchCount: 0,
+        api: { fetchApi: () => {
+            context.fetchCount += 1;
+            return responses.shift();
+        } },
         readApiJson: async (response) => response.payload,
     };
     vm.createContext(context);
@@ -80,6 +86,59 @@ async function testPresetListRaceInReverseResponseOrder() {
     assert.equal(context.scenePresetList[0].preset_id, "new");
     assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
     assert.equal(context.scenePresetDisplayGraphs.has("old"), false);
+}
+
+async function testPresetListFailureInNormalResponseOrder() {
+    const first = deferred();
+    const second = deferred();
+    const context = presetListRaceContext(first, second);
+    const oldRequest = context.loadScenePresetList(true);
+    const newRequest = context.loadScenePresetList(true);
+    first.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "old" } }], errors: [] } });
+    await new Promise((resolve) => setImmediate(resolve));
+    second.resolve({ ok: false, payload: { error: "latest failed" } });
+    const results = await Promise.allSettled([oldRequest, newRequest]);
+    assert.deepEqual(results.map((result) => result.status), ["rejected", "rejected"]);
+    assert.deepEqual(results.map((result) => result.reason.message), ["latest failed", "latest failed"]);
+    assert.equal(context.scenePresetList, null);
+    assert.equal(context.scenePresetDisplayGraphs.size, 0);
+}
+
+async function testPresetListFailureInReverseResponseOrder() {
+    const first = deferred();
+    const second = deferred();
+    const context = presetListRaceContext(first, second);
+    const oldRequest = context.loadScenePresetList(true);
+    const newRequest = context.loadScenePresetList(true);
+    second.resolve({ ok: false, payload: { error: "latest failed" } });
+    await assert.rejects(newRequest, /latest failed/);
+    first.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "old" } }], errors: [] } });
+    await assert.rejects(oldRequest, /latest failed/);
+    assert.equal(context.scenePresetList, null);
+    assert.equal(context.scenePresetDisplayGraphs.size, 0);
+}
+
+async function testPresetListRetriesAfterLatestFailure() {
+    const initial = deferred();
+    const failed = deferred();
+    const retry = deferred();
+    const context = presetListRaceContext(initial, failed, retry);
+
+    const initialRequest = context.loadScenePresetList();
+    initial.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "initial" } }], errors: [] } });
+    assert.equal((await initialRequest)[0].preset_id, "initial");
+
+    const failedRequest = context.loadScenePresetList(true);
+    failed.resolve({ ok: false, payload: { error: "refresh failed" } });
+    await assert.rejects(failedRequest, /refresh failed/);
+
+    const retryRequest = context.loadScenePresetList();
+    assert.equal(context.fetchCount, 3);
+    retry.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "recovered" } }], errors: [] } });
+    assert.equal((await retryRequest)[0].preset_id, "recovered");
+    assert.equal(context.scenePresetList[0].preset_id, "recovered");
+    assert.equal(context.scenePresetDisplayGraphs.has("recovered"), true);
+    assert.equal(context.scenePresetDisplayGraphs.has("initial"), false);
 }
 
 function testNodeRemovalCancelsItsRun() {
@@ -144,6 +203,9 @@ function testSourceOwnershipBoundaries() {
 Promise.resolve()
     .then(testPresetListRaceInNormalResponseOrder)
     .then(testPresetListRaceInReverseResponseOrder)
+    .then(testPresetListFailureInNormalResponseOrder)
+    .then(testPresetListFailureInReverseResponseOrder)
+    .then(testPresetListRetriesAfterLatestFailure)
     .then(testNodeRemovalCancelsItsRun)
     .then(testMatrixToggleSavesOnlyEnabledState)
     .then(testSourceOwnershipBoundaries)

@@ -160,6 +160,8 @@ let scenePresetList = null;
 let scenePresetListErrors = [];
 let scenePresetListRequestGeneration = 0;
 let scenePresetListPromise = null;
+let scenePresetListLatestPromise = null;
+let scenePresetListCacheCurrent = false;
 let scenePresetNotificationTimer = null;
 
 const VISIBLE_INPUT_NAMES = new Set(["scene_prompt"]);
@@ -8147,13 +8149,14 @@ function ensureSceneExpandControls(node) {
 }
 
 async function loadScenePresetList(force = false) {
-    if (!force && Array.isArray(scenePresetList)) {
+    if (!force && scenePresetListCacheCurrent && Array.isArray(scenePresetList)) {
         return scenePresetList;
     }
     if (!force && scenePresetListPromise) {
         return scenePresetListPromise;
     }
     const generation = ++scenePresetListRequestGeneration;
+    scenePresetListCacheCurrent = false;
     const request = (async () => {
         const response = await api.fetchApi("/scene_presets/list");
         const data = await readApiJson(response, "Preset一覧を取得できませんでした");
@@ -8161,10 +8164,7 @@ async function loadScenePresetList(force = false) {
             throw new Error(data.error || "Preset一覧を取得できませんでした");
         }
         if (generation !== scenePresetListRequestGeneration) {
-            if (scenePresetListPromise && scenePresetListPromise !== request) {
-                return scenePresetListPromise;
-            }
-            return scenePresetList || [];
+            return scenePresetListLatestPromise;
         }
         const entries = Array.isArray(data.presets) ? data.presets : [];
         scenePresetDisplayGraphs = new Map(entries.map((entry) => [
@@ -8173,9 +8173,11 @@ async function loadScenePresetList(force = false) {
         ]).filter(([presetId]) => presetId));
         scenePresetList = entries.map((entry) => entry.metadata).filter(Boolean);
         scenePresetListErrors = Array.isArray(data.errors) ? data.errors : [];
+        scenePresetListCacheCurrent = true;
         return scenePresetList;
     })();
     scenePresetListPromise = request;
+    scenePresetListLatestPromise = request;
     try {
         return await request;
     } finally {
