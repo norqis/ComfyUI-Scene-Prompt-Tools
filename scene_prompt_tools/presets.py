@@ -37,7 +37,7 @@ _CANCELLED_RUNS_MAX_ENTRIES = 256
 # Keep validation below Python's practical recursion depth as scene evaluation
 # is intentionally small and direct. Larger preset graphs are not useful for
 # this node family and now fail with a clear save-time error.
-MAX_PRESET_NODES = 512
+MAX_PRESET_NODES = 256
 MAX_PRESET_REFERENCE_DEPTH = 64
 MAX_PRESET_REFERENCE_NODE_DEPTH = 256
 

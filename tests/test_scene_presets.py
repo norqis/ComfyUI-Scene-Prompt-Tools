@@ -589,6 +589,22 @@ class ScenePresetTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.ScenePresetError, "ノード数"):
             self.save("too-deep", nodes)
 
+    def test_long_linear_preset_at_limit_does_not_overflow_python_stack(self):
+        nodes = basic_nodes()
+        previous = "2"
+        counter_count = self.module.MAX_PRESET_NODES - len(nodes)
+        for index in range(counter_count):
+            node_id = str(10 + index)
+            nodes[node_id] = {
+                "class_type": "ScenePromptCounter",
+                "inputs": {"scene_prompt": [previous, 0], "count": 1},
+            }
+            previous = node_id
+        nodes["3"]["inputs"]["scene_prompt"] = [previous, 0]
+
+        saved = self.save("linear-at-limit", nodes)
+        self.assertEqual(saved["metadata"]["preset_id"], "linear-at-limit")
+
     def test_repeated_resolve_keeps_the_first_snapshot_and_response(self):
         self.save("fixed", basic_nodes("first"))
         api_graph = graph({
