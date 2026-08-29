@@ -11,7 +11,7 @@ from pathlib import Path
 
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
-from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
+from .prompt import SCENE_PROMPT_TYPE, ScenePrompt, _prompt_data_index
 from .plan import seed_plan
 from .storage import public_user_directory
 from .nodes import (
@@ -344,7 +344,14 @@ def _validate_preset_runtime(nodes, user_id="default"):
             _resolve_preset_tree(preset_id, resolved, [], user_id, len(nodes))
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
-    _scene_node_value(nodes, validation["output_link"][0], resolved, set())
+    _scene_node_value(
+        nodes,
+        validation["output_link"][0],
+        resolved,
+        set(),
+        user_id=user_id,
+        prompt_data_index=_prompt_data_index(user_id),
+    )
 
 
 def _preset_nodes(preset):
@@ -535,7 +542,16 @@ def _assert_run_not_cancelled(run_id, user_id="default"):
         raise ScenePresetError(f"実行「{run_id}」はキャンセルされました。")
 
 
-def _scene_node_value_impl(nodes, node_id, resolved, stack, input_values=None, user_id="default", run_handle=""):
+def _scene_node_value_impl(
+    nodes,
+    node_id,
+    resolved,
+    stack,
+    input_values=None,
+    user_id="default",
+    run_handle="",
+    prompt_data_index=None,
+):
     node_id = str(node_id)
     if input_values and node_id in input_values:
         return input_values[node_id]
@@ -550,7 +566,16 @@ def _scene_node_value_impl(nodes, node_id, resolved, stack, input_values=None, u
     def value(raw):
         if not is_link(raw):
             return raw
-        return _scene_node_value(nodes, raw[0], resolved, next_stack, input_values, user_id, run_handle)
+        return _scene_node_value(
+            nodes,
+            raw[0],
+            resolved,
+            next_stack,
+            input_values,
+            user_id,
+            run_handle,
+            prompt_data_index,
+        )
 
     if class_type in SAFE_VALUE_NODE_CLASSES:
         raw_value = _node_inputs(node).get("value")
@@ -572,20 +597,48 @@ def _scene_node_value_impl(nodes, node_id, resolved, stack, input_values=None, u
         if not preset:
             raise ScenePresetError(f"Preset「{preset_id}」のスナップショットがありません。")
         upstream = value(_node_inputs(node).get("scene_prompt")) if is_link(_node_inputs(node).get("scene_prompt")) else None
-        return _evaluate_preset_scene(preset, resolved, upstream, set(), user_id, run_handle)
+        return _evaluate_preset_scene(
+            preset,
+            resolved,
+            upstream,
+            set(),
+            user_id,
+            run_handle,
+            prompt_data_index,
+        )
     cls = SAFE_NODE_CLASSES.get(class_type)
     if cls is None:
         raise ScenePresetError(f"{_node_label(node_id, node)} はScene計画を計算できません。")
     kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
     if class_type in {"ScenePrompt", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
+        if prompt_data_index is not None:
+            kwargs["_prompt_data_index"] = prompt_data_index
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     return result[0]
 
 
-def _scene_node_value(nodes, node_id, resolved, stack, input_values=None, user_id="default", run_handle=""):
+def _scene_node_value(
+    nodes,
+    node_id,
+    resolved,
+    stack,
+    input_values=None,
+    user_id="default",
+    run_handle="",
+    prompt_data_index=None,
+):
     try:
-        return _scene_node_value_impl(nodes, node_id, resolved, stack, input_values, user_id, run_handle)
+        return _scene_node_value_impl(
+            nodes,
+            node_id,
+            resolved,
+            stack,
+            input_values,
+            user_id,
+            run_handle,
+            prompt_data_index,
+        )
     except ScenePresetResolutionError:
         raise
     except (ScenePresetError, TypeError, ValueError, KeyError) as exc:
@@ -597,7 +650,15 @@ def _scene_node_value(nodes, node_id, resolved, stack, input_values=None, user_i
         ) from exc
 
 
-def _evaluate_preset_scene(preset, resolved, upstream, stack, user_id="default", run_handle=""):
+def _evaluate_preset_scene(
+    preset,
+    resolved,
+    upstream,
+    stack,
+    user_id="default",
+    run_handle="",
+    prompt_data_index=None,
+):
     preset_id = str(preset["metadata"]["preset_id"])
     if preset_id in stack:
         cycle = " -> ".join([*stack, preset_id])
@@ -607,7 +668,16 @@ def _evaluate_preset_scene(preset, resolved, upstream, stack, user_id="default",
     input_id = validation["input_id"]
     output_link = validation["output_link"]
     input_values = {input_id: upstream} if upstream is not None else None
-    return _scene_node_value(nodes, output_link[0], resolved, set(), input_values, user_id, run_handle)
+    return _scene_node_value(
+        nodes,
+        output_link[0],
+        resolved,
+        set(),
+        input_values,
+        user_id,
+        run_handle,
+        prompt_data_index,
+    )
 
 
 def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="default"):

@@ -388,7 +388,7 @@ def _parse_matrix_data(matrix_json):
     return data
 
 
-def _parse_matrix_sets(matrix_json, run_handle=""):
+def _parse_matrix_sets(matrix_json, run_handle="", prompt_data_index=None):
     data = _parse_matrix_data(matrix_json)
     raw_sets = data.get("sets", [])
     sets = []
@@ -396,7 +396,10 @@ def _parse_matrix_sets(matrix_json, run_handle=""):
         _selection_json_has_items(value.get("positive_json")) or _selection_json_has_items(value.get("negative_json"))
         for value in raw_sets if isinstance(value, dict)
     )
-    prompt_data_index = require_run_context(run_handle)["prompt_data_index"] if has_selection else {"by_key": {}, "by_id": {}}
+    if not has_selection:
+        prompt_data_index = {"by_key": {}, "by_id": {}}
+    elif prompt_data_index is None:
+        prompt_data_index = require_run_context(run_handle)["prompt_data_index"]
     for raw_set in raw_sets:
         matrix_line = _normalize_matrix_line_set(raw_set, prompt_data_index)
         sets.append(matrix_line)
@@ -704,11 +707,12 @@ class SceneMatrix:
         scene_prompt=None,
         **kwargs,
     ):
+        validation_prompt_data_index = kwargs.pop("_prompt_data_index", None)
         del kwargs
         return (
             matrix_product(
                 scene_prompt,
-                _parse_matrix_sets(matrix_json, run_handle),
+                _parse_matrix_sets(matrix_json, run_handle, validation_prompt_data_index),
                 _matrix_has_configured_sets(matrix_json),
             ),
         )
