@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 import json
 import sys
 import tempfile
@@ -26,11 +27,25 @@ def load_routes(data_dir):
     folder_paths = types.ModuleType("folder_paths")
     folder_paths.get_output_directory = lambda: str(data_dir / "output")
     folder_paths.get_user_directory = lambda: str(data_dir / "user")
+    folder_paths.get_public_user_directory = lambda user_id: str(data_dir / "user" / user_id)
 
+    registered = {}
+    def route(method):
+        def register(path):
+            def decorate(handler):
+                registered[(method, path)] = handler
+                return handler
+            return decorate
+        return register
     aiohttp = types.ModuleType("aiohttp")
-    aiohttp.web = types.SimpleNamespace(json_response=lambda *_args, **_kwargs: None)
+    aiohttp.web = types.SimpleNamespace(
+        json_response=lambda payload, status=200: {"payload": payload, "status": status},
+    )
     server = types.ModuleType("server")
-    server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(routes=types.SimpleNamespace()))
+    server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(
+        routes=types.SimpleNamespace(get=route("GET"), post=route("POST")),
+        user_manager=types.SimpleNamespace(get_request_user_id=lambda request: request.user_id),
+    ))
     sys.modules.update({
         "comfy": comfy,
         "comfy.model_management": management,
@@ -48,17 +63,17 @@ def load_routes(data_dir):
     package.__path__ = [str(PACKAGE_ROOT)]
     sys.modules[package_name] = package
     routes = importlib.import_module(f"{package_name}.routes")
-    routes.DATA_DIR = data_dir
-    routes.SAVED_PROMPTS_DIR = data_dir / routes.SAVED_PROMPTS_FOLDER
     routes._clear_prompt_caches()
+    routes.define_routes()
+    routes._test_routes = registered
     return routes
 
 
 class PromptDataRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.data_dir = Path(self.temp.name) / "data"
-        self.routes = load_routes(self.data_dir)
+        self.routes = load_routes(Path(self.temp.name) / "data")
+        self.data_dir = self.routes._data_dir()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -104,6 +119,39 @@ class PromptDataRouteTests(unittest.TestCase):
         self.routes._clear_prompt_caches()
         with self.assertRaisesRegex(ValueError, r"unsupported"):
             self.routes._load_saved_prompts()
+
+    def test_prompt_data_and_saved_prompts_are_isolated_by_user(self):
+        alice_data = self.routes._data_dir("alice")
+        bob_data = self.routes._data_dir("bob")
+        alice_file = alice_data / "People" / "prompt.json"
+        bob_file = bob_data / "People" / "prompt.json"
+        for path, label in ((alice_file, "Alice"), (bob_file, "Bob")):
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps([{"label": label, "prompt": label.lower(), "description": ""}]), encoding="utf-8")
+        self.assertEqual([item["label"] for item in self.routes._load_items("alice")], ["Alice"])
+        self.assertEqual([item["label"] for item in self.routes._load_items("bob")], ["Bob"])
+
+    def test_async_item_route_keeps_the_event_loop_responsive(self):
+        handler = self.routes._test_routes[("GET", "/scene_prompt/items")]
+        original = self.routes._load_items
+
+        def slow_load(user_id):
+            import time
+            time.sleep(0.05)
+            return original(user_id)
+
+        self.routes._load_items = slow_load
+        try:
+            async def run():
+                task = asyncio.create_task(handler(types.SimpleNamespace(user_id="alice")))
+                await asyncio.sleep(0.005)
+                self.assertFalse(task.done())
+                return await task
+            response = asyncio.run(run())
+        finally:
+            self.routes._load_items = original
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(response["payload"], {"items": []})
 
 
 if __name__ == "__main__":

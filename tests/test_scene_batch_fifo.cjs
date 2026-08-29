@@ -431,6 +431,7 @@ async function testPresetErrorMarksOnlyTargetReference() {
 
 async function testSelectedExpandBranchOnlyQueues() {
     const branchContext = { Map, Set, Object, String, Array };
+    branchContext.applyScenePromptUserId = async (snapshot) => snapshot;
     vm.createContext(branchContext);
     for (const name of [
         "apiLink",

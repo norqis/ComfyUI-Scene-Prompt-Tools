@@ -5,7 +5,9 @@ import sys
 import tempfile
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
@@ -32,6 +34,7 @@ def _install_comfy_stubs(output_dir):
     folder_paths = types.ModuleType("folder_paths")
     folder_paths.get_output_directory = lambda: str(output_dir)
     folder_paths.get_user_directory = lambda: str(output_dir / "user")
+    folder_paths.get_public_user_directory = lambda user_id: str(output_dir / "user" / user_id)
 
     sys.modules["comfy"] = comfy
     sys.modules["comfy.model_management"] = model_management
@@ -294,6 +297,43 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             metadata = json.loads(saved_image.text["scene_info"])
         self.assertEqual(metadata["repeat_count"], 100_000_000)
         self.assertEqual(metadata["total_count"], 100_000_000)
+
+    def test_scene_run_plan_cache_is_partitioned_and_lru_bounded(self):
+        self.nodes._SCENE_RUN_PLAN_CACHE.clear()
+        original_limit = self.nodes._SCENE_RUN_PLAN_CACHE_MAX_ENTRIES
+        self.nodes._SCENE_RUN_PLAN_CACHE_MAX_ENTRIES = 2
+        try:
+            first = _scene_prompt(self.nodes)
+            second = self.nodes.transform(first, lambda row, _item: {**row, "positive_parts": ["second"]})
+            with mock.patch.object(self.nodes, "normalize_plan", wraps=self.nodes.normalize_plan) as normalize:
+                self.nodes._scene_run_plan("one", first, "alice")
+                self.nodes._scene_run_plan("one", second, "alice")
+                self.nodes._scene_run_plan("one", second, "bob")
+                self.assertEqual(normalize.call_count, 2)
+
+            self.nodes._scene_run_plan("two", first, "alice")
+            self.nodes._scene_run_plan("one", first, "alice")
+            self.nodes._scene_run_plan("three", first, "alice")
+            self.assertIn(("alice", "one"), self.nodes._SCENE_RUN_PLAN_CACHE)
+            self.assertIn(("alice", "three"), self.nodes._SCENE_RUN_PLAN_CACHE)
+            self.assertNotIn(("alice", "two"), self.nodes._SCENE_RUN_PLAN_CACHE)
+        finally:
+            self.nodes._SCENE_RUN_PLAN_CACHE_MAX_ENTRIES = original_limit
+            self.nodes._SCENE_RUN_PLAN_CACHE.clear()
+
+    def test_concurrent_saves_reserve_distinct_filenames_and_keep_metadata(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        scene_info = {"use_run_dir": False, "file_index": 1, "filename_prefix": "parallel_", "positive": "test"}
+
+        def save_one(_index):
+            return self.nodes.SceneSaveImage().save_images([image], "", scene_info=scene_info)["result"][1]
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            paths = [Path(value) for value in pool.map(save_one, range(16))]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertTrue(all(path.exists() for path in paths))
+        with Image.open(paths[0]) as saved:
+            self.assertEqual(json.loads(saved.text["scene_info"])["positive"], "test")
 
     def test_all_registered_scene_nodes_have_japanese_descriptions(self):
         package = _load_node_package(Path(self.temp_dir.name))

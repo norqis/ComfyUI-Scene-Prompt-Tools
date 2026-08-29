@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 folder_paths = types.ModuleType("folder_paths")
 folder_paths.get_user_directory = lambda: str(ROOT / ".test-user")
+folder_paths.get_public_user_directory = lambda user_id: str(ROOT / ".test-user" / user_id)
 sys.modules.setdefault("folder_paths", folder_paths)
 
 from scene_prompt_tools.prompt import _choice_rng, _compose_prompt_parts, _expand_prompt_parts, _parse_selection_json, _read_prompt_items

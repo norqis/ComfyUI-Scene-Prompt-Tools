@@ -21,6 +21,7 @@ def install_stubs(user_directory):
     install_comfy_execution_stub()
     folder_paths = types.ModuleType("folder_paths")
     folder_paths.get_user_directory = lambda: str(user_directory)
+    folder_paths.get_public_user_directory = lambda user_id: str(user_directory / user_id)
     folder_paths.get_output_directory = lambda: str(user_directory / "output")
     sys.modules["folder_paths"] = folder_paths
 
@@ -112,13 +113,13 @@ class ScenePresetTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def save(self, preset_id, nodes, name=None, workflow=None):
+    def save(self, preset_id, nodes, name=None, workflow=None, user_id="default"):
         return self.module.save_preset({
             "preset_id": preset_id,
             "name": name or preset_id,
             "api_graph": graph(nodes),
             "workflow": workflow or {"version": 1, "nodes": []},
-        })
+        }, user_id)
 
     def test_save_is_atomic_and_revision_hash_increase(self):
         first = self.save("preset_a", basic_nodes("first"))
@@ -538,6 +539,43 @@ class ScenePresetTests(unittest.TestCase):
         })
         result = self.module.snapshot_presets_for_run("run-total", api_graph, "11")
         self.assertEqual(result["total_images"], 2)
+
+    def test_presets_and_run_snapshots_are_isolated_by_user(self):
+        self.save("shared", basic_nodes("alice"), user_id="alice")
+        self.save("shared", basic_nodes("bob"), user_id="bob")
+        self.assertEqual(self.module.load_preset("shared", "alice")["api_graph"]["output"]["2"]["inputs"]["positive_base"], "alice")
+        self.assertEqual(self.module.load_preset("shared", "bob")["api_graph"]["output"]["2"]["inputs"]["positive_base"], "bob")
+
+        graph_data = graph({"11": {"class_type": "ScenePromptExpand", "inputs": {}}})
+        self.module.snapshot_presets_for_run("same-run", graph_data, "11", "alice")
+        self.module.snapshot_presets_for_run("same-run", graph_data, "11", "bob")
+        self.assertIn(("alice", "same-run"), self.module._RUN_SNAPSHOTS)
+        self.assertIn(("bob", "same-run"), self.module._RUN_SNAPSHOTS)
+
+    def test_snapshot_cache_evicts_oldest_entry_at_limit(self):
+        self.module._RUN_SNAPSHOTS.clear()
+        self.module._CANCELLED_RUNS.clear()
+        original_limit = self.module._RUN_SNAPSHOTS_MAX_ENTRIES
+        original_cancel_limit = self.module._CANCELLED_RUNS_MAX_ENTRIES
+        self.module._RUN_SNAPSHOTS_MAX_ENTRIES = 2
+        self.module._CANCELLED_RUNS_MAX_ENTRIES = 2
+        try:
+            graph_data = graph({"11": {"class_type": "ScenePromptExpand", "inputs": {}}})
+            self.module.snapshot_presets_for_run("one", graph_data, "11")
+            self.module.snapshot_presets_for_run("two", graph_data, "11")
+            self.module.snapshot_presets_for_run("one", graph_data, "11")
+            self.module.snapshot_presets_for_run("three", graph_data, "11")
+            self.assertIn(("default", "one"), self.module._RUN_SNAPSHOTS)
+            self.assertIn(("default", "three"), self.module._RUN_SNAPSHOTS)
+            self.assertNotIn(("default", "two"), self.module._RUN_SNAPSHOTS)
+            for run_id in ("cancel-one", "cancel-two", "cancel-three"):
+                self.module.release_scene_preset_snapshot(run_id)
+            self.assertEqual(list(self.module._CANCELLED_RUNS), [("default", "cancel-two"), ("default", "cancel-three")])
+        finally:
+            self.module._RUN_SNAPSHOTS_MAX_ENTRIES = original_limit
+            self.module._CANCELLED_RUNS_MAX_ENTRIES = original_cancel_limit
+            self.module._RUN_SNAPSHOTS.clear()
+            self.module._CANCELLED_RUNS.clear()
 
 
 if __name__ == "__main__":

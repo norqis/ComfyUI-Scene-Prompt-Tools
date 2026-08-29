@@ -12,7 +12,6 @@ DEFAULT_CATEGORY_ORDER = ""
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
 DEFAULT_SELECTED_JSON = "{\"version\":1,\"categories\":{}}"
 PROMPT_FILE_NAME = "prompt.json"
-DATA_DIR = prompt_data_directory()
 SAVED_PROMPTS_FOLDER = "保存済みプロンプト"
 PROMPT_ITEM_REQUIRED_KEYS = {"label", "prompt"}
 PROMPT_ITEM_OPTIONAL_KEYS = {"id", "description"}
@@ -27,8 +26,8 @@ MAX_WEIGHT = 3.0
 
 CHOICE_RE = re.compile(r"\{([^{}]+)\}")
 WEIGHTED_PART_RE = re.compile(r"^\((.*):\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\)$")
-_PROMPT_DATA_INDEX_CACHE = {"signature": None, "index": None}
-_PROMPT_FILE_SIGNATURE_CACHE = {"expires": 0.0, "signature": None}
+_PROMPT_DATA_INDEX_CACHE = {}
+_PROMPT_FILE_SIGNATURE_CACHE = {}
 _PROMPT_SIGNATURE_TTL_SECONDS = 0.5
 
 
@@ -204,22 +203,30 @@ def _category_key(item):
     return ""
 
 
-def _prompt_file_signature():
+def _prompt_data_directory_for_user(user_id="default"):
+    return prompt_data_directory(user_id)
+
+
+def _prompt_file_signature(user_id="default"):
+    user_key = str(user_id or "default")
     now = time.monotonic()
-    cached = _PROMPT_FILE_SIGNATURE_CACHE.get("signature")
-    if cached is not None and _PROMPT_FILE_SIGNATURE_CACHE.get("expires", 0.0) > now:
+    cache = _PROMPT_FILE_SIGNATURE_CACHE.setdefault(user_key, {"expires": 0.0, "signature": None})
+    cached = cache.get("signature")
+    if cached is not None and cache.get("expires", 0.0) > now:
         return cached
 
-    if not DATA_DIR.exists():
+    data_dir = _prompt_data_directory_for_user(user_key)
+
+    if not data_dir.exists():
         signature = ()
-        _PROMPT_FILE_SIGNATURE_CACHE["signature"] = signature
-        _PROMPT_FILE_SIGNATURE_CACHE["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
+        cache["signature"] = signature
+        cache["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
         return signature
 
     signature = []
-    for prompt_file in sorted(DATA_DIR.rglob(PROMPT_FILE_NAME)):
+    for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
         try:
-            category_path = prompt_file.parent.relative_to(DATA_DIR).parts
+            category_path = prompt_file.parent.relative_to(data_dir).parts
         except ValueError:
             continue
         if category_path and category_path[0] == SAVED_PROMPTS_FOLDER:
@@ -230,20 +237,20 @@ def _prompt_file_signature():
             continue
         signature.append(("/".join(category_path), stat.st_mtime_ns, stat.st_size))
     signature = tuple(signature)
-    _PROMPT_FILE_SIGNATURE_CACHE["signature"] = signature
-    _PROMPT_FILE_SIGNATURE_CACHE["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
+    cache["signature"] = signature
+    cache["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
     return signature
 
 
-def _clear_prompt_data_cache():
-    _PROMPT_FILE_SIGNATURE_CACHE["expires"] = 0.0
-    _PROMPT_FILE_SIGNATURE_CACHE["signature"] = None
-    _PROMPT_DATA_INDEX_CACHE["signature"] = None
-    _PROMPT_DATA_INDEX_CACHE["index"] = None
+def _clear_prompt_data_cache(user_id=None):
+    keys = [str(user_id or "default")] if user_id is not None else set(_PROMPT_FILE_SIGNATURE_CACHE) | set(_PROMPT_DATA_INDEX_CACHE)
+    for key in keys:
+        _PROMPT_FILE_SIGNATURE_CACHE.pop(key, None)
+        _PROMPT_DATA_INDEX_CACHE.pop(key, None)
 
 
-def _prompt_data_change_key():
-    payload = json.dumps(_prompt_file_signature(), ensure_ascii=False, separators=(",", ":"))
+def _prompt_data_change_key(user_id="default"):
+    payload = json.dumps(_prompt_file_signature(user_id), ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -369,18 +376,21 @@ def _selection_item_key(item, default_category=""):
     return f"{category}::item::{item['label']}::{item['prompt']}"
 
 
-def _prompt_data_index():
-    signature = _prompt_file_signature()
-    cached = _PROMPT_DATA_INDEX_CACHE.get("index")
-    if _PROMPT_DATA_INDEX_CACHE.get("signature") == signature and cached is not None:
+def _prompt_data_index(user_id="default"):
+    user_key = str(user_id or "default")
+    signature = _prompt_file_signature(user_key)
+    cache = _PROMPT_DATA_INDEX_CACHE.get(user_key)
+    cached = cache.get("index") if cache else None
+    if cache and cache.get("signature") == signature and cached is not None:
         return cached
 
     by_key = {}
     by_id = {}
-    if DATA_DIR.exists():
-        for prompt_file in sorted(DATA_DIR.rglob(PROMPT_FILE_NAME)):
+    data_dir = _prompt_data_directory_for_user(user_key)
+    if data_dir.exists():
+        for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
             try:
-                category_path = list(prompt_file.parent.relative_to(DATA_DIR).parts)
+                category_path = list(prompt_file.parent.relative_to(data_dir).parts)
             except ValueError:
                 continue
             if category_path and category_path[0] == SAVED_PROMPTS_FOLDER:
@@ -400,8 +410,7 @@ def _prompt_data_index():
         "by_key": by_key,
         "by_id": by_id,
     }
-    _PROMPT_DATA_INDEX_CACHE["signature"] = signature
-    _PROMPT_DATA_INDEX_CACHE["index"] = index
+    _PROMPT_DATA_INDEX_CACHE[user_key] = {"signature": signature, "index": index}
     return index
 
 
@@ -617,6 +626,7 @@ class _ScenePromptBase:
                     },
                 ),
                 "randomize": ("BOOLEAN", {"default": True, "hidden": True}),
+                "user_id": ("STRING", {"default": "default", "hidden": True}),
             },
             "optional": {
                 "scene_prompt": (
@@ -638,6 +648,7 @@ class _ScenePromptBase:
         seed,
         randomize,
         scene_prompt=None,
+        user_id="default",
         **kwargs,
     ):
         return "|".join(
@@ -651,7 +662,7 @@ class _ScenePromptBase:
                 str(randomize),
                 str(seed),
                 _scene_prompt_change_key(scene_prompt),
-                _prompt_data_change_key(),
+                _prompt_data_change_key(user_id),
             ]
         )
 
@@ -666,11 +677,12 @@ class _ScenePromptBase:
         seed,
         randomize,
         scene_prompt=None,
+        user_id="default",
         **kwargs,
     ):
         del kwargs
         label = str(prompt_name or "").strip() or "Scene Prompt"
-        prompt_data_index = _prompt_data_index()
+        prompt_data_index = _prompt_data_index(user_id)
         positive_parts = _compose_prompt_parts(
             positive_base,
             positive_json,

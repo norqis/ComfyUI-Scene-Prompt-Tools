@@ -10,9 +10,6 @@ from collections import defaultdict
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = BASE_DIR / "data"
-
 BLOCK_RE = re.compile(
     r"<(?P<tag>h2|h3)\b[^>]*>(?P<head>.*?)</(?P=tag)>|(?P<figure><figure\b[^>]*>.*?</figure>)",
     re.IGNORECASE | re.DOTALL,
@@ -178,54 +175,75 @@ def dedupe_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
     return deduped
 
 
-def write_data(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: Path, clean: bool) -> tuple[int, int, int]:
-    if clean and output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _atomic_write_json(path: Path, data: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
-    category_count = 0
-    subcategory_count = 0
-    item_count = 0
 
+def _output_payloads(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: Path):
     used_main_names: dict[str, str] = {}
+    payloads = []
     for main_category, subcategories in sorted(grouped.items()):
         main_dir_name = safe_dir_name(main_category, "main_category")
         if main_dir_name in used_main_names and used_main_names[main_dir_name] != main_category:
             main_dir_name = f"{main_dir_name}_{stable_suffix(main_category)}"
         used_main_names[main_dir_name] = main_category
-        main_dir = output_dir / main_dir_name
-        main_dir.mkdir(parents=True, exist_ok=True)
-        category_count += 1
-
         used_sub_names: dict[str, str] = {}
         for sub_category, raw_items in sorted(subcategories.items()):
             items = dedupe_items(raw_items)
             if not items:
                 continue
-
             sub_dir_name = safe_dir_name(sub_category, "sub_category")
             if sub_dir_name in used_sub_names and used_sub_names[sub_dir_name] != sub_category:
                 sub_dir_name = f"{sub_dir_name}_{stable_suffix(sub_category)}"
             used_sub_names[sub_dir_name] = sub_category
+            payloads.append((output_dir / main_dir_name / sub_dir_name / "prompt.json", items))
+    return payloads
 
-            sub_dir = main_dir / sub_dir_name
-            sub_dir.mkdir(parents=True, exist_ok=True)
-            prompt_file = sub_dir / "prompt.json"
-            prompt_file.write_text(
-                json.dumps(items, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            subcategory_count += 1
-            item_count += len(items)
 
-    return category_count, subcategory_count, item_count
+def write_data(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: Path, mode: str = "abort") -> tuple[int, int, int]:
+    payloads = _output_payloads(grouped, output_dir)
+    if mode not in {"abort", "merge", "replace", "clean"}:
+        raise ValueError("unsupported write mode")
+    if mode == "abort":
+        collisions = [path for path, _items in payloads if path.exists()]
+        if collisions:
+            raise FileExistsError(f"Destination already contains prompt data: {collisions[0]}")
+    if mode == "clean" and output_dir.exists():
+        shutil.rmtree(output_dir)
+    prepared = []
+    for prompt_file, items in payloads:
+        if mode == "merge" and prompt_file.exists():
+            existing = json.loads(prompt_file.read_text(encoding="utf-8"))
+            if not isinstance(existing, list):
+                raise ValueError(f"Destination file is not a JSON array: {prompt_file}")
+            items = dedupe_items([*existing, *items])
+        prepared.append((prompt_file, items))
+
+    for prompt_file, items in prepared:
+        _atomic_write_json(prompt_file, items)
+
+    return (
+        len({path.parent.parent for path, _items in prepared}),
+        len(prepared),
+        sum(len(items) for _path, items in prepared),
+    )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Import Scene prompt HTML files into ComfyUI prompt data JSON.")
     parser.add_argument("--input", type=Path, required=True, help="Directory containing source HTML files.")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR, help="Destination data directory.")
-    parser.add_argument("--clean", action="store_true", help="Delete the destination data directory before writing.")
+    parser.add_argument("--output", type=Path, required=True, help="Destination data directory.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--merge", action="store_true", help="Merge items into existing prompt files.")
+    mode.add_argument("--replace", action="store_true", help="Replace existing prompt files.")
+    mode.add_argument("--clean", action="store_true", help="Delete the destination data directory before writing.")
     parser.add_argument("--dry-run", action="store_true", help="Parse and report counts without writing files.")
     return parser.parse_args()
 
@@ -244,7 +262,8 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    written_categories, written_subcategories, written_items = write_data(grouped, args.output, args.clean)
+    mode = "clean" if args.clean else "merge" if args.merge else "replace" if args.replace else "abort"
+    written_categories, written_subcategories, written_items = write_data(grouped, args.output, mode)
     print(
         "wrote "
         f"categories={written_categories} subcategories={written_subcategories} items={written_items} "

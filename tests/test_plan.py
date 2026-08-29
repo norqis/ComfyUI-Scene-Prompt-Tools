@@ -1,14 +1,19 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import scene_prompt_tools.plan as plan_module
+
 from scene_prompt_tools.plan import (
+    MAX_PLAN_ROWS,
     SCENE_PROMPT_TYPE,
     ScenePlanError,
     empty_row,
     item_for_index,
+    item_for_normalized_plan,
     make_plan,
     matrix_product,
     merge,
@@ -139,6 +144,15 @@ class ScenePlanTests(unittest.TestCase):
         with self.assertRaises(IndexError):
             item_for_index(plan, 2)
 
+    def test_validated_lookup_skips_zero_count_rows_without_revalidating(self):
+        plan = make_plan([
+            {"row": prompt_row("first"), "count": 1},
+            {"row": prompt_row("empty"), "count": 0},
+            {"row": prompt_row("last"), "count": 1},
+        ])
+        with mock.patch.object(plan_module, "normalize_plan", side_effect=AssertionError("must not normalize")):
+            self.assertEqual(item_for_normalized_plan(plan, 1)["label"], "last")
+
     def test_plan_type_is_current_schema_only(self):
         self.assertEqual(seed_plan()["type"], SCENE_PROMPT_TYPE)
         with self.assertRaises(ScenePlanError):
@@ -151,6 +165,32 @@ class ScenePlanTests(unittest.TestCase):
         broken = {**plan, "rows": [{**plan["rows"][0], "row": {**plan["rows"][0]["row"], "legacy": True}}]}
         with self.assertRaises(ScenePlanError):
             normalize_plan(broken)
+
+    def test_row_cap_rejects_merge_before_materializing_rows(self):
+        with mock.patch.object(plan_module, "MAX_PLAN_ROWS", 4), mock.patch.object(plan_module, "merge_rows") as merge_rows:
+            with self.assertRaisesRegex(ScenePlanError, "more than 4 rows"):
+                merge(make_plan([{"row": prompt_row("a"), "count": 1}] * 3), make_plan([{"row": prompt_row("b"), "count": 1}] * 2))
+        merge_rows.assert_not_called()
+
+    def test_row_cap_rejects_queue_and_matrix_before_materializing_rows(self):
+        with mock.patch.object(plan_module, "MAX_PLAN_ROWS", 2):
+            with self.assertRaisesRegex(ScenePlanError, "cannot contain more than 2 rows"):
+                queue([make_plan([{"row": prompt_row("a"), "count": 1}] * 2), prompt_plan("b")])
+            with self.assertRaisesRegex(ScenePlanError, "would create more than 2 rows"):
+                matrix_product(
+                    make_plan([{"row": prompt_row("a"), "count": 1}] * 2),
+                    [{**prompt_row("b"), "name": "b", "enabled": True}, {**prompt_row("c"), "name": "c", "enabled": True}],
+                    True,
+                )
+
+    def test_normalize_uses_one_running_cursor_per_row(self):
+        row_count = min(MAX_PLAN_ROWS, 2_000)
+        plan = make_plan([{"row": prompt_row(str(index)), "count": 1} for index in range(row_count)])
+        expected = list(range(row_count))
+        with mock.patch.object(plan_module, "_build_plan", wraps=plan_module._build_plan) as build_plan:
+            normalized = normalize_plan(plan)
+        self.assertEqual([item["start_index"] for item in normalized["rows"]], expected)
+        self.assertEqual(build_plan.call_count, 1)
 
 
 if __name__ == "__main__":

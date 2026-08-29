@@ -308,8 +308,9 @@ function testMatrixToggleSavesOnlyEnabledState() {
 
 function testSourceOwnershipBoundaries() {
     assert.doesNotMatch(functionSource("hideInternalDomWidgets"), /document\.querySelectorAll/);
-    assert.match(functionSource("attachSceneUtilityNode"), /node\.onRemoved/);
-    assert.match(functionSource("attachSceneUtilityNode"), /cancelSceneBatchRunForNode\(this\)/);
+    const cleanup = functionSource("installSceneNodeRemovalCleanup");
+    assert.match(cleanup, /node\.onRemoved/);
+    assert.match(cleanup, /cancelSceneBatchRunForNode\(this\)/);
 
     const matrixEditor = functionSource("openSceneMatrixLinesPopup");
     const toggleStart = matrixEditor.indexOf('toggle.addEventListener("click"');

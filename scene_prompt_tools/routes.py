@@ -1,4 +1,5 @@
 import json
+import asyncio
 import re
 import threading
 import time
@@ -25,14 +26,28 @@ from .presets import (
 from .storage import prompt_data_directory
 
 
-DATA_DIR = prompt_data_directory()
-SAVED_PROMPTS_DIR = DATA_DIR / SAVED_PROMPTS_FOLDER
 PROMPT_FILE_NAME = "prompt.json"
 DATA_WRITE_LOCK = threading.Lock()
 _ROUTES_DEFINED = False
 _CACHE_TTL_SECONDS = 2.0
-_ITEMS_CACHE = {"expires": 0.0, "signature": None, "value": None}
-_SAVED_PROMPTS_CACHE = {"expires": 0.0, "signature": None, "value": None}
+_ITEMS_CACHE = {}
+_SAVED_PROMPTS_CACHE = {}
+
+
+def _request_user_id(request):
+    return PromptServer.instance.user_manager.get_request_user_id(request)
+
+
+def _data_dir(user_id="default"):
+    return prompt_data_directory(user_id)
+
+
+def _saved_prompts_dir(user_id="default"):
+    return _data_dir(user_id) / SAVED_PROMPTS_FOLDER
+
+
+def _cache_for(caches, user_id):
+    return caches.setdefault(str(user_id or "default"), {"expires": 0.0, "signature": None, "value": None})
 
 
 def _prompt_file_signature(root):
@@ -70,10 +85,10 @@ def _cache_set(cache, signature, value):
     return value
 
 
-def _clear_prompt_caches():
-    _ITEMS_CACHE["expires"] = 0.0
-    _SAVED_PROMPTS_CACHE["expires"] = 0.0
-    _clear_prompt_data_cache()
+def _clear_prompt_caches(user_id="default"):
+    _ITEMS_CACHE.pop(str(user_id or "default"), None)
+    _SAVED_PROMPTS_CACHE.pop(str(user_id or "default"), None)
+    _clear_prompt_data_cache(user_id)
 
 
 def _read_items(path, category_path):
@@ -98,27 +113,30 @@ def _read_items(path, category_path):
     return normalized
 
 
-def _load_items():
-    cached = _cache_get_unexpired(_ITEMS_CACHE)
+def _load_items(user_id="default"):
+    data_dir = _data_dir(user_id)
+    saved_prompts_dir = _saved_prompts_dir(user_id)
+    cache = _cache_for(_ITEMS_CACHE, user_id)
+    cached = _cache_get_unexpired(cache)
     if cached is not None:
         return cached
 
-    signature = _prompt_file_signature(DATA_DIR)
-    cached = _cache_get(_ITEMS_CACHE, signature)
+    signature = _prompt_file_signature(data_dir)
+    cached = _cache_get(cache, signature)
     if cached is not None:
         return cached
 
     items = []
 
-    if not DATA_DIR.exists():
-        return _cache_set(_ITEMS_CACHE, signature, items)
+    if not data_dir.exists():
+        return _cache_set(cache, signature, items)
 
-    for prompt_file in sorted(DATA_DIR.rglob(PROMPT_FILE_NAME)):
-        category_path = list(prompt_file.parent.relative_to(DATA_DIR).parts)
-        if category_path and category_path[0] != SAVED_PROMPTS_DIR.name:
+    for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
+        category_path = list(prompt_file.parent.relative_to(data_dir).parts)
+        if category_path and category_path[0] != saved_prompts_dir.name:
             items.extend(_read_items(prompt_file, category_path))
 
-    return _cache_set(_ITEMS_CACHE, signature, items)
+    return _cache_set(cache, signature, items)
 
 
 def _safe_folder_name(name):
@@ -197,7 +215,7 @@ def _unique_child_dir(parent, folder_name):
         index += 1
 
 
-def _create_prompt_item(payload):
+def _create_prompt_item(payload, user_id="default"):
     if not isinstance(payload, dict):
         raise ValueError("invalid payload")
 
@@ -209,7 +227,9 @@ def _create_prompt_item(payload):
 
     if not category:
         raise ValueError("category is required")
-    if _safe_folder_name(category) == SAVED_PROMPTS_DIR.name:
+    data_dir = _data_dir(user_id)
+    saved_prompts_dir = _saved_prompts_dir(user_id)
+    if _safe_folder_name(category) == saved_prompts_dir.name:
         raise ValueError("reserved category name")
     if not label:
         raise ValueError("name is required")
@@ -220,7 +240,7 @@ def _create_prompt_item(payload):
         parts = [_safe_folder_name(category)]
         if subcategory:
             parts.append(_safe_folder_name(subcategory))
-        target_dir = DATA_DIR.joinpath(*parts)
+        target_dir = data_dir.joinpath(*parts)
         target = target_dir / PROMPT_FILE_NAME
         data = _read_prompt_payload(target)
 
@@ -247,9 +267,9 @@ def _create_prompt_item(payload):
 
         data.append(item)
         _write_prompt_payload(target, data)
-        _clear_prompt_caches()
+        _clear_prompt_caches(user_id)
 
-        category_path = list(target.parent.relative_to(DATA_DIR).parts)
+        category_path = list(target.parent.relative_to(data_dir).parts)
         normalized = dict(item)
         normalized["category_path"] = category_path
         normalized["category_key"] = " > ".join(category_path)
@@ -272,7 +292,7 @@ def _item_matches_update_target(item, target):
     return True
 
 
-def _update_prompt_item(payload):
+def _update_prompt_item(payload, user_id="default"):
     if not isinstance(payload, dict):
         raise ValueError("invalid payload")
 
@@ -280,7 +300,8 @@ def _update_prompt_item(payload):
     if not isinstance(category_path, list):
         raise ValueError("category_path is required")
     safe_parts = [_safe_folder_name(part) for part in category_path if str(part or "").strip()]
-    if not safe_parts or safe_parts[0] == SAVED_PROMPTS_DIR.name:
+    data_dir = _data_dir(user_id)
+    if not safe_parts or safe_parts[0] == _saved_prompts_dir(user_id).name:
         raise ValueError("invalid category_path")
 
     label = str(payload.get("label") or "").strip()
@@ -295,7 +316,7 @@ def _update_prompt_item(payload):
         raise ValueError("prompt is required")
 
     with DATA_WRITE_LOCK:
-        target = DATA_DIR.joinpath(*safe_parts) / PROMPT_FILE_NAME
+        target = data_dir.joinpath(*safe_parts) / PROMPT_FILE_NAME
         data = _read_prompt_payload(target)
 
         updated = None
@@ -323,7 +344,7 @@ def _update_prompt_item(payload):
             raise ValueError("item not found")
 
         _write_prompt_payload(target, data)
-        _clear_prompt_caches()
+        _clear_prompt_caches(user_id)
 
         normalized = dict(updated)
         normalized["category_path"] = safe_parts
@@ -344,7 +365,7 @@ def _normalize_saved_item(item, prompt_file, index):
         raise ValueError(str(exc)) from exc
 
 
-def _read_saved_prompt(prompt_file):
+def _read_saved_prompt(prompt_file, saved_prompts_dir):
     try:
         with prompt_file.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -364,7 +385,7 @@ def _read_saved_prompt(prompt_file):
 
     items = [_normalize_saved_item(item, prompt_file, index) for index, item in enumerate(data["items"])]
 
-    category_path = list(prompt_file.parent.relative_to(SAVED_PROMPTS_DIR).parts)
+    category_path = list(prompt_file.parent.relative_to(saved_prompts_dir).parts)
     folder_name = prompt_file.parent.name
     name = data["name"].strip()
     return {
@@ -376,26 +397,28 @@ def _read_saved_prompt(prompt_file):
     }
 
 
-def _load_saved_prompts():
-    cached = _cache_get_unexpired(_SAVED_PROMPTS_CACHE)
+def _load_saved_prompts(user_id="default"):
+    saved_prompts_dir = _saved_prompts_dir(user_id)
+    cache = _cache_for(_SAVED_PROMPTS_CACHE, user_id)
+    cached = _cache_get_unexpired(cache)
     if cached is not None:
         return cached
 
-    signature = _prompt_file_signature(SAVED_PROMPTS_DIR)
-    cached = _cache_get(_SAVED_PROMPTS_CACHE, signature)
+    signature = _prompt_file_signature(saved_prompts_dir)
+    cached = _cache_get(cache, signature)
     if cached is not None:
         return cached
 
     saved = []
-    if not SAVED_PROMPTS_DIR.exists():
-        return _cache_set(_SAVED_PROMPTS_CACHE, signature, saved)
+    if not saved_prompts_dir.exists():
+        return _cache_set(cache, signature, saved)
 
-    for prompt_file in sorted(SAVED_PROMPTS_DIR.rglob(PROMPT_FILE_NAME)):
-        saved.append(_read_saved_prompt(prompt_file))
-    return _cache_set(_SAVED_PROMPTS_CACHE, signature, saved)
+    for prompt_file in sorted(saved_prompts_dir.rglob(PROMPT_FILE_NAME)):
+        saved.append(_read_saved_prompt(prompt_file, saved_prompts_dir))
+    return _cache_set(cache, signature, saved)
 
 
-def _save_prompt_payload(payload):
+def _save_prompt_payload(payload, user_id="default"):
     if not isinstance(payload, dict):
         raise ValueError("invalid payload")
 
@@ -410,7 +433,7 @@ def _save_prompt_payload(payload):
 
     with DATA_WRITE_LOCK:
         folder_name = _safe_folder_name(name)
-        target_dir = _unique_child_dir(SAVED_PROMPTS_DIR, folder_name)
+        target_dir = _unique_child_dir(_saved_prompts_dir(user_id), folder_name)
         target = target_dir / PROMPT_FILE_NAME
         data = {
             "name": name,
@@ -418,9 +441,9 @@ def _save_prompt_payload(payload):
             "items": items,
         }
         _write_prompt_payload(target, data)
-        _clear_prompt_caches()
+        _clear_prompt_caches(user_id)
 
-        return _read_saved_prompt(target)
+        return _read_saved_prompt(target, _saved_prompts_dir(user_id))
 
 
 def define_routes():
@@ -431,16 +454,18 @@ def define_routes():
     setattr(PromptServer.instance, "_scene_prompt_routes_defined", True)
 
     @PromptServer.instance.routes.get("/scene_prompt/items")
-    async def scene_prompt_items(_request):
+    async def scene_prompt_items(request):
         try:
-            return web.json_response({"items": _load_items()})
+            user_id = _request_user_id(request)
+            return web.json_response({"items": await asyncio.to_thread(_load_items, user_id)})
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
 
     @PromptServer.instance.routes.get("/scene_prompt/saved_prompts")
-    async def scene_prompt_saved_prompts(_request):
+    async def scene_prompt_saved_prompts(request):
         try:
-            return web.json_response({"saved_prompts": _load_saved_prompts()})
+            user_id = _request_user_id(request)
+            return web.json_response({"saved_prompts": await asyncio.to_thread(_load_saved_prompts, user_id)})
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
 
@@ -448,12 +473,13 @@ def define_routes():
     async def scene_prompt_save_prompt(request):
         try:
             payload = await request.json()
-            saved = _save_prompt_payload(payload)
+            user_id = _request_user_id(request)
+            saved = await asyncio.to_thread(_save_prompt_payload, payload, user_id)
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
         try:
-            saved_prompts = _load_saved_prompts()
+            saved_prompts = await asyncio.to_thread(_load_saved_prompts, user_id)
         except Exception as exc:
             return web.json_response({"error": f"Saved prompt was written, but reload failed: {exc}"}, status=500)
 
@@ -463,15 +489,16 @@ def define_routes():
     async def scene_prompt_create_item(request):
         try:
             payload = await request.json()
+            user_id = _request_user_id(request)
             if isinstance(payload, dict) and payload.get("mode") == "update":
-                item = _update_prompt_item(payload)
+                item = await asyncio.to_thread(_update_prompt_item, payload, user_id)
             else:
-                item = _create_prompt_item(payload)
+                item = await asyncio.to_thread(_create_prompt_item, payload, user_id)
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
         try:
-            items = _load_items()
+            items = await asyncio.to_thread(_load_items, user_id)
         except Exception as exc:
             return web.json_response({"error": f"Prompt item was written, but reload failed: {exc}"}, status=500)
 
@@ -482,8 +509,9 @@ def define_routes():
         try:
             payload = await request.json()
             run_id = payload.get("run_id") if isinstance(payload, dict) else ""
-            released = release_scene_run_plan(run_id)
-            preset_released = release_scene_preset_snapshot(run_id)
+            user_id = _request_user_id(request)
+            released = release_scene_run_plan(run_id, user_id)
+            preset_released = release_scene_preset_snapshot(run_id, user_id)
             return web.json_response({"released": released or preset_released})
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=400)
@@ -491,7 +519,7 @@ def define_routes():
     @PromptServer.instance.routes.post("/scene_presets/save")
     async def scene_presets_save(request):
         try:
-            saved = save_preset(await request.json())
+            saved = await asyncio.to_thread(save_preset, await request.json(), _request_user_id(request))
             return web.json_response({"metadata": saved["metadata"]})
         except ScenePresetResolutionError as exc:
             return web.json_response({"error": str(exc), "node_id": exc.node_id}, status=400)
@@ -501,9 +529,9 @@ def define_routes():
             return web.json_response({"error": f"Presetを保存できませんでした: {exc}"}, status=500)
 
     @PromptServer.instance.routes.get("/scene_presets/list")
-    async def scene_presets_list(_request):
+    async def scene_presets_list(request):
         try:
-            return web.json_response(list_presets())
+            return web.json_response(await asyncio.to_thread(list_presets, _request_user_id(request)))
         except ScenePresetError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
@@ -516,10 +544,18 @@ def define_routes():
             run_id = payload.get("run_id") if isinstance(payload, dict) else ""
             api_graph = payload.get("api_graph") if isinstance(payload, dict) else None
             expand_node_id = payload.get("expand_node_id") if isinstance(payload, dict) else None
-            return web.json_response(snapshot_presets_for_run(run_id, api_graph, expand_node_id))
+            user_id = _request_user_id(request)
+            return web.json_response(await asyncio.to_thread(snapshot_presets_for_run, run_id, api_graph, expand_node_id, user_id))
         except ScenePresetResolutionError as exc:
             return web.json_response({"error": str(exc), "node_id": exc.node_id}, status=400)
         except ScenePresetError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             return web.json_response({"error": f"Presetを検証できませんでした: {exc}"}, status=500)
+
+    @PromptServer.instance.routes.get("/scene_prompt/user")
+    async def scene_prompt_user(request):
+        try:
+            return web.json_response({"user_id": _request_user_id(request)})
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=400)

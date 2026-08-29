@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime
 
 import numpy as np
@@ -36,7 +37,7 @@ from .plan import (
     MIN_DIMENSION,
     ScenePlanError,
     empty_row,
-    item_for_index,
+    item_for_normalized_plan,
     matrix_product,
     merge,
     multiply_count,
@@ -69,9 +70,10 @@ WINDOWS_RESERVED_PREFIX_RE = re.compile(
 )
 SEED_MODULO = 18446744073709551616
 SEED_MAX = SEED_MODULO - 1
-_SCENE_RUN_PLAN_CACHE = {}
+_SCENE_RUN_PLAN_CACHE = OrderedDict()
 _SCENE_RUN_PLAN_CACHE_LOCK = threading.Lock()
 _SCENE_RUN_PLAN_TTL_SECONDS = 12 * 60 * 60
+_SCENE_RUN_PLAN_CACHE_MAX_ENTRIES = 256
 
 
 def _clean_string_list(values):
@@ -294,11 +296,11 @@ def _parse_matrix_data(matrix_json):
     return data
 
 
-def _parse_matrix_sets(matrix_json):
+def _parse_matrix_sets(matrix_json, user_id="default"):
     data = _parse_matrix_data(matrix_json)
     raw_sets = data.get("sets", [])
     sets = []
-    prompt_data_index = _prompt_data_index()
+    prompt_data_index = _prompt_data_index(user_id)
     for raw_set in raw_sets:
         matrix_line = _normalize_matrix_line_set(raw_set, prompt_data_index)
         sets.append(matrix_line)
@@ -352,8 +354,8 @@ def _scene_count(value):
     return value
 
 
-def _clean_scene_run_id(run_id):
-    return str(run_id or "").strip()
+def _scene_run_cache_key(run_id, user_id="default"):
+    return str(user_id or "default"), str(run_id or "").strip()
 
 
 def _drop_scene_run_plan(key):
@@ -369,30 +371,41 @@ def _purge_scene_run_plans(now=None):
     ]
     for key in expired:
         _drop_scene_run_plan(key)
+    while len(_SCENE_RUN_PLAN_CACHE) > _SCENE_RUN_PLAN_CACHE_MAX_ENTRIES:
+        _SCENE_RUN_PLAN_CACHE.popitem(last=False)
 
 
-def _scene_run_plan(run_id, scene_prompt=None):
-    run_key = _clean_scene_run_id(run_id)
-    if not run_key:
+def _scene_run_plan(run_id, scene_prompt=None, user_id="default"):
+    run_id = str(run_id or "").strip()
+    if not run_id:
         return normalize_plan(scene_prompt)
+    run_key = _scene_run_cache_key(run_id, user_id)
 
     now = time.monotonic()
+    with _SCENE_RUN_PLAN_CACHE_LOCK:
+        _purge_scene_run_plans(now)
+        existing = _SCENE_RUN_PLAN_CACHE.get(run_key)
+        if existing is not None:
+            existing["last_access"] = now
+            _SCENE_RUN_PLAN_CACHE.move_to_end(run_key)
+            return existing["plan"]
     normalized = normalize_plan(scene_prompt)
     with _SCENE_RUN_PLAN_CACHE_LOCK:
         _purge_scene_run_plans(now)
         existing = _SCENE_RUN_PLAN_CACHE.get(run_key)
         if existing is not None:
             existing["last_access"] = now
+            _SCENE_RUN_PLAN_CACHE.move_to_end(run_key)
             return existing["plan"]
         _SCENE_RUN_PLAN_CACHE[run_key] = {"plan": normalized, "last_access": now}
         _purge_scene_run_plans(now)
         return normalized
 
 
-def release_scene_run_plan(run_id):
-    run_key = _clean_scene_run_id(run_id)
-    if not run_key:
+def release_scene_run_plan(run_id, user_id="default"):
+    if not str(run_id or "").strip():
         return False
+    run_key = _scene_run_cache_key(run_id, user_id)
     with _SCENE_RUN_PLAN_CACHE_LOCK:
         return _drop_scene_run_plan(run_key)
 
@@ -400,7 +413,7 @@ def release_scene_run_plan(run_id):
 def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False):
     plan = normalized if normalized is not None else normalize_plan(scene_prompt)
     try:
-        return item_for_index(plan, current_index)
+        return item_for_normalized_plan(plan, current_index)
     except IndexError:
         if strict:
             raise IndexError("生成計画に生成対象がありません。") from None
@@ -482,6 +495,7 @@ def _find_next_index(run_root, extension, padding, filename_prefix=""):
 
 _RUN_DIR_CACHE = {}
 _NEXT_INDEX_CACHE = {}
+_FILENAME_RESERVATION_LOCK = threading.Lock()
 
 
 def _next_index_cache_key(run_root, extension, padding, filename_prefix=""):
@@ -510,6 +524,24 @@ def _remember_next_index(run_root, extension, padding, next_index, filename_pref
     key = _next_index_cache_key(run_root, extension, padding, filename_prefix)
     current = _NEXT_INDEX_CACHE.get(key, 0)
     _NEXT_INDEX_CACHE[key] = max(int(current or 0), int(next_index or 0))
+
+
+def _reserve_output_path(directory, extension, padding, counter, filename_prefix=""):
+    """Reserve a unique filename before PIL writes it, across local processes."""
+    prefix = _safe_filename_prefix(filename_prefix)
+    while True:
+        filename = f"{prefix}{counter:0{padding}d}.{extension}"
+        path = os.path.join(directory, filename)
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            counter += 1
+            continue
+        except OSError:
+            raise
+        else:
+            os.close(descriptor)
+            return path, filename, counter
 
 
 def _auto_seed_base(seed_base):
@@ -587,6 +619,7 @@ class SceneMatrix:
                     "STRING",
                     {"multiline": True, "default": DEFAULT_MATRIX_JSON, "hidden": True},
                 ),
+                "user_id": ("STRING", {"default": "default", "hidden": True}),
             },
             "optional": optional,
         }
@@ -595,11 +628,12 @@ class SceneMatrix:
     def IS_CHANGED(
         cls,
         matrix_json,
+        user_id="default",
         **kwargs,
     ):
         parts = [
             matrix_json or "",
-            _prompt_data_change_key(),
+            _prompt_data_change_key(user_id),
         ]
         scene_prompt = kwargs.get("scene_prompt")
         if isinstance(scene_prompt, dict):
@@ -609,6 +643,7 @@ class SceneMatrix:
     def build(
         self,
         matrix_json,
+        user_id="default",
         scene_prompt=None,
         **kwargs,
     ):
@@ -616,7 +651,7 @@ class SceneMatrix:
         return (
             matrix_product(
                 scene_prompt,
-                _parse_matrix_sets(matrix_json),
+                _parse_matrix_sets(matrix_json, user_id),
                 _matrix_has_configured_sets(matrix_json),
             ),
         )
@@ -902,6 +937,9 @@ class ScenePromptExpand:
                     {"display_name": "scene_prompt", "label": "scene_prompt"},
                 ),
             },
+            "hidden": {
+                "user_id": ("STRING", {"default": "default", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -913,8 +951,9 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
+        user_id="default",
     ):
-        plan = _scene_run_plan(run_id, scene_prompt)
+        plan = _scene_run_plan(run_id, scene_prompt, user_id)
         return "|".join(
             [
                 _scene_prompt_change_key(plan),
@@ -934,9 +973,10 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
+        user_id="default",
     ):
         separator = ", "
-        plan = _scene_run_plan(run_id, scene_prompt)
+        plan = _scene_run_plan(run_id, scene_prompt, user_id)
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
         global_index = int(item.get("global_index", 0) or 0)
@@ -1018,7 +1058,6 @@ class SceneSaveImage:
     ):
         extension = "png"
         padding = 5
-        overwrite = False
         info = _normalize_scene_save_info(scene_info)
         filename_prefix = info.get("filename_prefix", "")
         base_root = folder_paths.get_output_directory()
@@ -1055,13 +1094,6 @@ class SceneSaveImage:
                 ]
 
         for image in images:
-            while True:
-                filename = f"{filename_prefix}{counter:0{padding}d}.{extension}"
-                output_path = os.path.join(output_dir, filename)
-                if overwrite or not os.path.exists(output_path):
-                    break
-                counter += 1
-
             image_array = 255.0 * image.cpu().numpy()
             img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
 
@@ -1098,7 +1130,18 @@ class SceneSaveImage:
                         metadata.add_text("scene_negative", scene_metadata["negative"])
                     metadata.add_text("scene_seed", str(scene_metadata["seed"]))
 
-            img.save(output_path, pnginfo=metadata, compress_level=self.compress_level)
+            with _FILENAME_RESERVATION_LOCK:
+                output_path, filename, counter = _reserve_output_path(
+                    output_dir, extension, padding, counter, filename_prefix
+                )
+            try:
+                img.save(output_path, pnginfo=metadata, compress_level=self.compress_level)
+            except Exception:
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass
+                raise
             saved_paths.append(output_path)
             if preview_subfolder is not None:
                 preview_ref = {"filename": filename, "subfolder": preview_subfolder, "type": self.type}
