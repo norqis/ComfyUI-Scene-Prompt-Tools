@@ -152,6 +152,17 @@ class PromptDataRouteTests(unittest.TestCase):
                     self.routes._create_prompt_item(payload, "alice")
         self.assertFalse((self.routes._data_dir("alice") / "A").exists())
 
+    def test_new_category_components_reject_names_over_80_characters(self):
+        shared_prefix = "A" * 80
+        for suffix in ("1", "2"):
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(ValueError, "80 characters"):
+                self.routes._create_prompt_item({
+                    "category": f"{shared_prefix}{suffix}",
+                    "label": "One",
+                    "prompt": "girl",
+                }, "alice")
+        self.assertFalse((self.routes._data_dir("alice") / shared_prefix).exists())
+
     def test_force_reload_discards_the_user_cache(self):
         path = self.routes._data_dir("alice") / "People" / "prompt.json"
         path.parent.mkdir(parents=True)

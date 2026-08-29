@@ -241,10 +241,7 @@ def write_data(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: 
                 raise ValueError(f"Staged file is not a JSON array: {staged_file.name}")
 
         if backup.exists():
-            try:
-                shutil.rmtree(backup)
-            except OSError:
-                pass
+            shutil.rmtree(backup)
         if output_dir.exists():
             output_dir.replace(backup)
         try:
@@ -255,10 +252,7 @@ def write_data(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: 
                 backup.replace(output_dir)
             raise
         if backup.exists():
-            try:
-                shutil.rmtree(backup)
-            except OSError:
-                pass
+            shutil.rmtree(backup, ignore_errors=True)
         return (
             len({path.parent.parent for path, _items in prepared}),
             len(prepared),

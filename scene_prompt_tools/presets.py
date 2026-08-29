@@ -35,10 +35,11 @@ _CANCELLED_RUNS = OrderedDict()
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
 _CANCELLED_RUNS_MAX_ENTRIES = 256
 # Keep validation below Python's practical recursion depth as scene evaluation
-# is intentionally small and direct.  Larger preset graphs are not useful for
+# is intentionally small and direct. Larger preset graphs are not useful for
 # this node family and now fail with a clear save-time error.
 MAX_PRESET_NODES = 512
 MAX_PRESET_REFERENCE_DEPTH = 64
+MAX_PRESET_REFERENCE_NODE_DEPTH = 256
 
 SAFE_NODE_CLASSES = {
     "ScenePrompt": ScenePrompt,
@@ -243,12 +244,6 @@ def _validate_literal_input(node_id, node, input_name, value, definition):
     declared_type, options = definition[0], definition[1] if len(definition) > 1 else {}
     label = f"{_node_label(node_id, node)} の {input_name}"
     if isinstance(declared_type, (list, tuple)):
-        if (
-            node.get("class_type") == "ScenePath"
-            and input_name == "path_mode"
-            and value in {"directory", "append"}
-        ):
-            return
         if value not in declared_type:
             raise ScenePresetResolutionError(f"{label} の値が不正です。", node_id)
         return
@@ -451,7 +446,7 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     return _scene_prompt_closure(nodes, source[0]), source
 
 
-def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
+def _resolve_preset_tree(preset_id, resolved, stack, user_id="default", node_depth=0):
     preset_id = _clean_preset_id(preset_id)
     if len(stack) >= MAX_PRESET_REFERENCE_DEPTH:
         raise ScenePresetError(f"Preset参照の深さは{MAX_PRESET_REFERENCE_DEPTH}個までです。")
@@ -462,10 +457,15 @@ def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
         return
     preset = load_preset(preset_id, user_id)
     preset_name = str(preset["metadata"].get("name") or preset_id)
+    next_node_depth = node_depth + len(_preset_nodes(preset))
+    if next_node_depth > MAX_PRESET_REFERENCE_NODE_DEPTH:
+        raise ScenePresetError(
+            f"Preset参照内の累積ノード数は{MAX_PRESET_REFERENCE_NODE_DEPTH}個までです。"
+        )
     next_stack = [*stack, preset_id]
     for _node_id, nested_id, _node in _find_references(_preset_nodes(preset)):
         try:
-            _resolve_preset_tree(nested_id, resolved, next_stack, user_id)
+            _resolve_preset_tree(nested_id, resolved, next_stack, user_id, next_node_depth)
         except ScenePresetError as exc:
             raise ScenePresetError(f"Preset「{preset_name}」: {exc}") from exc
     resolved[preset_id] = preset

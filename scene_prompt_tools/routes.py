@@ -178,12 +178,6 @@ def _load_items(user_id="default", force=False, with_errors=False):
             return _cache_value(_cache_set(cache, signature, value), "items", with_errors)
 
 
-def _safe_folder_name(name):
-    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name or "").strip())
-    value = re.sub(r"\s+", " ", value).strip(" .")
-    return value[:80] or "untitled"
-
-
 def _folder_component(value, field):
     text = str(value or "").strip()
     if not text:
@@ -192,7 +186,9 @@ def _folder_component(value, field):
         raise ValueError(f"{field} contains unsupported path characters")
     if text != text.strip(" ."):
         raise ValueError(f"{field} cannot start or end with a dot or space")
-    return text[:80]
+    if len(text) > 80:
+        raise ValueError(f"{field} must be 80 characters or fewer")
+    return text
 
 
 def _safe_id(name):
