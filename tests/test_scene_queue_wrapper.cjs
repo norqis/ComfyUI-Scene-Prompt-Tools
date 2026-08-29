@@ -25,6 +25,7 @@ const context = {
     sceneBatchRun: null,
     sceneBatchDetachedRuns: new Map(),
     sceneRunHandlesByPromptId: new Map(),
+    sceneRunTerminalPromptIds: new Set(),
     prepared: 0,
     queued: 0,
     released: [],
@@ -34,6 +35,7 @@ const context = {
             context.queued += 1;
             return { prompt_id: `prompt-${context.queued}`, received: structuredClone(prompt) };
         },
+        async fetchApi() { return { ok: true, payload: { claimed: true } }; },
     },
     async prepareSceneRunContext(prompt) {
         context.prepared += 1;
@@ -45,13 +47,21 @@ const context = {
         return { run_handle: "opaque-handle" };
     },
     scenePromptIdFromValue(value) { return value?.prompt_id || ""; },
+    async readApiJson(response) { return response.payload; },
     showPromptValidationErrorFromThrown() {},
     releaseSceneRunHandle(handle) { context.released.push(handle); },
+    registerQueuedSceneRunHandle(promptId, handle) { context.sceneRunHandlesByPromptId.set(promptId, handle); },
     acceptSceneBatchPrompt() {},
     buildSceneBatchCachedPrompt() { return null; },
 };
 vm.createContext(context);
-for (const name of ["sceneRunTargetNodes", "installSceneBatchPromptCapture"]) {
+for (const name of [
+    "sceneRunTargetNodes",
+    "claimSceneRunHandle",
+    "registerQueuedSceneRunHandle",
+    "releaseCompletedSceneRun",
+    "installSceneBatchPromptCapture",
+]) {
     vm.runInContext(functionSource(name), context);
 }
 
@@ -74,6 +84,15 @@ context.installSceneBatchPromptCapture();
         /queue failed/,
     );
     assert.deepEqual(context.released, ["opaque-handle"], "failed queue releases its prepared handle");
+
+    context.releaseCompletedSceneRun({ prompt_id: "fast-prompt" });
+    context.registerQueuedSceneRunHandle("fast-prompt", "fast-handle");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(
+        context.released,
+        ["opaque-handle", "fast-handle"],
+        "a completion arriving before the queue response releases the claimed handle once",
+    );
     console.log("Scene Prompt queue wrapper wiring tests passed.");
 })().catch((error) => {
     console.error(error);

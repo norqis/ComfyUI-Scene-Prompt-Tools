@@ -185,6 +185,49 @@ class PromptDataRouteTests(unittest.TestCase):
         with self.assertRaises(runs.SceneRunError):
             runs.require_run_context(handle)
 
+    def test_prepare_projects_selected_items_and_claim_is_owner_bound(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        path = self.routes._data_dir("alice") / "Style" / "prompt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([
+            {"id": "used", "label": "Used", "prompt": "used"},
+            {"id": "nested", "label": "Nested", "prompt": "nested"},
+            {"id": "unused", "label": "Unused", "prompt": "unused"},
+        ]), encoding="utf-8")
+        selected = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "used", "label": "Used", "prompt": "used",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {"positive_json": selected}}}}
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        claim = self.routes._test_routes[("POST", "/scene_prompt/runs/claim")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+        handle = asyncio.run(prepare(Request("alice", {"api_graph": graph})))["payload"]["run_handle"]
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        projected = runs.require_run_context(handle)["prompt_data_index"]
+        self.assertEqual(set(projected["by_id"]), {("Style", "used")})
+        nested = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "nested", "label": "Nested", "prompt": "nested",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        projected = self.routes.project_prompt_data_index(
+            graph,
+            self.routes._prompt_data_index("alice"),
+            {"preset": {"api_graph": {"output": {"2": {"inputs": {"negative_json": nested}}}}}},
+        )
+        self.assertEqual(set(projected["by_id"]), {("Style", "used"), ("Style", "nested")})
+        self.assertFalse(asyncio.run(claim(Request("bob", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
+        self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
+        self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
+        self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
+
     def test_stale_threaded_read_cannot_restore_a_cleared_cache(self):
         path = self.routes._data_dir("alice") / "Category" / "prompt.json"
         path.parent.mkdir(parents=True)

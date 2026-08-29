@@ -55,6 +55,7 @@ const context = {
     sceneNodeForRun() {
         return null;
     },
+    prepareSceneBatchRunSnapshot() {},
     queueNextSceneBatchItem() {
         context.activated.push(context.sceneBatchRun.runId);
     },
@@ -359,6 +360,8 @@ async function testPresetResolutionKeepsClickFifo() {
         activated: [],
         clearSceneSavePreviews() {},
         refreshSceneBatchRunNode() {},
+        sceneNodeForRun() { return null; },
+        prepareSceneBatchRunSnapshot() {},
         queueNextSceneBatchItem() {
             fifoContext.activated.push(fifoContext.sceneBatchRun.runId);
         },

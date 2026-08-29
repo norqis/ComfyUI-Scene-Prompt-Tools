@@ -558,27 +558,24 @@ class ScenePresetTests(unittest.TestCase):
         self.assertIn(("alice", "same-run"), self.module._RUN_SNAPSHOTS)
         self.assertIn(("bob", "same-run"), self.module._RUN_SNAPSHOTS)
 
-    def test_snapshot_cache_rejects_new_active_entry_at_limit(self):
+    def test_snapshot_cache_keeps_active_entries_until_release(self):
         self.module._RUN_SNAPSHOTS.clear()
         self.module._CANCELLED_RUNS.clear()
-        original_limit = self.module._RUN_SNAPSHOTS_MAX_ENTRIES
         original_cancel_limit = self.module._CANCELLED_RUNS_MAX_ENTRIES
-        self.module._RUN_SNAPSHOTS_MAX_ENTRIES = 2
         self.module._CANCELLED_RUNS_MAX_ENTRIES = 2
         try:
             graph_data = graph({"11": {"class_type": "ScenePromptExpand", "inputs": {}}})
             self.module.snapshot_presets_for_run("one", graph_data, "11")
             self.module.snapshot_presets_for_run("two", graph_data, "11")
             self.module.snapshot_presets_for_run("one", graph_data, "11")
-            with self.assertRaisesRegex(self.module.ScenePresetError, "上限"):
-                self.module.snapshot_presets_for_run("three", graph_data, "11")
+            self.module.snapshot_presets_for_run("three", graph_data, "11")
             self.assertIn(("default", "one"), self.module._RUN_SNAPSHOTS)
             self.assertIn(("default", "two"), self.module._RUN_SNAPSHOTS)
+            self.assertIn(("default", "three"), self.module._RUN_SNAPSHOTS)
             for run_id in ("cancel-one", "cancel-two", "cancel-three"):
                 self.module.release_scene_preset_snapshot(run_id)
             self.assertEqual(list(self.module._CANCELLED_RUNS), [("default", "cancel-two"), ("default", "cancel-three")])
         finally:
-            self.module._RUN_SNAPSHOTS_MAX_ENTRIES = original_limit
             self.module._CANCELLED_RUNS_MAX_ENTRIES = original_cancel_limit
             self.module._RUN_SNAPSHOTS.clear()
             self.module._CANCELLED_RUNS.clear()

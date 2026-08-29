@@ -29,6 +29,29 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.require(first)["user_id"], "alice")
         self.assertEqual(store.require(second)["user_id"], "bob")
 
+    def test_claim_is_idempotent_and_active_contexts_are_not_expired(self):
+        store = RUNS.RunContextStore(maximum=3, prepared_limit=2, active_limit=1, prepared_ttl_seconds=999)
+        handle = store.create("alice", {"by_key": {}, "by_id": {}})
+        self.assertTrue(store.claim(handle, "alice", "prompt-1"))
+        self.assertTrue(store.claim(handle, "alice", "prompt-1"))
+        self.assertFalse(store.claim(handle, "alice", "prompt-2"))
+        self.assertEqual(store.purge_expired(), [])
+        self.assertEqual(store.require(handle)["state"], "active")
+        with self.assertRaisesRegex(RUNS.SceneRunError, "実行中または準備済み"):
+            store.create("alice", {"by_key": {}, "by_id": {}})
+
+    def test_prepared_contexts_expire_and_plans_are_expand_specific(self):
+        expiring = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=0)
+        old = expiring.create("alice", {"by_key": {}, "by_id": {}})
+        self.assertEqual(expiring.purge_expired()[0][0], old)
+        store = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=999)
+        handle = store.create("alice", {"by_key": {}, "by_id": {}})
+        first = {"rows": [{"row": {"positive_parts": ["A"]}}]}
+        second = {"rows": [{"row": {"positive_parts": ["B"]}}]}
+        self.assertEqual(store.set_plan(handle, "11", first), first)
+        self.assertEqual(store.set_plan(handle, "22", second), second)
+        self.assertEqual(store.set_plan(handle, "11", second), first)
+
     def test_nodes_do_not_expose_user_id_inputs(self):
         source = "\n".join(
             (ROOT / "scene_prompt_tools" / filename).read_text(encoding="utf-8")

@@ -3,6 +3,7 @@ import hashlib
 import random
 import re
 import time
+import threading
 from collections import OrderedDict
 from .plan import make_plan, normalize_plan
 from .storage import prompt_data_directory
@@ -29,6 +30,8 @@ CHOICE_RE = re.compile(r"\{([^{}]+)\}")
 WEIGHTED_PART_RE = re.compile(r"^\((.*):\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\)$")
 _PROMPT_DATA_INDEX_CACHE = {}
 _PROMPT_FILE_SIGNATURE_CACHE = {}
+_PROMPT_INDEX_GENERATIONS = {}
+_PROMPT_INDEX_LOCK = threading.RLock()
 _PROMPT_SIGNATURE_TTL_SECONDS = 0.5
 
 
@@ -211,17 +214,19 @@ def _prompt_data_directory_for_user(user_id="default"):
 def _prompt_file_signature(user_id="default"):
     user_key = str(user_id or "default")
     now = time.monotonic()
-    cache = _PROMPT_FILE_SIGNATURE_CACHE.setdefault(user_key, {"expires": 0.0, "signature": None})
-    cached = cache.get("signature")
-    if cached is not None and cache.get("expires", 0.0) > now:
-        return cached
+    with _PROMPT_INDEX_LOCK:
+        cache = _PROMPT_FILE_SIGNATURE_CACHE.setdefault(user_key, {"expires": 0.0, "signature": None})
+        cached = cache.get("signature")
+        if cached is not None and cache.get("expires", 0.0) > now:
+            return cached
 
     data_dir = _prompt_data_directory_for_user(user_key)
 
     if not data_dir.exists():
         signature = ()
-        cache["signature"] = signature
-        cache["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
+        with _PROMPT_INDEX_LOCK:
+            cache["signature"] = signature
+            cache["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
         return signature
 
     signature = []
@@ -238,16 +243,19 @@ def _prompt_file_signature(user_id="default"):
             continue
         signature.append(("/".join(category_path), stat.st_mtime_ns, stat.st_size))
     signature = tuple(signature)
-    cache["signature"] = signature
-    cache["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
+    with _PROMPT_INDEX_LOCK:
+        cache["signature"] = signature
+        cache["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
     return signature
 
 
 def _clear_prompt_data_cache(user_id=None):
-    keys = [str(user_id or "default")] if user_id is not None else set(_PROMPT_FILE_SIGNATURE_CACHE) | set(_PROMPT_DATA_INDEX_CACHE)
-    for key in keys:
-        _PROMPT_FILE_SIGNATURE_CACHE.pop(key, None)
-        _PROMPT_DATA_INDEX_CACHE.pop(key, None)
+    with _PROMPT_INDEX_LOCK:
+        keys = [str(user_id or "default")] if user_id is not None else set(_PROMPT_FILE_SIGNATURE_CACHE) | set(_PROMPT_DATA_INDEX_CACHE)
+        for key in keys:
+            _PROMPT_INDEX_GENERATIONS[key] = _PROMPT_INDEX_GENERATIONS.get(key, 0) + 1
+            _PROMPT_FILE_SIGNATURE_CACHE.pop(key, None)
+            _PROMPT_DATA_INDEX_CACHE.pop(key, None)
 
 
 def _prompt_data_change_key(user_id="default"):
@@ -379,40 +387,74 @@ def _selection_item_key(item, default_category=""):
 
 def _prompt_data_index(user_id="default"):
     user_key = str(user_id or "default")
-    signature = _prompt_file_signature(user_key)
-    cache = _PROMPT_DATA_INDEX_CACHE.get(user_key)
-    cached = cache.get("index") if cache else None
-    if cache and cache.get("signature") == signature and cached is not None:
-        return cached
+    while True:
+        with _PROMPT_INDEX_LOCK:
+            generation = _PROMPT_INDEX_GENERATIONS.get(user_key, 0)
+        signature = _prompt_file_signature(user_key)
+        with _PROMPT_INDEX_LOCK:
+            cache = _PROMPT_DATA_INDEX_CACHE.get(user_key)
+            cached = cache.get("index") if cache else None
+            if cache and cache.get("signature") == signature and cached is not None:
+                return cached
 
-    by_key = {}
-    by_id = {}
-    data_dir = _prompt_data_directory_for_user(user_key)
-    if data_dir.exists():
-        for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
-            try:
-                category_path = list(prompt_file.parent.relative_to(data_dir).parts)
-            except ValueError:
+        by_key = {}
+        by_id = {}
+        data_dir = _prompt_data_directory_for_user(user_key)
+        if data_dir.exists():
+            for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
+                try:
+                    category_path = list(prompt_file.parent.relative_to(data_dir).parts)
+                except ValueError:
+                    continue
+                if category_path and category_path[0] == SAVED_PROMPTS_FOLDER:
+                    continue
+                for item in _read_prompt_items(prompt_file, category_path):
+                    category = _category_key(item)
+                    key = _selection_item_key(item, category)
+                    if key:
+                        by_key[key] = item
+                    item_id = str(item.get("id") or "").strip()
+                    if item_id:
+                        by_id[(category, item_id)] = item
+
+        index = {"by_key": by_key, "by_id": by_id}
+        with _PROMPT_INDEX_LOCK:
+            if generation != _PROMPT_INDEX_GENERATIONS.get(user_key, 0):
                 continue
-            if category_path and category_path[0] == SAVED_PROMPTS_FOLDER:
-                continue
-            items = _read_prompt_items(prompt_file, category_path)
+            _PROMPT_DATA_INDEX_CACHE[user_key] = {"signature": signature, "index": index}
+            return index
 
-            for item in items:
-                category = _category_key(item)
-                key = _selection_item_key(item, category)
-                if key:
-                    by_key[key] = item
-                item_id = str(item.get("id") or "").strip()
-                if item_id:
-                    by_id[(category, item_id)] = item
 
-    index = {
-        "by_key": by_key,
-        "by_id": by_id,
-    }
-    _PROMPT_DATA_INDEX_CACHE[user_key] = {"signature": signature, "index": index}
-    return index
+def project_prompt_data_index(api_graph, data_index, preset_graphs=None):
+    """Return only current prompt items selected by a queued Scene graph."""
+    projected = {"by_key": {}, "by_id": {}}
+    graphs = [api_graph]
+    graphs.extend((entry.get("api_graph") if isinstance(entry, dict) else entry) for entry in (preset_graphs or {}).values())
+    for graph in graphs:
+        for node in (graph or {}).get("output", {}).values():
+            inputs = node.get("inputs", {}) if isinstance(node, dict) else {}
+            selections = [inputs.get("positive_json"), inputs.get("negative_json")]
+            raw_matrix = inputs.get("matrix_json")
+            if isinstance(raw_matrix, str):
+                try:
+                    selections.extend(
+                        value.get(key)
+                        for value in json.loads(raw_matrix).get("sets", [])
+                        if isinstance(value, dict)
+                        for key in ("positive_json", "negative_json")
+                    )
+                except (AttributeError, TypeError, json.JSONDecodeError):
+                    pass
+            for selection in selections:
+                for category, items in _parse_selection_json(selection, data_index).items():
+                    for item in items:
+                        key = _selection_item_key(item, category)
+                        if key:
+                            projected["by_key"][key] = dict(item)
+                        item_id = str(item.get("id") or "").strip()
+                        if item_id:
+                            projected["by_id"][(category, item_id)] = dict(item)
+    return projected
 
 
 def _prompt_parts_with_index(prompt):

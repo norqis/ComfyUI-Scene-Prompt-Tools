@@ -304,8 +304,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
         first = _scene_prompt(self.nodes)
         second = self.nodes.transform(first, lambda row, _item: {**row, "positive_parts": ["second"]})
-        self.assertEqual(self.nodes._scene_run_plan(handle, first)["rows"][0]["row"]["positive_parts"], ["test"])
-        self.assertEqual(self.nodes._scene_run_plan(handle, second)["rows"][0]["row"]["positive_parts"], ["test"])
+        self.assertEqual(self.nodes._scene_run_plan(handle, first, "expand-1")["rows"][0]["row"]["positive_parts"], ["test"])
+        self.assertEqual(self.nodes._scene_run_plan(handle, second, "expand-1")["rows"][0]["row"]["positive_parts"], ["test"])
         runs.release_run_context(handle, "alice")
         with self.assertRaises(runs.SceneRunError):
             self.nodes._scene_run_plan(handle, first)
