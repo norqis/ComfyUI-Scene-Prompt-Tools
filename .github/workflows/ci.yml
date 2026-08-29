@@ -35,12 +35,13 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-      - run: npm install --no-save playwright@1.61.1
+      - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run check:frontend
       - run: npm run test:frontend
@@ -85,6 +86,7 @@ jobs:
   comfy-smoke:
     name: ComfyUI smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -105,6 +107,7 @@ jobs:
     if: github.event_name == 'schedule'
     continue-on-error: true
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

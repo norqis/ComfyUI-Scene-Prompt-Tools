@@ -48,7 +48,7 @@ def _scene_prompt_inputs():
     }
 
 
-def _save_graph(mode, path="runtime"):
+def _save_graph(mode, path="runtime", *, width=16, height=16, batch_size=1):
     return {
         "1": {"class_type": "ScenePrompt", "inputs": _scene_prompt_inputs()},
         "2": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 2}},
@@ -67,7 +67,10 @@ def _save_graph(mode, path="runtime"):
                 "prefix": "",
             },
         },
-        "5": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+        "5": {
+            "class_type": "EmptyImage",
+            "inputs": {"width": width, "height": height, "batch_size": batch_size, "color": 0},
+        },
         "6": {
             "class_type": "SceneSaveImage",
             "inputs": {"images": ["5", 0], "path": path, "metadata_mode": mode, "scene_info": ["4", 2]},
@@ -76,6 +79,23 @@ def _save_graph(mode, path="runtime"):
             "class_type": "SceneSaveImage",
             "inputs": {"images": ["5", 0], "path": path, "metadata_mode": mode, "scene_info": ["4", 2]},
         },
+    }
+
+
+def _large_extra_pnginfo():
+    """Use realistic workflow metadata without adding model inference to CPU CI."""
+    workflow_nodes = [
+        {
+            "id": index,
+            "type": "ScenePrompt",
+            "title": f"Scene {index:03d}",
+            "widgets_values": ["metadata-check", "x" * 256],
+        }
+        for index in range(180)
+    ]
+    return {
+        "workflow": {"version": 1, "nodes": workflow_nodes, "groups": []},
+        "custom": {"source": "http-runtime-smoke", "notes": "metadata-" * 12000},
     }
 
 
@@ -160,8 +180,8 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             detail = exc.read().decode("utf-8", errors="replace")
             raise AssertionError(f"{path} returned HTTP {exc.code}: {detail}") from exc
 
-    def _wait_for_prompt(self, prompt_id):
-        deadline = time.monotonic() + 60
+    def _wait_for_prompt(self, prompt_id, timeout=60):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             history = self._request(f"/history/{prompt_id}")
             entry = history.get(prompt_id)
@@ -174,8 +194,11 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             time.sleep(0.2)
         self.fail(f"Timed out waiting for prompt {prompt_id}")
 
-    def _queue_and_wait(self, graph):
-        return self._wait_for_prompt(self._request("/prompt", {"prompt": graph})["prompt_id"])
+    def _queue_and_wait(self, graph, *, extra_data=None, timeout=60):
+        payload = {"prompt": graph}
+        if extra_data is not None:
+            payload["extra_data"] = extra_data
+        return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
 
     def test_http_prompt_history_two_outputs_and_metadata_modes(self):
         for index, mode in enumerate(("ワークフロー全体", "プロンプトのみ", "生成経路ノードのみ"), start=1):
@@ -191,6 +214,41 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                 self.assertNotIn("prompt", metadata)
             else:
                 self.assertIn("prompt", metadata)
+
+    def test_http_large_batch_multiple_saves_preserve_workflow_metadata(self):
+        graph = _save_graph(
+            "ワークフロー全体",
+            "large-batch",
+            width=832,
+            height=1216,
+            batch_size=3,
+        )
+        extra_pnginfo = _large_extra_pnginfo()
+        self.assertGreater(len(json.dumps(extra_pnginfo)), 100_000)
+
+        started = time.monotonic()
+        entry = self._queue_and_wait(
+            graph,
+            extra_data={"extra_pnginfo": extra_pnginfo},
+            timeout=90,
+        )
+        self.assertLess(time.monotonic() - started, 90)
+        self.assertEqual(set(entry["outputs"]).intersection({"6", "7"}), {"6", "7"})
+
+        files = sorted((self.base / "output" / "large-batch").glob("*.png"))
+        self.assertEqual(len(files), 6)
+        from PIL import Image
+
+        for file_path in files:
+            with Image.open(file_path) as image:
+                self.assertEqual(image.size, (832, 1216))
+                image.verify()
+            with Image.open(file_path) as image:
+                metadata = dict(image.text)
+            saved_prompt = json.loads(metadata["prompt"])
+            self.assertEqual(set(saved_prompt), set(graph))
+            self.assertEqual(json.loads(metadata["workflow"]), extra_pnginfo["workflow"])
+            self.assertEqual(json.loads(metadata["custom"]), extra_pnginfo["custom"])
 
     def test_preset_http_lifecycle_and_save_failure_recovery(self):
         preset_graph = {

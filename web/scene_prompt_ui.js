@@ -7352,14 +7352,12 @@ function releaseSceneRunHandle(runHandle, options = {}) {
         return Promise.resolve(false);
     }
     const existing = sceneRunReleaseStates.get(key);
-    if (existing?.promise) {
-        return existing.promise;
+    if (existing) {
+        return existing;
     }
-    const state = { attempts: 0, promise: null };
-    state.promise = (async () => {
+    const release = (async () => {
         let lastError = null;
-        while (state.attempts < 3) {
-            state.attempts += 1;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
             try {
                 const response = await api.fetchApi("/scene_prompt/runs/release", {
                     method: "POST",
@@ -7371,24 +7369,30 @@ function releaseSceneRunHandle(runHandle, options = {}) {
                 if (!response.ok) {
                     throw new Error(data.error || "生成計画の解放に失敗しました");
                 }
-                sceneRunReleaseStates.delete(key);
                 return !!data.released;
             } catch (error) {
                 lastError = error;
-                if (state.attempts < 3 && !options.keepalive) {
-                    await new Promise((resolve) => setTimeout(resolve, 250 * state.attempts));
+                if (attempt < 3 && !options.keepalive) {
+                    await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
                 }
             }
         }
-        state.error = lastError;
         console.warn("[Scene Prompt] 生成計画の解放に失敗しました。", lastError);
         return false;
     })();
-    sceneRunReleaseStates.set(key, state);
-    return state.promise;
+    sceneRunReleaseStates.set(key, release);
+    release.finally(() => {
+        if (sceneRunReleaseStates.get(key) === release) {
+            sceneRunReleaseStates.delete(key);
+        }
+    });
+    return release;
 }
 
-function releaseSceneRunsOnPageHide() {
+function releaseSceneRunsOnPageHide(event) {
+    if (event?.persisted) {
+        return;
+    }
     const handles = new Set(sceneRunReleaseStates.keys());
     for (const handle of sceneRunHandlesByPromptId.values()) {
         handles.add(handle);

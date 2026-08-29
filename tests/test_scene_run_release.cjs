@@ -65,7 +65,20 @@ function releaseContext(responses) {
     ]);
     assert.equal(await failed.releaseSceneRunHandle("failed-handle"), false);
     assert.equal(failed.calls.length, 3);
-    assert.equal(failed.sceneRunReleaseStates.get("failed-handle").attempts, 3);
+    assert.equal(failed.sceneRunReleaseStates.has("failed-handle"), false);
+
+    const retryAfterFailure = releaseContext([
+        new Error("offline"),
+        new Error("offline"),
+        new Error("offline"),
+        { ok: true, payload: { released: true } },
+    ]);
+    assert.equal(await retryAfterFailure.releaseSceneRunHandle("retry-after-failure"), false);
+    const firstRetry = retryAfterFailure.releaseSceneRunHandle("retry-after-failure");
+    const sharedRetry = retryAfterFailure.releaseSceneRunHandle("retry-after-failure");
+    assert.equal(firstRetry, sharedRetry);
+    assert.equal(await firstRetry, true);
+    assert.equal(retryAfterFailure.calls.length, 4);
 
     const pagehide = releaseContext([
         { ok: true, payload: { released: true } },
@@ -73,7 +86,10 @@ function releaseContext(responses) {
     ]);
     pagehide.sceneRunHandlesByPromptId.set("prompt-a", "handle-a");
     pagehide.sceneBatchRunsById.set("run-b", { runHandle: "handle-b" });
-    pagehide.releaseSceneRunsOnPageHide();
+    pagehide.releaseSceneRunsOnPageHide({ persisted: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(pagehide.calls.length, 0);
+    pagehide.releaseSceneRunsOnPageHide({ persisted: false });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(pagehide.calls.map((call) => call.options.keepalive), [true, true]);
     console.log("Scene Prompt run release tests passed.");
