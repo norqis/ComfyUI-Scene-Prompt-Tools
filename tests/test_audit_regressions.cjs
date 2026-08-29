@@ -23,8 +23,12 @@ function functionSource(name) {
 
 function deferred() {
     let resolve;
-    const promise = new Promise((done) => { resolve = done; });
-    return { promise, resolve };
+    let reject;
+    const promise = new Promise((done, fail) => {
+        resolve = done;
+        reject = fail;
+    });
+    return { promise, resolve, reject };
 }
 
 function presetListRaceContext(...requests) {
@@ -156,6 +160,88 @@ async function testStalePresetListFailureAdoptsLatestSuccessInReverseResponseOrd
     assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
 }
 
+async function testStalePresetListNetworkFailureAdoptsLatestSuccessInNormalResponseOrder() {
+    const first = deferred();
+    const second = deferred();
+    const context = presetListRaceContext(first, second);
+    const oldRequest = context.loadScenePresetList(true);
+    const newRequest = context.loadScenePresetList(true);
+    let oldRequestSettled = false;
+    oldRequest.then(
+        () => { oldRequestSettled = true; },
+        () => { oldRequestSettled = true; },
+    );
+    first.reject(new Error("stale network failed"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(oldRequestSettled, false);
+    second.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "new" } }], errors: [] } });
+    const [oldResult, newResult] = await Promise.all([oldRequest, newRequest]);
+    assert.equal(oldResult[0].preset_id, "new");
+    assert.equal(newResult[0].preset_id, "new");
+    assert.equal(context.scenePresetList[0].preset_id, "new");
+    assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
+}
+
+async function testStalePresetListNetworkFailureAdoptsLatestSuccessInReverseResponseOrder() {
+    const first = deferred();
+    const second = deferred();
+    const context = presetListRaceContext(first, second);
+    const oldRequest = context.loadScenePresetList(true);
+    const newRequest = context.loadScenePresetList(true);
+    second.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "new" } }], errors: [] } });
+    const newResult = await newRequest;
+    first.reject(new Error("stale network failed"));
+    const oldResult = await oldRequest;
+    assert.equal(oldResult[0].preset_id, "new");
+    assert.equal(newResult[0].preset_id, "new");
+    assert.equal(context.scenePresetList[0].preset_id, "new");
+    assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
+}
+
+async function testStalePresetListParseFailureAdoptsLatestSuccessInNormalResponseOrder() {
+    const firstFetch = deferred();
+    const secondFetch = deferred();
+    const firstParse = deferred();
+    const context = presetListRaceContext(firstFetch, secondFetch);
+    const oldRequest = context.loadScenePresetList(true);
+    firstFetch.resolve({ ok: true, payload: firstParse.promise });
+    await new Promise((resolve) => setImmediate(resolve));
+    const newRequest = context.loadScenePresetList(true);
+    let oldRequestSettled = false;
+    oldRequest.then(
+        () => { oldRequestSettled = true; },
+        () => { oldRequestSettled = true; },
+    );
+    firstParse.reject(new Error("stale parse failed"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(oldRequestSettled, false);
+    secondFetch.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "new" } }], errors: [] } });
+    const [oldResult, newResult] = await Promise.all([oldRequest, newRequest]);
+    assert.equal(oldResult[0].preset_id, "new");
+    assert.equal(newResult[0].preset_id, "new");
+    assert.equal(context.scenePresetList[0].preset_id, "new");
+    assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
+}
+
+async function testStalePresetListParseFailureAdoptsLatestSuccessInReverseResponseOrder() {
+    const firstFetch = deferred();
+    const secondFetch = deferred();
+    const firstParse = deferred();
+    const context = presetListRaceContext(firstFetch, secondFetch);
+    const oldRequest = context.loadScenePresetList(true);
+    firstFetch.resolve({ ok: true, payload: firstParse.promise });
+    await new Promise((resolve) => setImmediate(resolve));
+    const newRequest = context.loadScenePresetList(true);
+    secondFetch.resolve({ ok: true, payload: { presets: [{ metadata: { preset_id: "new" } }], errors: [] } });
+    const newResult = await newRequest;
+    firstParse.reject(new Error("stale parse failed"));
+    const oldResult = await oldRequest;
+    assert.equal(oldResult[0].preset_id, "new");
+    assert.equal(newResult[0].preset_id, "new");
+    assert.equal(context.scenePresetList[0].preset_id, "new");
+    assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
+}
+
 async function testPresetListRetriesAfterLatestFailure() {
     const initial = deferred();
     const failed = deferred();
@@ -245,6 +331,10 @@ Promise.resolve()
     .then(testPresetListFailureInReverseResponseOrder)
     .then(testStalePresetListFailureAdoptsLatestSuccessInNormalResponseOrder)
     .then(testStalePresetListFailureAdoptsLatestSuccessInReverseResponseOrder)
+    .then(testStalePresetListNetworkFailureAdoptsLatestSuccessInNormalResponseOrder)
+    .then(testStalePresetListNetworkFailureAdoptsLatestSuccessInReverseResponseOrder)
+    .then(testStalePresetListParseFailureAdoptsLatestSuccessInNormalResponseOrder)
+    .then(testStalePresetListParseFailureAdoptsLatestSuccessInReverseResponseOrder)
     .then(testPresetListRetriesAfterLatestFailure)
     .then(testNodeRemovalCancelsItsRun)
     .then(testMatrixToggleSavesOnlyEnabledState)

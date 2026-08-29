@@ -8158,23 +8158,33 @@ async function loadScenePresetList(force = false) {
     const generation = ++scenePresetListRequestGeneration;
     scenePresetListCacheCurrent = false;
     const request = (async () => {
-        const response = await api.fetchApi("/scene_presets/list");
-        const data = await readApiJson(response, "Preset一覧を取得できませんでした");
-        if (generation !== scenePresetListRequestGeneration) {
-            return scenePresetListLatestPromise;
+        try {
+            const response = await api.fetchApi("/scene_presets/list");
+            if (generation !== scenePresetListRequestGeneration) {
+                return scenePresetListLatestPromise;
+            }
+            const data = await readApiJson(response, "Preset一覧を取得できませんでした");
+            if (generation !== scenePresetListRequestGeneration) {
+                return scenePresetListLatestPromise;
+            }
+            if (!response.ok) {
+                throw new Error(data.error || "Preset一覧を取得できませんでした");
+            }
+            const entries = Array.isArray(data.presets) ? data.presets : [];
+            scenePresetDisplayGraphs = new Map(entries.map((entry) => [
+                String(entry?.metadata?.preset_id || ""),
+                entry,
+            ]).filter(([presetId]) => presetId));
+            scenePresetList = entries.map((entry) => entry.metadata).filter(Boolean);
+            scenePresetListErrors = Array.isArray(data.errors) ? data.errors : [];
+            scenePresetListCacheCurrent = true;
+            return scenePresetList;
+        } catch (error) {
+            if (generation !== scenePresetListRequestGeneration) {
+                return scenePresetListLatestPromise;
+            }
+            throw error;
         }
-        if (!response.ok) {
-            throw new Error(data.error || "Preset一覧を取得できませんでした");
-        }
-        const entries = Array.isArray(data.presets) ? data.presets : [];
-        scenePresetDisplayGraphs = new Map(entries.map((entry) => [
-            String(entry?.metadata?.preset_id || ""),
-            entry,
-        ]).filter(([presetId]) => presetId));
-        scenePresetList = entries.map((entry) => entry.metadata).filter(Boolean);
-        scenePresetListErrors = Array.isArray(data.errors) ? data.errors : [];
-        scenePresetListCacheCurrent = true;
-        return scenePresetList;
     })();
     scenePresetListPromise = request;
     scenePresetListLatestPromise = request;
