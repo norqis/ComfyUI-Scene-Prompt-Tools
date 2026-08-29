@@ -6925,7 +6925,6 @@ function cancelSceneBatchRunPreparation(run) {
         return;
     }
     run.cancelled = true;
-    run.resolveController?.abort();
     releaseCancelledSceneBatchRun(run);
 }
 
@@ -7912,7 +7911,6 @@ function createSceneBatchRun(node, total) {
         snapshotError: null,
         cachedPrompt: null,
         cancelled: false,
-        resolveController: null,
         snapshotReleased: false,
     };
     setWidgetValue(node, "current_index", 0, { silent: true });
@@ -7943,7 +7941,6 @@ function prepareSceneBatchRunSnapshot(run, node) {
             if (run.cancelled) {
                 return null;
             }
-            run.resolveController = new AbortController();
             const resolved = await resolveScenePresetsForRun(run, run.firstPromptSnapshot, node.id);
             if (run.cancelled || !resolved) {
                 releaseCancelledSceneBatchRun(run);
@@ -7963,7 +7960,7 @@ function prepareSceneBatchRunSnapshot(run, node) {
             run.snapshotError = null;
             updateSceneExpandCountWidget(node);
         } catch (error) {
-            if (run.cancelled || error?.name === "AbortError") {
+            if (run.cancelled) {
                 releaseCancelledSceneBatchRun(run);
                 return null;
             }
@@ -7978,7 +7975,6 @@ function prepareSceneBatchRunSnapshot(run, node) {
                 showSceneBatchError("待機中の連続生成を準備できませんでした。", error);
             }
         } finally {
-            run.resolveController = null;
             refreshSceneBatchRunNode(run, { graphChange: false, background: false });
         }
         return run.firstPromptSnapshot;

@@ -189,7 +189,6 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
     ] };
     let preparedSnapshot = null;
     const tabContext = {
-        AbortController,
         Map,
         Set,
         Object,
@@ -591,7 +590,6 @@ async function testSelectedExpandBranchOnlyQueues() {
 
 async function testCancelledPresetResolutionReleasesOnce() {
     const cancelledContext = {
-        AbortController,
         Set,
         String,
         Object,
@@ -616,7 +614,6 @@ async function testCancelledPresetResolutionReleasesOnce() {
     }
     const run = {
         runId: "cancelled",
-        resolveController: new AbortController(),
         snapshotReleased: false,
         cancelled: false,
     };
@@ -625,7 +622,6 @@ async function testCancelledPresetResolutionReleasesOnce() {
     cancelledContext.cancelPendingSceneBatchRun(run);
     cancelledContext.cancelPendingSceneBatchRun(run);
     assert.equal(run.cancelled, true);
-    assert.equal(run.resolveController.signal.aborted, true);
     assert.equal(cancelledContext.releaseCalls, 1);
     assert.equal(cancelledContext.sceneBatchRunsById.has(run.runId), false);
 

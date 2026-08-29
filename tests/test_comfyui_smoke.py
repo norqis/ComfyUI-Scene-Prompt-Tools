@@ -156,7 +156,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
         nodes = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.nodes"]
         runs = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.runs"]
         runs.RUN_CONTEXTS.clear()
-        handle = runs.create_run_context("smoke", {"by_key": {}, "by_id": {}})
+        handle = runs.create_run_context("smoke")
         unique_id = "expand-1"
         try:
             nodes.ScenePromptExpand.IS_CHANGED(
@@ -238,7 +238,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
         ):
             runs.RUN_CONTEXTS.clear()
             presets._RUN_SNAPSHOTS.clear()
-            handle = runs.create_run_context("default", {"by_key": {}, "by_id": {}})
+            handle = runs.create_run_context("default")
             try:
                 presets.save_preset(
                     {

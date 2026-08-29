@@ -13,9 +13,9 @@ SPEC.loader.exec_module(RUNS)
 class RunContextTests(unittest.TestCase):
     def test_handle_is_opaque_and_released_handles_are_rejected(self):
         store = RUNS.RunContextStore()
-        handle = store.create("alice", {"by_key": {"a": {"label": "Alice"}}, "by_id": {}})
+        handle = store.create("alice")
         self.assertNotEqual(handle, "alice")
-        self.assertEqual(store.require(handle)["prompt_data_index"]["by_key"]["a"]["label"], "Alice")
+        self.assertEqual(store.require(handle)["user_id"], "alice")
         self.assertFalse(store.release(handle, "bob"))
         self.assertTrue(store.release(handle, "alice"))
         with self.assertRaises(RUNS.SceneRunError):
@@ -23,10 +23,10 @@ class RunContextTests(unittest.TestCase):
 
     def test_capacity_never_evicts_active_contexts(self):
         store = RUNS.RunContextStore(maximum=2)
-        first = store.create("alice", {"by_key": {}, "by_id": {}})
-        second = store.create("bob", {"by_key": {}, "by_id": {}})
+        first = store.create("alice")
+        second = store.create("bob")
         with self.assertRaisesRegex(RUNS.SceneRunError, "上限"):
-            store.create("charlie", {"by_key": {}, "by_id": {}})
+            store.create("charlie")
         self.assertEqual(store.require(first)["user_id"], "alice")
         self.assertEqual(store.require(second)["user_id"], "bob")
 
@@ -39,32 +39,32 @@ class RunContextTests(unittest.TestCase):
             expiration_callback=lambda handle, user_id: expired.append((handle, user_id)),
         )
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11, 11]):
-            old = store.create("alice", {"by_key": {}, "by_id": {}})
-            fresh = store.create("alice", {"by_key": {}, "by_id": {}})
+            old = store.create("alice")
+            fresh = store.create("alice")
         self.assertNotEqual(old, fresh)
         self.assertEqual(expired, [(old, "alice")])
         self.assertEqual(store._entries[fresh]["user_id"], "alice")
 
     def test_claim_is_idempotent_and_active_contexts_stay_until_idle_ttl(self):
         store = RUNS.RunContextStore(maximum=3, prepared_limit=2, active_limit=1, prepared_ttl_seconds=999)
-        handle = store.create("alice", {"by_key": {}, "by_id": {}})
+        handle = store.create("alice")
         self.assertTrue(store.claim(handle, "alice", "prompt-1"))
         self.assertTrue(store.claim(handle, "alice", "prompt-1"))
         self.assertFalse(store.claim(handle, "alice", "prompt-2"))
         self.assertEqual(store.purge_expired(), [])
         self.assertEqual(store.require(handle)["state"], "active")
         with self.assertRaisesRegex(RUNS.SceneRunError, "実行中または準備済み"):
-            store.create("alice", {"by_key": {}, "by_id": {}})
+            store.create("alice")
 
     def test_idle_active_contexts_expire_but_recently_used_contexts_do_not(self):
         expiring = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=0)
-        old = expiring.create("alice", {"by_key": {}, "by_id": {}})
+        old = expiring.create("alice")
         self.assertTrue(expiring.claim(old, "alice", "prompt-old"))
         self.assertEqual(expiring.purge_expired(), [(old, "alice")])
-        self.assertTrue(expiring.create("alice", {"by_key": {}, "by_id": {}}))
+        self.assertTrue(expiring.create("alice"))
 
         live = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=999)
-        handle = live.create("alice", {"by_key": {}, "by_id": {}})
+        handle = live.create("alice")
         self.assertTrue(live.claim(handle, "alice", "prompt-live"))
         live.require(handle)
         self.assertEqual(live.purge_expired(), [])
@@ -72,7 +72,7 @@ class RunContextTests(unittest.TestCase):
     def test_scene_node_access_refreshes_the_active_idle_deadline(self):
         store = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=10)
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 3, 6, 9, 18]):
-            handle = store.create("alice", {"by_key": {}, "by_id": {}})
+            handle = store.create("alice")
             store.require(handle)
             self.assertTrue(store.claim(handle, "alice", "prompt-1"))
             store.set_plan(handle, "expand-1", {"rows": []})
@@ -81,7 +81,7 @@ class RunContextTests(unittest.TestCase):
     def test_require_rejects_expired_context_before_touching_it(self):
         prepared = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=10)
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
-            handle = prepared.create("alice", {"by_key": {}, "by_id": {}})
+            handle = prepared.create("alice")
             with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
                 prepared.require(handle)
         with self.assertRaises(RUNS.SceneRunError):
@@ -89,7 +89,7 @@ class RunContextTests(unittest.TestCase):
 
         active = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=10)
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 1, 12]):
-            handle = active.create("alice", {"by_key": {}, "by_id": {}})
+            handle = active.create("alice")
             self.assertTrue(active.claim(handle, "alice", "prompt-1"))
             with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
                 active.require(handle)
@@ -97,7 +97,7 @@ class RunContextTests(unittest.TestCase):
     def test_claim_cannot_revive_an_expired_prepared_context(self):
         store = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=10)
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
-            handle = store.create("alice", {"by_key": {}, "by_id": {}})
+            handle = store.create("alice")
             self.assertFalse(store.claim(handle, "alice", "prompt-late"))
         with self.assertRaises(RUNS.SceneRunError):
             store.require(handle)
@@ -112,9 +112,9 @@ class RunContextTests(unittest.TestCase):
             expiration_callback=lambda handle, user_id: expired.append((handle, user_id)),
         )
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 0, 0, 11, 11, 11]):
-            required = store.create("alice", {"by_key": {}, "by_id": {}})
-            claimed = store.create("bob", {"by_key": {}, "by_id": {}})
-            purged = store.create("carol", {"by_key": {}, "by_id": {}})
+            required = store.create("alice")
+            claimed = store.create("bob")
+            purged = store.create("carol")
             with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
                 store.require(required)
             self.assertFalse(store.claim(claimed, "bob", "prompt-late"))
@@ -129,10 +129,10 @@ class RunContextTests(unittest.TestCase):
 
     def test_prepared_contexts_expire_and_plans_are_expand_specific(self):
         expiring = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=0)
-        old = expiring.create("alice", {"by_key": {}, "by_id": {}})
+        old = expiring.create("alice")
         self.assertEqual(expiring.purge_expired()[0][0], old)
         store = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=999)
-        handle = store.create("alice", {"by_key": {}, "by_id": {}})
+        handle = store.create("alice")
         first = {"rows": [{"row": {"positive_parts": ["A"]}}]}
         second = {"rows": [{"row": {"positive_parts": ["B"]}}]}
         self.assertEqual(store.set_plan(handle, "11", first), first)
