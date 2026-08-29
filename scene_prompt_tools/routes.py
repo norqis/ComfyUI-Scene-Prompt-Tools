@@ -5,18 +5,14 @@ import re
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from aiohttp import web
 from server import PromptServer
 
 from .prompt import (
-    SAVED_PROMPTS_FOLDER,
-    _clear_prompt_data_cache,
-    _prompt_data_index,
-    project_prompt_data_index,
     _validate_selection_item,
-    validate_prompt_data_item,
 )
 from .runs import (
     SceneRunError,
@@ -24,7 +20,6 @@ from .runs import (
     create_run_context,
     purge_expired_run_contexts,
     release_run_context,
-    replace_run_prompt_data_index,
     set_run_expiration_callback,
 )
 from .presets import (
@@ -42,13 +37,15 @@ set_run_expiration_callback(release_scene_preset_snapshot)
 
 
 PROMPT_FILE_NAME = "prompt.json"
+SAVED_PROMPTS_FOLDER = "保存済みプロンプト"
 DATA_WRITE_LOCK = threading.Lock()
 DATA_CACHE_LOCK = threading.RLock()
 _ROUTES_DEFINED = False
 _CACHE_TTL_SECONDS = 2.0
-_ITEMS_CACHE = {}
-_SAVED_PROMPTS_CACHE = {}
-_CACHE_GENERATIONS = {}
+_CACHE_MAX_USERS = 64
+_ITEMS_CACHE = OrderedDict()
+_SAVED_PROMPTS_CACHE = OrderedDict()
+_CACHE_GENERATION = 0
 
 
 def _request_user_id(request):
@@ -64,11 +61,20 @@ def _saved_prompts_dir(user_id="default"):
 
 
 def _cache_for(caches, user_id):
-    return caches.setdefault(str(user_id or "default"), {"expires": 0.0, "signature": None, "value": None})
+    user_key = str(user_id or "default")
+    cache = caches.get(user_key)
+    if cache is None:
+        cache = {"expires": 0.0, "signature": None, "value": None}
+        caches[user_key] = cache
+        if len(caches) > _CACHE_MAX_USERS:
+            caches.popitem(last=False)
+    else:
+        caches.move_to_end(user_key)
+    return cache
 
 
 def _cache_generation(user_id):
-    return _CACHE_GENERATIONS.get(str(user_id or "default"), 0)
+    return _CACHE_GENERATION
 
 
 def _prompt_file_signature(root):
@@ -107,12 +113,32 @@ def _cache_set(cache, signature, value):
 
 
 def _clear_prompt_caches(user_id="default"):
+    global _CACHE_GENERATION
     user_key = str(user_id or "default")
     with DATA_CACHE_LOCK:
-        _CACHE_GENERATIONS[user_key] = _cache_generation(user_key) + 1
+        _CACHE_GENERATION += 1
         _ITEMS_CACHE.pop(user_key, None)
         _SAVED_PROMPTS_CACHE.pop(user_key, None)
-        _clear_prompt_data_cache(user_id)
+
+
+def _validate_prompt_data_item(item, label="Prompt data item"):
+    if not isinstance(item, dict) or not {"label", "prompt"}.issubset(item) or set(item) - {"id", "label", "prompt", "description"}:
+        raise ValueError(f"{label} has unsupported or missing fields.")
+    result = {}
+    for key in ("label", "prompt"):
+        value = item[key]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} {key} must be a non-empty string.")
+        result[key] = value
+    if "id" in item:
+        if not isinstance(item["id"], str) or not item["id"].strip():
+            raise ValueError(f"{label} id must be a non-empty string.")
+        result["id"] = item["id"]
+    if "description" in item:
+        if not isinstance(item["description"], str):
+            raise ValueError(f"{label} description must be a string.")
+        result["description"] = item["description"]
+    return result
 
 
 def _read_items(path, category_path):
@@ -129,7 +155,7 @@ def _read_items(path, category_path):
 
     normalized = []
     for index, item in enumerate(data):
-        normalized_item = validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
+        normalized_item = _validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
         normalized_item["category_path"] = category_path
         normalized_item["category_key"] = " > ".join(category_path)
         normalized_item["category_label"] = " > ".join(category_path)
@@ -234,7 +260,7 @@ def _read_prompt_payload(path):
     if not isinstance(data, list):
         raise ValueError(f"Prompt data file '{path.name}' must be a JSON array.")
     return [
-        validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
+        _validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
         for index, item in enumerate(data)
     ]
 
@@ -590,17 +616,8 @@ def define_routes():
             api_graph = payload.get("api_graph") if isinstance(payload, dict) else None
             expand_node_id = payload.get("expand_node_id") if isinstance(payload, dict) else None
             user_id = _request_user_id(request)
-            prompt_index = await asyncio.to_thread(_prompt_data_index, user_id)
-            handle = create_run_context(user_id, prompt_index)
+            handle = create_run_context(user_id)
             snapshot = await asyncio.to_thread(snapshot_presets_for_run, handle, api_graph, expand_node_id, user_id)
-            projection = await asyncio.to_thread(
-                project_prompt_data_index,
-                api_graph,
-                prompt_index,
-                snapshot.get("preset_graphs", {}),
-                expand_node_id,
-            )
-            replace_run_prompt_data_index(handle, projection)
             return web.json_response({"run_handle": handle, **snapshot})
         except ScenePresetResolutionError as exc:
             if handle:

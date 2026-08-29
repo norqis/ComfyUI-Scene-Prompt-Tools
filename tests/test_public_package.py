@@ -74,9 +74,18 @@ class PublicPackageTests(unittest.TestCase):
     def test_runtime_uses_comfyui_user_data_directory(self):
         prompt_source = (ROOT / "scene_prompt_tools" / "prompt.py").read_text(encoding="utf-8")
         routes_source = (ROOT / "scene_prompt_tools" / "routes.py").read_text(encoding="utf-8")
-        self.assertIn("prompt_data_directory(user_id)", prompt_source)
+        self.assertNotIn("prompt_data_directory", prompt_source)
         self.assertIn("prompt_data_directory(user_id)", routes_source)
         self.assertNotIn('Path(__file__).resolve().parents[1] / "data"', prompt_source + routes_source)
+
+    def test_runtime_has_no_prompt_data_remapping(self):
+        runtime_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "scene_prompt_tools").glob("*.py")
+        )
+        for retired_name in ("prompt_data_index", "latest_prompt", "STORED_SELECTION_DATA", "project_prompt_data_index"):
+            with self.subTest(retired_name=retired_name):
+                self.assertNotIn(retired_name, runtime_source)
 
     def test_old_schema_migration_code_is_absent(self):
         runtime_source = "\n".join(

@@ -86,7 +86,7 @@ class RunContextStore:
         states = Counter(entry["state"] for entry in self._entries.values() if entry["user_id"] == str(user_id))
         return states["prepared"], states["active"]
 
-    def create(self, user_id, prompt_data_index):
+    def create(self, user_id):
         now = time.monotonic()
         with self._lock:
             expired = self._purge_expired_locked(now)
@@ -104,7 +104,6 @@ class RunContextStore:
                     handle = secrets.token_urlsafe(32)
                 self._entries[handle] = {
                     "user_id": str(user_id),
-                    "prompt_data_index": copy.deepcopy(prompt_data_index),
                     "plans": {},
                     "state": "prepared",
                     "prompt_id": "",
@@ -146,13 +145,6 @@ class RunContextStore:
             if entry is None or self._is_expired_locked(entry, time.monotonic()):
                 raise SceneRunError("実行コンテキストが見つからないか、有効期限が切れました。画像生成を開始し直してください。")
             return copy.deepcopy(entry)
-
-    def replace_prompt_data_index(self, handle, prompt_data_index):
-        entry = self.require(handle)
-        with self._lock:
-            if self._entries.get(str(handle)) is not entry or entry["state"] != "prepared":
-                raise SceneRunError("開始済みの実行コンテキストは変更できません。")
-            entry["prompt_data_index"] = copy.deepcopy(prompt_data_index)
 
     def set_plan(self, handle, expand_node_id, plan):
         key = str(expand_node_id or "").strip()
@@ -217,8 +209,8 @@ def set_run_expiration_callback(callback):
     RUN_CONTEXTS.set_expiration_callback(callback)
 
 
-def create_run_context(user_id, prompt_data_index):
-    return RUN_CONTEXTS.create(user_id, prompt_data_index)
+def create_run_context(user_id):
+    return RUN_CONTEXTS.create(user_id)
 
 
 def require_run_context(handle):
@@ -227,10 +219,6 @@ def require_run_context(handle):
 
 def peek_run_context(handle):
     return RUN_CONTEXTS.peek(handle)
-
-
-def replace_run_prompt_data_index(handle, prompt_data_index):
-    return RUN_CONTEXTS.replace_prompt_data_index(handle, prompt_data_index)
 
 
 def set_run_plan(handle, expand_node_id, plan):

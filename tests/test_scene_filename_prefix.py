@@ -302,7 +302,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
     def test_independent_expand_unique_ids_keep_separate_immutable_plans(self):
         runs = sys.modules[f"{self.nodes.__package__}.runs"]
         runs.RUN_CONTEXTS.clear()
-        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        handle = runs.create_run_context("alice")
         first = _scene_prompt(self.nodes)
         second = self.nodes.transform(first, lambda row, _item: {**row, "positive_parts": ["second"]})
         self.assertEqual(self.nodes._scene_run_plan(handle, first, "expand-1")["rows"][0]["row"]["positive_parts"], ["test"])
@@ -316,7 +316,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
     def test_is_changed_does_not_register_a_seed_plan_before_expand(self):
         runs = sys.modules[f"{self.nodes.__package__}.runs"]
         runs.RUN_CONTEXTS.clear()
-        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        handle = runs.create_run_context("alice")
         unique_id = "expand-1"
         try:
             self.nodes.ScenePromptExpand.IS_CHANGED(

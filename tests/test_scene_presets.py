@@ -146,14 +146,6 @@ class ScenePresetTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 
-    def write_prompt_data(self, user_id="default"):
-        path = self.root / user_id / "scene_prompt_tools" / "data" / "Emotion" / "prompt.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps([{"id": "fear", "label": "怯え", "prompt": "scared"}], ensure_ascii=False),
-            encoding="utf-8",
-        )
-
     def selected_prompt_json(self):
         return json.dumps({
             "version": 1,
@@ -184,7 +176,6 @@ class ScenePresetTests(unittest.TestCase):
             self.assertEqual(json.load(handle)["metadata"]["name"], "Renamed")
 
     def test_save_selected_scene_prompt_does_not_require_a_generation_context(self):
-        self.write_prompt_data()
         nodes = basic_nodes()
         nodes["2"]["inputs"]["positive_json"] = self.selected_prompt_json()
 
@@ -193,7 +184,6 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual(saved["metadata"]["preset_id"], "selected-prompt")
 
     def test_save_selected_matrix_does_not_require_a_generation_context(self):
-        self.write_prompt_data()
         nodes = basic_nodes()
         nodes["4"] = {
             "class_type": "SceneMatrix",
@@ -211,8 +201,7 @@ class ScenePresetTests(unittest.TestCase):
 
         self.assertEqual(saved["metadata"]["preset_id"], "selected-matrix")
 
-    def test_save_nested_selected_prompt_uses_the_current_user_data(self):
-        self.write_prompt_data("alice")
+    def test_save_nested_selected_prompt_uses_only_the_stored_selection(self):
         inner = basic_nodes()
         inner["2"]["inputs"]["positive_json"] = self.selected_prompt_json()
         self.save("selected-inner", inner, user_id="alice")
@@ -226,20 +215,19 @@ class ScenePresetTests(unittest.TestCase):
 
         self.assertEqual(saved["metadata"]["preset_id"], "selected-outer")
 
-    def test_selected_prompt_generation_still_requires_a_run_context(self):
-        self.write_prompt_data()
+    def test_selected_prompt_uses_the_value_stored_in_the_node(self):
+        plan = self.module.ScenePrompt().build(
+            "Prompt",
+            "",
+            self.selected_prompt_json(),
+            "",
+            '{"version":1,"categories":{}}',
+            "",
+            0,
+            True,
+        )[0]
 
-        with self.assertRaisesRegex(ValueError, "実行コンテキスト"):
-            self.module.ScenePrompt().build(
-                "Prompt",
-                "",
-                self.selected_prompt_json(),
-                "",
-                '{"version":1,"categories":{}}',
-                "",
-                0,
-                True,
-            )
+        self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["scared"])
 
     def test_preset_paths_reject_untrusted_user_ids(self):
         for user_id in ("", "../outside", "/outside", "C:" + chr(92) + "outside", "__system"):
@@ -501,20 +489,24 @@ class ScenePresetTests(unittest.TestCase):
 
         self.module._resolve_preset_tree = delayed_resolve
         try:
-            resolver = threading.Thread(
-                target=lambda: result.setdefault("value", self.module.snapshot_presets_for_run("race-run", api_graph, "11")),
-            )
+            def resolve_snapshot():
+                try:
+                    result["value"] = self.module.snapshot_presets_for_run("race-run", api_graph, "11")
+                except Exception as exc:
+                    result["error"] = exc
+
+            resolver = threading.Thread(target=resolve_snapshot)
             resolver.start()
             self.assertTrue(started.wait(2))
             releaser = threading.Thread(target=lambda: self.module.release_scene_preset_snapshot("race-run"))
             releaser.start()
-            self.assertTrue(releaser.is_alive())
+            releaser.join(2)
+            self.assertFalse(releaser.is_alive())
             continue_resolve.set()
             resolver.join(2)
-            releaser.join(2)
         finally:
             self.module._resolve_preset_tree = original
-        self.assertIn("value", result)
+        self.assertIsInstance(result.get("error"), self.module.ScenePresetError)
         self.assertNotIn("race-run", self.module._RUN_SNAPSHOTS)
         with self.assertRaisesRegex(self.module.ScenePresetError, "スナップショットがありません"):
             self.module.expand_preset_reference("fixed", ["outer", 0], "race-run")
@@ -707,7 +699,7 @@ class ScenePresetTests(unittest.TestCase):
             "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         runs = sys.modules[f"{self.module.__package__}.runs"]
-        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        handle = runs.create_run_context("alice")
         self.module.snapshot_presets_for_run(handle, graph_data, "11", "alice")
         resolved = self.module._RUN_SNAPSHOTS[("alice", handle)]["presets"]
         value = self.module._scene_node_value(
@@ -724,7 +716,7 @@ class ScenePresetTests(unittest.TestCase):
             "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         runs = sys.modules[f"{self.module.__package__}.runs"]
-        handle = runs.create_run_context("alice", {"by_key": {}, "by_id": {}})
+        handle = runs.create_run_context("alice")
         try:
             self.module.snapshot_presets_for_run(handle, graph_data, "11", "alice")
             before_runs = copy.deepcopy(runs.RUN_CONTEXTS._entries)
@@ -781,6 +773,44 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual(second, first)
         snapshot = self.module._snapshot_preset("same-run", "fixed")
         self.assertEqual(snapshot["metadata"]["revision"], 1)
+
+    def test_concurrent_resolve_publishes_one_valid_snapshot(self):
+        self.save("fixed", basic_nodes("first"))
+        api_graph = graph({
+            "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
+            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+        })
+        barrier = threading.Barrier(2)
+        original = self.module._resolve_preset_tree
+
+        def delayed_resolve(*args, **kwargs):
+            barrier.wait(2)
+            return original(*args, **kwargs)
+
+        self.module._resolve_preset_tree = delayed_resolve
+        results = []
+        errors = []
+
+        def resolve_snapshot():
+            try:
+                results.append(self.module.snapshot_presets_for_run("concurrent-run", api_graph, "11"))
+            except Exception as exc:
+                errors.append(exc)
+
+        try:
+            workers = [threading.Thread(target=resolve_snapshot) for _ in range(2)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+        finally:
+            self.module._resolve_preset_tree = original
+
+        self.assertEqual(errors, [])
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(len(self.module._RUN_SNAPSHOTS), 1)
+        self.assertEqual(self.module._RUN_SNAPSHOTS[("default", "concurrent-run")]["response"], results[0])
 
     def test_unlinked_expand_run_is_snapshotted_and_cannot_be_reused_after_release(self):
         api_graph = graph({

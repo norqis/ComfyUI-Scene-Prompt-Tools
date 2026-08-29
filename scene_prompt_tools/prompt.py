@@ -1,22 +1,13 @@
 import json
-import hashlib
 import random
 import re
-import time
-import threading
 from collections import OrderedDict
 from .plan import make_plan, normalize_plan
-from .storage import prompt_data_directory
-from .runs import require_run_context
 
 
 DEFAULT_CATEGORY_ORDER = ""
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
 DEFAULT_SELECTED_JSON = "{\"version\":1,\"categories\":{}}"
-PROMPT_FILE_NAME = "prompt.json"
-SAVED_PROMPTS_FOLDER = "保存済みプロンプト"
-PROMPT_ITEM_REQUIRED_KEYS = {"label", "prompt"}
-PROMPT_ITEM_OPTIONAL_KEYS = {"id", "description"}
 SELECTION_ITEM_REQUIRED_KEYS = {
     "label", "prompt", "category_path", "category_key", "category_label",
 }
@@ -28,20 +19,6 @@ MAX_WEIGHT = 3.0
 
 CHOICE_RE = re.compile(r"\{([^{}]+)\}")
 WEIGHTED_PART_RE = re.compile(r"^\((.*):\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\)$")
-_PROMPT_DATA_INDEX_CACHE = {}
-_PROMPT_FILE_SIGNATURE_CACHE = {}
-_PROMPT_INDEX_GENERATIONS = {}
-_PROMPT_INDEX_LOCK = threading.RLock()
-_PROMPT_SIGNATURE_TTL_SECONDS = 0.5
-
-
-def _is_link(value):
-    return (
-        isinstance(value, list)
-        and len(value) == 2
-        and isinstance(value[0], str)
-        and isinstance(value[1], (int, float))
-    )
 
 
 def _split_prompt(text):
@@ -202,99 +179,6 @@ def _parse_order(category_order):
     return [part.strip() for part in re.split(r"[,、\n]", category_order or "") if part.strip()]
 
 
-def _category_key(item):
-    key = item.get("category_key")
-    if isinstance(key, str) and key.strip():
-        return key.strip()
-
-    path = item.get("category_path")
-    if isinstance(path, list):
-        parts = [str(part).strip() for part in path if str(part).strip()]
-        if parts:
-            return " > ".join(parts)
-
-    return ""
-
-
-def _prompt_data_directory_for_user(user_id="default"):
-    return prompt_data_directory(user_id)
-
-
-def _prompt_file_signature(user_id="default"):
-    user_key = str(user_id or "default")
-    now = time.monotonic()
-    with _PROMPT_INDEX_LOCK:
-        cache = _PROMPT_FILE_SIGNATURE_CACHE.setdefault(user_key, {"expires": 0.0, "signature": None})
-        cached = cache.get("signature")
-        if cached is not None and cache.get("expires", 0.0) > now:
-            return cached
-
-    data_dir = _prompt_data_directory_for_user(user_key)
-
-    if not data_dir.exists():
-        signature = ()
-        with _PROMPT_INDEX_LOCK:
-            cache["signature"] = signature
-            cache["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
-        return signature
-
-    signature = []
-    for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
-        try:
-            category_path = prompt_file.parent.relative_to(data_dir).parts
-        except ValueError:
-            continue
-        if category_path and category_path[0] == SAVED_PROMPTS_FOLDER:
-            continue
-        try:
-            stat = prompt_file.stat()
-        except OSError:
-            continue
-        signature.append(("/".join(category_path), stat.st_mtime_ns, stat.st_size))
-    signature = tuple(signature)
-    with _PROMPT_INDEX_LOCK:
-        cache["signature"] = signature
-        cache["expires"] = now + _PROMPT_SIGNATURE_TTL_SECONDS
-    return signature
-
-
-def _clear_prompt_data_cache(user_id=None):
-    with _PROMPT_INDEX_LOCK:
-        keys = [str(user_id or "default")] if user_id is not None else set(_PROMPT_FILE_SIGNATURE_CACHE) | set(_PROMPT_DATA_INDEX_CACHE)
-        for key in keys:
-            _PROMPT_INDEX_GENERATIONS[key] = _PROMPT_INDEX_GENERATIONS.get(key, 0) + 1
-            _PROMPT_FILE_SIGNATURE_CACHE.pop(key, None)
-            _PROMPT_DATA_INDEX_CACHE.pop(key, None)
-
-
-def _prompt_data_change_key(user_id="default"):
-    payload = json.dumps(_prompt_file_signature(user_id), ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _read_prompt_items(path, category_path):
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON.") from exc
-    except OSError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' cannot be read.") from exc
-
-    if not isinstance(data, list):
-        raise ValueError(f"Prompt data file '{path.name}' must be a JSON array.")
-
-    category_key = " > ".join(category_path)
-    normalized = []
-    for index, item in enumerate(data):
-        normalized_item = validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
-        normalized_item["category_path"] = list(category_path)
-        normalized_item["category_key"] = category_key
-        normalized_item["category_label"] = category_key
-        normalized.append(normalized_item)
-    return normalized
-
-
 def _require_exact_keys(item, required, optional, label):
     if not isinstance(item, dict):
         raise ValueError(f"{label} must be an object.")
@@ -313,22 +197,6 @@ def _validate_weight(value, label):
     if type(value) not in (int, float) or isinstance(value, bool) or not MIN_WEIGHT <= value <= MAX_WEIGHT:
         raise ValueError(f"{label} must be a number between 0.05 and 3.")
     return float(value)
-
-
-def validate_prompt_data_item(item, label="Prompt data item"):
-    """Validate one on-disk current-schema prompt item without adding fields."""
-    _require_exact_keys(item, PROMPT_ITEM_REQUIRED_KEYS, PROMPT_ITEM_OPTIONAL_KEYS, label)
-    result = {
-        "label": _require_nonempty_string(item["label"], f"{label} label"),
-        "prompt": _require_nonempty_string(item["prompt"], f"{label} prompt"),
-    }
-    if "id" in item:
-        result["id"] = _require_nonempty_string(item["id"], f"{label} id")
-    if "description" in item:
-        if not isinstance(item["description"], str):
-            raise ValueError(f"{label} description must be a string.")
-        result["description"] = item["description"]
-    return result
 
 
 def _validate_selected_part(part, prompt_parts, label):
@@ -385,199 +253,13 @@ def _validate_selection_item(item, category, label):
     return result
 
 
-def _selection_item_key(item, default_category=""):
-    category = _category_key(item) or str(default_category or "").strip()
-    if not category:
-        return ""
-    if item.get("id"):
-        return f"{category}::id::{item['id']}"
-    return f"{category}::item::{item['label']}::{item['prompt']}"
-
-
-def _prompt_data_index(user_id="default"):
-    user_key = str(user_id or "default")
-    while True:
-        with _PROMPT_INDEX_LOCK:
-            generation = _PROMPT_INDEX_GENERATIONS.get(user_key, 0)
-        signature = _prompt_file_signature(user_key)
-        with _PROMPT_INDEX_LOCK:
-            cache = _PROMPT_DATA_INDEX_CACHE.get(user_key)
-            cached = cache.get("index") if cache else None
-            if cache and cache.get("signature") == signature and cached is not None:
-                return cached
-
-        by_key = {}
-        by_id = {}
-        data_dir = _prompt_data_directory_for_user(user_key)
-        if data_dir.exists():
-            for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
-                try:
-                    category_path = list(prompt_file.parent.relative_to(data_dir).parts)
-                except ValueError:
-                    continue
-                if category_path and category_path[0] == SAVED_PROMPTS_FOLDER:
-                    continue
-                for item in _read_prompt_items(prompt_file, category_path):
-                    category = _category_key(item)
-                    key = _selection_item_key(item, category)
-                    if key:
-                        by_key[key] = item
-                    item_id = str(item.get("id") or "").strip()
-                    if item_id:
-                        by_id[(category, item_id)] = item
-
-        index = {"by_key": by_key, "by_id": by_id}
-        with _PROMPT_INDEX_LOCK:
-            if generation != _PROMPT_INDEX_GENERATIONS.get(user_key, 0):
-                continue
-            _PROMPT_DATA_INDEX_CACHE[user_key] = {"signature": signature, "index": index}
-            return index
-
-
-def _expand_branch_nodes(api_graph, expand_node_id):
-    """Return the upstream input closure for one Scene Prompt Expand node."""
-    nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
-    if not isinstance(nodes, dict):
-        raise ValueError("生成開始時のグラフを取得できませんでした。")
-    expand_id = str(expand_node_id)
-    expand = nodes.get(expand_id)
-    if not isinstance(expand, dict):
-        raise ValueError(f"Scene Prompt Expand #{expand_id} が見つかりません。")
-    if expand.get("class_type") != "ScenePromptExpand":
-        raise ValueError(f"#{expand_id} は Scene Prompt Expand ではありません。")
-    inputs = expand.get("inputs") if isinstance(expand, dict) else None
-    source = inputs.get("scene_prompt") if isinstance(inputs, dict) else None
-    if not _is_link(source):
-        return {}
-
-    closure = {}
-    visiting = set()
-
-    def visit(node_id):
-        node_id = str(node_id)
-        if node_id in closure:
-            return
-        if node_id in visiting:
-            raise ValueError(f"生成グラフのScene接続が循環しています: #{node_id}")
-        node = nodes.get(node_id)
-        if not isinstance(node, dict):
-            raise ValueError(f"Sceneノード #{node_id} が見つかりません。")
-        visiting.add(node_id)
-        inputs = node.get("inputs")
-        for value in inputs.values() if isinstance(inputs, dict) else ():
-            if _is_link(value):
-                visit(value[0])
-        visiting.remove(node_id)
-        closure[node_id] = node
-
-    visit(source[0])
-    return closure
-
-
-def project_prompt_data_index(api_graph, data_index, preset_graphs=None, expand_node_id=None):
-    """Return only current prompt items selected by a queued Scene graph."""
-    projected = {"by_key": {}, "by_id": {}}
-    graph_nodes = (
-        _expand_branch_nodes(api_graph, expand_node_id)
-        if expand_node_id is not None
-        else (api_graph or {}).get("output", {})
-    )
-    graphs = [{"output": graph_nodes}]
-    graphs.extend((entry.get("api_graph") if isinstance(entry, dict) else entry) for entry in (preset_graphs or {}).values())
-    for graph in graphs:
-        for node in (graph or {}).get("output", {}).values():
-            inputs = node.get("inputs", {}) if isinstance(node, dict) else {}
-            selections = [inputs.get("positive_json"), inputs.get("negative_json")]
-            raw_matrix = inputs.get("matrix_json")
-            if isinstance(raw_matrix, str):
-                try:
-                    selections.extend(
-                        value.get(key)
-                        for value in json.loads(raw_matrix).get("sets", [])
-                        if isinstance(value, dict)
-                        for key in ("positive_json", "negative_json")
-                    )
-                except (AttributeError, TypeError, json.JSONDecodeError):
-                    pass
-            for selection in selections:
-                for category, items in _parse_selection_json(selection, data_index).items():
-                    for item in items:
-                        key = _selection_item_key(item, category)
-                        if key:
-                            projected["by_key"][key] = dict(item)
-                        item_id = str(item.get("id") or "").strip()
-                        if item_id:
-                            projected["by_id"][(category, item_id)] = dict(item)
-    return projected
-
-
-def _prompt_parts_with_index(prompt):
-    return [{"index": index, "text": part} for index, part in enumerate(_split_prompt(prompt))]
-
-
-def _remap_selected_parts(previous_item, latest_item):
-    """Map an explicit partial selection onto the latest item without guessing."""
-    previous_parts = previous_item.get("selected_parts")
-    if previous_parts is None:
-        return None
-
-    latest_parts = _split_prompt(latest_item["prompt"])
-    used_indexes = set()
-    remapped = []
-    for part in previous_parts:
-        old_index = part["index"]
-        text = part["text"]
-        candidates = [
-            index for index, value in enumerate(latest_parts)
-            if value == text and index not in used_indexes
-        ]
-        if old_index in candidates:
-            new_index = old_index
-        elif len(candidates) == 1:
-            new_index = candidates[0]
-        else:
-            raise ValueError(
-                "Scene Prompt partial selection can no longer be mapped to the current prompt item."
-            )
-        selected = {"index": new_index, "text": text}
-        if "weight" in part:
-            selected["weight"] = part["weight"]
-        remapped.append(selected)
-        used_indexes.add(new_index)
-    return remapped
-
-
-def _selection_item_with_latest_prompt(previous_item, default_category, data_index):
-    category = previous_item["category_key"]
-    if "id" in previous_item:
-        latest = data_index["by_id"].get((category, previous_item["id"]))
-        if latest is None:
-            raise ValueError("Scene Prompt selected item no longer exists in the current prompt data.")
-    else:
-        latest = data_index["by_key"].get(_selection_item_key(previous_item, category))
-        if latest is None:
-            raise ValueError(
-                "Scene Prompt selected item has no stable id and no longer matches the current prompt data."
-            )
-
-    selected = dict(latest)
-    if "weight" in previous_item:
-        selected["weight"] = previous_item["weight"]
-    remapped_parts = _remap_selected_parts(previous_item, latest)
-    if remapped_parts is not None:
-        selected["selected_parts"] = remapped_parts
-    return _validate_selection_item(selected, category, "Scene Prompt selection entry")
-
-
-def _parse_selection_json(selection_json, data_index=None):
+def _parse_selection_json(selection_json):
     """Read only the current selection-state schema.
 
     An empty widget is intentionally an empty selection. Any supplied value must
     be valid current-schema JSON so malformed saved workflow data cannot quietly
     remove prompt choices.
     """
-    if data_index is None:
-        data_index = _prompt_data_index()
     if selection_json is None or (isinstance(selection_json, str) and not selection_json.strip()):
         return OrderedDict()
     if not isinstance(selection_json, str):
@@ -605,24 +287,9 @@ def _parse_selection_json(selection_json, data_index=None):
             raise ValueError("Scene Prompt selection category entries must be lists.")
         categories[category] = []
         for index, item in enumerate(items):
-            normalized = _validate_selection_item(item, category, f"Scene Prompt selection entry {index}")
-            categories[category].append(
-                _selection_item_with_latest_prompt(normalized, category, data_index)
-            )
+            categories[category].append(_validate_selection_item(item, category, f"Scene Prompt selection entry {index}"))
 
     return categories
-
-
-def _selection_json_has_items(selection_json):
-    if selection_json is None or (isinstance(selection_json, str) and not selection_json.strip()):
-        return False
-    if not isinstance(selection_json, str):
-        return True
-    try:
-        value = json.loads(selection_json)
-    except json.JSONDecodeError:
-        return True
-    return isinstance(value, dict) and any(value.get("categories", {}).values())
 
 
 def _scene_prompt_change_key(value):
@@ -631,9 +298,9 @@ def _scene_prompt_change_key(value):
     return str(value.get("change_key") or "")
 
 
-def _compose_prompt_parts(base_text, selection_json, category_order, randomize, seed, data_index=None):
+def _compose_prompt_parts(base_text, selection_json, category_order, randomize, seed):
     rng = random.Random(int(seed or 0))
-    categories = _parse_selection_json(selection_json, data_index or _prompt_data_index())
+    categories = _parse_selection_json(selection_json)
     order = _parse_order(category_order)
     parts = _split_prompt(_expand_choices(base_text or "", rng, randomize, bool(randomize)))
     parts.extend(_selected_prompt_parts(categories, order, rng, randomize, bool(randomize)))
@@ -789,23 +456,14 @@ class _ScenePromptBase:
         run_handle="",
         **kwargs,
     ):
-        validation_prompt_data_index = kwargs.pop("_prompt_data_index", None)
         del kwargs
         label = str(prompt_name or "").strip() or "Scene Prompt"
-        has_selection = _selection_json_has_items(positive_json) or _selection_json_has_items(negative_json)
-        if not has_selection:
-            prompt_data_index = {"by_key": {}, "by_id": {}}
-        elif validation_prompt_data_index is not None:
-            prompt_data_index = validation_prompt_data_index
-        else:
-            prompt_data_index = require_run_context(run_handle)["prompt_data_index"]
         positive_parts = _compose_prompt_parts(
             positive_base,
             positive_json,
             category_order,
             bool(randomize),
             int(seed or 0),
-            prompt_data_index,
         )
         negative_parts = _compose_prompt_parts(
             negative_base,
@@ -813,7 +471,6 @@ class _ScenePromptBase:
             category_order,
             bool(randomize),
             int(seed or 0) ^ 0x5F3759DF,
-            prompt_data_index,
         )
 
         rows = []

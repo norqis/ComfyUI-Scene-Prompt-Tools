@@ -294,7 +294,7 @@ class PromptDataRouteTests(unittest.TestCase):
         with self.assertRaises(runs.SceneRunError):
             runs.require_run_context(handle)
 
-    def test_prepare_projects_selected_items_and_claim_is_owner_bound(self):
+    def test_prepare_and_claim_are_owner_bound(self):
         class Request:
             def __init__(self, user_id, payload):
                 self.user_id = user_id
@@ -303,13 +303,6 @@ class PromptDataRouteTests(unittest.TestCase):
             async def json(self):
                 return self.payload
 
-        path = self.routes._data_dir("alice") / "Style" / "prompt.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps([
-            {"id": "used", "label": "Used", "prompt": "used"},
-            {"id": "nested", "label": "Nested", "prompt": "nested"},
-            {"id": "unused", "label": "Unused", "prompt": "unused"},
-        ]), encoding="utf-8")
         selected = json.dumps({"version": 1, "categories": {"Style": [{
             "id": "used", "label": "Used", "prompt": "used",
             "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
@@ -320,22 +313,50 @@ class PromptDataRouteTests(unittest.TestCase):
         release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
         handle = asyncio.run(prepare(Request("alice", {"api_graph": graph})))["payload"]["run_handle"]
         runs = sys.modules[f"{self.routes.__package__}.runs"]
-        projected = runs.require_run_context(handle)["prompt_data_index"]
-        self.assertEqual(set(projected["by_id"]), {("Style", "used")})
-        nested = json.dumps({"version": 1, "categories": {"Style": [{
-            "id": "nested", "label": "Nested", "prompt": "nested",
-            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
-        }]}})
-        projected = self.routes.project_prompt_data_index(
-            graph,
-            self.routes._prompt_data_index("alice"),
-            {"preset": {"api_graph": {"output": {"2": {"inputs": {"negative_json": nested}}}}}},
-        )
-        self.assertEqual(set(projected["by_id"]), {("Style", "used"), ("Style", "nested")})
+        self.assertEqual(runs.require_run_context(handle)["user_id"], "alice")
         self.assertFalse(asyncio.run(claim(Request("bob", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
         self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
         self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
         self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
+
+    def test_prepare_uses_stored_selections_without_reading_prompt_data(self):
+        class Request:
+            user_id = "alice"
+
+            async def json(self):
+                selected = json.dumps({"version": 1, "categories": {"Style": [{
+                    "id": "used", "label": "Used", "prompt": "stored prompt",
+                    "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+                }]}})
+                return {"api_graph": {"output": {
+                    "1": {"class_type": "ScenePrompt", "inputs": {
+                        "prompt_name": "Stored",
+                        "positive_base": "",
+                        "positive_json": selected,
+                        "negative_base": "",
+                        "negative_json": '{"version":1,"categories":{}}',
+                        "category_order": "",
+                        "seed": 0,
+                        "randomize": True,
+                    }},
+                    "2": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+                }}, "expand_node_id": "2"}
+
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+        original_data_dir = self.routes._data_dir
+        self.routes._data_dir = lambda *_args: (_ for _ in ()).throw(AssertionError("generation must not read prompt data"))
+        try:
+            response = asyncio.run(prepare(Request()))
+        finally:
+            self.routes._data_dir = original_data_dir
+
+        self.assertEqual(response["status"], 200, response["payload"])
+        self.assertEqual(response["payload"]["total_images"], 1)
+        handle = response["payload"]["run_handle"]
+        request = types.SimpleNamespace(user_id="alice", json=lambda: None)
+        request.json = lambda: asyncio.sleep(0, result={"run_handle": handle})
+        self.assertTrue(asyncio.run(release(request))["payload"]["released"])
 
     def test_prepare_ignores_stale_selections_outside_selected_expand_branch(self):
         class Request:
@@ -346,11 +367,6 @@ class PromptDataRouteTests(unittest.TestCase):
             async def json(self):
                 return self.payload
 
-        path = self.routes._data_dir("alice") / "Style" / "prompt.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps([
-            {"id": "current", "label": "Current", "prompt": "current"},
-        ]), encoding="utf-8")
         current = json.dumps({"version": 1, "categories": {"Style": [{
             "id": "current", "label": "Current", "prompt": "current",
             "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
@@ -386,8 +402,7 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertEqual(response["status"], 200, response["payload"])
         handle = response["payload"]["run_handle"]
         runs = sys.modules[f"{self.routes.__package__}.runs"]
-        projected = runs.require_run_context(handle)["prompt_data_index"]
-        self.assertEqual(set(projected["by_id"]), {("Style", "current")})
+        self.assertEqual(runs.require_run_context(handle)["user_id"], "alice")
         self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
 
     def test_unlinked_expand_ignores_disconnected_stale_selections(self):
@@ -418,8 +433,6 @@ class PromptDataRouteTests(unittest.TestCase):
 
         self.assertEqual(response["status"], 200, response["payload"])
         handle = response["payload"]["run_handle"]
-        runs = sys.modules[f"{self.routes.__package__}.runs"]
-        self.assertEqual(runs.require_run_context(handle)["prompt_data_index"], {"by_key": {}, "by_id": {}})
         self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
 
     def test_explicit_expand_rejects_missing_wrong_and_invalid_upstream_nodes(self):
@@ -430,47 +443,6 @@ class PromptDataRouteTests(unittest.TestCase):
 
             async def json(self):
                 return self.payload
-
-        index = {"by_key": {}, "by_id": {}}
-        self.assertRaisesRegex(
-            ValueError,
-            "Scene Prompt Expand #missing が見つかりません。",
-            self.routes.project_prompt_data_index,
-            {"output": {}}, index, None, "missing",
-        )
-        self.assertRaisesRegex(
-            ValueError,
-            "#1 は Scene Prompt Expand ではありません。",
-            self.routes.project_prompt_data_index,
-            {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}, index, None, "1",
-        )
-        self.assertRaisesRegex(
-            ValueError,
-            "Sceneノード #missing が見つかりません。",
-            self.routes.project_prompt_data_index,
-            {"output": {"1": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["missing", 0]}}}},
-            index, None, "1",
-        )
-        self.assertRaisesRegex(
-            ValueError,
-            "生成グラフのScene接続が循環しています: #1",
-            self.routes.project_prompt_data_index,
-            {"output": {
-                "1": {"class_type": "ScenePrompt", "inputs": {"scene_prompt": ["2", 0]}},
-                "2": {"class_type": "ScenePrompt", "inputs": {"scene_prompt": ["1", 0]}},
-                "3": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
-            }},
-            index, None, "3",
-        )
-        self.assertEqual(
-            self.routes.project_prompt_data_index(
-                {"output": {"1": {"class_type": "ScenePromptExpand", "inputs": {
-                    "scene_prompt": ("missing", 0),
-                }}}},
-                index, None, "1",
-            ),
-            {"by_key": {}, "by_id": {}},
-        )
 
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         for expand_node_id, expected in (("missing", "Scene Prompt Expand #missing が見つかりません。"), (
@@ -512,7 +484,7 @@ class PromptDataRouteTests(unittest.TestCase):
             runs.set_run_expiration_callback(release_snapshot)
             for index in range(300):
                 user_id = f"user-{index}"
-                handle = runs.create_run_context(user_id, {"by_key": {}, "by_id": {}})
+                handle = runs.create_run_context(user_id)
                 presets.snapshot_presets_for_run(handle, graph, user_id=user_id)
                 handles.append((handle, user_id))
 
@@ -569,6 +541,16 @@ class PromptDataRouteTests(unittest.TestCase):
         self.routes._read_items = original
         self.assertEqual([item["label"] for item in result["items"]], ["New"])
         self.assertEqual([item["label"] for item in self.routes._load_items("alice")], ["New"])
+
+    def test_ui_caches_evict_least_recently_used_users(self):
+        for index in range(self.routes._CACHE_MAX_USERS + 1):
+            self.routes._load_items(f"user-{index}")
+            self.routes._load_saved_prompts(f"user-{index}")
+
+        self.assertEqual(len(self.routes._ITEMS_CACHE), self.routes._CACHE_MAX_USERS)
+        self.assertEqual(len(self.routes._SAVED_PROMPTS_CACHE), self.routes._CACHE_MAX_USERS)
+        self.assertNotIn("user-0", self.routes._ITEMS_CACHE)
+        self.assertNotIn("user-0", self.routes._SAVED_PROMPTS_CACHE)
 
 
 if __name__ == "__main__":

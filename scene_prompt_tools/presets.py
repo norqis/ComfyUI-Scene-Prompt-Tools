@@ -11,7 +11,7 @@ from pathlib import Path
 
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
-from .prompt import SCENE_PROMPT_TYPE, ScenePrompt, _prompt_data_index
+from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
 from .plan import seed_plan
 from .storage import public_user_directory
 from .nodes import (
@@ -344,14 +344,7 @@ def _validate_preset_runtime(nodes, user_id="default"):
             _resolve_preset_tree(preset_id, resolved, [], user_id, len(nodes))
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
-    _scene_node_value(
-        nodes,
-        validation["output_link"][0],
-        resolved,
-        set(),
-        user_id=user_id,
-        prompt_data_index=_prompt_data_index(user_id),
-    )
+    _scene_node_value(nodes, validation["output_link"][0], resolved, set(), user_id=user_id)
 
 
 def _preset_nodes(preset):
@@ -550,7 +543,6 @@ def _scene_node_value_impl(
     input_values=None,
     user_id="default",
     run_handle="",
-    prompt_data_index=None,
 ):
     node_id = str(node_id)
     if input_values and node_id in input_values:
@@ -574,7 +566,6 @@ def _scene_node_value_impl(
             input_values,
             user_id,
             run_handle,
-            prompt_data_index,
         )
 
     if class_type in SAFE_VALUE_NODE_CLASSES:
@@ -604,7 +595,6 @@ def _scene_node_value_impl(
             set(),
             user_id,
             run_handle,
-            prompt_data_index,
         )
     cls = SAFE_NODE_CLASSES.get(class_type)
     if cls is None:
@@ -612,8 +602,6 @@ def _scene_node_value_impl(
     kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
     if class_type in {"ScenePrompt", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
-        if prompt_data_index is not None:
-            kwargs["_prompt_data_index"] = prompt_data_index
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     return result[0]
 
@@ -626,7 +614,6 @@ def _scene_node_value(
     input_values=None,
     user_id="default",
     run_handle="",
-    prompt_data_index=None,
 ):
     try:
         return _scene_node_value_impl(
@@ -637,7 +624,6 @@ def _scene_node_value(
             input_values,
             user_id,
             run_handle,
-            prompt_data_index,
         )
     except ScenePresetResolutionError:
         raise
@@ -657,7 +643,6 @@ def _evaluate_preset_scene(
     stack,
     user_id="default",
     run_handle="",
-    prompt_data_index=None,
 ):
     preset_id = str(preset["metadata"]["preset_id"])
     if preset_id in stack:
@@ -676,7 +661,6 @@ def _evaluate_preset_scene(
         input_values,
         user_id,
         run_handle,
-        prompt_data_index,
     )
 
 
@@ -696,37 +680,45 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             existing["last_access"] = time.monotonic()
             _RUN_SNAPSHOTS.move_to_end(cache_key)
             return copy.deepcopy(existing["response"])
-        resolved = {}
-        for reference_node_id, preset_id, _node in _find_references(scene_nodes):
-            try:
-                _resolve_preset_tree(preset_id, resolved, [], user_id, len(scene_nodes))
-            except ScenePresetError as exc:
-                raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
+
+    resolved = {}
+    for reference_node_id, preset_id, _node in _find_references(scene_nodes):
+        try:
+            _resolve_preset_tree(preset_id, resolved, [], user_id, len(scene_nodes))
+        except ScenePresetError as exc:
+            raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
+    plan = (
+        _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id)
+        if source is not None else {"total_images": 1, "total_batches": 1}
+    )
+    response = {
+        "presets": [
+            {
+                "preset_id": preset_id,
+                "name": preset["metadata"]["name"],
+                "revision": preset["metadata"]["revision"],
+                "sha256": preset["metadata"]["sha256"],
+            }
+            for preset_id, preset in resolved.items()
+        ],
+        "preset_graphs": {
+            preset_id: {
+                "metadata": copy.deepcopy(preset["metadata"]),
+                "api_graph": copy.deepcopy(preset["api_graph"]),
+            }
+            for preset_id, preset in resolved.items()
+        },
+        "total_images": int(plan.get("total_images") or 0),
+        "total_batches": int(plan.get("total_batches") or 0),
+    }
+
+    with _PRESET_LOCK:
         _assert_run_not_cancelled(run_id, user_id)
-        plan = (
-            _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id)
-            if source is not None else {"total_images": 1, "total_batches": 1}
-        )
-        response = {
-            "presets": [
-                {
-                    "preset_id": preset_id,
-                    "name": preset["metadata"]["name"],
-                    "revision": preset["metadata"]["revision"],
-                    "sha256": preset["metadata"]["sha256"],
-                }
-                for preset_id, preset in resolved.items()
-            ],
-            "preset_graphs": {
-                preset_id: {
-                    "metadata": copy.deepcopy(preset["metadata"]),
-                    "api_graph": copy.deepcopy(preset["api_graph"]),
-                }
-                for preset_id, preset in resolved.items()
-            },
-            "total_images": int(plan.get("total_images") or 0),
-            "total_batches": int(plan.get("total_batches") or 0),
-        }
+        existing = _RUN_SNAPSHOTS.get(cache_key)
+        if existing:
+            existing["last_access"] = time.monotonic()
+            _RUN_SNAPSHOTS.move_to_end(cache_key)
+            return copy.deepcopy(existing["response"])
         _RUN_SNAPSHOTS[cache_key] = {
             "presets": copy.deepcopy(resolved),
             "response": copy.deepcopy(response),
