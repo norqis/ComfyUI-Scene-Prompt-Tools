@@ -998,10 +998,9 @@ class ScenePromptExpand:
         run_handle="",
         unique_id=None,
     ):
-        plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
         return "|".join(
             [
-                _scene_prompt_change_key(plan),
+                _scene_prompt_change_key(scene_prompt),
                 str(current_index),
                 str(run_id or ""),
                 _seed_change_key(seed_base),
