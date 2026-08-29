@@ -131,6 +131,12 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertEqual([item["label"] for item in self.routes._load_items("alice")], ["Alice"])
         self.assertEqual([item["label"] for item in self.routes._load_items("bob")], ["Bob"])
 
+    def test_prompt_paths_reject_untrusted_user_ids(self):
+        for user_id in ("", "../outside", "/outside", "C:" + chr(92) + "outside", "__system"):
+            with self.subTest(user_id=user_id):
+                with self.assertRaises(ValueError):
+                    self.routes._data_dir(user_id)
+
     def test_async_item_route_keeps_the_event_loop_responsive(self):
         handler = self.routes._test_routes[("GET", "/scene_prompt/items")]
         original = self.routes._load_items

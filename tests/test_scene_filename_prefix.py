@@ -332,8 +332,14 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             paths = [Path(value) for value in pool.map(save_one, range(16))]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertTrue(all(path.exists() for path in paths))
-        with Image.open(paths[0]) as saved:
-            self.assertEqual(json.loads(saved.text["scene_info"])["positive"], "test")
+        file_indexes = []
+        for path in paths:
+            with Image.open(path) as saved:
+                scene_metadata = json.loads(saved.text["scene_info"])
+            self.assertEqual(scene_metadata["positive"], "test")
+            self.assertEqual(scene_metadata["file_index"], int(path.stem.rsplit("_", 1)[1]))
+            file_indexes.append(scene_metadata["file_index"])
+        self.assertEqual(len(file_indexes), len(set(file_indexes)))
 
     def test_all_registered_scene_nodes_have_japanese_descriptions(self):
         package = _load_node_package(Path(self.temp_dir.name))

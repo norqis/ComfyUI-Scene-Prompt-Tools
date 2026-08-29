@@ -6753,11 +6753,14 @@ async function currentScenePromptUserId() {
 }
 
 async function applyScenePromptUserId(apiGraph) {
+    const targetNodes = Object.values(apiGraph?.output || {}).filter((node) => (
+        ["ScenePrompt", "SceneMatrix", "ScenePresetReference", "ScenePromptExpand"].includes(node?.class_type)
+    ));
+    if (!targetNodes.length) {
+        return apiGraph;
+    }
     const userId = await currentScenePromptUserId();
-    for (const node of Object.values(apiGraph?.output || {})) {
-        if (!["ScenePrompt", "SceneMatrix", "ScenePresetReference", "ScenePromptExpand"].includes(node?.class_type)) {
-            continue;
-        }
+    for (const node of targetNodes) {
         node.inputs = node.inputs || {};
         node.inputs.user_id = userId;
     }

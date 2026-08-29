@@ -9,11 +9,11 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-import folder_paths
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
 from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
 from .plan import seed_plan
+from .storage import public_user_directory
 from .nodes import (
     SceneEmptyLatent,
     SceneMatrix,
@@ -73,10 +73,10 @@ class ScenePresetResolutionError(ScenePresetError):
 
 
 def preset_directory(user_id="default"):
-    directory = folder_paths.get_public_user_directory(str(user_id or "default"))
-    if directory is None:
-        raise ScenePresetError("Preset保存先を利用できません。")
-    return Path(directory) / PRESET_DIRECTORY_NAME
+    try:
+        return public_user_directory(user_id) / PRESET_DIRECTORY_NAME
+    except ValueError as exc:
+        raise ScenePresetError("Preset保存先を利用できません。") from exc
 
 
 def _clean_preset_id(value):

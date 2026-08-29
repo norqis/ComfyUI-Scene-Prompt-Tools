@@ -31,6 +31,11 @@ class PublicPackageTests(unittest.TestCase):
         storage_source = (ROOT / "scene_prompt_tools" / "storage.py").read_text(encoding="utf-8")
         self.assertIn("folder_paths.get_public_user_directory", storage_source)
         self.assertIn('STORAGE_DIRECTORY_NAME = "scene_prompt_tools"', storage_source)
+        self.assertNotIn("get_public_user_directory", (ROOT / "scene_prompt_tools" / "presets.py").read_text(encoding="utf-8"))
+
+    def test_generated_tool_caches_are_ignored(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(".ruff_cache/", gitignore)
 
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -128,6 +133,10 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn("SCENE_PROMPT_HISTORY_HEAD_SHA", workflow)
         self.assertIn("refs/pull/${{ github.event.pull_request.number }}/merge", workflow)
         self.assertIn("SCENE_PROMPT_SYNTHETIC_MERGE_REF", workflow)
+        self.assertNotIn("cache: pip", workflow)
+        self.assertNotIn("cache: npm", workflow)
+        self.assertIn('python -m pip install "numpy<3" "Pillow<12"', workflow)
+        self.assertIn("python3 - <<'PY'", workflow)
 
 
 if __name__ == "__main__":

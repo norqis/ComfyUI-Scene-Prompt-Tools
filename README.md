@@ -32,7 +32,7 @@ python tools/import_scene_html.py --input path/to/html --output path/to/data --d
 python tools/import_scene_html.py --input path/to/html --output path/to/data --merge
 ```
 
-An existing destination is left unchanged unless `--merge`, `--replace`, or `--clean` is specified.
+Existing `prompt.json` files are left unchanged unless `--merge`, `--replace`, or `--clean` is specified.
 
 ## Tests
 

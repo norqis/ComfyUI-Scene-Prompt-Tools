@@ -135,6 +135,12 @@ class ScenePresetTests(unittest.TestCase):
         with path.open("r", encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["metadata"]["name"], "Renamed")
 
+    def test_preset_paths_reject_untrusted_user_ids(self):
+        for user_id in ("", "../outside", "/outside", "C:" + chr(92) + "outside", "__system"):
+            with self.subTest(user_id=user_id):
+                with self.assertRaises(self.module.ScenePresetError):
+                    self.module.preset_directory(user_id)
+
     def test_atomic_save_validates_temp_before_replace(self):
         first = self.save("atomic", basic_nodes("first"))
         original_validator = self.module._validate_preset_payload

@@ -1097,44 +1097,43 @@ class SceneSaveImage:
             image_array = 255.0 * image.cpu().numpy()
             img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
 
-            metadata = None
-            if not args.disable_metadata:
-                metadata = PngInfo()
-                if prompt_metadata is not None:
-                    metadata.add_text("prompt", prompt_metadata)
-                for key, value in extra_pnginfo_metadata:
-                    metadata.add_text(key, value)
-                if info:
-                    relative_path = "/".join([*base_path_parts, *run_parts, *scene_path_parts])
-                    scene_metadata = {
-                        "positive": info.get("positive", ""),
-                        "negative": info.get("negative", ""),
-                        "seed": info.get("seed", 0),
-                        "base_path": "/".join(base_path_parts),
-                        "path": "/".join(scene_path_parts),
-                        "run_relative_path": relative_path,
-                        "full_path": relative_path,
-                        "run_dir": "/".join(run_parts),
-                        "filename_prefix": filename_prefix,
-                        "file_index": counter,
-                        "label": info.get("label", ""),
-                        "row_index": info.get("row_index", 0),
-                        "repeat_index": info.get("repeat_index", 0),
-                        "repeat_count": info.get("repeat_count", 0),
-                        "total_count": info.get("total_count", 0),
-                    }
-                    metadata.add_text("scene_info", json.dumps(scene_metadata, ensure_ascii=False, separators=(",", ":")))
-                    if scene_metadata["positive"]:
-                        metadata.add_text("scene_positive", scene_metadata["positive"])
-                    if scene_metadata["negative"]:
-                        metadata.add_text("scene_negative", scene_metadata["negative"])
-                    metadata.add_text("scene_seed", str(scene_metadata["seed"]))
-
             with _FILENAME_RESERVATION_LOCK:
                 output_path, filename, counter = _reserve_output_path(
                     output_dir, extension, padding, counter, filename_prefix
                 )
             try:
+                metadata = None
+                if not args.disable_metadata:
+                    metadata = PngInfo()
+                    if prompt_metadata is not None:
+                        metadata.add_text("prompt", prompt_metadata)
+                    for key, value in extra_pnginfo_metadata:
+                        metadata.add_text(key, value)
+                    if info:
+                        relative_path = "/".join([*base_path_parts, *run_parts, *scene_path_parts])
+                        scene_metadata = {
+                            "positive": info.get("positive", ""),
+                            "negative": info.get("negative", ""),
+                            "seed": info.get("seed", 0),
+                            "base_path": "/".join(base_path_parts),
+                            "path": "/".join(scene_path_parts),
+                            "run_relative_path": relative_path,
+                            "full_path": relative_path,
+                            "run_dir": "/".join(run_parts),
+                            "filename_prefix": filename_prefix,
+                            "file_index": counter,
+                            "label": info.get("label", ""),
+                            "row_index": info.get("row_index", 0),
+                            "repeat_index": info.get("repeat_index", 0),
+                            "repeat_count": info.get("repeat_count", 0),
+                            "total_count": info.get("total_count", 0),
+                        }
+                        metadata.add_text("scene_info", json.dumps(scene_metadata, ensure_ascii=False, separators=(",", ":")))
+                        if scene_metadata["positive"]:
+                            metadata.add_text("scene_positive", scene_metadata["positive"])
+                        if scene_metadata["negative"]:
+                            metadata.add_text("scene_negative", scene_metadata["negative"])
+                        metadata.add_text("scene_seed", str(scene_metadata["seed"]))
                 img.save(output_path, pnginfo=metadata, compress_level=self.compress_level)
             except Exception:
                 try:
