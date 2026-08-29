@@ -237,6 +237,9 @@ async function loadSavedPrompts(force = false) {
     if (savedPrompts && !force) {
         return savedPrompts;
     }
+    if (!force && savedPromptsPromise) {
+        return savedPromptsPromise;
+    }
     const generation = ++savedPromptsRequestGeneration;
     let request = null;
     const latest = () => savedPromptsLatestPromise === request ? savedPrompts : savedPromptsLatestPromise;
@@ -7351,19 +7354,22 @@ function releaseSceneRunHandle(runHandle, options = {}) {
     if (!key) {
         return Promise.resolve(false);
     }
-    const existing = sceneRunReleaseStates.get(key);
-    if (existing) {
-        return existing;
+    const keepalive = !!options.keepalive;
+    const state = sceneRunReleaseStates.get(key) || {};
+    const lane = keepalive ? "keepalive" : "normal";
+    if (state[lane]) {
+        return state[lane];
     }
     const release = (async () => {
         let lastError = null;
-        for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const attempts = keepalive ? 1 : 3;
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
             try {
                 const response = await api.fetchApi("/scene_prompt/runs/release", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ run_handle: key }),
-                    keepalive: !!options.keepalive,
+                    keepalive,
                 });
                 const data = await readApiJson(response, "生成計画の解放に失敗しました");
                 if (!response.ok) {
@@ -7372,7 +7378,7 @@ function releaseSceneRunHandle(runHandle, options = {}) {
                 return !!data.released;
             } catch (error) {
                 lastError = error;
-                if (attempt < 3 && !options.keepalive) {
+                if (attempt < attempts && !keepalive) {
                     await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
                 }
             }
@@ -7380,9 +7386,13 @@ function releaseSceneRunHandle(runHandle, options = {}) {
         console.warn("[Scene Prompt] 生成計画の解放に失敗しました。", lastError);
         return false;
     })();
-    sceneRunReleaseStates.set(key, release);
+    state[lane] = release;
+    sceneRunReleaseStates.set(key, state);
     release.finally(() => {
-        if (sceneRunReleaseStates.get(key) === release) {
+        if (state[lane] === release) {
+            state[lane] = null;
+        }
+        if (!state.normal && !state.keepalive) {
             sceneRunReleaseStates.delete(key);
         }
     });

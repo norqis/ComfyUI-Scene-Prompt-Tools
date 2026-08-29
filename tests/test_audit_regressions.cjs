@@ -338,7 +338,13 @@ function listRaceContext(kind, ...requests) {
         savedPromptsLatestPromise: null,
         promptItemsRequestGeneration: 0,
         savedPromptsRequestGeneration: 0,
-        api: { fetchApi: () => requests.shift().promise },
+        fetchCount: 0,
+        api: {
+            fetchApi: () => {
+                context.fetchCount += 1;
+                return requests.shift().promise;
+            },
+        },
         readApiJson: async (response) => response.payload,
         showSceneBatchError() {},
         clearSceneSelectedListLayoutCaches() {},
@@ -384,6 +390,19 @@ async function testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost() {
     }
 }
 
+async function testSavedPromptNormalLoadsShareOneInFlightRequest() {
+    const request = deferred();
+    const context = listRaceContext("saved", request);
+    const first = context.loadSavedPrompts();
+    const second = context.loadSavedPrompts();
+    assert.equal(context.savedPromptsRequestGeneration, 1);
+    assert.equal(context.fetchCount, 1);
+    request.resolve({ ok: true, payload: { saved_prompts: [{ label: "shared" }] } });
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.equal(firstResult[0].label, "shared");
+    assert.equal(secondResult[0].label, "shared");
+}
+
 Promise.resolve()
     .then(testPresetListRaceInNormalResponseOrder)
     .then(testPresetListRaceInReverseResponseOrder)
@@ -401,6 +420,7 @@ Promise.resolve()
     .then(testSourceOwnershipBoundaries)
     .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)
     .then(testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost)
+    .then(testSavedPromptNormalLoadsShareOneInFlightRequest)
     .then(() => console.log("Audit regression tests passed."))
     .catch((error) => {
         console.error(error);

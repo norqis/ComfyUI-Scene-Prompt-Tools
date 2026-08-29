@@ -36,6 +36,7 @@ function releaseContext(responses) {
                 context.calls.push({ url, options });
                 const result = responses.shift();
                 if (result instanceof Error) throw result;
+                if (result?.promise) return result.promise;
                 return result;
             },
         },
@@ -46,6 +47,16 @@ function releaseContext(responses) {
     vm.runInContext(functionSource("releaseSceneRunHandle"), context);
     vm.runInContext(functionSource("releaseSceneRunsOnPageHide"), context);
     return context;
+}
+
+function deferred() {
+    let resolve;
+    let reject;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+    });
+    return { promise, resolve, reject };
 }
 
 (async () => {
@@ -92,6 +103,25 @@ function releaseContext(responses) {
     pagehide.releaseSceneRunsOnPageHide({ persisted: false });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(pagehide.calls.map((call) => call.options.keepalive), [true, true]);
+
+    const normalResponse = deferred();
+    const keepaliveResponse = deferred();
+    const competing = releaseContext([normalResponse, keepaliveResponse]);
+    const normal = competing.releaseSceneRunHandle("competing-handle");
+    assert.equal(competing.releaseSceneRunHandle("competing-handle"), normal);
+    competing.sceneRunHandlesByPromptId.set("prompt-competing", "competing-handle");
+    competing.releaseSceneRunsOnPageHide({ persisted: false });
+    const keepalive = competing.sceneRunReleaseStates.get("competing-handle").keepalive;
+    competing.releaseSceneRunsOnPageHide({ persisted: false });
+    assert.equal(competing.calls.length, 2);
+    assert.deepEqual(competing.calls.map((call) => call.options.keepalive), [false, true]);
+    keepaliveResponse.resolve({ ok: true, payload: { released: false } });
+    normalResponse.resolve({ ok: true, payload: { released: true } });
+    assert.equal(await keepalive, false);
+    assert.equal(await normal, true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(competing.sceneRunReleaseStates.has("competing-handle"), false);
+
     console.log("Scene Prompt run release tests passed.");
 })().catch((error) => {
     console.error(error);
