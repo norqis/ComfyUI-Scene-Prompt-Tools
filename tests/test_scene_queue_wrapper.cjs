@@ -41,6 +41,7 @@ const context = {
     api: {
         async queuePrompt(_number, prompt) {
             if (prompt.output?.["3"]) throw new Error("queue failed");
+            if (prompt.output?.["4"]) return { received: structuredClone(prompt) };
             context.queued += 1;
             return { prompt_id: `prompt-${context.queued}`, received: structuredClone(prompt) };
         },
@@ -106,12 +107,15 @@ context.installSceneBatchPromptCapture();
     );
     assert.deepEqual(context.released, ["opaque-handle-1", "opaque-handle-2"], "failed queue releases its prepared handle");
 
+    await context.api.queuePrompt(0, { output: { "4": { class_type: "ScenePrompt", inputs: {} } } });
+    assert.equal(context.released.at(-1), "opaque-handle-3", "a queue response without prompt_id releases its prepared handle");
+
     context.releaseCompletedSceneRun({ prompt_id: "fast-prompt" });
     context.registerQueuedSceneRunHandle("fast-prompt", "fast-handle");
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(
         context.released,
-        ["opaque-handle-1", "opaque-handle-2", "fast-handle"],
+        ["opaque-handle-1", "opaque-handle-2", "opaque-handle-3", "fast-handle"],
         "a completion arriving before the queue response releases the claimed handle once",
     );
 

@@ -89,26 +89,32 @@ class RunContextStore:
     def create(self, user_id, prompt_data_index):
         now = time.monotonic()
         with self._lock:
+            expired = self._purge_expired_locked(now)
             prepared, active = self._counts_locked(user_id)
+            error = None
             if len(self._entries) >= self.maximum:
-                raise SceneRunError("実行コンテキストが上限に達しています。実行中の生成が終わってから再試行してください。")
-            if prepared >= self.prepared_limit:
-                raise SceneRunError("実行準備が上限に達しています。開始していない生成を減らしてから再試行してください。")
-            if prepared + active >= self.active_limit:
-                raise SceneRunError("実行中または準備済みのScene Promptが上限に達しています。完了を待ってから再試行してください。")
-            handle = secrets.token_urlsafe(32)
-            while handle in self._entries:
+                error = "実行コンテキストが上限に達しています。実行中の生成が終わってから再試行してください。"
+            elif prepared >= self.prepared_limit:
+                error = "実行準備が上限に達しています。開始していない生成を減らしてから再試行してください。"
+            elif prepared + active >= self.active_limit:
+                error = "実行中または準備済みのScene Promptが上限に達しています。完了を待ってから再試行してください。"
+            else:
                 handle = secrets.token_urlsafe(32)
-            self._entries[handle] = {
-                "user_id": str(user_id),
-                "prompt_data_index": copy.deepcopy(prompt_data_index),
-                "plans": {},
-                "state": "prepared",
-                "prompt_id": "",
-                "created_at": now,
-                "last_access": now,
-            }
-            return handle
+                while handle in self._entries:
+                    handle = secrets.token_urlsafe(32)
+                self._entries[handle] = {
+                    "user_id": str(user_id),
+                    "prompt_data_index": copy.deepcopy(prompt_data_index),
+                    "plans": {},
+                    "state": "prepared",
+                    "prompt_id": "",
+                    "created_at": now,
+                    "last_access": now,
+                }
+        self._notify_expired(expired)
+        if error:
+            raise SceneRunError(error)
+        return handle
 
     def require(self, handle):
         value = str(handle or "").strip()
@@ -129,6 +135,17 @@ class RunContextStore:
         if expired:
             raise SceneRunError("実行コンテキストの有効期限が切れました。画像生成を開始し直してください。")
         return entry
+
+    def peek(self, handle):
+        """Return a copy for cache inspection without touching run state."""
+        value = str(handle or "").strip()
+        if not value:
+            raise SceneRunError("実行コンテキストがありません。画像生成を開始し直してください。")
+        with self._lock:
+            entry = self._entries.get(value)
+            if entry is None or self._is_expired_locked(entry, time.monotonic()):
+                raise SceneRunError("実行コンテキストが見つからないか、有効期限が切れました。画像生成を開始し直してください。")
+            return copy.deepcopy(entry)
 
     def replace_prompt_data_index(self, handle, prompt_data_index):
         entry = self.require(handle)
@@ -206,6 +223,10 @@ def create_run_context(user_id, prompt_data_index):
 
 def require_run_context(handle):
     return RUN_CONTEXTS.require(handle)
+
+
+def peek_run_context(handle):
+    return RUN_CONTEXTS.peek(handle)
 
 
 def replace_run_prompt_data_index(handle, prompt_data_index):

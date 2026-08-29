@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -241,7 +241,10 @@ def write_data(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: 
                 raise ValueError(f"Staged file is not a JSON array: {staged_file.name}")
 
         if backup.exists():
-            shutil.rmtree(backup)
+            try:
+                shutil.rmtree(backup)
+            except OSError:
+                pass
         if output_dir.exists():
             output_dir.replace(backup)
         try:
@@ -252,7 +255,10 @@ def write_data(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: 
                 backup.replace(output_dir)
             raise
         if backup.exists():
-            shutil.rmtree(backup)
+            try:
+                shutil.rmtree(backup)
+            except OSError:
+                pass
         return (
             len({path.parent.parent for path, _items in prepared}),
             len(prepared),

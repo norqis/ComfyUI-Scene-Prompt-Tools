@@ -1,8 +1,10 @@
+import hashlib
 import json
 import os
 import re
 import threading
 import time
+import tempfile
 from datetime import datetime
 
 import numpy as np
@@ -606,11 +608,12 @@ def _cached_run_parts(base_dir, run_dir, prompt=None, unique_id=None):
     if value and value.lower() != "auto":
         return _resolve_run_dir(value)
 
-    key = (
-        str(unique_id or ""),
-        id(prompt) if prompt is not None else 0,
-        os.path.abspath(base_dir),
-    )
+    prompt_key = ""
+    if isinstance(prompt, dict):
+        prompt_key = hashlib.sha256(
+            json.dumps(prompt, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+    key = (str(unique_id or ""), prompt_key, os.path.abspath(base_dir))
     cached = _RUN_DIR_CACHE.get(key)
     if cached:
         return cached
@@ -1136,6 +1139,8 @@ class SceneSaveImage:
 
         results = []
         saved_paths = []
+        reserved_paths = []
+        temp_paths = []
         preview_subfolder = _subfolder_for_preview(output_dir, self.output_dir)
         prompt_metadata = None
         extra_pnginfo_metadata = []
@@ -1155,15 +1160,19 @@ class SceneSaveImage:
                     if key != "prompt" or prompt_metadata is None
                 ]
 
-        for image in images:
-            image_array = 255.0 * image.cpu().numpy()
-            img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
+        try:
+            for image in images:
+                image_array = 255.0 * image.cpu().numpy()
+                img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
 
-            with _FILENAME_RESERVATION_LOCK:
-                output_path, filename, counter = _reserve_output_path(
-                    output_dir, extension, padding, counter, filename_prefix
-                )
-            try:
+                with _FILENAME_RESERVATION_LOCK:
+                    output_path, filename, counter = _reserve_output_path(
+                        output_dir, extension, padding, counter, filename_prefix
+                    )
+                reserved_paths.append(output_path)
+                descriptor, temp_path = tempfile.mkstemp(prefix=".scene-save-", suffix=".png", dir=output_dir)
+                os.close(descriptor)
+                temp_paths.append(temp_path)
                 metadata = None
                 if not args.disable_metadata:
                     metadata = PngInfo()
@@ -1196,18 +1205,23 @@ class SceneSaveImage:
                         if scene_metadata["negative"]:
                             metadata.add_text("scene_negative", scene_metadata["negative"])
                         metadata.add_text("scene_seed", str(scene_metadata["seed"]))
-                img.save(output_path, pnginfo=metadata, compress_level=self.compress_level)
-            except Exception:
+                img.save(temp_path, pnginfo=metadata, compress_level=self.compress_level)
+                with Image.open(temp_path) as check:
+                    check.verify()
+                os.replace(temp_path, output_path)
+                temp_paths.remove(temp_path)
+                saved_paths.append(output_path)
+                if preview_subfolder is not None:
+                    preview_ref = {"filename": filename, "subfolder": preview_subfolder, "type": self.type}
+                    results.append(preview_ref)
+                counter += 1
+        except Exception:
+            for candidate in [*temp_paths, *reserved_paths]:
                 try:
-                    os.unlink(output_path)
+                    os.unlink(candidate)
                 except OSError:
                     pass
-                raise
-            saved_paths.append(output_path)
-            if preview_subfolder is not None:
-                preview_ref = {"filename": filename, "subfolder": preview_subfolder, "type": self.type}
-                results.append(preview_ref)
-            counter += 1
+            raise
 
         _remember_next_index(run_root, extension, padding, counter, filename_prefix)
 

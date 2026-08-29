@@ -325,6 +325,65 @@ function testSourceOwnershipBoundaries() {
     assert.doesNotMatch(capture, /stopSceneBatchRun/);
 }
 
+function listRaceContext(kind, ...requests) {
+    const context = {
+        Array,
+        Promise,
+        console: { error() {} },
+        promptItems: null,
+        savedPrompts: null,
+        promptItemsPromise: null,
+        savedPromptsPromise: null,
+        promptItemsLatestPromise: null,
+        savedPromptsLatestPromise: null,
+        promptItemsRequestGeneration: 0,
+        savedPromptsRequestGeneration: 0,
+        api: { fetchApi: () => requests.shift().promise },
+        readApiJson: async (response) => response.payload,
+        showSceneBatchError() {},
+        clearSceneSelectedListLayoutCaches() {},
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource(kind === "items" ? "loadPromptItems" : "loadSavedPrompts"), context);
+    return context;
+}
+
+async function testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse() {
+    for (const kind of ["items", "saved"]) {
+        const old = deferred();
+        const fresh = deferred();
+        const context = listRaceContext(kind, old, fresh);
+        const load = kind === "items" ? context.loadPromptItems : context.loadSavedPrompts;
+        const first = load(true);
+        const second = load(true);
+        const key = kind === "items" ? "items" : "saved_prompts";
+        old.resolve({ ok: true, payload: { [key]: [{ label: "old" }] } });
+        fresh.resolve({ ok: true, payload: { [key]: [{ label: "fresh" }] } });
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+        assert.equal(firstResult[0].label, "fresh");
+        assert.equal(secondResult[0].label, "fresh");
+    }
+}
+
+async function testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost() {
+    for (const kind of ["items", "saved"]) {
+        const request = deferred();
+        const context = listRaceContext(kind, request);
+        const load = kind === "items" ? context.loadPromptItems : context.loadSavedPrompts;
+        const result = load(true);
+        const key = kind === "items" ? "promptItems" : "savedPrompts";
+        const generationKey = kind === "items" ? "promptItemsRequestGeneration" : "savedPromptsRequestGeneration";
+        context[generationKey] += 1;
+        context[key] = [{ label: "saved-by-post" }];
+        request.resolve({ ok: true, payload: { [kind === "items" ? "items" : "saved_prompts"]: [{ label: "stale" }] } });
+        const value = await Promise.race([
+            result,
+            new Promise((_, reject) => setTimeout(() => reject(new Error("stale request did not settle")), 250)),
+        ]);
+        assert.equal(value[0].label, "saved-by-post");
+    }
+}
+
 Promise.resolve()
     .then(testPresetListRaceInNormalResponseOrder)
     .then(testPresetListRaceInReverseResponseOrder)
@@ -340,6 +399,8 @@ Promise.resolve()
     .then(testNodeRemovalCancelsItsRun)
     .then(testMatrixToggleSavesOnlyEnabledState)
     .then(testSourceOwnershipBoundaries)
+    .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)
+    .then(testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost)
     .then(() => console.log("Audit regression tests passed."))
     .catch((error) => {
         console.error(error);

@@ -87,8 +87,10 @@ class PromptDataRouteTests(unittest.TestCase):
         path = self.data_dir / "Category" / "prompt.json"
         path.parent.mkdir(parents=True)
         path.write_text("{broken", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, r"prompt\.json.*invalid JSON"):
-            self.routes._load_items()
+        payload = self.routes._load_items(with_errors=True)
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(payload["errors"][0]["file"], "Category/prompt.json")
+        self.assertNotIn(str(self.data_dir), payload["errors"][0]["error"])
 
         with self.assertRaisesRegex(ValueError, r"prompt\.json.*invalid JSON"):
             self.routes._read_prompt_payload(path)
@@ -101,8 +103,10 @@ class PromptDataRouteTests(unittest.TestCase):
         path = self.data_dir / self.routes.SAVED_PROMPTS_FOLDER / "saved" / "prompt.json"
         path.parent.mkdir(parents=True)
         path.write_text("{broken", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, r"prompt\.json.*invalid JSON"):
-            self.routes._load_saved_prompts()
+        payload = self.routes._load_saved_prompts(with_errors=True)
+        self.assertEqual(payload["saved_prompts"], [])
+        self.assertEqual(payload["errors"][0]["file"], "saved/prompt.json")
+        self.assertNotIn(str(self.data_dir), payload["errors"][0]["error"])
 
     def test_saved_prompt_items_keep_the_current_selection_schema(self):
         path = self.data_dir / self.routes.SAVED_PROMPTS_FOLDER / "saved" / "prompt.json"
@@ -118,8 +122,9 @@ class PromptDataRouteTests(unittest.TestCase):
 
         path.write_text(json.dumps({"name": "Saved", "description": "", "items": [{**item, "legacy": True}]}), encoding="utf-8")
         self.routes._clear_prompt_caches()
-        with self.assertRaisesRegex(ValueError, r"unsupported"):
-            self.routes._load_saved_prompts()
+        payload = self.routes._load_saved_prompts(with_errors=True)
+        self.assertEqual(payload["saved_prompts"], [])
+        self.assertIn("unsupported", payload["errors"][0]["error"])
 
     def test_prompt_data_and_saved_prompts_are_isolated_by_user(self):
         alice_data = self.routes._data_dir("alice")
@@ -138,19 +143,112 @@ class PromptDataRouteTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.routes._data_dir(user_id)
 
+    def test_new_category_components_reject_path_characters_without_sanitizing(self):
+        for field, value in (("category", "A/B"), ("subcategory", "A\\B"), ("category", "..")):
+            payload = {"category": "People", "subcategory": "", "label": "One", "prompt": "girl"}
+            payload[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(ValueError, "unsupported|cannot"):
+                    self.routes._create_prompt_item(payload, "alice")
+        self.assertFalse((self.routes._data_dir("alice") / "A").exists())
+
+    def test_force_reload_discards_the_user_cache(self):
+        path = self.routes._data_dir("alice") / "People" / "prompt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([{"label": "Old", "prompt": "old"}]), encoding="utf-8")
+        self.assertEqual(self.routes._load_items("alice")[0]["label"], "Old")
+        path.write_text(json.dumps([{"label": "New", "prompt": "new"}]), encoding="utf-8")
+        self.assertEqual(self.routes._load_items("alice", force=True)[0]["label"], "New")
+
+    def test_post_write_keeps_success_when_list_reload_fails(self):
+        class Request:
+            def __init__(self, payload):
+                self.user_id = "alice"
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        handler = self.routes._test_routes[("POST", "/scene_prompt/items")]
+        original = self.routes._load_items
+        self.routes._load_items = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("reload failed"))
+        try:
+            response = asyncio.run(handler(Request({"category": "People", "label": "One", "prompt": "girl"})))
+        finally:
+            self.routes._load_items = original
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(response["payload"]["item"]["label"], "One")
+        self.assertIn("warning", response["payload"])
+        self.assertTrue((self.routes._data_dir("alice") / "People" / "prompt.json").exists())
+
+    def test_route_endpoints_cover_saved_prompts_presets_claim_and_force_reads(self):
+        class Request:
+            def __init__(self, payload=None, query=None):
+                self.user_id = "alice"
+                self.payload = payload
+                self.query = query or {}
+
+            async def json(self):
+                return self.payload
+
+        item = {
+            "id": "sample",
+            "label": "Sample",
+            "prompt": "girl",
+            "category_path": ["People"],
+            "category_key": "People",
+            "category_label": "People",
+            "selected_parts": [{"index": 0, "text": "girl", "weight": 1.0}],
+        }
+        saved = self.routes._test_routes[("POST", "/scene_prompt/saved_prompts")]
+        saved_response = asyncio.run(saved(Request({"name": "Saved", "description": "", "items": [item]})))
+        self.assertEqual(saved_response["status"], 200)
+        self.assertEqual(saved_response["payload"]["saved_prompt"]["name"], "Saved")
+        get_saved = self.routes._test_routes[("GET", "/scene_prompt/saved_prompts")]
+        self.assertEqual(asyncio.run(get_saved(Request(query={"reload": "1"})))["payload"]["saved_prompts"][0]["name"], "Saved")
+
+        graph = {
+            "output": {
+                "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                "2": {
+                    "class_type": "ScenePrompt",
+                    "inputs": {
+                        "prompt_name": "Preset", "positive_base": "preset", "positive_json": '{"version":1,"categories":{}}',
+                        "negative_base": "", "negative_json": '{"version":1,"categories":{}}', "category_order": "",
+                        "seed": 0, "randomize": True, "scene_prompt": ["1", 0],
+                    },
+                },
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            }
+        }
+        save_preset = self.routes._test_routes[("POST", "/scene_presets/save")]
+        response = asyncio.run(save_preset(Request({"preset_id": "route", "name": "Route", "api_graph": graph, "workflow": {"nodes": []}})))
+        self.assertEqual(response["status"], 200)
+        list_presets = self.routes._test_routes[("GET", "/scene_presets/list")]
+        self.assertEqual(asyncio.run(list_presets(Request()))["payload"]["presets"][0]["metadata"]["preset_id"], "route")
+
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        claim = self.routes._test_routes[("POST", "/scene_prompt/runs/claim")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+        prepared_graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+        prepared = asyncio.run(prepare(Request({"api_graph": prepared_graph})))
+        handle = prepared["payload"]["run_handle"]
+        self.assertTrue(asyncio.run(claim(Request({"run_handle": handle, "prompt_id": "route-prompt"})))["payload"]["claimed"])
+        self.assertTrue(asyncio.run(release(Request({"run_handle": handle})))["payload"]["released"])
+
     def test_async_item_route_keeps_the_event_loop_responsive(self):
         handler = self.routes._test_routes[("GET", "/scene_prompt/items")]
         original = self.routes._load_items
 
-        def slow_load(user_id):
+        def slow_load(user_id, *args, **kwargs):
             import time
             time.sleep(0.05)
-            return original(user_id)
+            return original(user_id, *args, **kwargs)
 
         self.routes._load_items = slow_load
         try:
             async def run():
-                task = asyncio.create_task(handler(types.SimpleNamespace(user_id="alice")))
+                task = asyncio.create_task(handler(types.SimpleNamespace(user_id="alice", query={})))
                 await asyncio.sleep(0.005)
                 self.assertFalse(task.done())
                 return await task
@@ -158,7 +256,7 @@ class PromptDataRouteTests(unittest.TestCase):
         finally:
             self.routes._load_items = original
         self.assertEqual(response["status"], 200)
-        self.assertEqual(response["payload"], {"items": []})
+        self.assertEqual(response["payload"], {"items": [], "errors": []})
 
     def test_prepare_route_creates_owner_bound_opaque_context(self):
         class Request:

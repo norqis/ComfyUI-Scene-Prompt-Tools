@@ -378,6 +378,29 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             file_indexes.append(scene_metadata["file_index"])
         self.assertEqual(len(file_indexes), len(set(file_indexes)))
 
+    def test_failed_batch_leaves_no_placeholder_temp_or_partial_png(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        original_save = Image.Image.save
+        calls = 0
+
+        def fail_second_save(instance, fp, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("second image failed")
+            return original_save(instance, fp, *args, **kwargs)
+
+        with mock.patch.object(Image.Image, "save", fail_second_save):
+            with self.assertRaisesRegex(OSError, "second image failed"):
+                self.nodes.SceneSaveImage().save_images(
+                    [image, image],
+                    "atomic",
+                    scene_info={"use_run_dir": False, "file_index": 1},
+                )
+        target = Path(self.temp_dir.name) / "atomic"
+        self.assertEqual(list(target.glob("*.png")), [])
+        self.assertEqual(list(target.glob(".scene-save-*.png")), [])
+
     def test_save_metadata_mode_choices_are_ordered_and_default_to_full_workflow(self):
         metadata_mode = self.nodes.SceneSaveImage.INPUT_TYPES()["required"]["metadata_mode"]
         self.assertEqual(
