@@ -473,14 +473,21 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None):
         raise ScenePresetError("Scene Prompt Expand のノードIDがありません。")
     expand = nodes.get(str(expand_node_id))
     source = _node_inputs(expand).get("scene_prompt") if isinstance(expand, dict) else None
-    if not is_link(source):
-        return {"presets": [], "preset_graphs": {}, "total_images": 1, "total_batches": 1}
     with _PRESET_LOCK:
         _assert_run_not_cancelled(run_id)
         existing = _RUN_SNAPSHOTS.get(run_id)
         if existing:
             existing["last_access"] = time.monotonic()
             return copy.deepcopy(existing["response"])
+        if not is_link(source):
+            response = {"presets": [], "preset_graphs": {}, "total_images": 1, "total_batches": 1}
+            _RUN_SNAPSHOTS[run_id] = {
+                "presets": {},
+                "response": copy.deepcopy(response),
+                "last_access": time.monotonic(),
+            }
+            _purge_run_snapshots()
+            return response
         scene_nodes = _scene_prompt_closure(nodes, source[0])
         resolved = {}
         for reference_node_id, preset_id, _node in _find_references(scene_nodes):

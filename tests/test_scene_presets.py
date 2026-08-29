@@ -418,6 +418,17 @@ class ScenePresetTests(unittest.TestCase):
         snapshot = self.module._snapshot_preset("same-run", "fixed")
         self.assertEqual(snapshot["metadata"]["revision"], 1)
 
+    def test_unlinked_expand_run_is_snapshotted_and_cannot_be_reused_after_release(self):
+        api_graph = graph({
+            "11": {"class_type": "ScenePromptExpand", "inputs": {}},
+        })
+        first = self.module.snapshot_presets_for_run("unlinked-run", api_graph, "11")
+        second = self.module.snapshot_presets_for_run("unlinked-run", api_graph, "11")
+        self.assertEqual(second, first)
+        self.assertTrue(self.module.release_scene_preset_snapshot("unlinked-run"))
+        with self.assertRaisesRegex(self.module.ScenePresetError, "キャンセル"):
+            self.module.snapshot_presets_for_run("unlinked-run", api_graph, "11")
+
     def test_empty_top_level_reference_keeps_its_node_id(self):
         api_graph = graph({
             "51": {"class_type": "ScenePresetReference", "inputs": {"preset_id": ""}},
