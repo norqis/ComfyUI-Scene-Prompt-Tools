@@ -37,14 +37,27 @@ class RunContextStore:
         active_limit=MAX_ACTIVE_PER_USER,
         prepared_ttl_seconds=PREPARED_TTL_SECONDS,
         active_idle_ttl_seconds=ACTIVE_IDLE_TTL_SECONDS,
+        expiration_callback=None,
     ):
         self.maximum = maximum
         self.prepared_limit = prepared_limit
         self.active_limit = active_limit
         self.prepared_ttl_seconds = prepared_ttl_seconds
         self.active_idle_ttl_seconds = active_idle_ttl_seconds
+        self._expiration_callback = expiration_callback
         self._entries = {}
         self._lock = threading.RLock()
+
+    def set_expiration_callback(self, callback):
+        with self._lock:
+            self._expiration_callback = callback
+
+    def _notify_expired(self, expired):
+        callback = self._expiration_callback
+        if callback is None:
+            return
+        for handle, user_id in expired:
+            callback(handle, user_id)
 
     def _purge_expired_locked(self, now):
         expired = []
@@ -61,7 +74,9 @@ class RunContextStore:
 
     def purge_expired(self):
         with self._lock:
-            return self._purge_expired_locked(time.monotonic())
+            expired = self._purge_expired_locked(time.monotonic())
+        self._notify_expired(expired)
+        return expired
 
     @staticmethod
     def _touch_locked(entry, now):
@@ -106,14 +121,19 @@ class RunContextStore:
             now = time.monotonic()
             if self._is_expired_locked(entry, now):
                 self._entries.pop(value, None)
-                raise SceneRunError("実行コンテキストの有効期限が切れました。画像生成を開始し直してください。")
-            self._touch_locked(entry, now)
-            return entry
+                expired = [(value, entry["user_id"])]
+            else:
+                expired = []
+                self._touch_locked(entry, now)
+        self._notify_expired(expired)
+        if expired:
+            raise SceneRunError("実行コンテキストの有効期限が切れました。画像生成を開始し直してください。")
+        return entry
 
     def replace_prompt_data_index(self, handle, prompt_data_index):
+        entry = self.require(handle)
         with self._lock:
-            entry = self.require(handle)
-            if entry["state"] != "prepared":
+            if self._entries.get(str(handle)) is not entry or entry["state"] != "prepared":
                 raise SceneRunError("開始済みの実行コンテキストは変更できません。")
             entry["prompt_data_index"] = copy.deepcopy(prompt_data_index)
 
@@ -121,8 +141,10 @@ class RunContextStore:
         key = str(expand_node_id or "").strip()
         if not key:
             raise SceneRunError("Scene Prompt Expand のIDがありません。")
+        entry = self.require(handle)
         with self._lock:
-            entry = self.require(handle)
+            if self._entries.get(str(handle)) is not entry:
+                raise SceneRunError("実行コンテキストが見つかりません。画像生成を開始し直してください。")
             if key not in entry["plans"]:
                 entry["plans"][key] = copy.deepcopy(plan)
             return copy.deepcopy(entry["plans"][key])
@@ -139,14 +161,21 @@ class RunContextStore:
             now = time.monotonic()
             if self._is_expired_locked(entry, now):
                 self._entries.pop(value, None)
-                return False
-            if entry["state"] == "active":
+                expired = [(value, entry["user_id"])]
+            else:
+                expired = []
+            if expired:
+                claimed = False
+            elif entry["state"] == "active":
                 self._touch_locked(entry, now)
-                return entry["prompt_id"] == prompt_value
-            entry["state"] = "active"
-            entry["prompt_id"] = prompt_value
-            self._touch_locked(entry, now)
-            return True
+                claimed = entry["prompt_id"] == prompt_value
+            else:
+                entry["state"] = "active"
+                entry["prompt_id"] = prompt_value
+                self._touch_locked(entry, now)
+                claimed = True
+        self._notify_expired(expired)
+        return claimed
 
     def release(self, handle, user_id):
         value = str(handle or "").strip()
@@ -165,6 +194,10 @@ class RunContextStore:
 
 
 RUN_CONTEXTS = RunContextStore()
+
+
+def set_run_expiration_callback(callback):
+    RUN_CONTEXTS.set_expiration_callback(callback)
 
 
 def create_run_context(user_id, prompt_data_index):

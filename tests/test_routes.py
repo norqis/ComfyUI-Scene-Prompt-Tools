@@ -228,6 +228,63 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
         self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
 
+    def test_expiration_removes_contexts_and_preset_snapshots_once_and_bounds_caches(self):
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        presets = sys.modules[f"{self.routes.__package__}.presets"]
+        store = runs.RUN_CONTEXTS
+        original = (
+            store.maximum,
+            store.prepared_limit,
+            store.active_limit,
+            store.prepared_ttl_seconds,
+            store._expiration_callback,
+        )
+        released = []
+
+        def release_snapshot(handle, user_id):
+            released.append((handle, user_id))
+            presets.release_scene_preset_snapshot(handle, user_id)
+
+        graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+        handles = []
+        try:
+            store.maximum = 300
+            store.prepared_limit = 300
+            store.active_limit = 300
+            store.prepared_ttl_seconds = 999
+            runs.set_run_expiration_callback(release_snapshot)
+            for index in range(300):
+                user_id = f"user-{index}"
+                handle = runs.create_run_context(user_id, {"by_key": {}, "by_id": {}})
+                presets.snapshot_presets_for_run(handle, graph, user_id=user_id)
+                handles.append((handle, user_id))
+
+            self.assertEqual(len(store._entries), 300)
+            self.assertEqual(len(presets._RUN_SNAPSHOTS), 300)
+            store.prepared_ttl_seconds = 0
+            with self.assertRaisesRegex(runs.SceneRunError, "有効期限"):
+                runs.require_run_context(handles[0][0])
+            self.assertFalse(runs.claim_run_context(handles[1][0], handles[1][1], "late-prompt"))
+            runs.purge_expired_run_contexts()
+
+            self.assertEqual(store._entries, {})
+            self.assertEqual(presets._RUN_SNAPSHOTS, {})
+            self.assertCountEqual(released, handles)
+            self.assertEqual(len(released), len(set(released)))
+            self.assertLessEqual(len(presets._CANCELLED_RUNS), presets._CANCELLED_RUNS_MAX_ENTRIES)
+        finally:
+            store.clear()
+            presets._RUN_SNAPSHOTS.clear()
+            presets._CANCELLED_RUNS.clear()
+            (
+                store.maximum,
+                store.prepared_limit,
+                store.active_limit,
+                store.prepared_ttl_seconds,
+                callback,
+            ) = original
+            runs.set_run_expiration_callback(callback)
+
     def test_stale_threaded_read_cannot_restore_a_cleared_cache(self):
         path = self.routes._data_dir("alice") / "Category" / "prompt.json"
         path.parent.mkdir(parents=True)

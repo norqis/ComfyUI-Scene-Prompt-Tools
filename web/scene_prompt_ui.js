@@ -6474,17 +6474,17 @@ function sceneBatchRunStatus(run) {
     if (!run) {
         return "idle";
     }
-    if (run.releaseBlocked) {
-        return "blocked";
-    }
     if (sceneBatchRun === run) {
         return "active";
+    }
+    if (sceneBatchDetachedRuns.get(run.runId) === run) {
+        return "stopping";
     }
     if (sceneBatchPendingRuns.includes(run)) {
         return "pending";
     }
-    if (sceneBatchDetachedRuns.get(run.runId) === run) {
-        return "stopping";
+    if (run.releaseBlocked) {
+        return "blocked";
     }
     return "idle";
 }
@@ -7398,13 +7398,9 @@ function scheduleDetachedSceneBatchReconcile(run, delay = SCENE_DETACHED_RETRY_M
         return;
     }
     const retryCount = Number(run.detachedRetryCount || 0);
-    if (retryCount >= SCENE_DETACHED_MAX_RETRIES) {
-        if (run.nodeRemoved) {
-            releaseDetachedSceneBatchRun(run, run.currentPromptId);
-        }
-        return;
-    }
-    run.detachedRetryCount = retryCount + 1;
+    // Keep checking safely after the counter saturates; a queued prompt must
+    // never be released only because its node disappeared or retries elapsed.
+    run.detachedRetryCount = Math.min(retryCount + 1, SCENE_DETACHED_MAX_RETRIES);
     run.detachedTimer = setTimeout(() => {
         run.detachedTimer = null;
         if (sceneBatchDetachedRuns.get(run.runId) === run) {
@@ -7904,6 +7900,10 @@ async function queueNextSceneBatchItem() {
     if (!run || run.queueing || run.waiting) {
         return;
     }
+    if (run.releaseBlocked) {
+        stopSceneBatchRun({ forceRelease: true });
+        return;
+    }
 
     run.queueing = true;
     try {
@@ -8016,6 +8016,10 @@ function continueSceneBatchRun(detail = null) {
         return;
     }
     if (!sceneBatchEventMatchesRun(run, detail)) {
+        return;
+    }
+    if (run.releaseBlocked) {
+        failSceneBatchRun(detail);
         return;
     }
     const promptId = scenePromptIdFromValue(detail);

@@ -23,6 +23,7 @@ from .runs import (
     purge_expired_run_contexts,
     release_run_context,
     replace_run_prompt_data_index,
+    set_run_expiration_callback,
 )
 from .presets import (
     ScenePresetError,
@@ -33,6 +34,9 @@ from .presets import (
     snapshot_presets_for_run,
 )
 from .storage import prompt_data_directory
+
+
+set_run_expiration_callback(release_scene_preset_snapshot)
 
 
 PROMPT_FILE_NAME = "prompt.json"
@@ -541,8 +545,7 @@ def define_routes():
         handle = ""
         user_id = ""
         try:
-            for expired_handle, expired_user in purge_expired_run_contexts():
-                release_scene_preset_snapshot(expired_handle, expired_user)
+            purge_expired_run_contexts()
             payload = await request.json()
             api_graph = payload.get("api_graph") if isinstance(payload, dict) else None
             expand_node_id = payload.get("expand_node_id") if isinstance(payload, dict) else None
@@ -572,8 +575,7 @@ def define_routes():
     @PromptServer.instance.routes.post("/scene_prompt/runs/claim")
     async def scene_prompt_claim_run(request):
         try:
-            for expired_handle, expired_user in purge_expired_run_contexts():
-                release_scene_preset_snapshot(expired_handle, expired_user)
+            purge_expired_run_contexts()
             payload = await request.json()
             handle = payload.get("run_handle") if isinstance(payload, dict) else ""
             prompt_id = payload.get("prompt_id") if isinstance(payload, dict) else ""

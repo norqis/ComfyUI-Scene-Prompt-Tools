@@ -115,9 +115,12 @@ async function testStillQueuedAndFetchFailureRemainBlocked() {
     assert.equal(queued.scheduled[0].delay, 30_000);
     queuedRun.detachedTimer = null;
     queuedRun.detachedRetryCount = 20;
+    queuedRun.nodeRemoved = true;
     queued.scheduled.length = 0;
     queued.scheduleDetachedSceneBatchReconcile(queuedRun);
-    assert.equal(queued.scheduled.length, 0, "automatic detached retries are bounded");
+    assert.equal(queued.scheduled.length, 1, "a removed node keeps a safe recovery check after retry saturation");
+    assert.equal(queuedRun.detachedRetryCount, 20, "the retry counter remains bounded");
+    assert.deepEqual(queued.released, [], "a still-queued run is never released because its node was removed");
 
     const failed = reconcileContext([new Error("offline")]);
     const failedRun = { runId: "run-failed", currentPromptId: "prompt-failed" };
@@ -192,6 +195,99 @@ async function testMissedTerminalHistoryUsesItsActualStatus() {
     assert.equal(error.failed, 1);
 }
 
+async function testClaimFailureHistoryCompletionUsesRealCleanupPath() {
+    const active = {
+        runId: "blocked-active",
+        runHandle: "blocked-handle",
+        currentPromptId: "",
+        waiting: true,
+        promptAccepted: false,
+        pendingPromptIds: new Set(),
+        nextIndex: 0,
+        total: 1,
+    };
+    const next = { runId: "next-run", cancelled: false };
+    const context = {
+        Map,
+        Set,
+        String,
+        Array,
+        Object,
+        Math,
+        encodeURIComponent,
+        queueMicrotask,
+        console: { warn() {} },
+        sceneBatchRun: active,
+        sceneBatchRunsById: new Map([[active.runId, active], [next.runId, next]]),
+        sceneBatchDetachedRuns: new Map(),
+        sceneBatchPendingRuns: [next],
+        sceneBatchPendingReleases: new Map(),
+        sceneBatchTerminalEvents: new Map(),
+        released: [],
+        activated: [],
+        errors: [],
+        timers: [],
+        api: {
+            async fetchApi(url) {
+                if (url === "/scene_prompt/runs/claim") {
+                    return response({ claimed: false });
+                }
+                assert.equal(url, "/history/blocked-prompt");
+                return response({
+                    "blocked-prompt": { status: { status_str: "success", completed: true } },
+                });
+            },
+        },
+        async readApiJson(value) { return value.payload; },
+        sceneQueueContainsPrompt() { return false; },
+        sceneNodeForRun() { return null; },
+        clearSceneSavePreviews() {},
+        prepareSceneBatchRunSnapshot(run) { context.activated.push(`prepare:${run.runId}`); },
+        queueNextSceneBatchItem() { context.activated.push(`queue:${context.sceneBatchRun.runId}`); },
+        releaseSceneRunHandle(handle) { context.released.push(handle); },
+        refreshSceneBatchRunNode() {},
+        showSceneBatchError(message) { context.errors.push(message); },
+        clearTimeout(timer) { context.timers = context.timers.filter((item) => item !== timer); },
+        setTimeout(callback, delay) {
+            const timer = { callback, delay };
+            context.timers.push(timer);
+            return timer;
+        },
+    };
+    vm.createContext(context);
+    for (const name of [
+        "sceneBatchRunStatus",
+        "sceneHistoryStatus",
+        "scenePromptIdFromValue",
+        "sceneBatchEventMatchesRun",
+        "markSceneBatchReleaseBlocked",
+        "claimSceneRunHandle",
+        "acceptSceneBatchPrompt",
+        "clearPendingSceneBatchReleasesForRun",
+        "releaseSceneBatchPlan",
+        "activateNextSceneBatchRun",
+        "stopSceneBatchRun",
+        "scheduleNextSceneBatchItem",
+        "continueSceneBatchRun",
+        "failSceneBatchRun",
+        "scheduleActiveSceneBatchReconcile",
+        "reconcileActiveSceneBatchRun",
+    ]) {
+        vm.runInContext(functionSource(name), context);
+    }
+
+    context.acceptSceneBatchPrompt(active, { prompt_id: "blocked-prompt" });
+    await active.runClaimPromise;
+    assert.equal(active.releaseBlocked, true, "the real failed claim marks the active run for cleanup");
+    assert.equal(context.sceneBatchRunStatus(active), "active", "release failure does not detach the active global run");
+    await context.reconcileActiveSceneBatchRun(active);
+
+    assert.equal(context.sceneBatchRun, next, "successful history cleanup activates the next FIFO run");
+    assert.equal(context.sceneBatchRunsById.has(active.runId), false);
+    assert.deepEqual(context.released, ["blocked-handle"]);
+    assert.deepEqual(context.activated, ["prepare:next-run", "queue:next-run"]);
+}
+
 function testNonSceneQueueSkipsRunPreparation() {
     const context = { Object };
     vm.createContext(context);
@@ -231,14 +327,13 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     assert.equal(context.sceneDownstreamRefreshSources.has(node), false);
 }
 
-assert.match(source, /if \(existingStatus === "blocked"\) \{\s*reconcileDetachedSceneBatchRun\(existingRun\);/u, "blocked controls retry reconciliation");
-
 Promise.resolve()
     .then(testHistoryTerminalReleasesOnceAndResumesFifo)
     .then(testAbsentFromHistoryAndQueueReleases)
     .then(testStillQueuedAndFetchFailureRemainBlocked)
     .then(testDeletingBlockedDetachedNodeReconcilesAndResumesFifo)
     .then(testMissedTerminalHistoryUsesItsActualStatus)
+    .then(testClaimFailureHistoryCompletionUsesRealCleanupPath)
     .then(testNonSceneQueueSkipsRunPreparation)
     .then(testRemovalCleanupRunsOnceAndPreservesPreviousHandler)
     .then(() => console.log("detached Scene Prompt run reconciliation tests passed"))

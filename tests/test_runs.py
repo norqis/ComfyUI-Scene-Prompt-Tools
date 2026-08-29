@@ -87,6 +87,31 @@ class RunContextTests(unittest.TestCase):
         with self.assertRaises(RUNS.SceneRunError):
             store.require(handle)
 
+    def test_every_expiration_path_notifies_exactly_once(self):
+        expired = []
+        store = RUNS.RunContextStore(
+            maximum=4,
+            prepared_limit=4,
+            active_limit=4,
+            prepared_ttl_seconds=10,
+            expiration_callback=lambda handle, user_id: expired.append((handle, user_id)),
+        )
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 0, 0, 11, 11, 11]):
+            required = store.create("alice", {"by_key": {}, "by_id": {}})
+            claimed = store.create("bob", {"by_key": {}, "by_id": {}})
+            purged = store.create("carol", {"by_key": {}, "by_id": {}})
+            with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
+                store.require(required)
+            self.assertFalse(store.claim(claimed, "bob", "prompt-late"))
+            self.assertEqual(store.purge_expired(), [(purged, "carol")])
+
+        self.assertCountEqual(expired, [(required, "alice"), (claimed, "bob"), (purged, "carol")])
+        with self.assertRaises(RUNS.SceneRunError):
+            store.require(required)
+        self.assertFalse(store.claim(claimed, "bob", "prompt-late"))
+        self.assertEqual(store.purge_expired(), [])
+        self.assertEqual(len(expired), 3)
+
     def test_prepared_contexts_expire_and_plans_are_expand_specific(self):
         expiring = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=0)
         old = expiring.create("alice", {"by_key": {}, "by_id": {}})
