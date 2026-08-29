@@ -26,6 +26,25 @@ assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{
 const { prompt, ...missingPrompt } = selectionItem;
 assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [missingPrompt] } }), /missing/u);
 assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{ ...selectionItem, legacy: true }] } }), /unsupported/u);
+const legacySelection = parseSelectionState({
+    version: 1,
+    categories: { "Outfit > School": [{ label: "Summer", prompt: "summer uniform" }] },
+});
+assert.deepEqual(legacySelection.categories["Outfit > School"][0], {
+    label: "Summer",
+    prompt: "summer uniform",
+    category_path: ["Outfit", "School"],
+    category_key: "Outfit > School",
+    category_label: "Outfit > School",
+});
+assert.throws(() => parseSelectionState({
+    version: 1,
+    categories: { "Outfit > School": [{ label: "Summer", prompt: "summer uniform", category_key: "Wrong" }] },
+}), /inconsistent/u);
+assert.throws(() => parseSelectionState({
+    version: 1,
+    categories: { Category: [{ label: "A", prompt: "a", unknown: true }] },
+}), /unsupported/u);
 
 const line = createMatrixLine("Night");
 line.positive_base = "night, forest";
@@ -36,7 +55,9 @@ assert.equal(parseMatrixState(serializeMatrixState(state)).sets[0].positive_base
 assert.throws(() => parseMatrixState('{"version":1,"sets":[{"name":"old"}]}'), /unsupported|schema/u);
 assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, enabled: "true" }] }), /boolean/u);
 const { positive_base, ...oldLine } = line;
-assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...oldLine, positive: "old" }] }), /unsupported|positive/u);
+assert.equal(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].enabled, true);
+assert.deepEqual(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].display_label_groups, []);
+assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...oldLine, unknown: true }] }), /unsupported/u);
 assert.equal(serializeSelectionState(createSelectionState()), '{"version":1,"categories":{}}');
 assert.equal(formatSceneExpandCounts(2, 6), "2回 / 6枚");
 assert.throws(() => formatSceneExpandCounts(2, 6.5), /integer/u);

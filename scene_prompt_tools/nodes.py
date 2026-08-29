@@ -17,6 +17,7 @@ import folder_paths
 from comfy.cli_args import args
 
 from .prompt import (
+    DEFAULT_SELECTED_JSON,
     SCENE_PROMPT_TYPE,
     _compose_prompt_parts,
     _expand_prompt_parts,
@@ -53,6 +54,7 @@ MATRIX_LINE_KEYS = {
     "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
     "positive_parts", "negative_parts", "display_labels", "display_label_groups",
 }
+MATRIX_LINE_REQUIRED_LEGACY_KEYS = {"row_id", "name", "path_label"}
 SCENE_SAVE_INFO_TYPE = "SCENE_SAVE_INFO"
 SAVE_METADATA_WORKFLOW = "ワークフロー全体"
 SAVE_METADATA_PROMPT_ONLY = "プロンプトのみ"
@@ -267,13 +269,10 @@ def _selection_json_has_items(value):
 def _normalize_matrix_line_set(value):
     if not isinstance(value, dict):
         raise ValueError("Scene Matrix entries must be objects.")
-    if set(value) != MATRIX_LINE_KEYS:
+    if not MATRIX_LINE_REQUIRED_LEGACY_KEYS.issubset(value) or set(value) - MATRIX_LINE_KEYS:
         raise ValueError("Scene Matrix entry has unsupported or missing fields.")
-    if value.get("type") != MATRIX_LINE_TYPE or value.get("version") != 1:
+    if value.get("type", MATRIX_LINE_TYPE) != MATRIX_LINE_TYPE or value.get("version", 1) != 1:
         raise ValueError("Unsupported Scene Matrix entry schema.")
-    for retired_field in ("label", "id", "positive", "negative"):
-        if retired_field in value:
-            raise ValueError(f"Unsupported Scene Matrix field: {retired_field}.")
 
     required_string_fields = (
         "row_id",
@@ -288,33 +287,33 @@ def _normalize_matrix_line_set(value):
         "category_order",
     )
     for field in required_string_fields:
-        if not isinstance(value.get(field), str):
+        if not isinstance(value.get(field, ""), str):
             raise ValueError(f"Scene Matrix {field} must be a string.")
     for field in ("row_id", "name", "path_label"):
         if not value[field].strip():
             raise ValueError(f"Scene Matrix {field} must be a non-empty string.")
-    if not isinstance(value.get("enabled"), bool):
+    if not isinstance(value.get("enabled", True), bool):
         raise ValueError("Scene Matrix entry enabled must be a boolean.")
 
-    node_id = value["node_id"].strip()
-    category = value["category"].strip()
+    node_id = value.get("node_id", "").strip()
+    category = value.get("category", "").strip()
     name = value["name"].strip()
     path_label = value["path_label"].strip()
-    positive_base = value["positive_base"]
-    positive_json = value["positive_json"]
-    negative_base = value["negative_base"]
-    negative_json = value["negative_json"]
-    category_order = value["category_order"]
-    display_labels = _clean_string_list(_require_string_list(value.get("display_labels"), "Scene Matrix display_labels"))
-    raw_label_groups = value.get("display_label_groups")
+    positive_base = value.get("positive_base", "")
+    positive_json = value.get("positive_json", DEFAULT_SELECTED_JSON)
+    negative_base = value.get("negative_base", "")
+    negative_json = value.get("negative_json", DEFAULT_SELECTED_JSON)
+    category_order = value.get("category_order", "")
+    display_labels = _clean_string_list(_require_string_list(value.get("display_labels", []), "Scene Matrix display_labels"))
+    raw_label_groups = value.get("display_label_groups", [])
     if not isinstance(raw_label_groups, list) or any(
         not isinstance(group, list) or not all(isinstance(item, str) for item in group)
         for group in raw_label_groups
     ):
         raise ValueError("Scene Matrix display_label_groups must be a list of string lists.")
     display_label_groups = _clean_label_groups(raw_label_groups)
-    raw_positive_parts = _require_string_list(value.get("positive_parts"), "Scene Matrix positive_parts")
-    raw_negative_parts = _require_string_list(value.get("negative_parts"), "Scene Matrix negative_parts")
+    raw_positive_parts = _require_string_list(value.get("positive_parts", []), "Scene Matrix positive_parts")
+    raw_negative_parts = _require_string_list(value.get("negative_parts", []), "Scene Matrix negative_parts")
     _parse_selection_json(positive_json)
     _parse_selection_json(negative_json)
 
@@ -350,7 +349,7 @@ def _normalize_matrix_line_set(value):
         "category": category,
         "name": name,
         "path_label": path_label,
-        "enabled": value["enabled"],
+        "enabled": value.get("enabled", True),
         "positive_parts": positive_parts,
         "negative_parts": negative_parts,
         "display_labels": display_labels,

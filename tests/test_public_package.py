@@ -40,7 +40,7 @@ class PublicPackageTests(unittest.TestCase):
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.2.6"', pyproject)
+        self.assertIn('version = "0.2.7"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)

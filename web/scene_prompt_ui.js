@@ -4340,11 +4340,22 @@ function matrixRowDisplayText(row) {
 }
 
 function currentMatrixJsonValue(node, widget) {
-    const values = [widget?.value, node?.properties?.scene_matrix_json, serializedMatrixJsonValue(node)]
-        .filter((value) => value != null && String(value).trim());
-    const parsed = values.map((value) => parseMatrixState(value));
-    const configured = parsed.find((state) => state.sets.length > 0);
-    return serializeMatrixState(configured || parsed[0] || createMatrixState());
+    const values = [widget?.value, node?.properties?.scene_matrix_json, serializedMatrixJsonValue(node)];
+    let lastError = null;
+    let firstValid = null;
+    for (const value of values) {
+        if (value == null || !String(value).trim()) continue;
+        try {
+            const state = parseMatrixState(value);
+            if (!firstValid) firstValid = state;
+            if (state.sets.length) return serializeMatrixState(state);
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    if (firstValid) return serializeMatrixState(firstValid);
+    if (lastError) throw lastError;
+    return serializeMatrixState(createMatrixState());
 }
 
 function normalizeMatrixWidgetValues(node, widget) {

@@ -6,6 +6,7 @@ export const DEFAULT_SELECTED_JSON = "{\"version\":1,\"categories\":{}}";
 export const MATRIX_DEFAULT_JSON = "{\"version\":1,\"sets\":[]}";
 const SELECTION_ITEM_REQUIRED_KEYS = ["label", "prompt", "category_path", "category_key", "category_label"];
 const SELECTION_ITEM_OPTIONAL_KEYS = ["id", "description", "weight", "selected_parts"];
+const SELECTION_ITEM_KNOWN_KEYS = new Set([...SELECTION_ITEM_REQUIRED_KEYS, ...SELECTION_ITEM_OPTIONAL_KEYS]);
 const SELECTED_PART_REQUIRED_KEYS = ["index", "text"];
 const SELECTED_PART_OPTIONAL_KEYS = ["weight"];
 const MATRIX_LINE_KEYS = [
@@ -13,6 +14,7 @@ const MATRIX_LINE_KEYS = [
     "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
     "positive_parts", "negative_parts", "display_labels", "display_label_groups",
 ];
+const MATRIX_LINE_REQUIRED_LEGACY_KEYS = ["row_id", "name", "path_label"];
 
 function isPlainObject(value) {
     return !!value && typeof value === "object" && !Array.isArray(value);
@@ -110,17 +112,28 @@ function parseSelectionItem(value, category, label) {
     if (!isPlainObject(value)) {
         throw new Error(`${label} must be an object.`);
     }
-    requireExactKeys(value, SELECTION_ITEM_REQUIRED_KEYS, SELECTION_ITEM_OPTIONAL_KEYS, label);
+    if (!Object.hasOwn(value, "label") || !Object.hasOwn(value, "prompt") || Object.keys(value).some((key) => !SELECTION_ITEM_KNOWN_KEYS.has(key))) {
+        throw new Error(`${label} has unsupported or missing fields.`);
+    }
+    const categoryPath = category.split(" > ");
+    if (!category.trim() || categoryPath.some((part) => !part.trim())) {
+        throw new Error(`${label} category is invalid.`);
+    }
+    if (Object.hasOwn(value, "category_path")) {
+        const storedPath = requireStringList(value.category_path, `${label} category_path`);
+        if (!storedPath.length || storedPath.some((part) => !part.trim())) {
+            throw new Error(`${label} category_path must be a non-empty list of strings.`);
+        }
+        if (storedPath.length !== categoryPath.length || storedPath.some((part, index) => part !== categoryPath[index])) {
+            throw new Error(`${label} category fields are inconsistent.`);
+        }
+    }
+    for (const field of ["category_key", "category_label"]) {
+        if (Object.hasOwn(value, field) && requireString(value[field], `${label} ${field}`, { allowEmpty: false }) !== category) {
+            throw new Error(`${label} category fields are inconsistent.`);
+        }
+    }
     const prompt = requireString(value.prompt, `${label} prompt`, { allowEmpty: false });
-    const categoryPath = requireStringList(value.category_path, `${label} category_path`);
-    if (!categoryPath.length || categoryPath.some((part) => !part.trim())) {
-        throw new Error(`${label} category_path must be a non-empty list of strings.`);
-    }
-    const categoryKey = requireString(value.category_key, `${label} category_key`, { allowEmpty: false });
-    const categoryLabel = requireString(value.category_label, `${label} category_label`, { allowEmpty: false });
-    if (categoryKey !== category || categoryKey !== categoryPath.join(" > ") || categoryLabel !== categoryKey) {
-        throw new Error(`${label} category fields are inconsistent.`);
-    }
     if (Object.hasOwn(value, "weight") && Object.hasOwn(value, "selected_parts")) {
         throw new Error(`${label} cannot contain both weight and selected_parts.`);
     }
@@ -128,8 +141,8 @@ function parseSelectionItem(value, category, label) {
         label: requireString(value.label, `${label} label`, { allowEmpty: false }),
         prompt,
         category_path: categoryPath,
-        category_key: categoryKey,
-        category_label: categoryLabel,
+        category_key: category,
+        category_label: category,
     };
     if (Object.hasOwn(value, "id")) result.id = requireString(value.id, `${label} id`, { allowEmpty: false });
     if (Object.hasOwn(value, "description")) result.description = requireString(value.description, `${label} description`);
@@ -210,41 +223,39 @@ export function parseMatrixLine(value) {
     if (!isPlainObject(value)) {
         throw new Error("Scene Matrix entries must be objects.");
     }
-    requireExactKeys(value, MATRIX_LINE_KEYS, [], "Scene Matrix entry");
-    if (value.type !== MATRIX_LINE_TYPE || value.version !== MATRIX_STATE_VERSION) {
+    if (MATRIX_LINE_REQUIRED_LEGACY_KEYS.some((key) => !Object.hasOwn(value, key)) || Object.keys(value).some((key) => !MATRIX_LINE_KEYS.includes(key))) {
+        throw new Error("Scene Matrix entry has unsupported or missing fields.");
+    }
+    if ((Object.hasOwn(value, "type") && value.type !== MATRIX_LINE_TYPE) || (Object.hasOwn(value, "version") && value.version !== MATRIX_STATE_VERSION)) {
         throw new Error("Unsupported Scene Matrix entry schema.");
     }
-    for (const retiredField of ["label", "id", "positive", "negative"]) {
-        if (Object.hasOwn(value, retiredField)) {
-            throw new Error(`Unsupported Scene Matrix field: ${retiredField}.`);
-        }
-    }
-    if (typeof value.enabled !== "boolean") {
+    if (Object.hasOwn(value, "enabled") && typeof value.enabled !== "boolean") {
         throw new Error("Scene Matrix entry enabled must be a boolean.");
     }
 
     const name = requireString(value.name, "Scene Matrix line name", { allowEmpty: false }).trim();
     const pathLabel = requireString(value.path_label, "Scene Matrix line path label", { allowEmpty: false }).trim();
     const rowId = requireString(value.row_id, "Scene Matrix line row id", { allowEmpty: false });
+    const fieldOrDefault = (field, fallback) => Object.hasOwn(value, field) ? value[field] : fallback;
 
     return {
         type: MATRIX_LINE_TYPE,
         version: MATRIX_STATE_VERSION,
         row_id: rowId,
-        node_id: requireString(value.node_id, "Scene Matrix line node id"),
-        category: requireString(value.category, "Scene Matrix line category"),
+        node_id: requireString(fieldOrDefault("node_id", ""), "Scene Matrix line node id"),
+        category: requireString(fieldOrDefault("category", ""), "Scene Matrix line category"),
         name,
         path_label: pathLabel,
-        enabled: value.enabled,
-        positive_base: requireString(value.positive_base, "Scene Matrix positive base"),
-        positive_json: serializeSelectionState(value.positive_json),
-        negative_base: requireString(value.negative_base, "Scene Matrix negative base"),
-        negative_json: serializeSelectionState(value.negative_json),
-        category_order: requireString(value.category_order, "Scene Matrix category order"),
-        positive_parts: requireStringList(value.positive_parts, "Scene Matrix positive parts"),
-        negative_parts: requireStringList(value.negative_parts, "Scene Matrix negative parts"),
-        display_labels: requireStringList(value.display_labels, "Scene Matrix display labels"),
-        display_label_groups: requireStringGroups(value.display_label_groups, "Scene Matrix display label groups"),
+        enabled: fieldOrDefault("enabled", true),
+        positive_base: requireString(fieldOrDefault("positive_base", ""), "Scene Matrix positive base"),
+        positive_json: serializeSelectionState(fieldOrDefault("positive_json", DEFAULT_SELECTED_JSON)),
+        negative_base: requireString(fieldOrDefault("negative_base", ""), "Scene Matrix negative base"),
+        negative_json: serializeSelectionState(fieldOrDefault("negative_json", DEFAULT_SELECTED_JSON)),
+        category_order: requireString(fieldOrDefault("category_order", ""), "Scene Matrix category order"),
+        positive_parts: requireStringList(fieldOrDefault("positive_parts", []), "Scene Matrix positive parts"),
+        negative_parts: requireStringList(fieldOrDefault("negative_parts", []), "Scene Matrix negative parts"),
+        display_labels: requireStringList(fieldOrDefault("display_labels", []), "Scene Matrix display labels"),
+        display_label_groups: requireStringGroups(fieldOrDefault("display_label_groups", []), "Scene Matrix display label groups"),
     };
 }
 
