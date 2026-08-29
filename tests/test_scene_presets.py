@@ -146,6 +146,29 @@ class ScenePresetTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 
+    def write_prompt_data(self, user_id="default"):
+        path = self.root / user_id / "scene_prompt_tools" / "data" / "Emotion" / "prompt.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps([{"id": "fear", "label": "怯え", "prompt": "scared"}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def selected_prompt_json(self):
+        return json.dumps({
+            "version": 1,
+            "categories": {
+                "Emotion": [{
+                    "id": "fear",
+                    "label": "怯え",
+                    "prompt": "scared",
+                    "category_path": ["Emotion"],
+                    "category_key": "Emotion",
+                    "category_label": "Emotion",
+                }],
+            },
+        }, ensure_ascii=False)
+
     def test_save_is_atomic_and_revision_hash_increase(self):
         first = self.save("preset_a", basic_nodes("first"))
         path = self.module._preset_path("preset_a")
@@ -159,6 +182,64 @@ class ScenePresetTests(unittest.TestCase):
         self.assertNotEqual(first["metadata"]["sha256"], second["metadata"]["sha256"])
         with path.open("r", encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["metadata"]["name"], "Renamed")
+
+    def test_save_selected_scene_prompt_does_not_require_a_generation_context(self):
+        self.write_prompt_data()
+        nodes = basic_nodes()
+        nodes["2"]["inputs"]["positive_json"] = self.selected_prompt_json()
+
+        saved = self.save("selected-prompt", nodes)
+
+        self.assertEqual(saved["metadata"]["preset_id"], "selected-prompt")
+
+    def test_save_selected_matrix_does_not_require_a_generation_context(self):
+        self.write_prompt_data()
+        nodes = basic_nodes()
+        nodes["4"] = {
+            "class_type": "SceneMatrix",
+            "inputs": {
+                "matrix_json": json.dumps({
+                    "version": 1,
+                    "sets": [matrix_line("Fear", positive_json=self.selected_prompt_json())],
+                }, ensure_ascii=False),
+                "scene_prompt": ["2", 0],
+            },
+        }
+        nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+
+        saved = self.save("selected-matrix", nodes)
+
+        self.assertEqual(saved["metadata"]["preset_id"], "selected-matrix")
+
+    def test_save_nested_selected_prompt_uses_the_current_user_data(self):
+        self.write_prompt_data("alice")
+        inner = basic_nodes()
+        inner["2"]["inputs"]["positive_json"] = self.selected_prompt_json()
+        self.save("selected-inner", inner, user_id="alice")
+        outer = basic_nodes()
+        outer["2"] = {
+            "class_type": "ScenePresetReference",
+            "inputs": {"preset_id": "selected-inner", "scene_prompt": ["1", 0]},
+        }
+
+        saved = self.save("selected-outer", outer, user_id="alice")
+
+        self.assertEqual(saved["metadata"]["preset_id"], "selected-outer")
+
+    def test_selected_prompt_generation_still_requires_a_run_context(self):
+        self.write_prompt_data()
+
+        with self.assertRaisesRegex(ValueError, "実行コンテキスト"):
+            self.module.ScenePrompt().build(
+                "Prompt",
+                "",
+                self.selected_prompt_json(),
+                "",
+                '{"version":1,"categories":{}}',
+                "",
+                0,
+                True,
+            )
 
     def test_preset_paths_reject_untrusted_user_ids(self):
         for user_id in ("", "../outside", "/outside", "C:" + chr(92) + "outside", "__system"):

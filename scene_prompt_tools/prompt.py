@@ -789,13 +789,16 @@ class _ScenePromptBase:
         run_handle="",
         **kwargs,
     ):
+        validation_prompt_data_index = kwargs.pop("_prompt_data_index", None)
         del kwargs
         label = str(prompt_name or "").strip() or "Scene Prompt"
         has_selection = _selection_json_has_items(positive_json) or _selection_json_has_items(negative_json)
-        prompt_data_index = (
-            require_run_context(run_handle)["prompt_data_index"]
-            if has_selection else {"by_key": {}, "by_id": {}}
-        )
+        if not has_selection:
+            prompt_data_index = {"by_key": {}, "by_id": {}}
+        elif validation_prompt_data_index is not None:
+            prompt_data_index = validation_prompt_data_index
+        else:
+            prompt_data_index = require_run_context(run_handle)["prompt_data_index"]
         positive_parts = _compose_prompt_parts(
             positive_base,
             positive_json,
