@@ -12,10 +12,19 @@ from .prompt import (
     SAVED_PROMPTS_FOLDER,
     _clear_prompt_data_cache,
     _prompt_data_index,
+    project_prompt_data_index,
     _validate_selection_item,
     validate_prompt_data_item,
 )
-from .runs import create_run_context, release_run_context
+from .runs import (
+    SceneRunError,
+    claim_run_context,
+    create_run_context,
+    purge_expired_run_contexts,
+    release_run_context,
+    replace_run_prompt_data_index,
+    set_run_expiration_callback,
+)
 from .presets import (
     ScenePresetError,
     ScenePresetResolutionError,
@@ -25,6 +34,9 @@ from .presets import (
     snapshot_presets_for_run,
 )
 from .storage import prompt_data_directory
+
+
+set_run_expiration_callback(release_scene_preset_snapshot)
 
 
 PROMPT_FILE_NAME = "prompt.json"
@@ -533,6 +545,7 @@ def define_routes():
         handle = ""
         user_id = ""
         try:
+            purge_expired_run_contexts()
             payload = await request.json()
             api_graph = payload.get("api_graph") if isinstance(payload, dict) else None
             expand_node_id = payload.get("expand_node_id") if isinstance(payload, dict) else None
@@ -540,6 +553,14 @@ def define_routes():
             prompt_index = await asyncio.to_thread(_prompt_data_index, user_id)
             handle = create_run_context(user_id, prompt_index)
             snapshot = await asyncio.to_thread(snapshot_presets_for_run, handle, api_graph, expand_node_id, user_id)
+            projection = await asyncio.to_thread(
+                project_prompt_data_index,
+                api_graph,
+                prompt_index,
+                snapshot.get("preset_graphs", {}),
+                expand_node_id,
+            )
+            replace_run_prompt_data_index(handle, projection)
             return web.json_response({"run_handle": handle, **snapshot})
         except ScenePresetResolutionError as exc:
             if handle:
@@ -550,6 +571,20 @@ def define_routes():
             if handle:
                 release_run_context(handle, user_id)
                 release_scene_preset_snapshot(handle, user_id)
+            return web.json_response({"error": str(exc)}, status=400)
+
+    @PromptServer.instance.routes.post("/scene_prompt/runs/claim")
+    async def scene_prompt_claim_run(request):
+        try:
+            purge_expired_run_contexts()
+            payload = await request.json()
+            handle = payload.get("run_handle") if isinstance(payload, dict) else ""
+            prompt_id = payload.get("prompt_id") if isinstance(payload, dict) else ""
+            claimed = claim_run_context(handle, _request_user_id(request), prompt_id)
+            return web.json_response({"claimed": claimed})
+        except SceneRunError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        except Exception as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
     @PromptServer.instance.routes.post("/scene_prompt/runs/release")

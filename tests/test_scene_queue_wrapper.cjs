@@ -19,12 +19,22 @@ function functionSource(name) {
 }
 
 const context = {
+    Date,
     Object,
+    JSON,
     String,
     Map,
+    encodeURIComponent,
+    setTimeout,
+    clearTimeout,
     sceneBatchRun: null,
     sceneBatchDetachedRuns: new Map(),
     sceneRunHandlesByPromptId: new Map(),
+    sceneRunTerminalPromptIds: new Map(),
+    sceneRunHandleReconcileTimers: new Map(),
+    SCENE_RUN_TERMINAL_MAX: 256,
+    SCENE_RUN_TERMINAL_RETENTION_MS: 10 * 60 * 1000,
+    sceneRunTerminalOverflowUntil: 0,
     prepared: 0,
     queued: 0,
     released: [],
@@ -34,24 +44,40 @@ const context = {
             context.queued += 1;
             return { prompt_id: `prompt-${context.queued}`, received: structuredClone(prompt) };
         },
+        async fetchApi() { return { ok: true, payload: { claimed: true } }; },
     },
     async prepareSceneRunContext(prompt) {
         context.prepared += 1;
+        const handle = `opaque-handle-${context.prepared}`;
         for (const node of Object.values(prompt.output)) {
             if (["ScenePrompt", "SceneMatrix", "ScenePresetReference", "ScenePromptExpand"].includes(node.class_type)) {
-                node.inputs.run_handle = "opaque-handle";
+                node.inputs.run_handle = handle;
             }
         }
-        return { run_handle: "opaque-handle" };
+        return { run_handle: handle };
     },
     scenePromptIdFromValue(value) { return value?.prompt_id || ""; },
+    async readApiJson(response) { return response.payload; },
     showPromptValidationErrorFromThrown() {},
     releaseSceneRunHandle(handle) { context.released.push(handle); },
+    registerQueuedSceneRunHandle(promptId, handle) { context.sceneRunHandlesByPromptId.set(promptId, handle); },
     acceptSceneBatchPrompt() {},
     buildSceneBatchCachedPrompt() { return null; },
 };
 vm.createContext(context);
-for (const name of ["sceneRunTargetNodes", "installSceneBatchPromptCapture"]) {
+for (const name of [
+    "sceneRunTargetNodes",
+    "sceneHistoryStatus",
+    "pruneSceneRunTerminalPromptIds",
+    "rememberSceneRunTerminalPromptId",
+    "consumeSceneRunTerminalPromptId",
+    "clearQueuedSceneRunReconcile",
+    "reconcileQueuedSceneRunHandle",
+    "claimSceneRunHandle",
+    "registerQueuedSceneRunHandle",
+    "releaseCompletedSceneRun",
+    "installSceneBatchPromptCapture",
+]) {
     vm.runInContext(functionSource(name), context);
 }
 
@@ -61,9 +87,14 @@ context.installSceneBatchPromptCapture();
 (async () => {
     const scenePrompt = { output: { "1": { class_type: "ScenePrompt", inputs: {} } } };
     const result = await context.api.queuePrompt(0, scenePrompt);
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(context.prepared, 1, "Scene graph is prepared once");
     assert.equal(context.queued, 1, "wrapped queue calls the original once");
-    assert.equal(result.received.output["1"].inputs.run_handle, "opaque-handle");
+    assert.equal(result.received.output["1"].inputs.run_handle, "opaque-handle-1");
+    assert.equal(context.sceneRunHandlesByPromptId.get("prompt-1"), "opaque-handle-1");
+    context.releaseCompletedSceneRun({ prompt_id: "prompt-1" });
+    context.releaseCompletedSceneRun({ prompt_id: "prompt-1" });
+    assert.deepEqual(context.released, ["opaque-handle-1"], "claim-before-terminal and duplicate terminal release once");
 
     await context.api.queuePrompt(0, { output: { "2": { class_type: "KSampler", inputs: {} } } });
     assert.equal(context.prepared, 1, "non-Scene graph skips preparation");
@@ -73,7 +104,69 @@ context.installSceneBatchPromptCapture();
         () => context.api.queuePrompt(0, { output: { "3": { class_type: "ScenePrompt", inputs: {} } } }),
         /queue failed/,
     );
-    assert.deepEqual(context.released, ["opaque-handle"], "failed queue releases its prepared handle");
+    assert.deepEqual(context.released, ["opaque-handle-1", "opaque-handle-2"], "failed queue releases its prepared handle");
+
+    context.releaseCompletedSceneRun({ prompt_id: "fast-prompt" });
+    context.registerQueuedSceneRunHandle("fast-prompt", "fast-handle");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(
+        context.released,
+        ["opaque-handle-1", "opaque-handle-2", "fast-handle"],
+        "a completion arriving before the queue response releases the claimed handle once",
+    );
+
+    context.sceneRunTerminalPromptIds.clear();
+    for (let index = 0; index < 100; index += 1) {
+        context.releaseCompletedSceneRun({ prompt_id: `early-${index}` });
+    }
+    assert.equal(context.sceneRunTerminalPromptIds.size, 100, "more than 64 early completions remain retained");
+    context.registerQueuedSceneRunHandle("early-0", "early-handle");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(context.released.at(-1), "early-handle");
+
+    context.sceneRunTerminalPromptIds.clear();
+    context.rememberSceneRunTerminalPromptId("expired", 1_000);
+    context.pruneSceneRunTerminalPromptIds(1_000 + context.SCENE_RUN_TERMINAL_RETENTION_MS);
+    assert.equal(context.sceneRunTerminalPromptIds.size, 0, "early completion markers expire after ten minutes");
+
+    context.sceneRunTerminalPromptIds.clear();
+    for (let index = 0; index < 257; index += 1) {
+        context.releaseCompletedSceneRun({ prompt_id: `overflow-${index}` });
+    }
+    assert.equal(context.sceneRunTerminalPromptIds.size, 256);
+    assert.ok(context.sceneRunTerminalOverflowUntil > Date.now());
+    context.api.fetchApi = async (url) => {
+        if (url === "/scene_prompt/runs/claim") return { ok: true, payload: { claimed: true } };
+        if (url === "/history/overflow-0") {
+            return { ok: true, payload: { "overflow-0": { status: { status_str: "success", completed: true } } } };
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+    context.registerQueuedSceneRunHandle("overflow-0", "overflow-handle");
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(context.released.at(-1), "overflow-handle", "overflow history reconciliation prevents a leaked handle");
+    assert.equal(context.sceneRunHandlesByPromptId.has("overflow-0"), false);
+
+    for (const name of ["applySceneRunHandle", "prepareSceneRunContext"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    let preparedPayload = null;
+    context.api.fetchApi = async (_path, options) => {
+        preparedPayload = JSON.parse(options.body);
+        return { ok: true, payload: { run_handle: "two-expand-handle" } };
+    };
+    const multiExpand = {
+        output: {
+            "1": { class_type: "ScenePrompt", inputs: {} },
+            "10": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["1", 0] } },
+            "20": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["1", 0] } },
+        },
+    };
+    await context.prepareSceneRunContext(multiExpand);
+    assert.equal(preparedPayload.expand_node_id, null, "standard Queue prepares all Expand branches, not the first one");
+    assert.equal(multiExpand.output["10"].inputs.run_handle, "two-expand-handle");
+    assert.equal(multiExpand.output["20"].inputs.run_handle, "two-expand-handle");
     console.log("Scene Prompt queue wrapper wiring tests passed.");
 })().catch((error) => {
     console.error(error);

@@ -356,9 +356,9 @@ def _scene_count(value):
     return value
 
 
-def _scene_run_plan(run_handle, scene_prompt=None):
+def _scene_run_plan(run_handle, scene_prompt=None, unique_id=None):
     normalized = normalize_plan(scene_prompt)
-    return set_run_plan(run_handle, normalized) if str(run_handle or "").strip() else normalized
+    return set_run_plan(run_handle, unique_id, normalized) if str(run_handle or "").strip() else normalized
 
 
 def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False):
@@ -890,6 +890,7 @@ class ScenePromptExpand:
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -903,8 +904,9 @@ class ScenePromptExpand:
         prefix="",
         scene_prompt=None,
         run_handle="",
+        unique_id=None,
     ):
-        plan = _scene_run_plan(run_handle, scene_prompt)
+        plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
         return "|".join(
             [
                 _scene_prompt_change_key(plan),
@@ -925,9 +927,10 @@ class ScenePromptExpand:
         prefix="",
         scene_prompt=None,
         run_handle="",
+        unique_id=None,
     ):
         separator = ", "
-        plan = _scene_run_plan(run_handle, scene_prompt)
+        plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
         global_index = int(item.get("global_index", 0) or 0)

@@ -143,6 +143,8 @@ const sceneBatchPendingRuns = [];
 const sceneBatchPendingReleases = new Map();
 const sceneBatchDetachedRuns = new Map();
 const sceneBatchTerminalEvents = new Map();
+const SCENE_DETACHED_RETRY_MS = 30 * 1000;
+const SCENE_DETACHED_MAX_RETRIES = 20;
 let chipMeasureContext = null;
 let sceneDownstreamRefreshTimer = null;
 let sceneQueuePromptSyncPaused = 0;
@@ -164,6 +166,11 @@ let scenePresetListLatestPromise = null;
 let scenePresetListCacheCurrent = false;
 let scenePresetNotificationTimer = null;
 const sceneRunHandlesByPromptId = new Map();
+const sceneRunTerminalPromptIds = new Map();
+const sceneRunHandleReconcileTimers = new Map();
+const SCENE_RUN_TERMINAL_MAX = 256;
+const SCENE_RUN_TERMINAL_RETENTION_MS = 10 * 60 * 1000;
+let sceneRunTerminalOverflowUntil = 0;
 
 const VISIBLE_INPUT_NAMES = new Set(["scene_prompt"]);
 const INTERNAL_INPUT_NAMES = new Set([
@@ -6467,24 +6474,24 @@ function sceneBatchRunStatus(run) {
     if (!run) {
         return "idle";
     }
-    if (run.releaseBlocked) {
-        return "blocked";
-    }
     if (sceneBatchRun === run) {
         return "active";
+    }
+    if (sceneBatchDetachedRuns.get(run.runId) === run) {
+        return "stopping";
     }
     if (sceneBatchPendingRuns.includes(run)) {
         return "pending";
     }
-    if (sceneBatchDetachedRuns.get(run.runId) === run) {
-        return "stopping";
+    if (run.releaseBlocked) {
+        return "blocked";
     }
     return "idle";
 }
 
 function sceneNodeForRun(run) {
-    const node = sceneNodeById(run?.nodeId);
-    if (!node) {
+    const node = run?.node || null;
+    if (!node || node.graph !== run.graph || String(node.id) !== String(run.nodeId)) {
         return null;
     }
     return sceneBatchNodeRunId(node) === run.runId ? node : null;
@@ -6749,10 +6756,6 @@ function applySceneRunHandle(apiGraph, runHandle) {
     return apiGraph;
 }
 
-function sceneExpandIdForPrompt(apiGraph) {
-    return Object.entries(apiGraph?.output || {}).find(([, node]) => node?.class_type === "ScenePromptExpand")?.[0] || null;
-}
-
 async function prepareSceneRunContext(apiGraph, expandNodeId = null) {
     if (!sceneRunTargetNodes(apiGraph).length) {
         return null;
@@ -6760,7 +6763,7 @@ async function prepareSceneRunContext(apiGraph, expandNodeId = null) {
     const response = await api.fetchApi("/scene_prompt/runs/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId || sceneExpandIdForPrompt(apiGraph) }),
+        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId }),
     });
     const data = await readApiJson(response, "Scene Promptの実行準備に失敗しました");
     if (!response.ok || !data?.run_handle) {
@@ -7120,7 +7123,7 @@ function installSceneBatchPromptCapture() {
         }
         const promptId = scenePromptIdFromValue(result);
         if (preparedRunHandle && promptId) {
-            sceneRunHandlesByPromptId.set(promptId, preparedRunHandle);
+            registerQueuedSceneRunHandle(promptId, preparedRunHandle);
         }
         if (matchesFirstBatchPrompt) {
             acceptSceneBatchPrompt(run, result);
@@ -7138,6 +7141,15 @@ function acceptSceneBatchPrompt(run, result) {
     run.promptAccepted = true;
     run.currentPromptId = promptId;
     run.pendingPromptIds.add(promptId);
+    scheduleActiveSceneBatchReconcile(run);
+    if (run.runHandle && !run.runClaimed) {
+        run.runClaimed = true;
+        run.runClaimPromise = claimSceneRunHandle(run.runHandle, promptId).catch((error) => {
+            run.runClaimed = false;
+            markSceneBatchReleaseBlocked(run, "連続生成の実行状態を開始できませんでした。もう一度実行してください。");
+            console.warn("[Scene Prompt] 実行コンテキストの開始に失敗しました。", error);
+        });
+    }
     const terminal = sceneBatchTerminalEvents.get(promptId);
     if (terminal) {
         sceneBatchTerminalEvents.delete(promptId);
@@ -7177,17 +7189,138 @@ function rememberSceneBatchTerminalEvent(type, detail) {
 
 function releaseSceneBatchPlan(runId) {
     const key = String(runId || "");
-    releaseSceneRunHandle(sceneBatchRunsById.get(key)?.runHandle || sceneBatchDetachedRuns.get(key)?.runHandle);
+    const run = sceneBatchRunsById.get(key) || sceneBatchDetachedRuns.get(key);
+    if (!run || run.releaseRequested) {
+        return;
+    }
+    run.releaseRequested = true;
+    const release = () => releaseSceneRunHandle(run.runHandle);
+    if (run.runClaimPromise) {
+        run.runClaimPromise.finally(release);
+    } else {
+        release();
+    }
+}
+
+function pruneSceneRunTerminalPromptIds(now = Date.now()) {
+    for (const [promptId, completedAt] of sceneRunTerminalPromptIds.entries()) {
+        if (now - completedAt >= SCENE_RUN_TERMINAL_RETENTION_MS) {
+            sceneRunTerminalPromptIds.delete(promptId);
+        }
+    }
+    while (sceneRunTerminalPromptIds.size > SCENE_RUN_TERMINAL_MAX) {
+        sceneRunTerminalPromptIds.delete(sceneRunTerminalPromptIds.keys().next().value);
+        sceneRunTerminalOverflowUntil = Math.max(
+            sceneRunTerminalOverflowUntil,
+            now + SCENE_RUN_TERMINAL_RETENTION_MS,
+        );
+    }
+    if (sceneRunTerminalOverflowUntil <= now) {
+        sceneRunTerminalOverflowUntil = 0;
+    }
+}
+
+function rememberSceneRunTerminalPromptId(promptId, now = Date.now()) {
+    const key = String(promptId || "");
+    if (!key) {
+        return;
+    }
+    sceneRunTerminalPromptIds.delete(key);
+    sceneRunTerminalPromptIds.set(key, now);
+    pruneSceneRunTerminalPromptIds(now);
+}
+
+function consumeSceneRunTerminalPromptId(promptId, now = Date.now()) {
+    pruneSceneRunTerminalPromptIds(now);
+    const key = String(promptId || "");
+    const found = sceneRunTerminalPromptIds.has(key);
+    sceneRunTerminalPromptIds.delete(key);
+    return found;
+}
+
+function clearQueuedSceneRunReconcile(promptId) {
+    const timer = sceneRunHandleReconcileTimers.get(promptId);
+    if (timer) {
+        clearTimeout(timer);
+    }
+    sceneRunHandleReconcileTimers.delete(promptId);
+}
+
+async function reconcileQueuedSceneRunHandle(promptId, runHandle, attempt = 0) {
+    if (sceneRunHandlesByPromptId.get(promptId) !== runHandle) {
+        clearQueuedSceneRunReconcile(promptId);
+        return;
+    }
+    try {
+        const response = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
+        const history = await readApiJson(response, "Scene Promptの実行状態を確認できませんでした");
+        if (
+            response.ok
+            && sceneHistoryStatus(history, promptId)
+            && sceneRunHandlesByPromptId.get(promptId) === runHandle
+        ) {
+            sceneRunHandlesByPromptId.delete(promptId);
+            clearQueuedSceneRunReconcile(promptId);
+            releaseSceneRunHandle(runHandle);
+            return;
+        }
+    } catch (error) {
+        console.warn("[Scene Prompt] 生成計画の完了確認に失敗しました。", error);
+    }
+    if (attempt >= 5 || sceneRunHandlesByPromptId.get(promptId) !== runHandle) {
+        clearQueuedSceneRunReconcile(promptId);
+        return;
+    }
+    const timer = setTimeout(() => {
+        sceneRunHandleReconcileTimers.delete(promptId);
+        reconcileQueuedSceneRunHandle(promptId, runHandle, attempt + 1);
+    }, 10 * 1000);
+    sceneRunHandleReconcileTimers.set(promptId, timer);
 }
 
 function releaseCompletedSceneRun(detail) {
     const promptId = scenePromptIdFromValue(detail);
     const runHandle = promptId ? sceneRunHandlesByPromptId.get(promptId) : "";
     if (!runHandle) {
+        rememberSceneRunTerminalPromptId(promptId);
         return;
     }
     sceneRunHandlesByPromptId.delete(promptId);
+    sceneRunTerminalPromptIds.delete(promptId);
+    clearQueuedSceneRunReconcile(promptId);
     releaseSceneRunHandle(runHandle);
+}
+
+async function claimSceneRunHandle(runHandle, promptId) {
+    const response = await api.fetchApi("/scene_prompt/runs/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_handle: runHandle, prompt_id: promptId }),
+    });
+    const data = await readApiJson(response, "Scene Promptの実行開始に失敗しました");
+    if (!response.ok || !data?.claimed) {
+        throw new Error(data?.error || "Scene Promptの実行開始に失敗しました");
+    }
+}
+
+function registerQueuedSceneRunHandle(promptId, runHandle) {
+    const key = String(promptId || "");
+    if (!key || !runHandle) {
+        return;
+    }
+    claimSceneRunHandle(runHandle, key).then(() => {
+        if (consumeSceneRunTerminalPromptId(key)) {
+            releaseSceneRunHandle(runHandle);
+            return;
+        }
+        sceneRunHandlesByPromptId.set(key, runHandle);
+        if (sceneRunTerminalOverflowUntil > Date.now()) {
+            reconcileQueuedSceneRunHandle(key, runHandle);
+        }
+    }).catch((error) => {
+        releaseSceneRunHandle(runHandle);
+        console.warn("[Scene Prompt] 実行コンテキストの開始に失敗しました。", error);
+    });
 }
 
 function releaseSceneRunHandle(runHandle) {
@@ -7260,6 +7393,22 @@ function releaseDetachedSceneBatchRun(run, promptId) {
     activateNextSceneBatchRun();
 }
 
+function scheduleDetachedSceneBatchReconcile(run, delay = SCENE_DETACHED_RETRY_MS) {
+    if (!run?.runId || run.detachedReleased || run.detachedTimer) {
+        return;
+    }
+    const retryCount = Number(run.detachedRetryCount || 0);
+    // Keep checking safely after the counter saturates; a queued prompt must
+    // never be released only because its node disappeared or retries elapsed.
+    run.detachedRetryCount = Math.min(retryCount + 1, SCENE_DETACHED_MAX_RETRIES);
+    run.detachedTimer = setTimeout(() => {
+        run.detachedTimer = null;
+        if (sceneBatchDetachedRuns.get(run.runId) === run) {
+            reconcileDetachedSceneBatchRun(run);
+        }
+    }, delay);
+}
+
 async function reconcileDetachedSceneBatchRun(run) {
     if (!run?.runId || run.reconciling) {
         return false;
@@ -7269,6 +7418,7 @@ async function reconcileDetachedSceneBatchRun(run) {
         return false;
     }
     run.reconciling = true;
+    let released = false;
     try {
         const historyResponse = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
         const history = await readApiJson(historyResponse, "連続生成の状態を確認できませんでした");
@@ -7278,6 +7428,7 @@ async function reconcileDetachedSceneBatchRun(run) {
         const hasHistory = sceneQueueContainsPrompt(history, promptId);
         if (hasHistory) {
             releaseDetachedSceneBatchRun(run, promptId);
+            released = true;
             return true;
         }
         const queueResponse = await api.fetchApi("/queue");
@@ -7287,6 +7438,7 @@ async function reconcileDetachedSceneBatchRun(run) {
         }
         if (!sceneQueueContainsPrompt(queue, promptId)) {
             releaseDetachedSceneBatchRun(run, promptId);
+            released = true;
             return true;
         }
         markSceneBatchReleaseBlocked(run, "前の連続生成はまだ実行待ちです。終了後にもう一度確認してください。");
@@ -7297,6 +7449,9 @@ async function reconcileDetachedSceneBatchRun(run) {
         return false;
     } finally {
         run.reconciling = false;
+        if (!released && sceneBatchDetachedRuns.get(run.runId) === run) {
+            scheduleDetachedSceneBatchReconcile(run);
+        }
     }
 }
 
@@ -7318,6 +7473,71 @@ function rememberPendingSceneBatchRelease(promptId, runId) {
     sceneBatchPendingReleases.set(promptId, entry);
 }
 
+function scheduleActiveSceneBatchReconcile(run) {
+    if (!run?.currentPromptId || run.activeReconcileTimer) {
+        return;
+    }
+    run.activeReconcileTimer = setTimeout(() => {
+        run.activeReconcileTimer = null;
+        reconcileActiveSceneBatchRun(run);
+    }, 90 * 1000);
+}
+
+async function reconcileActiveSceneBatchRun(run) {
+    if (sceneBatchRun !== run || !run?.waiting || run.reconciling) {
+        return;
+    }
+    const promptId = String(run.currentPromptId || "");
+    if (!promptId) {
+        return;
+    }
+    run.reconciling = true;
+    try {
+        const historyResponse = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
+        const history = await readApiJson(historyResponse, "連続生成の状態を確認できませんでした");
+        if (!historyResponse.ok) {
+            throw new Error(history.error || "連続生成の状態を確認できませんでした");
+        }
+        const historyStatus = sceneHistoryStatus(history, promptId);
+        if (historyStatus === "success") {
+            continueSceneBatchRun({ prompt_id: promptId });
+            return;
+        }
+        if (historyStatus === "error") {
+            failSceneBatchRun({ prompt_id: promptId });
+            return;
+        }
+        const queueResponse = await api.fetchApi("/queue");
+        const queue = await readApiJson(queueResponse, "連続生成の状態を確認できませんでした");
+        if (!queueResponse.ok) {
+            throw new Error(queue.error || "連続生成の状態を確認できませんでした");
+        }
+        if (!sceneQueueContainsPrompt(queue, promptId)) {
+            failSceneBatchRun({ prompt_id: promptId });
+            return;
+        }
+    } catch (error) {
+        console.warn("[Scene Prompt] 連続生成の再照合に失敗しました。", error);
+    } finally {
+        run.reconciling = false;
+        if (sceneBatchRun === run && run.waiting) {
+            scheduleActiveSceneBatchReconcile(run);
+        }
+    }
+}
+
+function sceneHistoryStatus(history, promptId) {
+    const entry = history?.[String(promptId)];
+    const status = String(entry?.status?.status_str || "").toLowerCase();
+    if (status === "success" || entry?.status?.completed === true) {
+        return "success";
+    }
+    if (status === "error" || entry?.status?.completed === false) {
+        return "error";
+    }
+    return "";
+}
+
 function rememberDetachedSceneBatchRun(run) {
     if (!run?.runId) {
         return;
@@ -7326,11 +7546,8 @@ function rememberDetachedSceneBatchRun(run) {
         clearTimeout(run.detachedTimer);
     }
     sceneBatchDetachedRuns.set(run.runId, run);
-    run.detachedTimer = setTimeout(() => {
-        if (sceneBatchDetachedRuns.get(run.runId) === run) {
-            reconcileDetachedSceneBatchRun(run);
-        }
-    }, 5 * 60 * 1000);
+    run.detachedRetryCount = 0;
+    scheduleDetachedSceneBatchReconcile(run);
 }
 
 function clearDetachedSceneBatchRun(run) {
@@ -7342,8 +7559,9 @@ function clearDetachedSceneBatchRun(run) {
         clearTimeout(run.detachedTimer);
         run.detachedTimer = null;
     }
+    run.detachedRetryCount = 0;
     if (run.controlsResetPending) {
-        const node = sceneNodeById(run.nodeId);
+        const node = sceneNodeForRun(run);
         if (String(findSceneWidget(node, "run_id")?.value || "") === run.runId) {
             resetSceneExpandRunControls(node, { mark: false });
             updateSceneExpandButton(node);
@@ -7424,6 +7642,10 @@ function stopSceneBatchRun(options = {}) {
         clearTimeout(run.nextTimer);
         run.nextTimer = null;
     }
+    if (run?.activeReconcileTimer) {
+        clearTimeout(run.activeReconcileTimer);
+        run.activeReconcileTimer = null;
+    }
     const previousNode = sceneNodeForRun(run);
     if (run?.preparing) {
         cancelSceneBatchRunPreparation(run);
@@ -7459,12 +7681,25 @@ function cancelSceneBatchRunForNode(node) {
     if (!run) {
         return;
     }
+    run.nodeRemoved = true;
     if (sceneBatchRun === run) {
         stopSceneBatchRun();
         return;
     }
     if (sceneBatchPendingRuns.includes(run)) {
         cancelPendingSceneBatchRun(run);
+        return;
+    }
+    if (sceneBatchDetachedRuns.get(run.runId) === run) {
+        if (run.detachedTimer) {
+            clearTimeout(run.detachedTimer);
+            run.detachedTimer = null;
+        }
+        if (run.currentPromptId) {
+            reconcileDetachedSceneBatchRun(run);
+        } else {
+            releaseDetachedSceneBatchRun(run, "");
+        }
     }
 }
 
@@ -7555,6 +7790,7 @@ function activateNextSceneBatchRun() {
     for (const pending of sceneBatchPendingRuns) {
         refreshSceneBatchRunNode(pending, { graphChange: false, background: false });
     }
+    prepareSceneBatchRunSnapshot(nextRun, sceneNodeForRun(nextRun));
     queueNextSceneBatchItem();
 }
 
@@ -7565,6 +7801,8 @@ function createSceneBatchRun(node, total) {
     }
     const run = {
         nodeId: node.id,
+        node,
+        graph: node.graph || app.graph,
         total,
         totalImages: null,
         nextIndex: 0,
@@ -7576,6 +7814,8 @@ function createSceneBatchRun(node, total) {
         pendingPromptIds: new Set(),
         currentSeed: sceneBatchSeedBase(),
         firstPromptSnapshot: null,
+        promptCapturePromise: null,
+        promptCaptureError: null,
         snapshotPromise: null,
         snapshotReady: false,
         snapshotError: null,
@@ -7587,6 +7827,10 @@ function createSceneBatchRun(node, total) {
     setWidgetValue(node, "current_index", 0, { silent: true });
     setWidgetValue(node, "run_id", run.runId, { silent: true });
     setWidgetValue(node, "seed_base", run.currentSeed, { silent: true });
+    run.promptCapturePromise = createSceneBatchPromptSnapshot(node.id).catch((error) => {
+        run.promptCaptureError = error;
+        return null;
+    });
     sceneBatchRunsById.set(run.runId, run);
     updateSceneExpandButton(node);
     return run;
@@ -7598,7 +7842,13 @@ function prepareSceneBatchRunSnapshot(run, node) {
     }
     run.snapshotPromise = (async () => {
         try {
-            run.firstPromptSnapshot = await createSceneBatchPromptSnapshot(node.id);
+            run.firstPromptSnapshot = await run.promptCapturePromise;
+            if (run.promptCaptureError) {
+                throw run.promptCaptureError;
+            }
+            if (!run.firstPromptSnapshot) {
+                throw new Error("Scene Prompt Expand のプロンプトを取得できませんでした。");
+            }
             if (run.cancelled) {
                 return null;
             }
@@ -7648,6 +7898,10 @@ function prepareSceneBatchRunSnapshot(run, node) {
 async function queueNextSceneBatchItem() {
     const run = sceneBatchRun;
     if (!run || run.queueing || run.waiting) {
+        return;
+    }
+    if (run.releaseBlocked) {
+        stopSceneBatchRun({ forceRelease: true });
         return;
     }
 
@@ -7746,7 +8000,6 @@ function startSceneBatchRun(node) {
         for (const pending of sceneBatchPendingRuns) {
             refreshSceneBatchRunNode(pending, { graphChange: false, background: false });
         }
-        prepareSceneBatchRunSnapshot(run, node);
         return;
     }
 
@@ -7765,7 +8018,15 @@ function continueSceneBatchRun(detail = null) {
     if (!sceneBatchEventMatchesRun(run, detail)) {
         return;
     }
+    if (run.releaseBlocked) {
+        failSceneBatchRun(detail);
+        return;
+    }
     const promptId = scenePromptIdFromValue(detail);
+    if (run.activeReconcileTimer) {
+        clearTimeout(run.activeReconcileTimer);
+        run.activeReconcileTimer = null;
+    }
     if (promptId) {
         run.pendingPromptIds.delete(promptId);
         sceneBatchTerminalEvents.delete(promptId);

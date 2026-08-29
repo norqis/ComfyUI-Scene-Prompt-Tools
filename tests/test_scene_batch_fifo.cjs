@@ -55,6 +55,7 @@ const context = {
     sceneNodeForRun() {
         return null;
     },
+    prepareSceneBatchRunSnapshot() {},
     queueNextSceneBatchItem() {
         context.activated.push(context.sceneBatchRun.runId);
     },
@@ -178,7 +179,96 @@ async function testQueuedPrefixesStayWithTheirTabs() {
     assert.equal(context.queuedPrompts[2].output["41"].inputs.prefix, "waiting_b_");
 }
 
+async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
+    const graphA = { name: "A", prompt: { output: { "41": { class_type: "ScenePromptExpand", inputs: { prefix: "tab_a_" } } } } };
+    const graphB = { name: "B", prompt: { output: { "41": { class_type: "ScenePromptExpand", inputs: { prefix: "tab_b_" } } } } };
+    const nodeB = { id: 41, graph: graphB, widgets: [
+        { name: "current_index", value: 0 },
+        { name: "run_id", value: "" },
+        { name: "seed_base", value: 0 },
+    ] };
+    let preparedSnapshot = null;
+    const tabContext = {
+        AbortController,
+        Map,
+        Set,
+        Object,
+        Array,
+        JSON,
+        String,
+        Number,
+        Math,
+        structuredClone,
+        app: {
+            graph: graphB,
+            async graphToPrompt() {
+                return structuredClone(this.graph.prompt);
+            },
+        },
+        sceneBatchRun: { runId: "tab-a" },
+        sceneBatchRunsById: new Map(),
+        sceneBatchDetachedRuns: new Map(),
+        sceneBatchPendingRuns: [],
+        sceneBatchPlanId() { return "captured-plan"; },
+        sceneBatchRunId() { return "run"; },
+        sceneBatchSeedBase() { return 123; },
+        findWidget(node, name) { return node?.widgets?.find((widget) => widget.name === name); },
+        setWidgetValue(node, name, value) {
+            const widget = node.widgets.find((item) => item.name === name);
+            widget.value = value;
+            return true;
+        },
+        updateSceneExpandButton() {},
+        clearSceneSavePreviews() {},
+        refreshSceneBatchRunNode() {},
+        updateSceneExpandCountWidget() {},
+        markScenePresetReferenceErrors() {},
+        scenePresetReferenceIdsForExpand() { return []; },
+        sceneBatchRunStatus() { return "active"; },
+        releaseCancelledSceneBatchRun() {},
+        async resolveScenePresetsForRun(_run, snapshot) {
+            preparedSnapshot = snapshot;
+            return { total_batches: 1, total_images: 1 };
+        },
+        queueNextSceneBatchItem() {},
+    };
+    vm.createContext(tabContext);
+    for (const name of [
+        "apiLink",
+        "cloneScenePromptPayload",
+        "promptDescendantIds",
+        "promptAncestorIds",
+        "sliceSceneBatchPrompt",
+        "createSceneBatchPromptSnapshot",
+        "sceneBatchNodeRunId",
+        "sceneNodeForRun",
+        "createSceneBatchRun",
+        "prepareSceneBatchRunSnapshot",
+        "activateNextSceneBatchRun",
+    ]) {
+        vm.runInContext(functionSource(name), tabContext);
+    }
+
+    const pendingB = tabContext.createSceneBatchRun(nodeB, 1);
+    tabContext.sceneBatchPendingRuns.push(pendingB);
+    assert.equal(preparedSnapshot, null, "pending click does not prepare a server run context");
+
+    tabContext.app.graph = graphA;
+    tabContext.activateNextSceneBatchRun();
+    assert.equal(tabContext.sceneBatchRun.runId, "tab-a");
+
+    tabContext.sceneBatchRun = null;
+    tabContext.activateNextSceneBatchRun();
+    await pendingB.snapshotPromise;
+
+    assert.equal(pendingB.snapshotError, null, pendingB.snapshotError?.stack);
+    assert.equal(tabContext.sceneBatchRun, pendingB);
+    assert.equal(tabContext.sceneNodeForRun(pendingB), nodeB);
+    assert.equal(preparedSnapshot.output["41"].inputs.prefix, "tab_b_");
+}
+
 testQueuedPrefixesStayWithTheirTabs()
+    .then(testHiddenPendingTabUsesItsCapturedGraphWhenActivated)
     .then(testScenePresetResolution)
     .then(testSelectedExpandBranchOnlyQueues)
     .then(testCancelledPresetResolutionReleasesOnce)
@@ -359,6 +449,8 @@ async function testPresetResolutionKeepsClickFifo() {
         activated: [],
         clearSceneSavePreviews() {},
         refreshSceneBatchRunNode() {},
+        sceneNodeForRun() { return null; },
+        prepareSceneBatchRunSnapshot() {},
         queueNextSceneBatchItem() {
             fifoContext.activated.push(fifoContext.sceneBatchRun.runId);
         },

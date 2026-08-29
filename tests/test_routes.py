@@ -185,6 +185,254 @@ class PromptDataRouteTests(unittest.TestCase):
         with self.assertRaises(runs.SceneRunError):
             runs.require_run_context(handle)
 
+    def test_prepare_projects_selected_items_and_claim_is_owner_bound(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        path = self.routes._data_dir("alice") / "Style" / "prompt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([
+            {"id": "used", "label": "Used", "prompt": "used"},
+            {"id": "nested", "label": "Nested", "prompt": "nested"},
+            {"id": "unused", "label": "Unused", "prompt": "unused"},
+        ]), encoding="utf-8")
+        selected = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "used", "label": "Used", "prompt": "used",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {"positive_json": selected}}}}
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        claim = self.routes._test_routes[("POST", "/scene_prompt/runs/claim")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+        handle = asyncio.run(prepare(Request("alice", {"api_graph": graph})))["payload"]["run_handle"]
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        projected = runs.require_run_context(handle)["prompt_data_index"]
+        self.assertEqual(set(projected["by_id"]), {("Style", "used")})
+        nested = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "nested", "label": "Nested", "prompt": "nested",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        projected = self.routes.project_prompt_data_index(
+            graph,
+            self.routes._prompt_data_index("alice"),
+            {"preset": {"api_graph": {"output": {"2": {"inputs": {"negative_json": nested}}}}}},
+        )
+        self.assertEqual(set(projected["by_id"]), {("Style", "used"), ("Style", "nested")})
+        self.assertFalse(asyncio.run(claim(Request("bob", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
+        self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
+        self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
+        self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
+
+    def test_prepare_ignores_stale_selections_outside_selected_expand_branch(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        path = self.routes._data_dir("alice") / "Style" / "prompt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([
+            {"id": "current", "label": "Current", "prompt": "current"},
+        ]), encoding="utf-8")
+        current = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "current", "label": "Current", "prompt": "current",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        stale = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "stale", "label": "Stale", "prompt": "stale",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        scene_inputs = {
+            "prompt_name": "Current branch",
+            "positive_base": "",
+            "positive_json": current,
+            "negative_base": "",
+            "negative_json": "{\"version\":1,\"categories\":{}}",
+            "category_order": "",
+            "seed": 0,
+            "randomize": True,
+        }
+        graph = {"output": {
+            "1": {"class_type": "ScenePrompt", "inputs": scene_inputs},
+            "2": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+            "3": {"class_type": "ScenePrompt", "inputs": {"positive_json": stale}},
+            "4": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["3", 0]}},
+        }}
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+
+        response = asyncio.run(prepare(Request("alice", {
+            "api_graph": graph,
+            "expand_node_id": "2",
+        })))
+
+        self.assertEqual(response["status"], 200, response["payload"])
+        handle = response["payload"]["run_handle"]
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        projected = runs.require_run_context(handle)["prompt_data_index"]
+        self.assertEqual(set(projected["by_id"]), {("Style", "current")})
+        self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
+
+    def test_unlinked_expand_ignores_disconnected_stale_selections(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        stale = json.dumps({"version": 1, "categories": {"Style": [{
+            "id": "stale", "label": "Stale", "prompt": "stale",
+            "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
+        }]}})
+        graph = {"output": {
+            "1": {"class_type": "ScenePrompt", "inputs": {"positive_json": stale}},
+            "2": {"class_type": "ScenePromptExpand", "inputs": {}},
+            "3": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+        }}
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+
+        response = asyncio.run(prepare(Request("alice", {
+            "api_graph": graph,
+            "expand_node_id": "2",
+        })))
+
+        self.assertEqual(response["status"], 200, response["payload"])
+        handle = response["payload"]["run_handle"]
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        self.assertEqual(runs.require_run_context(handle)["prompt_data_index"], {"by_key": {}, "by_id": {}})
+        self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
+
+    def test_explicit_expand_rejects_missing_wrong_and_invalid_upstream_nodes(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        index = {"by_key": {}, "by_id": {}}
+        self.assertRaisesRegex(
+            ValueError,
+            "Scene Prompt Expand #missing が見つかりません。",
+            self.routes.project_prompt_data_index,
+            {"output": {}}, index, None, "missing",
+        )
+        self.assertRaisesRegex(
+            ValueError,
+            "#1 は Scene Prompt Expand ではありません。",
+            self.routes.project_prompt_data_index,
+            {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}, index, None, "1",
+        )
+        self.assertRaisesRegex(
+            ValueError,
+            "Sceneノード #missing が見つかりません。",
+            self.routes.project_prompt_data_index,
+            {"output": {"1": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["missing", 0]}}}},
+            index, None, "1",
+        )
+        self.assertRaisesRegex(
+            ValueError,
+            "生成グラフのScene接続が循環しています: #1",
+            self.routes.project_prompt_data_index,
+            {"output": {
+                "1": {"class_type": "ScenePrompt", "inputs": {"scene_prompt": ["2", 0]}},
+                "2": {"class_type": "ScenePrompt", "inputs": {"scene_prompt": ["1", 0]}},
+                "3": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+            }},
+            index, None, "3",
+        )
+        self.assertEqual(
+            self.routes.project_prompt_data_index(
+                {"output": {"1": {"class_type": "ScenePromptExpand", "inputs": {
+                    "scene_prompt": ("missing", 0),
+                }}}},
+                index, None, "1",
+            ),
+            {"by_key": {}, "by_id": {}},
+        )
+
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        for expand_node_id, expected in (("missing", "Scene Prompt Expand #missing が見つかりません。"), (
+            "1", "#1 は Scene Prompt Expand ではありません。",
+        )):
+            with self.subTest(expand_node_id=expand_node_id):
+                graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+                response = asyncio.run(prepare(Request("alice", {
+                    "api_graph": graph,
+                    "expand_node_id": expand_node_id,
+                })))
+                self.assertEqual(response["status"], 400)
+                self.assertEqual(response["payload"]["error"], expected)
+
+    def test_expiration_removes_contexts_and_preset_snapshots_once_and_bounds_caches(self):
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        presets = sys.modules[f"{self.routes.__package__}.presets"]
+        store = runs.RUN_CONTEXTS
+        original = (
+            store.maximum,
+            store.prepared_limit,
+            store.active_limit,
+            store.prepared_ttl_seconds,
+            store._expiration_callback,
+        )
+        released = []
+
+        def release_snapshot(handle, user_id):
+            released.append((handle, user_id))
+            presets.release_scene_preset_snapshot(handle, user_id)
+
+        graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+        handles = []
+        try:
+            store.maximum = 300
+            store.prepared_limit = 300
+            store.active_limit = 300
+            store.prepared_ttl_seconds = 999
+            runs.set_run_expiration_callback(release_snapshot)
+            for index in range(300):
+                user_id = f"user-{index}"
+                handle = runs.create_run_context(user_id, {"by_key": {}, "by_id": {}})
+                presets.snapshot_presets_for_run(handle, graph, user_id=user_id)
+                handles.append((handle, user_id))
+
+            self.assertEqual(len(store._entries), 300)
+            self.assertEqual(len(presets._RUN_SNAPSHOTS), 300)
+            store.prepared_ttl_seconds = 0
+            with self.assertRaisesRegex(runs.SceneRunError, "有効期限"):
+                runs.require_run_context(handles[0][0])
+            self.assertFalse(runs.claim_run_context(handles[1][0], handles[1][1], "late-prompt"))
+            runs.purge_expired_run_contexts()
+
+            self.assertEqual(store._entries, {})
+            self.assertEqual(presets._RUN_SNAPSHOTS, {})
+            self.assertCountEqual(released, handles)
+            self.assertEqual(len(released), len(set(released)))
+            self.assertLessEqual(len(presets._CANCELLED_RUNS), presets._CANCELLED_RUNS_MAX_ENTRIES)
+        finally:
+            store.clear()
+            presets._RUN_SNAPSHOTS.clear()
+            presets._CANCELLED_RUNS.clear()
+            (
+                store.maximum,
+                store.prepared_limit,
+                store.active_limit,
+                store.prepared_ttl_seconds,
+                callback,
+            ) = original
+            runs.set_run_expiration_callback(callback)
+
     def test_stale_threaded_read_cannot_restore_a_cleared_cache(self):
         path = self.routes._data_dir("alice") / "Category" / "prompt.json"
         path.parent.mkdir(parents=True)
