@@ -534,8 +534,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             metadata_mode[0],
             (
                 "ワークフロー全体",
-                "プロンプトのみ",
                 "生成経路ノードのみ",
+                "プロンプトのみ",
             ),
         )
         self.assertEqual(metadata_mode[1]["default"], "ワークフロー全体")
@@ -549,9 +549,40 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             "4": {"class_type": "SceneSaveImage", "inputs": {"images": ["2", 0]}},
             "5": {"class_type": "SceneSaveImage", "inputs": {"images": ["3", 0]}},
         }
+        workflow_nodes = [
+            {
+                "id": node_id,
+                "type": prompt[str(node_id)]["class_type"],
+                "pos": [node_id * 100, node_id * 50],
+                "size": [240, 180],
+                "inputs": ([{"name": "input", "link": link_id}] if link_id is not None else []),
+                "outputs": [{"name": "output", "links": output_links}],
+                "widgets_values": (["selected prompt", "selection-json"] if node_id == 2 else []),
+                "widgets_values_named": ({"selected": "selection-json"} if node_id == 2 else {}),
+                "properties": {"kept": node_id},
+            }
+            for node_id, link_id, output_links in (
+                (1, None, [10, 11]),
+                (2, 10, [12]),
+                (3, 11, [13]),
+                (4, 12, []),
+                (5, 13, []),
+            )
+        ]
         extra_pnginfo = {
             "prompt": {"reserved": "must not override the submitted prompt"},
-            "workflow": {"nodes": [{"id": "4", "pos": [200, 100]}]},
+            "workflow": {
+                "id": "workflow-id",
+                "nodes": workflow_nodes,
+                "links": [
+                    [10, 1, 0, 2, 0, "MODEL"],
+                    [11, 1, 0, 3, 0, "MODEL"],
+                    [12, 2, 0, 4, 0, "IMAGE"],
+                    [13, 3, 0, 5, 0, "IMAGE"],
+                ],
+                "groups": [],
+                "reroutes": [{"id": 99, "pos": [0, 0]}],
+            },
             "custom": {"keep": ["this", "value"]},
         }
         original_prompt = json.loads(json.dumps(prompt))
@@ -589,8 +620,15 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(json.loads(prompt_only["custom"]), extra_pnginfo["custom"])
 
         execution_path = saved["生成経路ノードのみ"]
-        self.assertNotIn("workflow", execution_path)
         self.assertEqual(set(json.loads(execution_path["prompt"])), {"1", "2", "4"})
+        sliced_workflow = json.loads(execution_path["workflow"])
+        self.assertEqual({str(node["id"]) for node in sliced_workflow["nodes"]}, {"1", "2", "4"})
+        self.assertEqual([link[0] for link in sliced_workflow["links"]], [10, 12])
+        self.assertEqual(sliced_workflow["nodes"][0]["outputs"][0]["links"], [10])
+        self.assertEqual(sliced_workflow["nodes"][1]["widgets_values"], ["selected prompt", "selection-json"])
+        self.assertEqual(sliced_workflow["nodes"][1]["widgets_values_named"], {"selected": "selection-json"})
+        self.assertEqual(sliced_workflow["nodes"][1]["pos"], [200, 100])
+        self.assertEqual(sliced_workflow["reroutes"], [])
         self.assertEqual(json.loads(execution_path["custom"]), extra_pnginfo["custom"])
 
         for metadata in saved.values():
@@ -605,7 +643,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {}}}
         extra_pnginfo = {
             "prompt": {"reserved": True},
-            "workflow": {"nodes": []},
+            "workflow": {"nodes": [{"id": "save", "pos": [1, 2]}], "links": [], "groups": []},
             "Prompt": {"keep": True},
             "Workflow": {"keep": True},
             "custom": {"keep": True},
@@ -616,13 +654,14 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                     prompt, extra_pnginfo, "save", mode
                 )
                 self.assertNotIn("prompt", saved_extra)
-                self.assertNotIn("workflow", saved_extra)
                 self.assertEqual(saved_extra["Prompt"], {"keep": True})
                 self.assertEqual(saved_extra["Workflow"], {"keep": True})
                 self.assertEqual(saved_extra["custom"], {"keep": True})
                 if mode == self.nodes.SAVE_METADATA_PROMPT_ONLY:
+                    self.assertNotIn("workflow", saved_extra)
                     self.assertIsNone(saved_prompt)
                 else:
+                    self.assertIn("workflow", saved_extra)
                     self.assertEqual(saved_prompt, prompt)
 
     def test_full_metadata_reuses_inputs_without_mutating_them(self):
@@ -732,7 +771,9 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         )
         for old_name, current_name in legacy_aliases.items():
             with self.subTest(old_name=old_name):
-                self.assertIs(package.NODE_CLASS_MAPPINGS[old_name], package.NODE_CLASS_MAPPINGS[current_name])
+                self.assertIsNot(package.NODE_CLASS_MAPPINGS[old_name], package.NODE_CLASS_MAPPINGS[current_name])
+                self.assertTrue(issubclass(package.NODE_CLASS_MAPPINGS[old_name], package.NODE_CLASS_MAPPINGS[current_name]))
+                self.assertTrue(package.NODE_CLASS_MAPPINGS[old_name].DEPRECATED)
                 self.assertNotIn(old_name, package.NODE_DISPLAY_NAME_MAPPINGS)
         for node_name, node_class in package.NODE_CLASS_MAPPINGS.items():
             with self.subTest(node=node_name):
@@ -740,6 +781,11 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 self.assertIsInstance(description, str)
                 self.assertTrue(description.strip())
                 self.assertRegex(description, r"[\u3040-\u30ff\u3400-\u9fff]")
+
+    def test_expand_uses_clear_position_and_seed_labels(self):
+        required = self.nodes.ScenePromptExpand.INPUT_TYPES()["required"]
+        self.assertEqual(required["current_index"][1]["display_name"], "処理位置")
+        self.assertEqual(required["seed_base"][1]["display_name"], "元シード")
 
 
 if __name__ == "__main__":

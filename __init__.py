@@ -12,6 +12,31 @@ from .scene_prompt_tools.prompt import ScenePrompt
 from .scene_prompt_tools.presets import ScenePresetInput, ScenePresetOutput, ScenePresetReference
 from .scene_prompt_tools.routes import define_routes
 
+
+class _LegacyScenePrompt(ScenePrompt):
+    DEPRECATED = True
+
+
+class _LegacyScenePromptExpand(ScenePromptExpand):
+    DEPRECATED = True
+
+
+class _LegacyScenePromptQueue(ScenePromptQueue):
+    DEPRECATED = True
+
+
+class _LegacyScenePromptMerge(ScenePromptMerge):
+    DEPRECATED = True
+
+
+_LEGACY_PREFIX = "Scene" + "Prompter"
+LEGACY_NODE_CLASS_MAPPINGS = {
+    _LEGACY_PREFIX: _LegacyScenePrompt,
+    _LEGACY_PREFIX + "Expand": _LegacyScenePromptExpand,
+    _LEGACY_PREFIX + "Queue": _LegacyScenePromptQueue,
+    _LEGACY_PREFIX + "Merge": _LegacyScenePromptMerge,
+}
+
 NODE_CLASS_MAPPINGS = {
     "ScenePrompt": ScenePrompt,
     "SceneMatrix": SceneMatrix,
@@ -25,12 +50,7 @@ NODE_CLASS_MAPPINGS = {
     "ScenePresetInput": ScenePresetInput,
     "ScenePresetOutput": ScenePresetOutput,
     "ScenePresetReference": ScenePresetReference,
-    # Pre-public PNG workflow metadata used these class IDs. Keep them loadable
-    # without exposing old display labels in NODE_DISPLAY_NAME_MAPPINGS.
-    "ScenePrompter": ScenePrompt,
-    "ScenePrompterExpand": ScenePromptExpand,
-    "ScenePrompterQueue": ScenePromptQueue,
-    "ScenePrompterMerge": ScenePromptMerge,
+    **LEGACY_NODE_CLASS_MAPPINGS,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

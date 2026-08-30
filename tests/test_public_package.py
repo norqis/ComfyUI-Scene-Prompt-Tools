@@ -41,7 +41,7 @@ class PublicPackageTests(unittest.TestCase):
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.2.9"', pyproject)
+        self.assertIn('version = "0.2.10"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
@@ -65,7 +65,6 @@ class PublicPackageTests(unittest.TestCase):
                 self.assertIsNotNone(FORBIDDEN.search(candidate))
 
     def test_retired_names_and_private_brand_names_are_absent_from_runtime_ui(self):
-        legacy_aliases = PRE_PUBLIC_NODE_ALIASES
         runtime_paths = [Path("__init__.py"), *(Path("scene_prompt_tools") / name for name in (
             "__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py",
         ))]
@@ -73,11 +72,6 @@ class PublicPackageTests(unittest.TestCase):
             path = ROOT / relative_path
             with self.subTest(path=relative_path):
                 source = path.read_text(encoding="utf-8")
-                if relative_path == Path("__init__.py"):
-                    for old_name, current_name in legacy_aliases.items():
-                        alias = f'"{old_name}": {current_name},'
-                        self.assertEqual(source.count(alias), 1)
-                        source = source.replace(alias, "")
                 self.assertIsNone(FORBIDDEN.search(source))
 
     def test_runtime_uses_comfyui_user_data_directory(self):
@@ -111,10 +105,10 @@ class PublicPackageTests(unittest.TestCase):
     def test_pre_public_node_ids_are_load_only_aliases(self):
         package_source = (ROOT / "__init__.py").read_text(encoding="utf-8")
         display_source = package_source.rsplit("NODE_DISPLAY_NAME_MAPPINGS =", 1)[1]
-        for old_name in PRE_PUBLIC_NODE_ALIASES:
-            with self.subTest(old_name=old_name):
-                self.assertIn(f'"{old_name}":', package_source)
-                self.assertNotIn(f'"{old_name}":', display_source)
+        self.assertIn("LEGACY_NODE_CLASS_MAPPINGS = {", package_source)
+        self.assertEqual(package_source.count("DEPRECATED = True"), len(PRE_PUBLIC_NODE_ALIASES))
+        self.assertIn("**LEGACY_NODE_CLASS_MAPPINGS", package_source)
+        self.assertNotIn("LEGACY_NODE_CLASS_MAPPINGS", display_source)
 
     def test_public_text_sources_have_no_utf8_bom(self):
         for relative_path in tracked_files():

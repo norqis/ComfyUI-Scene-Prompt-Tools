@@ -201,7 +201,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
 
     def test_http_prompt_history_two_outputs_and_metadata_modes(self):
-        for index, mode in enumerate(("ワークフロー全体", "プロンプトのみ", "生成経路ノードのみ"), start=1):
+        for index, mode in enumerate(("ワークフロー全体", "生成経路ノードのみ", "プロンプトのみ"), start=1):
             entry = self._queue_and_wait(_save_graph(mode, f"metadata-{index}"))
             outputs = entry["outputs"]
             self.assertEqual(set(outputs).intersection({"6", "7"}), {"6", "7"})
