@@ -835,7 +835,13 @@ def _replace_link(value, input_id, upstream_link, graph):
     return source.out(output_index)
 
 
-def expand_preset_reference(preset_id, scene_prompt=None, run_handle="", _require_context=False):
+def expand_preset_reference(
+    preset_id,
+    scene_prompt=None,
+    run_handle="",
+    _require_context=False,
+    source_node_id="",
+):
     preset_id = _clean_preset_id(preset_id)
     if _require_context:
         user_id = require_run_context(run_handle)["user_id"]
@@ -881,6 +887,11 @@ def expand_preset_reference(preset_id, scene_prompt=None, run_handle="", _requir
     result = _replace_link(output_link, input_id, scene_prompt, graph)
     if is_link(result) and str(result[0]) == output_id:
         raise ScenePresetError("Scene Preset Outputの接続が不正です。")
+    marker = graph.node("ScenePromptCounter", "__scene_preset_source")
+    marker.set_input("scene_prompt", result)
+    marker.set_input("count", 1)
+    marker.set_input("source_node_id", str(source_node_id or ""))
+    result = marker.out(0)
     return {"result": (result,), "expand": graph.finalize()}
 
 
@@ -939,6 +950,7 @@ class ScenePresetReference:
                 "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "rawLink": True}),
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     @classmethod
@@ -949,5 +961,11 @@ class ScenePresetReference:
         metadata = preset["metadata"]
         return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_handle}"
 
-    def expand(self, preset_id, scene_prompt=None, run_handle=""):
-        return expand_preset_reference(preset_id, scene_prompt, run_handle, _require_context=True)
+    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None):
+        return expand_preset_reference(
+            preset_id,
+            scene_prompt,
+            run_handle,
+            _require_context=True,
+            source_node_id=unique_id,
+        )

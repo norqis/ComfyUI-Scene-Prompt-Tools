@@ -1047,7 +1047,10 @@ class ScenePromptCounter:
                 ),
             },
             "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"})},
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -1059,8 +1062,9 @@ class ScenePromptCounter:
             ]
         )
 
-    def count(self, scene_prompt=None, count=1, unique_id=None):
-        return (with_source_node(multiply_count(scene_prompt, count), unique_id),)
+    def count(self, scene_prompt=None, count=1, unique_id=None, source_node_id=""):
+        plan = with_source_node(multiply_count(scene_prompt, count), unique_id)
+        return (with_source_node(plan, source_node_id),)
 
 
 class SceneEmptyLatent:

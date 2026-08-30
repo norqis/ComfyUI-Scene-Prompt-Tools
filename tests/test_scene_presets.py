@@ -348,13 +348,22 @@ class ScenePresetTests(unittest.TestCase):
         }
         nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
         self.save("expanded", nodes)
-        result = self.module.expand_preset_reference("expanded", ["outer", 0], "")
+        result = self.module.expand_preset_reference(
+            "expanded",
+            ["outer", 0],
+            "",
+            source_node_id="reference_20",
+        )
         self.assertIn("result", result)
         self.assertIn("expand", result)
         queue = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompterQueue")
         self.assertEqual(queue["inputs"]["scene_prompt1"][1], 0)
         prompt = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompter")
         self.assertEqual(prompt["inputs"]["scene_prompt"], ["outer", 0])
+        marker = result["expand"]["__scene_preset_source"]
+        self.assertEqual(marker["class_type"], "ScenePromptCounter")
+        self.assertEqual(marker["inputs"]["source_node_id"], "reference_20")
+        self.assertEqual(result["result"], (["__scene_preset_source", 0],))
 
         source_result = self.module.expand_preset_reference("expanded")
         self.assertTrue(any(value["class_type"] == "ScenePresetInput" for value in source_result["expand"].values()))
