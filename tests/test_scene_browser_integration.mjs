@@ -165,6 +165,7 @@ try {
                     { name: "negative_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
                     { name: "category_order", type: "text", value: "Outfit", options: {} },
                     { name: "seed", type: "number", value: 99, options: {} },
+                    { name: "control_after_generate", type: "combo", value: "randomize", options: {} },
                     { name: "randomize", type: "toggle", value: true, options: {} },
                     { name: "run_handle", type: "text", value: "", options: {} },
                 ];

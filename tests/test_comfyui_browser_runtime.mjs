@@ -79,8 +79,10 @@ try {
         { timeout: 30_000 },
     );
     const result = await page.evaluate(() => {
-        const names = ["filename_enabled", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "randomize"];
-        const values = [true, "positive", '{"version":1,"categories":{"Outfit":[{"id":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"id":"calm","label":"Calm"}]}}', "Outfit", 99, false];
+        const names = ["filename_enabled", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "randomize", "run_handle"];
+        const values = [true, "positive", '{"version":1,"categories":{"Outfit":[{"id":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"id":"calm","label":"Calm"}]}}', "Outfit", 99, false, "new run"];
+        const legacyNames = ["prompt_name", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "control_after_generate", "randomize", "run_handle"];
+        const legacyValues = ["v0.3 name", "v0.3 positive", "v0.3-positive-json", "v0.3 negative", "v0.3-negative-json", "Outfit", 77, "randomize", false, "v0.3 run"];
         const node = window.LiteGraph.createNode("ScenePrompter");
         window.app.graph.add(node);
         const setValue = (name, value) => {
@@ -93,6 +95,15 @@ try {
         const restored = window.LiteGraph.createNode("ScenePrompter");
         window.app.graph.add(restored);
         restored.configure(serialized);
+        const legacy = { widgets_values: [...legacyValues] };
+        const legacyRestored = window.LiteGraph.createNode("ScenePrompter");
+        window.app.graph.add(legacyRestored);
+        legacyRestored.configure(legacy);
+        const legacyAfterFirst = Object.fromEntries(legacyNames.map((name) => {
+            const widget = legacyRestored.widgets.find((candidate) => candidate.name === name);
+            return [name, widget?.value];
+        }));
+        legacyRestored.configure(legacy);
         return {
             top: node.widgets[0]?.name,
             serialized: serialized.widgets_values,
@@ -100,6 +111,13 @@ try {
                 const widget = restored.widgets.find((candidate) => candidate.name === name);
                 return [name, widget?.value];
             })),
+            legacyInput: legacy.widgets_values,
+            legacyAfterFirst,
+            legacy: Object.fromEntries(legacyNames.map((name) => {
+                const widget = legacyRestored.widgets.find((candidate) => candidate.name === name);
+                return [name, widget?.value];
+            })),
+            legacyFilename: legacyRestored.widgets.find((candidate) => candidate.name === "filename_enabled")?.value,
         };
     });
     assert.equal(result.top, "filename_enabled");
@@ -113,7 +131,23 @@ try {
         category_order: "Outfit",
         seed: 99,
         randomize: false,
+        run_handle: "new run",
     });
+    assert.deepEqual(result.legacyInput, ["v0.3 name", "v0.3 positive", "v0.3-positive-json", "v0.3 negative", "v0.3-negative-json", "Outfit", 77, "randomize", false, "v0.3 run"]);
+    assert.deepEqual(result.legacy, {
+        prompt_name: "v0.3 name",
+        positive_base: "v0.3 positive",
+        positive_json: "v0.3-positive-json",
+        negative_base: "v0.3 negative",
+        negative_json: "v0.3-negative-json",
+        category_order: "Outfit",
+        seed: 77,
+        control_after_generate: "randomize",
+        randomize: false,
+        run_handle: "v0.3 run",
+    });
+    assert.deepEqual(result.legacyAfterFirst, result.legacy, "a second configure must not alter v0.3 values");
+    assert.equal(result.legacyFilename, false);
     console.log("real ComfyUI LGraphNode filename widget round-trip passed");
 } finally {
     await browser?.close();

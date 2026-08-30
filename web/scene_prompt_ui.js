@@ -89,6 +89,20 @@ const SCENE_QUEUE_GROUP_COLORS = [
     "#4269ff",
 ];
 const SCENE_COUNT_MAX = 10000;
+const SCENE_PROMPT_V030_WIDGET_VALUE_COUNT = 10;
+const SCENE_PROMPT_SERIALIZED_WIDGET_NAMES = [
+    "prompt_name",
+    "positive_base",
+    "positive_json",
+    "negative_base",
+    "negative_json",
+    "category_order",
+    "seed",
+    "control_after_generate",
+    "randomize",
+    "run_handle",
+    "filename_enabled",
+];
 const PATH_MODE_DIRECTORY = "フォルダに分ける";
 const PATH_MODE_APPEND = "前のフォルダ名に結合";
 const SCENE_WIDGET_LABELS = {
@@ -8667,6 +8681,30 @@ function ensureSceneFilenameToggle(node) {
     }
 }
 
+function scenePromptSerializedWidgetValues(node) {
+    return SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.map((name) => findWidget(node, name)?.value);
+}
+
+function scenePromptStoredWidgetValues(config) {
+    const values = config?.widgets_values;
+    if (!Array.isArray(values)) {
+        return null;
+    }
+    return values.length === SCENE_PROMPT_V030_WIDGET_VALUE_COUNT
+        ? [...values, false]
+        : values.length === SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.length
+            ? values
+            : null;
+}
+
+function scenePromptConfigureValues(config) {
+    const stored = scenePromptStoredWidgetValues(config);
+    if (!stored) {
+        return config;
+    }
+    return { ...config, widgets_values: [stored[stored.length - 1], ...stored.slice(0, -1)] };
+}
+
 function saveMatrixLineFilenameEnabled(node, draft) {
     const state = readMatrixState(node);
     const rowId = String(draft?.row_id || "");
@@ -9530,6 +9568,24 @@ app.registerExtension({
             attachSceneNode(this, nodeData.name);
             return result;
         };
+
+        if (nodeData.name === "ScenePrompter") {
+            const configure = nodeType.prototype.configure;
+            const serialize = nodeType.prototype.serialize;
+            nodeType.prototype.configure = function (...args) {
+                const stored = scenePromptStoredWidgetValues(args[0]);
+                args[0] = scenePromptConfigureValues(args[0]);
+                const result = configure?.apply(this, args);
+                if (stored) {
+                    setWidgetValue(this, "run_handle", stored[9], { silent: true });
+                }
+                return result;
+            };
+            nodeType.prototype.serialize = function (...args) {
+                const serialized = serialize?.apply(this, args);
+                return serialized ? { ...serialized, widgets_values: scenePromptSerializedWidgetValues(this) } : serialized;
+            };
+        }
 
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
