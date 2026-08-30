@@ -6584,7 +6584,19 @@ function sceneExpandCounts(node) {
 
 function sceneExpandCountLabel(node) {
     const { totalBatches, totalImages } = sceneExpandCounts(node);
-    return totalImages === null ? `${totalBatches}回` : formatSceneExpandCounts(totalBatches, totalImages);
+    const totalLabel = totalImages === null ? `${totalBatches}回` : formatSceneExpandCounts(totalBatches, totalImages);
+    const run = sceneBatchRunForNode(node);
+    const status = sceneBatchRunStatus(run);
+    if (status === "idle") {
+        return totalLabel;
+    }
+    if (status === "pending" || run.preparing || !run.snapshotReady) {
+        return `準備中（全${totalLabel}）`;
+    }
+    const completed = Math.min(Math.max(0, Number(run.nextIndex)), totalBatches);
+    return totalImages === null
+        ? `${completed}/${totalBatches}回完了`
+        : `${completed}/${totalBatches}回完了（全${totalImages}枚）`;
 }
 
 function sceneBatchRunId(date = new Date()) {
@@ -7316,6 +7328,7 @@ function acceptSceneBatchPrompt(run, result) {
     run.currentPromptId = promptId;
     run.pendingPromptIds.add(promptId);
     scheduleActiveSceneBatchReconcile(run);
+    refreshSceneBatchRunNode(run, { graphChange: false, background: false });
     if (run.runHandle && !run.runClaimed) {
         run.runClaimed = true;
         run.runClaimPromise = claimSceneRunHandle(run.runHandle, promptId).catch((error) => {
@@ -7992,6 +8005,7 @@ function resetSceneExpandRunControls(node, options = {}) {
     changed = setWidgetValue(node, "current_index", 0, { silent: true }) || changed;
     changed = setWidgetValue(node, "run_id", "", { silent: true }) || changed;
     changed = setWidgetValue(node, "seed_base", 0, { silent: true }) || changed;
+    updateSceneExpandCountWidget(node);
     if (changed && options.mark !== false) {
         markSceneNodeChanged(node, options);
     }
@@ -8002,6 +8016,7 @@ function refreshSceneBatchRunNode(run, options = {}) {
     const node = sceneNodeForRun(run);
     if (node) {
         updateSceneExpandButton(node, options);
+        updateSceneExpandCountWidget(node);
     }
 }
 
@@ -8177,7 +8192,7 @@ async function queueNextSceneBatchItem() {
             const changedRun = setWidgetValue(node, "run_id", run.runId, { silent: true });
             const changedSeed = setWidgetValue(node, "seed_base", run.currentSeed, { silent: true });
             const lightweightDirty = { graphChange: false, background: false };
-            updateSceneExpandButton(node, lightweightDirty);
+            refreshSceneBatchRunNode(run, lightweightDirty);
             if (changedIndex || changedRun || changedSeed) {
                 markSceneNodeChanged(node, lightweightDirty);
             }
@@ -8242,7 +8257,7 @@ function startSceneBatchRun(node) {
 
     if (sceneBatchRun || sceneBatchDetachedRuns.size) {
         sceneBatchPendingRuns.push(run);
-        updateSceneExpandButton(node);
+        refreshSceneBatchRunNode(run);
         for (const pending of sceneBatchPendingRuns) {
             refreshSceneBatchRunNode(pending, { graphChange: false, background: false });
         }
@@ -8254,7 +8269,7 @@ function startSceneBatchRun(node) {
 
     sceneBatchRun = run;
     clearSceneSavePreviews();
-    updateSceneExpandButton(node);
+    refreshSceneBatchRunNode(run);
     prepareSceneBatchRunSnapshot(run, node);
     queueNextSceneBatchItem();
 }
@@ -8286,7 +8301,7 @@ function continueSceneBatchRun(detail = null) {
     run.waiting = false;
     run.nextIndex += 1;
     if (node) {
-        updateSceneExpandButton(node, { graphChange: false, background: false });
+        refreshSceneBatchRunNode(run, { graphChange: false, background: false });
     }
     scheduleNextSceneBatchItem(run);
 }
