@@ -13,13 +13,22 @@ const assets = new Map([
 ]);
 
 const appModule = `
+const graph = {
+  _nodes: [],
+  extra: { original_tab: true },
+  serialize() { return { version: 1, nodes: [], extra: structuredClone(this.extra) }; },
+};
+const loadedGraphs = [];
 export const app = {
-  graph: { _nodes: [] },
+  graph,
   canvas: {},
   registerExtension(extension) { window.__scenePromptExtension = extension; },
   queuePrompt: async () => ({ prompt_id: "browser-test" }),
+  graphToPrompt: async () => ({ output: {} }),
+  async loadGraphData(workflow, ...args) { loadedGraphs.push({ workflow, args }); },
 };
 window.app = app;
+window.__scenePromptLoadedGraphs = loadedGraphs;
 `;
 const apiModule = `
 const listeners = new Map();
@@ -41,6 +50,12 @@ export const api = {
     if (url.includes("/runs/claim")) payload = { claimed: true };
     if (url.includes("/runs/release")) payload = { released: true };
     if (url.includes("saved_prompts")) payload = { saved_prompts: [] };
+    if (url.includes("/scene_presets/list")) payload = { presets: [{ metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 3 } }], errors: [] };
+    if (url.includes("/scene_presets/load")) payload = {
+      metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 3 },
+      workflow: { id: "stored-workflow", version: 1, nodes: [{ id: 1, type: "ScenePresetInput" }], extra: { stored: true } },
+    };
+    if (url.includes("/scene_presets/save")) payload = { metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 4 } };
     return new Response(JSON.stringify(payload), { status: 200 });
   },
   queuePrompt: async () => ({ prompt_id: "browser-prompt" }),
@@ -206,6 +221,92 @@ try {
     assert.ok(selectedState.selectedList.height > 0);
     assert.ok(selectedState.selectedList.drawCount > 0);
     assert.ok(selectedState.selectedList.paintedPixels > 0);
+
+    await page.evaluate(async () => {
+        class ScenePresetReferenceNode {
+            constructor() {
+                this.id = 2;
+                this.type = "ScenePresetReference";
+                this.comfyClass = "ScenePresetReference";
+                this.size = [300, 180];
+                this.inputs = [];
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                this.graph = window.app.graph;
+                this.widgets = [{ name: "preset_id", type: "text", value: "browser-preset", options: {} }];
+                this.widgets_values = ["browser-preset"];
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            addInput(name, type) { this.inputs.push({ name, type, link: null }); }
+            addOutput(name, type) { this.outputs.push({ name, type, links: [] }); }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(ScenePresetReferenceNode, { name: "ScenePresetReference" });
+        const node = new ScenePresetReferenceNode();
+        window.app.graph._nodes.push(node);
+        node.onNodeCreated();
+        const edit = node.widgets.find((widget) => widget.sceneRole === "scene_preset_edit");
+        await Promise.all([edit.callback(), edit.callback()]);
+    });
+    const editor = await page.evaluate(() => ({
+        loads: window.__scenePromptLoadedGraphs,
+        originalGraph: window.app.graph.extra,
+        loadsRequested: window.__scenePromptCalls.filter((call) => call.url.includes("/scene_presets/load")).length,
+    }));
+    assert.equal(editor.loadsRequested, 1);
+    assert.equal(editor.loads.length, 1);
+    assert.deepEqual(editor.loads[0].args, [true, true, "Preset - Browser Preset"]);
+    assert.notEqual(editor.loads[0].workflow.id, "stored-workflow");
+    assert.match(editor.loads[0].workflow.id, /^[0-9a-f-]{36}$/i);
+    assert.deepEqual(editor.loads[0].workflow.extra, {
+        stored: true,
+        scene_preset_editor: { preset_id: "browser-preset", revision: 3 },
+    });
+    assert.deepEqual(editor.originalGraph, { original_tab: true });
+
+    await page.evaluate(async () => {
+        class ScenePresetOutputNode {
+            constructor() {
+                this.id = 3;
+                this.type = "ScenePresetOutput";
+                this.comfyClass = "ScenePresetOutput";
+                this.size = [300, 180];
+                this.inputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }];
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                this.graph = window.app.graph;
+                this.widgets = [
+                    { name: "preset_id", type: "text", value: "browser-preset", options: {} },
+                    { name: "preset_name", type: "text", value: "Browser Preset", options: {} },
+                ];
+                this.widgets_values = this.widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            addInput(name, type) { this.inputs.push({ name, type, link: null }); }
+            addOutput(name, type) { this.outputs.push({ name, type, links: [] }); }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        window.app.graph.extra = { scene_preset_editor: { preset_id: "browser-preset", revision: 3 } };
+        await window.__scenePromptExtension.beforeRegisterNodeDef(ScenePresetOutputNode, { name: "ScenePresetOutput" });
+        const node = new ScenePresetOutputNode();
+        window.app.graph._nodes.push(node);
+        node.onNodeCreated();
+        await node.widgets.find((widget) => widget.sceneRole === "scene_preset_save").callback();
+    });
+    const savedEditor = await page.evaluate(() => {
+        const save = window.__scenePromptCalls.findLast((call) => call.url.includes("/scene_presets/save"));
+        return { request: JSON.parse(save.options.body), editor: window.app.graph.extra.scene_preset_editor };
+    });
+    assert.equal(savedEditor.request.expected_revision, 3);
+    assert.deepEqual(savedEditor.editor, { preset_id: "browser-preset", revision: 4 });
 
     await createPreparedRun(page);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));

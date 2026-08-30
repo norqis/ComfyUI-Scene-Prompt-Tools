@@ -72,6 +72,14 @@ class ScenePresetError(ValueError):
     pass
 
 
+class ScenePresetNotFoundError(ScenePresetError):
+    pass
+
+
+class ScenePresetConflictError(ScenePresetError):
+    pass
+
+
 class ScenePresetResolutionError(ScenePresetError):
     def __init__(self, message, node_id=None):
         super().__init__(message)
@@ -123,7 +131,7 @@ def _read_json(path):
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
     except FileNotFoundError:
-        raise ScenePresetError(f"Presetが見つかりません: {path.stem}") from None
+        raise ScenePresetNotFoundError(f"Presetが見つかりません: {path.stem}") from None
     except json.JSONDecodeError as exc:
         raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
     except OSError as exc:
@@ -223,12 +231,12 @@ def _validate_preset_graph(nodes):
               if isinstance(node, dict) and node.get("class_type") == BOUNDARY_INPUT]
     outputs = [(node_id, node) for node_id, node in nodes.items()
                if isinstance(node, dict) and node.get("class_type") == BOUNDARY_OUTPUT]
-    if len(inputs) > 1:
-        raise ScenePresetError("Scene Preset Input は1個までです。")
+    if len(inputs) != 1:
+        raise ScenePresetError("Scene Preset Input は1個だけ必要です。")
     if len(outputs) != 1:
         raise ScenePresetError("Scene Preset Output は1個だけ必要です。")
 
-    input_id, input_node = inputs[0] if inputs else (None, None)
+    input_id, input_node = inputs[0]
     output_id, output_node = outputs[0]
     if input_node is not None and _node_inputs(input_node):
         raise ScenePresetError(f"{_node_label(input_id, input_node)} に入力を接続しないでください。")
@@ -276,8 +284,12 @@ def _validate_preset_graph(nodes):
         linked = list(_linked_nodes(nodes[node_id]))
         for source_id in reversed(linked):
             stack.append((source_id, False))
+    if str(input_id) not in ancestors:
+        raise ScenePresetError(
+            f"{_node_label(input_id, input_node)} は Scene Preset Output へ接続されていません。"
+        )
     return {
-        "input_id": str(input_id) if input_id is not None else None,
+        "input_id": str(input_id),
         "output_id": str(output_id),
         "output_link": output_link,
     }
@@ -398,6 +410,11 @@ def save_preset(payload, user_id="default"):
     preset_id = _clean_preset_id(payload.get("preset_id"))
     name = str(payload.get("name") or preset_id).strip() or preset_id
     output_node_id = str(payload.get("output_node_id") or "").strip()
+    expected_revision = payload.get("expected_revision")
+    if expected_revision is not None and (
+        type(expected_revision) is not int or expected_revision < 1
+    ):
+        raise ScenePresetError("expected_revision は1以上の整数で指定してください。")
     api_graph = payload.get("api_graph")
     workflow = payload.get("workflow")
     if not isinstance(api_graph, dict) or not isinstance(api_graph.get("output"), dict):
@@ -422,7 +439,11 @@ def save_preset(payload, user_id="default"):
         if path.exists():
             existing = _read_json(path)
             _validate_preset_payload(existing)
+            if expected_revision is not None and existing["metadata"]["revision"] != expected_revision:
+                raise ScenePresetConflictError("Presetは別のタブで更新されています。再度開いてください。")
             revision = existing["metadata"]["revision"] + 1
+        elif expected_revision is not None:
+            raise ScenePresetConflictError("Presetは別のタブで削除されています。再度開いてください。")
         digest = _content_hash(api_graph, workflow)
         saved = {
             "schema_version": PRESET_SCHEMA_VERSION,

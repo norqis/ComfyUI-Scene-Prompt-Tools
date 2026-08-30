@@ -532,6 +532,8 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
     };
     node.graph = context.app.graph;
     vm.createContext(context);
+    vm.runInContext(functionSource("scenePresetEditorRevision"), context);
+    vm.runInContext(functionSource("setScenePresetEditorRevision"), context);
     vm.runInContext(functionSource("saveScenePreset"), context);
     await context.saveScenePreset(node);
     assert.deepEqual(notices, []);

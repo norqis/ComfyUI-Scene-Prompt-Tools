@@ -21,7 +21,7 @@ git clone https://github.com/norqis/ComfyUI-Scene-Prompt-Tools.git
 - **Scene Path** records an output subfolder.
 - **Scene Empty Latent** records image size and batch size.
 - **Scene Prompt Expand** emits one planned batch at a time.
-- **Scene Preset** nodes save and reuse plan fragments.
+- **Scene Preset** nodes save and reuse plan fragments. Each Preset has one Input and one Output; Reference can open the selected Preset in a new editing tab.
 - **Scene Save Image** saves PNGs with the full workflow, only the nodes used for that image, or prompt text only.
 
 `Full workflow` preserves the complete workflow. `Execution path nodes only` keeps the selected Scene branch and the image-generation nodes that produced the file while preserving their canvas layout. `Prompt only` does not include ComfyUI workflow data, so dragging the PNG into ComfyUI will not restore a workflow.

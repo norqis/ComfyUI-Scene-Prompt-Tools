@@ -23,8 +23,11 @@ from .runs import (
     set_run_expiration_callback,
 )
 from .presets import (
+    ScenePresetConflictError,
     ScenePresetError,
+    ScenePresetNotFoundError,
     ScenePresetResolutionError,
+    load_preset,
     list_presets,
     release_scene_preset_snapshot,
     save_preset,
@@ -663,6 +666,8 @@ def define_routes():
             return web.json_response({"metadata": saved["metadata"]})
         except ScenePresetResolutionError as exc:
             return web.json_response({"error": str(exc), "node_id": exc.node_id}, status=400)
+        except ScenePresetConflictError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
         except ScenePresetError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
@@ -676,3 +681,19 @@ def define_routes():
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             return web.json_response({"error": f"Preset一覧を取得できませんでした: {exc}"}, status=500)
+
+    @PromptServer.instance.routes.get("/scene_presets/load")
+    async def scene_presets_load(request):
+        try:
+            preset_id = request.query.get("preset_id")
+            preset = await asyncio.to_thread(load_preset, preset_id, _request_user_id(request))
+            return web.json_response({
+                "metadata": preset["metadata"],
+                "workflow": preset["workflow"],
+            })
+        except ScenePresetNotFoundError as exc:
+            return web.json_response({"error": str(exc)}, status=404)
+        except ScenePresetError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            return web.json_response({"error": f"Presetを読み込めませんでした: {exc}"}, status=500)

@@ -169,6 +169,7 @@ let scenePresetListPromise = null;
 let scenePresetListLatestPromise = null;
 let scenePresetListCacheCurrent = false;
 let scenePresetNotificationTimer = null;
+const SCENE_PRESET_EDITOR_KEY = "scene_preset_editor";
 const sceneRunHandlesByPromptId = new Map();
 const sceneRunTerminalPromptIds = new Map();
 const sceneRunHandleReconcileTimers = new Map();
@@ -8849,6 +8850,36 @@ function selectedScenePreset(node, presets = scenePresetList || []) {
     return presets.find((preset) => String(preset?.preset_id || "") === presetId) || null;
 }
 
+function scenePresetEditorRevision(workflow, presetId) {
+    const editor = workflow?.extra?.[SCENE_PRESET_EDITOR_KEY];
+    if (!editor || String(editor.preset_id || "") !== String(presetId || "")) {
+        return null;
+    }
+    return Number.isInteger(editor.revision) && editor.revision > 0 ? editor.revision : null;
+}
+
+function setScenePresetEditorRevision(graph, metadata) {
+    if (!graph || !metadata?.preset_id || !Number.isInteger(metadata.revision)) {
+        return;
+    }
+    graph.extra = graph.extra && typeof graph.extra === "object" ? graph.extra : {};
+    graph.extra[SCENE_PRESET_EDITOR_KEY] = {
+        preset_id: String(metadata.preset_id),
+        revision: metadata.revision,
+    };
+}
+
+function presetEditorWorkflow(preset) {
+    const workflow = JSON.parse(JSON.stringify(preset.workflow));
+    workflow.id = crypto.randomUUID();
+    workflow.extra = workflow.extra && typeof workflow.extra === "object" ? workflow.extra : {};
+    workflow.extra[SCENE_PRESET_EDITOR_KEY] = {
+        preset_id: String(preset.metadata.preset_id),
+        revision: preset.metadata.revision,
+    };
+    return workflow;
+}
+
 function refreshScenePresetReference(node, presets = scenePresetList || []) {
     const button = findSceneWidget(node, "scene_preset_select");
     if (!button) {
@@ -8922,6 +8953,41 @@ async function openScenePresetPicker(node) {
     popup.appendChild(list);
 }
 
+async function openScenePresetEditor(node) {
+    const presetId = String(findWidget(node, "preset_id")?.value || "").trim();
+    if (!presetId) {
+        showSceneBatchError("編集するPresetを選択してください。");
+        return;
+    }
+    if (node.scenePresetEditorLoading) {
+        return;
+    }
+    node.scenePresetEditorLoading = true;
+    const button = findSceneWidget(node, "scene_preset_edit");
+    if (button) button.disabled = true;
+    try {
+        if (typeof app.loadGraphData !== "function") {
+            throw new Error("Preset編集に必要なComfyUI APIが見つかりません。");
+        }
+        const response = await api.fetchApi(`/scene_presets/load?preset_id=${encodeURIComponent(presetId)}`);
+        const preset = await readApiJson(response, "Presetを読み込めませんでした");
+        if (!response.ok) {
+            throw new Error(preset.error || "Presetを読み込めませんでした");
+        }
+        if (!preset?.metadata?.preset_id || !preset?.workflow || !Number.isInteger(preset.metadata.revision)) {
+            throw new Error("Presetの応答形式が不正です。");
+        }
+        const workflow = presetEditorWorkflow(preset);
+        await app.loadGraphData(workflow, true, true, `Preset - ${preset.metadata.name || preset.metadata.preset_id}`);
+    } catch (error) {
+        showSceneBatchError("Presetを編集用ワークフローとして開けませんでした。", error);
+    } finally {
+        node.scenePresetEditorLoading = false;
+        if (button) button.disabled = false;
+        node.setDirtyCanvas?.(true, true);
+    }
+}
+
 async function saveScenePreset(node) {
     // Preset graphs currently use root-graph node IDs. Do not save a graph we
     // cannot later resolve correctly from a ComfyUI subgraph.
@@ -8942,22 +9008,30 @@ async function saveScenePreset(node) {
         }
         const apiGraph = await graphToPrompt();
         const workflow = app.graph.serialize();
+        const expectedRevision = scenePresetEditorRevision(workflow, presetId);
+        const payload = {
+            preset_id: presetId,
+            name,
+            output_node_id: String(node.id),
+            api_graph: apiGraph,
+            workflow,
+        };
+        if (expectedRevision !== null) {
+            payload.expected_revision = expectedRevision;
+        }
         const response = await api.fetchApi("/scene_presets/save", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                preset_id: presetId,
-                name,
-                output_node_id: String(node.id),
-                api_graph: apiGraph,
-                workflow,
-            }),
+            body: JSON.stringify(payload),
         });
         const data = await readApiJson(response, "Presetの保存に失敗しました");
         if (!response.ok) {
             throw new Error(data.error || "Presetの保存に失敗しました");
         }
         const metadata = data.metadata || {};
+        if (expectedRevision !== null && String(metadata.preset_id || "") === presetId) {
+            setScenePresetEditorRevision(app.graph, metadata);
+        }
         scenePresetList = null;
         try {
             refreshAllScenePresetReferences(await loadScenePresetList(true));
@@ -8988,6 +9062,7 @@ function attachScenePresetReference(node) {
     removeInternalInputSockets(node, { visibleNames: new Set(["scene_prompt"]), removeAllExceptVisible: true });
     hideWidget(findWidget(node, "preset_id"));
     addSceneButton(node, "scene_preset_select", "Presetを選択", () => openScenePresetPicker(node));
+    addSceneButton(node, "scene_preset_edit", "Preset編集", () => openScenePresetEditor(node));
     if (!node.scenePresetSelectionRefreshInstalled) {
         const previousOnSelected = node.onSelected;
         node.onSelected = function (...args) {
