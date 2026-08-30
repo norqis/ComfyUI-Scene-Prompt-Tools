@@ -25,6 +25,12 @@ NODE_CLASS_MAPPINGS = {
     "ScenePresetInput": ScenePresetInput,
     "ScenePresetOutput": ScenePresetOutput,
     "ScenePresetReference": ScenePresetReference,
+    # Pre-public PNG workflow metadata used these class IDs. Keep them loadable
+    # without exposing old display labels in NODE_DISPLAY_NAME_MAPPINGS.
+    "ScenePrompter": ScenePrompt,
+    "ScenePrompterExpand": ScenePromptExpand,
+    "ScenePrompterQueue": ScenePromptQueue,
+    "ScenePrompterMerge": ScenePromptMerge,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

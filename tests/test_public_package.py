@@ -63,13 +63,26 @@ class PublicPackageTests(unittest.TestCase):
             with self.subTest(candidate=candidate):
                 self.assertIsNotNone(FORBIDDEN.search(candidate))
 
-    def test_retired_names_and_private_brand_names_are_absent(self):
-        for relative_path in tracked_files():
+    def test_retired_names_and_private_brand_names_are_absent_from_runtime_ui(self):
+        legacy_aliases = {
+            "ScenePrompter": "ScenePrompt",
+            "ScenePrompterExpand": "ScenePromptExpand",
+            "ScenePrompterQueue": "ScenePromptQueue",
+            "ScenePrompterMerge": "ScenePromptMerge",
+        }
+        runtime_paths = [Path("__init__.py"), *(Path("scene_prompt_tools") / name for name in (
+            "__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py",
+        ))]
+        for relative_path in runtime_paths:
             path = ROOT / relative_path
-            if path.suffix.lower() in {".pyc", ".png", ".jpg", ".jpeg", ".gif", ".zip"}:
-                continue
             with self.subTest(path=relative_path):
-                self.assertIsNone(FORBIDDEN.search(path.read_text(encoding="utf-8")))
+                source = path.read_text(encoding="utf-8")
+                if relative_path == Path("__init__.py"):
+                    for old_name, current_name in legacy_aliases.items():
+                        alias = f'"{old_name}": {current_name},'
+                        self.assertEqual(source.count(alias), 1)
+                        source = source.replace(alias, "")
+                self.assertIsNone(FORBIDDEN.search(source))
 
     def test_runtime_uses_comfyui_user_data_directory(self):
         prompt_source = (ROOT / "scene_prompt_tools" / "prompt.py").read_text(encoding="utf-8")
@@ -87,14 +100,22 @@ class PublicPackageTests(unittest.TestCase):
             with self.subTest(retired_name=retired_name):
                 self.assertNotIn(retired_name, runtime_source)
 
-    def test_old_schema_migration_code_is_absent(self):
+    def test_pre_public_png_compatibility_is_narrow_and_does_not_remap_prompt_data(self):
         runtime_source = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (ROOT / "scene_prompt_tools").glob("*.py")
         )
-        self.assertNotIn("legacy_keys", runtime_source)
+        self.assertIn('SELECTION_ITEM_LEGACY_OPTIONAL_KEYS = {"legacy_keys"}', runtime_source)
         self.assertNotIn("source_shape", runtime_source)
         self.assertNotIn("_migrate", runtime_source)
+
+    def test_pre_public_node_ids_are_load_only_aliases(self):
+        package_source = (ROOT / "__init__.py").read_text(encoding="utf-8")
+        display_source = package_source.rsplit("NODE_DISPLAY_NAME_MAPPINGS =", 1)[1]
+        for old_name in ("ScenePrompter", "ScenePrompterExpand", "ScenePrompterQueue", "ScenePrompterMerge"):
+            with self.subTest(old_name=old_name):
+                self.assertIn(f'"{old_name}":', package_source)
+                self.assertNotIn(f'"{old_name}":', display_source)
 
     def test_public_text_sources_have_no_utf8_bom(self):
         for relative_path in tracked_files():

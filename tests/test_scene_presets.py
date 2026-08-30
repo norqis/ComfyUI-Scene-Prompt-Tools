@@ -511,6 +511,124 @@ class ScenePresetTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.ScenePresetError, "スナップショットがありません"):
             self.module.expand_preset_reference("fixed", ["outer", 0], "race-run")
 
+    def test_cancelled_resolving_run_cannot_be_evicted_and_resurrected(self):
+        self.save("fixed", basic_nodes("first"))
+        api_graph = graph({
+            "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
+            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+        })
+        started = threading.Event()
+        continue_resolve = threading.Event()
+        result = {}
+        original = self.module._resolve_preset_tree
+        original_limit = self.module._CANCELLED_RUNS_MAX_ENTRIES
+
+        def delayed_resolve(*args, **kwargs):
+            started.set()
+            self.assertTrue(continue_resolve.wait(2))
+            return original(*args, **kwargs)
+
+        self.module._resolve_preset_tree = delayed_resolve
+        self.module._CANCELLED_RUNS_MAX_ENTRIES = 1
+        try:
+            def resolve_snapshot():
+                try:
+                    result["value"] = self.module.snapshot_presets_for_run("protected-run", api_graph, "11")
+                except Exception as exc:
+                    result["error"] = exc
+
+            resolver = threading.Thread(target=resolve_snapshot)
+            resolver.start()
+            self.assertTrue(started.wait(2))
+            self.module.release_scene_preset_snapshot("protected-run")
+            self.module.release_scene_preset_snapshot("other-run-1")
+            self.module.release_scene_preset_snapshot("other-run-2")
+            self.assertIn(("default", "protected-run"), self.module._CANCELLED_RUNS)
+            continue_resolve.set()
+            resolver.join(2)
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            self.module._resolve_preset_tree = original
+            self.module._CANCELLED_RUNS_MAX_ENTRIES = original_limit
+        self.assertFalse(resolver.is_alive())
+        self.assertNotIn(("default", "protected-run"), self.module._RUN_SNAPSHOTS)
+        self.assertNotIn("value", result)
+        self.assertIsInstance(result.get("error"), self.module.ScenePresetError)
+
+    def test_preset_reference_limit_counts_sibling_expansions(self):
+        def sized_nodes(positive):
+            nodes = basic_nodes(positive)
+            previous = "2"
+            for index in range(61):
+                node_id = str(10 + index)
+                nodes[node_id] = {
+                    "class_type": "ScenePromptCounter",
+                    "inputs": {"scene_prompt": [previous, 0], "count": 1},
+                }
+                previous = node_id
+            nodes["3"]["inputs"]["scene_prompt"] = [previous, 0]
+            return nodes
+
+        self.save("left", sized_nodes("left"))
+        self.save("right", sized_nodes("right"))
+        api_graph = graph({
+            "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "left"}},
+            "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "right"}},
+            "30": {
+                "class_type": "ScenePromptQueue",
+                "inputs": {"scene_prompt1": ["10", 0], "scene_prompt2": ["20", 0]},
+            },
+            "40": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["30", 0]}},
+        })
+        with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "累積ノード数") as error:
+            self.module.snapshot_presets_for_run("siblings-over-limit", api_graph, "40")
+        self.assertEqual(error.exception.node_id, "20")
+
+    def test_preset_output_link_rejects_boolean_and_float_indexes(self):
+        for name, invalid_index in (("boolean", False), ("float", 0.0)):
+            nodes = basic_nodes()
+            nodes["2"]["inputs"]["scene_prompt"] = ["1", invalid_index]
+            with self.subTest(invalid_index=invalid_index):
+                with self.assertRaisesRegex(self.module.ScenePresetError, "出力0だけ"):
+                    self.save(f"invalid-output-{name}", nodes)
+
+    def test_concurrent_preset_saves_cannot_commit_a_reference_cycle(self):
+        self.save("a", basic_nodes("a"))
+        self.save("b", basic_nodes("b"))
+
+        def nodes_referencing(preset_id):
+            nodes = basic_nodes()
+            nodes["4"] = {
+                "class_type": "ScenePresetReference",
+                "inputs": {"preset_id": preset_id, "scene_prompt": ["1", 0]},
+            }
+            nodes["2"]["inputs"]["scene_prompt"] = ["4", 0]
+            return nodes
+
+        barrier = threading.Barrier(2)
+        results = []
+
+        def save_after_barrier(preset_id, target_id):
+            barrier.wait(2)
+            try:
+                self.save(preset_id, nodes_referencing(target_id))
+                results.append((preset_id, "saved"))
+            except self.module.ScenePresetError:
+                results.append((preset_id, "rejected"))
+
+        workers = [
+            threading.Thread(target=save_after_barrier, args=("a", "b")),
+            threading.Thread(target=save_after_barrier, args=("b", "a")),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(sorted(status for _preset_id, status in results), ["rejected", "saved"])
+
     def test_snapshot_ignores_references_outside_selected_expand_closure(self):
         self.save("reachable", basic_nodes("reachable"))
         api_graph = graph({

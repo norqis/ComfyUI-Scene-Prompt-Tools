@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import json
+import errno
 import sys
 import tempfile
 import threading
@@ -243,6 +244,12 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [invalid]}))
 
+    def test_matrix_backend_rejects_duplicate_row_ids(self):
+        first = _matrix_line("A", row_id="shared")
+        second = _matrix_line("B", row_id="shared")
+        with self.assertRaisesRegex(ValueError, "row_id values must be unique"):
+            self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [first, second]}))
+
     def test_matrix_expands_current_schema_prompt_parts_for_both_sides(self):
         matrix_json = json.dumps({
             "version": 1,
@@ -440,6 +447,66 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(Path(result["result"][1]).name, "00002.png")
         self.assertFalse((target / "00001.png").exists())
 
+    def test_eacces_reservation_collision_uses_next_filename_only_when_claim_exists(self):
+        target = Path(self.temp_dir.name) / "eacces-collision"
+        target.mkdir()
+        claimed = target / "00001.png.scene-save-reservation"
+        claimed.touch()
+        original_open = self.nodes.os.open
+        calls = []
+
+        def eacces_once(path, flags, mode=0o777):
+            calls.append(path)
+            if len(calls) == 1:
+                raise PermissionError(errno.EACCES, "access denied", path)
+            return original_open(path, flags, mode)
+
+        with mock.patch.object(self.nodes.os, "open", side_effect=eacces_once):
+            with self.nodes._FILENAME_RESERVATION_LOCK:
+                output_path, reservation_path, filename, _counter = self.nodes._reserve_output_path(
+                    str(target), "png", 5, 1
+                )
+        self.assertEqual(Path(output_path).name, "00002.png")
+        self.assertEqual(filename, "00002.png")
+        self.nodes._remove_output_reservation(reservation_path)
+
+    def test_eacces_without_reservation_is_not_hidden(self):
+        target = Path(self.temp_dir.name) / "eacces-error"
+        target.mkdir()
+
+        with mock.patch.object(
+            self.nodes.os,
+            "open",
+            side_effect=PermissionError(errno.EACCES, "access denied"),
+        ):
+            with self.nodes._FILENAME_RESERVATION_LOCK:
+                with self.assertRaises(PermissionError):
+                    self.nodes._reserve_output_path(str(target), "png", 5, 1)
+
+    def test_reservation_cleanup_happens_under_the_reservation_lock(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        observed_lock_states = []
+        original_unlink = self.nodes.os.unlink
+
+        def observe_unlink(path, *args, **kwargs):
+            if str(path).endswith(".scene-save-reservation"):
+                observed_lock_states.append(self.nodes._FILENAME_RESERVATION_LOCK.locked())
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(self.nodes.os, "unlink", side_effect=observe_unlink):
+            self.nodes.SceneSaveImage().save_images(
+                [image], "reservation-lock", scene_info={"use_run_dir": False, "file_index": 1}
+            )
+        self.assertEqual(observed_lock_states, [True])
+
+    def test_final_publication_does_not_use_overwriting_replace(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        with mock.patch.object(self.nodes.os, "replace", side_effect=AssertionError("replace must not publish PNGs")):
+            result = self.nodes.SceneSaveImage().save_images(
+                [image], "non-overwriting", scene_info={"use_run_dir": False, "file_index": 1}
+            )
+        self.assertTrue(Path(result["result"][1]).is_file())
+
     def test_competing_final_png_is_not_overwritten_after_reservation(self):
         target = Path(self.temp_dir.name) / "competing"
         target.mkdir()
@@ -624,7 +691,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
     def test_all_registered_scene_nodes_have_japanese_descriptions(self):
         package = _load_node_package(Path(self.temp_dir.name))
 
-        expected_node_names = {
+        current_node_names = {
             "ScenePrompt",
             "SceneMatrix",
             "ScenePath",
@@ -638,7 +705,13 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             "ScenePresetOutput",
             "ScenePresetReference",
         }
-        self.assertSetEqual(set(package.NODE_CLASS_MAPPINGS), expected_node_names)
+        legacy_aliases = {
+            "ScenePrompter": "ScenePrompt",
+            "ScenePrompterExpand": "ScenePromptExpand",
+            "ScenePrompterQueue": "ScenePromptQueue",
+            "ScenePrompterMerge": "ScenePromptMerge",
+        }
+        self.assertSetEqual(set(package.NODE_CLASS_MAPPINGS), current_node_names | set(legacy_aliases))
         self.assertEqual(
             package.NODE_DISPLAY_NAME_MAPPINGS,
             {
@@ -656,6 +729,10 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 "ScenePresetReference": "Scene Preset Reference",
             },
         )
+        for old_name, current_name in legacy_aliases.items():
+            with self.subTest(old_name=old_name):
+                self.assertIs(package.NODE_CLASS_MAPPINGS[old_name], package.NODE_CLASS_MAPPINGS[current_name])
+                self.assertNotIn(old_name, package.NODE_DISPLAY_NAME_MAPPINGS)
         for node_name, node_class in package.NODE_CLASS_MAPPINGS.items():
             with self.subTest(node=node_name):
                 description = getattr(node_class, "DESCRIPTION", "")
