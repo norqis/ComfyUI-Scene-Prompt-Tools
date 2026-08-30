@@ -79,6 +79,7 @@ assert.equal(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old",
 assert.equal(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].filename_enabled, false);
 assert.deepEqual(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].display_label_groups, []);
 assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...oldLine, unknown: true }] }), /unsupported/u);
+assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, sceneScheduleRenderSummaries: true }] }), /unsupported/u);
 assert.equal(serializeSelectionState(createSelectionState()), '{"version":1,"categories":{}}');
 assert.equal(formatSceneExpandCounts(2, 6), "2回 / 6枚");
 assert.throws(() => formatSceneExpandCounts(2, 6.5), /integer/u);

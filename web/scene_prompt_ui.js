@@ -471,9 +471,9 @@ function matrixLineStateWidgetName(side) {
     return `matrix_line_${side}_json`;
 }
 
-function setMatrixLineDraftContext(node, index, draft, side) {
+function setMatrixLineDraftContext(node, index, draft, side, renderRows) {
     const stateWidgetName = matrixLineStateWidgetName(side);
-    node.sceneMatrixLineDraftContext = { index, draft, side, stateWidgetName };
+    node.sceneMatrixLineDraftContext = { index, draft, side, stateWidgetName, renderRows };
     return stateWidgetName;
 }
 
@@ -583,7 +583,7 @@ function writeStateToWidget(node, state, stateWidgetName) {
     const matrixLineContext = matrixLineDraftContextFor(node, widgetName);
     if (matrixLineContext) {
         writeMatrixLineDraftSelectionState(matrixLineContext.draft, matrixLineContext.side, state);
-        matrixLineContext.draft.sceneScheduleRenderSummaries?.();
+        matrixLineContext.renderRows?.();
         return;
     }
     const widget = findWidget(node, widgetName);
@@ -925,7 +925,7 @@ function replaceSelectedPromptItem(node, originalItem, updatedItem, options = {}
             }
         }
         if (draftChanged) {
-            matrixLineContext.draft.sceneScheduleRenderSummaries?.();
+            matrixLineContext.renderRows?.();
         }
     }
 
@@ -2010,7 +2010,7 @@ function appendMatrixLineEditReturn(popup, node, options = {}) {
     row.style.flex = "0 0 auto";
     const edit = createButton("行編集へ戻る");
     edit.addEventListener("click", () => {
-        matrixLineContext.draft.sceneScheduleRenderSummaries?.();
+        matrixLineContext.renderRows?.();
         closePopup();
     });
     row.appendChild(edit);
@@ -8723,8 +8723,7 @@ function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
     if (!draft) {
         return;
     }
-    const stateWidgetName = setMatrixLineDraftContext(node, index, draft, side);
-    draft.sceneScheduleRenderSummaries = renderRows;
+    const stateWidgetName = setMatrixLineDraftContext(node, index, draft, side, renderRows);
     openCategoryLevelPicker(node, [], { stateWidgetName });
 }
 

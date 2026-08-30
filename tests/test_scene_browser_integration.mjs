@@ -273,6 +273,97 @@ try {
     assert.ok(selectedState.selectedList.drawCount > 0);
     assert.ok(selectedState.selectedList.paintedPixels > 0);
 
+    await page.keyboard.press("Escape");
+    await page.evaluate(async () => {
+        const emptySelection = '{"version":1,"categories":{}}';
+        const makeLine = (rowId, name) => ({
+            type: "SCENE_MATRIX_LINE",
+            version: 1,
+            row_id: rowId,
+            node_id: "",
+            category: "",
+            name,
+            path_label: name,
+            enabled: true,
+            filename_enabled: false,
+            positive_base: "",
+            positive_json: emptySelection,
+            negative_base: "",
+            negative_json: emptySelection,
+            category_order: "",
+            positive_parts: [],
+            negative_parts: [],
+            display_labels: [],
+            display_label_groups: [],
+        });
+        class SceneMatrixNode {
+            constructor() {
+                this.id = 4;
+                this.type = "SceneMatrix";
+                this.comfyClass = "SceneMatrix";
+                this.size = [420, 300];
+                this.inputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }];
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                this.graph = window.app.graph;
+                this.widgets = [{
+                    name: "matrix_json",
+                    type: "text",
+                    value: JSON.stringify({ version: 1, sets: [makeLine("line-one", "Line One"), makeLine("line-two", "Line Two")] }),
+                    options: {},
+                }];
+                this.widgets_values = this.widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            addCustomWidget(widget) {
+                widget.triggerDraw = () => { widget.drawCount = (widget.drawCount || 0) + 1; };
+                this.widgets.push(widget);
+                return widget;
+            }
+            addInput(name, type) { this.inputs.push({ name, type, link: null }); }
+            addOutput(name, type) { this.outputs.push({ name, type, links: [] }); }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(SceneMatrixNode, { name: "SceneMatrix" });
+        const node = new SceneMatrixNode();
+        window.app.graph._nodes.push(node);
+        node.onNodeCreated();
+        window.__sceneMatrixTestNode = node;
+        node.widgets.find((widget) => widget.sceneRole === "matrix_rows").callback();
+    });
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
+    await page.getByText("Outfit", { exact: false }).click();
+    await page.getByTitle("summer dress").click();
+    await page.getByRole("button", { name: "行編集へ戻る" }).click();
+    await assert.doesNotReject(async () => page.getByText("Summer", { exact: true }).waitFor({ state: "visible" }));
+
+    await page.getByRole("button", { name: "ネガティブ候補" }).nth(1).click();
+    await page.getByText("Outfit", { exact: false }).click();
+    await page.getByTitle("summer dress").click();
+    await page.getByRole("button", { name: "行編集へ戻る" }).click();
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    const matrixState = await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode;
+        const widget = node.widgets.find((candidateWidget) => candidateWidget.name === "matrix_json");
+        return {
+            state: JSON.parse(widget.value),
+            stored: JSON.parse(node.widgets_values[node.widgets.indexOf(widget)]),
+            property: JSON.parse(node.properties.scene_matrix_json),
+        };
+    });
+    assert.equal(matrixState.state.sets.length, 2);
+    assert.equal(matrixState.state.sets[0].positive_json.includes("summer"), true);
+    assert.equal(matrixState.state.sets[1].negative_json.includes("summer"), true);
+    assert.equal(matrixState.state.sets[0].display_labels.includes("Summer"), true);
+    assert.equal(matrixState.state.sets[1].display_labels.includes("Summer"), true);
+    assert.deepEqual(matrixState.stored, matrixState.state);
+    assert.deepEqual(matrixState.property, matrixState.state);
+    assert.equal(matrixState.state.sets.every((line) => !Object.hasOwn(line, "sceneScheduleRenderSummaries")), true);
+
     await page.evaluate(async () => {
         class ScenePresetReferenceNode {
             constructor() {
