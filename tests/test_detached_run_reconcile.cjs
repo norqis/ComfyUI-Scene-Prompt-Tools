@@ -104,7 +104,7 @@ async function testAbsentFromHistoryAndQueueReleases() {
     assert.deepEqual(context.requests, ["/history/prompt-absent", "/queue"]);
 }
 
-async function testStillQueuedAndFetchFailureRemainBlocked() {
+async function testStillQueuedAndFetchFailureTerminateAfterBoundedRetries() {
     const queued = reconcileContext([response({}), response({ queue_running: [[0, "prompt-queued"]] })]);
     const queuedRun = { runId: "run-queued", currentPromptId: "prompt-queued" };
     queued.sceneBatchDetachedRuns.set(queuedRun.runId, queuedRun);
@@ -118,9 +118,10 @@ async function testStillQueuedAndFetchFailureRemainBlocked() {
     queuedRun.nodeRemoved = true;
     queued.scheduled.length = 0;
     queued.scheduleDetachedSceneBatchReconcile(queuedRun);
-    assert.equal(queued.scheduled.length, 1, "a removed node keeps a safe recovery check after retry saturation");
+    assert.equal(queued.scheduled.length, 0, "retry exhaustion does not schedule another reconciliation");
     assert.equal(queuedRun.detachedRetryCount, 20, "the retry counter remains bounded");
-    assert.deepEqual(queued.released, [], "a still-queued run is never released because its node was removed");
+    assert.deepEqual(queued.released, ["run-queued"], "retry exhaustion releases the detached plan");
+    assert.equal(queued.activated, 1, "retry exhaustion allows the next FIFO entry to start");
 
     const failed = reconcileContext([new Error("offline")]);
     const failedRun = { runId: "run-failed", currentPromptId: "prompt-failed" };
@@ -305,10 +306,12 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
         sceneTitleSyncNodes: new Set([node]),
         sceneLoadedRefreshNodes: new Set([node]),
         sceneDownstreamRefreshSources: new Set([node]),
+        sceneWorkflowLoadDepth: 0,
         activePopupContext: { node },
         closeCalls: 0,
         expandCancels: 0,
         clearSceneFitHeightTimer() {},
+        invalidatePopupRequests() {},
         closeAllPopups() { context.closeCalls += 1; },
         isSceneExpandNodeName(name) { return name === "ScenePromptExpand"; },
         cancelSceneBatchRunForNode() { context.expandCancels += 1; },
@@ -327,15 +330,41 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     assert.equal(context.sceneDownstreamRefreshSources.has(node), false);
 }
 
+function testWorkflowTabLoadDoesNotCancelExpandRun() {
+    const node = { sceneRefreshTimer: 0, onRemoved() {} };
+    const context = {
+        Set,
+        clearTimeout() {},
+        sceneTitleSyncNodes: new Set([node]),
+        sceneLoadedRefreshNodes: new Set([node]),
+        sceneDownstreamRefreshSources: new Set([node]),
+        sceneWorkflowLoadDepth: 1,
+        activePopupContext: null,
+        clearSceneFitHeightTimer() {},
+        invalidatePopupRequests() {},
+        closeAllPopups() {},
+        popupContextReferencesNode() { return false; },
+        isSceneExpandNodeName(name) { return name === "ScenePromptExpand"; },
+        cancellations: 0,
+        cancelSceneBatchRunForNode() { context.cancellations += 1; },
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
+    context.installSceneNodeRemovalCleanup(node, "ScenePromptExpand");
+    node.onRemoved();
+    assert.equal(context.cancellations, 0, "workflow loading must not cancel a queued Expand run");
+}
+
 Promise.resolve()
     .then(testHistoryTerminalReleasesOnceAndResumesFifo)
     .then(testAbsentFromHistoryAndQueueReleases)
-    .then(testStillQueuedAndFetchFailureRemainBlocked)
+    .then(testStillQueuedAndFetchFailureTerminateAfterBoundedRetries)
     .then(testDeletingBlockedDetachedNodeReconcilesAndResumesFifo)
     .then(testMissedTerminalHistoryUsesItsActualStatus)
     .then(testClaimFailureHistoryCompletionUsesRealCleanupPath)
     .then(testNonSceneQueueSkipsRunPreparation)
     .then(testRemovalCleanupRunsOnceAndPreservesPreviousHandler)
+    .then(testWorkflowTabLoadDoesNotCancelExpandRun)
     .then(() => console.log("detached Scene Prompt run reconciliation tests passed"))
     .catch((error) => {
         console.error(error);

@@ -430,6 +430,136 @@ async function testSavedPromptNormalLoadsShareOneInFlightRequest() {
     assert.equal(secondResult[0].label, "shared");
 }
 
+function testLiveWidgetStateWinsOverStaleSerializedValue() {
+    const context = { String, Array };
+    vm.createContext(context);
+    vm.runInContext(functionSource("serializedSelectionStateValue"), context);
+    const widget = { name: "positive_json", value: '{"version":1,"categories":{"Live":[]}}' };
+    const node = { widgets: [widget], widgets_values: ['{"version":1,"categories":{"Stale":[]}}'] };
+    assert.match(context.serializedSelectionStateValue(node, widget, widget.name), /Live/);
+    widget.value = "";
+    assert.match(context.serializedSelectionStateValue(node, widget, widget.name), /Stale/);
+}
+
+function testMatrixEmptyNameFailsBeforePersisting() {
+    const context = { String };
+    vm.createContext(context);
+    vm.runInContext(functionSource("saveMatrixLineDrafts"), context);
+    assert.throws(
+        () => context.saveMatrixLineDrafts({}, [{ name: "", row_id: "row-a" }]),
+        /Matrix 行 1 の名前/,
+    );
+}
+
+async function testWorkflowLoadGuardMarksOnlyLoadWindow() {
+    let resolveLoad;
+    const loading = new Promise((resolve) => { resolveLoad = resolve; });
+    const context = {
+        Math,
+        sceneWorkflowLoadDepth: 0,
+        app: {
+            loadGraphData() {
+                assert.equal(context.sceneWorkflowLoadDepth, 1);
+                return loading;
+            },
+        },
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("installSceneWorkflowLoadGuard"), context);
+    context.installSceneWorkflowLoadGuard();
+    const result = context.app.loadGraphData({});
+    assert.equal(context.sceneWorkflowLoadDepth, 1);
+    resolveLoad("loaded");
+    assert.equal(await result, "loaded");
+    assert.equal(context.sceneWorkflowLoadDepth, 0);
+}
+
+function testPendingFifoRunPreparesPresetSnapshotImmediately() {
+    const active = { runId: "active" };
+    const pending = { runId: "pending" };
+    const node = { id: 2 };
+    const context = {
+        Map,
+        sceneBatchRun: active,
+        sceneBatchDetachedRuns: new Map(),
+        sceneBatchPendingRuns: [],
+        sceneBatchRunForNode() { return null; },
+        sceneBatchRunStatus() { return "idle"; },
+        syncSceneNodeModes() {},
+        syncAllScenePromptNames() {},
+        sceneExpandCounts() { return { totalBatches: 1 }; },
+        createSceneBatchRun() { return pending; },
+        updateSceneExpandButton() {},
+        refreshSceneBatchRunNode() {},
+        prepared: [],
+        prepareSceneBatchRunSnapshot(run, snapshotNode) { context.prepared.push([run, snapshotNode]); },
+        resetSceneExpandRunControls() {},
+        showSceneBatchError(error) { throw error; },
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("startSceneBatchRun"), context);
+    context.startSceneBatchRun(node);
+    assert.deepEqual(context.sceneBatchPendingRuns, [pending]);
+    assert.deepEqual(context.prepared, [[pending, node]]);
+}
+
+async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
+    const node = {
+        graph: null,
+        widgets: [
+            { name: "preset_id", value: "preset-a" },
+            { name: "preset_name", value: "Preset A" },
+        ],
+    };
+    const errors = [];
+    const notices = [];
+    const context = {
+        String,
+        JSON,
+        app: {
+            graph: { serialize() { return { nodes: [] }; } },
+            async graphToPrompt() { return { output: {} }; },
+        },
+        scenePresetList: [],
+        findWidget(target, name) { return target.widgets.find((widget) => widget.name === name); },
+        api: { async fetchApi() { return { ok: true, payload: { metadata: { name: "Preset A", revision: 1 } } }; } },
+        async readApiJson(response) { return response.payload; },
+        async loadScenePresetList() { throw new Error("refresh offline"); },
+        refreshAllScenePresetReferences() { throw new Error("must not refresh stale data"); },
+        showSceneBatchError(message, error) { errors.push([message, error?.message || ""]); },
+        showSceneNotification(message) { notices.push(message); },
+        console: { warn() {} },
+    };
+    node.graph = context.app.graph;
+    vm.createContext(context);
+    vm.runInContext(functionSource("saveScenePreset"), context);
+    await context.saveScenePreset(node);
+    assert.deepEqual(notices, []);
+    assert.deepEqual(errors, [["Presetは保存しましたが、一覧を更新できませんでした。", "refresh offline"]]);
+}
+
+async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange() {
+    let resolveLoad;
+    const pending = new Promise((resolve) => { resolveLoad = resolve; });
+    const graph = {};
+    const node = { graph };
+    const context = {
+        Number,
+        app: { graph },
+        errors: [],
+        showSceneBatchError(message) { context.errors.push(message); },
+    };
+    vm.createContext(context);
+    for (const name of ["beginPopupRequest", "isCurrentPopupRequest", "invalidatePopupRequests", "loadPopupRequest"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    const request = context.loadPopupRequest(node, () => pending, "候補を読み込めませんでした。");
+    context.invalidatePopupRequests(node);
+    resolveLoad(["late response"]);
+    assert.equal(await request, null);
+    assert.deepEqual(context.errors, []);
+}
+
 Promise.resolve()
     .then(testPresetListRaceInNormalResponseOrder)
     .then(testPresetListRaceInReverseResponseOrder)
@@ -449,6 +579,12 @@ Promise.resolve()
     .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)
     .then(testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost)
     .then(testSavedPromptNormalLoadsShareOneInFlightRequest)
+    .then(testLiveWidgetStateWinsOverStaleSerializedValue)
+    .then(testMatrixEmptyNameFailsBeforePersisting)
+    .then(testWorkflowLoadGuardMarksOnlyLoadWindow)
+    .then(testPendingFifoRunPreparesPresetSnapshotImmediately)
+    .then(testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure)
+    .then(testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange)
     .then(() => console.log("Audit regression tests passed."))
     .catch((error) => {
         console.error(error);
