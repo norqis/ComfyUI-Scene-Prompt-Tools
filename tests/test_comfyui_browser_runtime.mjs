@@ -80,9 +80,9 @@ try {
     );
     const result = await page.evaluate(() => {
         const names = ["filename_enabled", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "randomize", "run_handle"];
-        const values = [true, "positive", '{"version":1,"categories":{"Outfit":[{"id":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"id":"calm","label":"Calm"}]}}', "Outfit", 99, false, "new run"];
+        const values = [true, "positive, {A|B}", '{"version":1,"categories":{"Outfit":[{"id":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"id":"calm","label":"Calm"}]}}', "Outfit", 99, false, "new run"];
         const legacyNames = ["prompt_name", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "control_after_generate", "randomize", "run_handle"];
-        const legacyValues = ["v0.3 name", "v0.3 positive", "v0.3-positive-json", "v0.3 negative", "v0.3-negative-json", "Outfit", 77, "randomize", false, "v0.3 run"];
+        const legacyValues = ["v0.3 name", "v0.3 positive, {A|B}", "v0.3-positive-json", "v0.3 negative", "v0.3-negative-json", "Outfit", 77, "randomize", false, "v0.3 run"];
         const node = window.LiteGraph.createNode("ScenePrompter");
         window.app.graph.add(node);
         const setValue = (name, value) => {
@@ -124,7 +124,7 @@ try {
     assert.ok(Array.isArray(result.serialized), "the real LGraphNode must use positional widget values");
     assert.deepEqual(result.values, {
         filename_enabled: true,
-        positive_base: "positive",
+        positive_base: "positive, {A|B}",
         positive_json: '{"version":1,"categories":{"Outfit":[{"id":"summer","label":"Summer"}]}}',
         negative_base: "negative",
         negative_json: '{"version":1,"categories":{"Mood":[{"id":"calm","label":"Calm"}]}}',
@@ -133,10 +133,10 @@ try {
         randomize: false,
         run_handle: "new run",
     });
-    assert.deepEqual(result.legacyInput, ["v0.3 name", "v0.3 positive", "v0.3-positive-json", "v0.3 negative", "v0.3-negative-json", "Outfit", 77, "randomize", false, "v0.3 run"]);
+    assert.deepEqual(result.legacyInput, ["v0.3 name", "v0.3 positive, {A|B}", "v0.3-positive-json", "v0.3 negative", "v0.3-negative-json", "Outfit", 77, "randomize", false, "v0.3 run"]);
     assert.deepEqual(result.legacy, {
         prompt_name: "v0.3 name",
-        positive_base: "v0.3 positive",
+        positive_base: "v0.3 positive, {A|B}",
         positive_json: "v0.3-positive-json",
         negative_base: "v0.3 negative",
         negative_json: "v0.3-negative-json",
@@ -148,7 +148,7 @@ try {
     });
     assert.deepEqual(result.legacyAfterFirst, result.legacy, "a second configure must not alter v0.3 values");
     assert.equal(result.legacyFilename, false);
-    console.log("real ComfyUI LGraphNode filename widget round-trip passed");
+    console.log("real ComfyUI LGraphNode legacy choice widget round-trip passed");
 } finally {
     await browser?.close();
     if (child?.exitCode === null) {

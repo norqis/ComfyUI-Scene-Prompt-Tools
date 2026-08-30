@@ -85,6 +85,22 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         result = self.nodes.ScenePromptExpand().expand(current_index=0, timestamp_dir=False, scene_prompt=plan)
         self.assertEqual(result[0], "alpha")
 
+    def test_randomize_false_choices_expand_with_consecutive_seeds(self):
+        plan = self.prompt.ScenePrompt().build(
+            "A", "{A|B}", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, False,
+        )[0]
+        plan = self.nodes.ScenePromptCounter().count(plan, 2)[0]
+
+        first = self.nodes.ScenePromptExpand().expand(
+            current_index=0, seed_base=4, timestamp_dir=False, scene_prompt=plan,
+        )
+        second = self.nodes.ScenePromptExpand().expand(
+            current_index=1, seed_base=4, timestamp_dir=False, scene_prompt=plan,
+        )
+
+        self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["{A|B}"])
+        self.assertEqual((first[0], second[0]), ("B", "A"))
+
     def test_filename_parts_follow_prompt_matrix_merge_and_queue_order(self):
         prompt = self.prompt.ScenePrompt()
         first = prompt.build(
