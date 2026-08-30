@@ -137,8 +137,18 @@ try {
     assert.equal(result.ownedDisplay, "none");
 
     await page.evaluate(async () => {
-        class ScenePromptNode {
+        class LGraphNode {
+            serialize() { return { widgets_values: structuredClone(this.widgets_values) }; }
+            configure(serialized) {
+                for (const [index, value] of (serialized.widgets_values || []).entries()) {
+                    this.widgets[index].value = structuredClone(value);
+                }
+                this.widgets_values = structuredClone(serialized.widgets_values || []);
+            }
+        }
+        class ScenePromptNode extends LGraphNode {
             constructor() {
+                super();
                 this.id = 1;
                 this.type = "ScenePrompter";
                 this.comfyClass = "ScenePrompter";
@@ -149,12 +159,12 @@ try {
                 this.widgets = [
                     { name: "prompt_name", type: "text", value: "Prompt", options: {} },
                     { name: "filename_enabled", type: "toggle", value: false, options: {} },
-                    { name: "positive_base", type: "text", value: "", options: {} },
+                    { name: "positive_base", type: "text", value: "positive base", options: {} },
                     { name: "positive_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
-                    { name: "negative_base", type: "text", value: "", options: {} },
+                    { name: "negative_base", type: "text", value: "negative base", options: {} },
                     { name: "negative_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
-                    { name: "category_order", type: "text", value: "", options: {} },
-                    { name: "seed", type: "number", value: 0, options: {} },
+                    { name: "category_order", type: "text", value: "Outfit", options: {} },
+                    { name: "seed", type: "number", value: 99, options: {} },
                     { name: "randomize", type: "toggle", value: true, options: {} },
                     { name: "run_handle", type: "text", value: "", options: {} },
                 ];
@@ -179,8 +189,26 @@ try {
         const node = new ScenePromptNode();
         window.app.graph._nodes = [node];
         node.onNodeCreated();
-        if (node.widgets[0].sceneRole !== "filename_enabled_toggle") throw new Error("filename toggle must be first");
-        node.widgets[0].callback();
+        if (node.widgets[0].name !== "filename_enabled" || node.widgets[0].serialize === false) throw new Error("serialized filename toggle must be first");
+        node.widgets[0].value = true;
+        node.widgets_values[0] = true;
+        const saved = node.serialize();
+        const restored = new ScenePromptNode();
+        restored.onNodeCreated();
+        restored.configure(saved);
+        const restoredValues = Object.fromEntries(restored.widgets.map((widget, index) => [widget.name, {
+            value: widget.value,
+            stored: restored.widgets_values[index],
+        }]));
+        for (const [name, expected] of Object.entries(Object.fromEntries(node.widgets.map((widget, index) => [widget.name, {
+            value: widget.value,
+            stored: node.widgets_values[index],
+        }])))) {
+            if (restoredValues[name]?.value !== expected.value || restoredValues[name]?.stored !== expected.stored) {
+                throw new Error(`positional widget restore changed ${name}`);
+            }
+        }
+        window.__scenePromptFilenameRoundTrip = restoredValues;
         window.__scenePromptTestNode = node;
         node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
     });
@@ -201,7 +229,7 @@ try {
                 return {
                     value: widget.value,
                     stored: node.widgets_values[node.widgets.indexOf(widget)],
-                    toggle: node.widgets[0].name,
+                    topWidget: node.widgets[0].name,
                 };
             })(),
             selectedList: (() => {
@@ -230,7 +258,7 @@ try {
     assert.deepEqual(selectedState.stored, selectedState.widget);
     assert.equal(selectedState.filenameEnabled.value, true);
     assert.equal(selectedState.filenameEnabled.stored, true);
-    assert.equal(selectedState.filenameEnabled.toggle, "ファイル名付与: ON");
+    assert.equal(selectedState.filenameEnabled.topWidget, "filename_enabled");
     assert.equal(selectedState.selectedList.value, "1カテゴリ / 1候補");
     assert.ok(selectedState.selectedList.height > 0);
     assert.ok(selectedState.selectedList.drawCount > 0);

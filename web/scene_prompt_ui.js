@@ -8654,23 +8654,17 @@ function ensureSceneFilenameToggle(node) {
     if (!source) {
         return;
     }
-    hideWidget(source);
-    const refresh = () => {
-        const enabled = source.value === true;
-        const toggle = addSceneButton(node, "filename_enabled_toggle", enabled ? "ファイル名付与: ON" : "ファイル名付与: OFF", () => {
-            setWidgetValue(node, "filename_enabled", source.value !== true);
-            refresh();
-        });
-        const index = node.widgets.indexOf(toggle);
-        if (index > 0) {
-            node.widgets.splice(index, 1);
-            node.widgets.unshift(toggle);
-            if (Array.isArray(node.widgets_values)) {
-                node.widgets_values.unshift(undefined);
-            }
+    source.sceneRole = "filename_enabled";
+    showWidget(source);
+    const index = node.widgets.indexOf(source);
+    if (index > 0) {
+        node.widgets.splice(index, 1);
+        node.widgets.unshift(source);
+        if (Array.isArray(node.widgets_values) && index < node.widgets_values.length) {
+            const [storedValue] = node.widgets_values.splice(index, 1);
+            node.widgets_values.unshift(storedValue);
         }
-    };
-    refresh();
+    }
 }
 
 function saveMatrixLineFilenameEnabled(node, draft) {
