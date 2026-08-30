@@ -104,7 +104,7 @@ async function testAbsentFromHistoryAndQueueReleases() {
     assert.deepEqual(context.requests, ["/history/prompt-absent", "/queue"]);
 }
 
-async function testStillQueuedAndFetchFailureTerminateAfterBoundedRetries() {
+async function testStillQueuedAndFetchFailureRemainBlocked() {
     const queued = reconcileContext([response({}), response({ queue_running: [[0, "prompt-queued"]] })]);
     const queuedRun = { runId: "run-queued", currentPromptId: "prompt-queued" };
     queued.sceneBatchDetachedRuns.set(queuedRun.runId, queuedRun);
@@ -118,10 +118,9 @@ async function testStillQueuedAndFetchFailureTerminateAfterBoundedRetries() {
     queuedRun.nodeRemoved = true;
     queued.scheduled.length = 0;
     queued.scheduleDetachedSceneBatchReconcile(queuedRun);
-    assert.equal(queued.scheduled.length, 0, "retry exhaustion does not schedule another reconciliation");
+    assert.equal(queued.scheduled.length, 1, "a removed node keeps a safe recovery check after retry saturation");
     assert.equal(queuedRun.detachedRetryCount, 20, "the retry counter remains bounded");
-    assert.deepEqual(queued.released, ["run-queued"], "retry exhaustion releases the detached plan");
-    assert.equal(queued.activated, 1, "retry exhaustion allows the next FIFO entry to start");
+    assert.deepEqual(queued.released, [], "a still-queued run is never released because its node was removed");
 
     const failed = reconcileContext([new Error("offline")]);
     const failedRun = { runId: "run-failed", currentPromptId: "prompt-failed" };
@@ -358,7 +357,7 @@ function testWorkflowTabLoadDoesNotCancelExpandRun() {
 Promise.resolve()
     .then(testHistoryTerminalReleasesOnceAndResumesFifo)
     .then(testAbsentFromHistoryAndQueueReleases)
-    .then(testStillQueuedAndFetchFailureTerminateAfterBoundedRetries)
+    .then(testStillQueuedAndFetchFailureRemainBlocked)
     .then(testDeletingBlockedDetachedNodeReconcilesAndResumesFifo)
     .then(testMissedTerminalHistoryUsesItsActualStatus)
     .then(testClaimFailureHistoryCompletionUsesRealCleanupPath)

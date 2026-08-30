@@ -7621,12 +7621,10 @@ function scheduleDetachedSceneBatchReconcile(run, delay = SCENE_DETACHED_RETRY_M
         return;
     }
     const retryCount = Number(run.detachedRetryCount || 0);
-    if (retryCount >= SCENE_DETACHED_MAX_RETRIES) {
-        markSceneBatchReleaseBlocked(run, "連続生成の状態を確認できないため、停止処理を完了しました。");
-        releaseDetachedSceneBatchRun(run, String(run.currentPromptId || ""));
-        return;
-    }
-    run.detachedRetryCount = retryCount + 1;
+    // A confirmed or potentially queued prompt must keep its server-side run
+    // context. Retry count is bounded, but uncertainty is never treated as
+    // completion because that would break a legitimate long-running queue.
+    run.detachedRetryCount = Math.min(retryCount + 1, SCENE_DETACHED_MAX_RETRIES);
     run.detachedTimer = setTimeout(() => {
         run.detachedTimer = null;
         if (sceneBatchDetachedRuns.get(run.runId) === run) {
