@@ -12,7 +12,10 @@ SELECTION_ITEM_REQUIRED_KEYS = {
     "label", "prompt", "category_path", "category_key", "category_label",
 }
 SELECTION_ITEM_OPTIONAL_KEYS = {"id", "description", "weight", "selected_parts"}
-SELECTION_ITEM_KNOWN_KEYS = SELECTION_ITEM_REQUIRED_KEYS | SELECTION_ITEM_OPTIONAL_KEYS
+SELECTION_ITEM_LEGACY_OPTIONAL_KEYS = {"legacy_keys"}
+SELECTION_ITEM_KNOWN_KEYS = (
+    SELECTION_ITEM_REQUIRED_KEYS | SELECTION_ITEM_OPTIONAL_KEYS | SELECTION_ITEM_LEGACY_OPTIONAL_KEYS
+)
 SELECTED_PART_REQUIRED_KEYS = {"index", "text"}
 SELECTED_PART_OPTIONAL_KEYS = {"weight"}
 MIN_WEIGHT = 0.05
@@ -244,6 +247,12 @@ def _validate_selection_item(item, category, label):
     }
     if "id" in item:
         result["id"] = _require_nonempty_string(item["id"], f"{label} id")
+    if "legacy_keys" in item:
+        legacy_keys = item["legacy_keys"]
+        if not isinstance(legacy_keys, list) or any(
+            not isinstance(value, str) or not value.strip() for value in legacy_keys
+        ):
+            raise ValueError(f"{label} legacy_keys must be a list of non-empty strings.")
     if "description" in item:
         if not isinstance(item["description"], str):
             raise ValueError(f"{label} description must be a string.")

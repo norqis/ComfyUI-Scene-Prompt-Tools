@@ -305,10 +305,12 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
         sceneTitleSyncNodes: new Set([node]),
         sceneLoadedRefreshNodes: new Set([node]),
         sceneDownstreamRefreshSources: new Set([node]),
+        sceneWorkflowLoadDepth: 0,
         activePopupContext: { node },
         closeCalls: 0,
         expandCancels: 0,
         clearSceneFitHeightTimer() {},
+        invalidatePopupRequests() {},
         closeAllPopups() { context.closeCalls += 1; },
         isSceneExpandNodeName(name) { return name === "ScenePromptExpand"; },
         cancelSceneBatchRunForNode() { context.expandCancels += 1; },
@@ -327,6 +329,31 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     assert.equal(context.sceneDownstreamRefreshSources.has(node), false);
 }
 
+function testWorkflowTabLoadDoesNotCancelExpandRun() {
+    const node = { sceneRefreshTimer: 0, onRemoved() {} };
+    const context = {
+        Set,
+        clearTimeout() {},
+        sceneTitleSyncNodes: new Set([node]),
+        sceneLoadedRefreshNodes: new Set([node]),
+        sceneDownstreamRefreshSources: new Set([node]),
+        sceneWorkflowLoadDepth: 1,
+        activePopupContext: null,
+        clearSceneFitHeightTimer() {},
+        invalidatePopupRequests() {},
+        closeAllPopups() {},
+        popupContextReferencesNode() { return false; },
+        isSceneExpandNodeName(name) { return name === "ScenePromptExpand"; },
+        cancellations: 0,
+        cancelSceneBatchRunForNode() { context.cancellations += 1; },
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
+    context.installSceneNodeRemovalCleanup(node, "ScenePromptExpand");
+    node.onRemoved();
+    assert.equal(context.cancellations, 0, "workflow loading must not cancel a queued Expand run");
+}
+
 Promise.resolve()
     .then(testHistoryTerminalReleasesOnceAndResumesFifo)
     .then(testAbsentFromHistoryAndQueueReleases)
@@ -336,6 +363,7 @@ Promise.resolve()
     .then(testClaimFailureHistoryCompletionUsesRealCleanupPath)
     .then(testNonSceneQueueSkipsRunPreparation)
     .then(testRemovalCleanupRunsOnceAndPreservesPreviousHandler)
+    .then(testWorkflowTabLoadDoesNotCancelExpandRun)
     .then(() => console.log("detached Scene Prompt run reconciliation tests passed"))
     .catch((error) => {
         console.error(error);

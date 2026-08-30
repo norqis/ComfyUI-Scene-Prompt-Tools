@@ -32,6 +32,7 @@ PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,80}$")
 _PRESET_LOCK = threading.RLock()
 _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
+_RESOLVING_RUNS = {}
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
 _CANCELLED_RUNS_MAX_ENTRIES = 256
 # Scene plan evaluation is intentionally direct and recursive. Keep the
@@ -245,7 +246,7 @@ def _validate_preset_graph(nodes):
             if not is_link(input_value):
                 continue
             source_id = str(input_value[0])
-            if input_value[1] != 0:
+            if type(input_value[1]) is not int or input_value[1] != 0:
                 raise ScenePresetError(
                     f"{_node_label(node_id, node)} の {input_name} は出力0だけを接続してください。"
                 )
@@ -335,13 +336,21 @@ def _validate_preset_input_values(nodes):
             _validate_literal_input(node_id, node, input_name, value, definitions[input_name])
 
 
-def _validate_preset_runtime(nodes, user_id="default"):
+def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
     validation = _validate_preset_graph(nodes)
     _validate_preset_input_values(nodes)
     resolved = {}
+    if preset_id is not None:
+        clean_preset_id = _clean_preset_id(preset_id)
+        resolved[clean_preset_id] = {
+            "schema_version": PRESET_SCHEMA_VERSION,
+            "metadata": {"preset_id": clean_preset_id, "name": clean_preset_id},
+            "api_graph": {"output": nodes},
+        }
+    node_budget = {"total": len(nodes)}
     for reference_node_id, preset_id, _node in _find_references(nodes):
         try:
-            _resolve_preset_tree(preset_id, resolved, [], user_id, len(nodes))
+            _resolve_preset_tree(preset_id, resolved, [], user_id, node_budget=node_budget)
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
     _scene_node_value(nodes, validation["output_link"][0], resolved, set(), user_id=user_id)
@@ -398,16 +407,16 @@ def save_preset(payload, user_id="default"):
     connected_nodes = _connected_preset_nodes(api_graph["output"], output_node_id)
     workflow = _connected_preset_workflow(workflow, connected_nodes)
     api_graph = _api_graph_with_titles({**api_graph, "output": connected_nodes}, workflow)
-    try:
-        _validate_workflow_nodes(workflow, api_graph["output"])
-        _validate_preset_graph(api_graph["output"])
-        _validate_preset_runtime(api_graph["output"], user_id)
-    except ScenePresetResolutionError as exc:
-        raise ScenePresetResolutionError(f"Preset「{name}」: {exc}", exc.node_id) from exc
-    except ScenePresetError as exc:
-        raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
-
     with _PRESET_LOCK:
+        try:
+            _validate_workflow_nodes(workflow, api_graph["output"])
+            _validate_preset_graph(api_graph["output"])
+            _validate_preset_runtime(api_graph["output"], user_id, preset_id)
+        except ScenePresetResolutionError as exc:
+            raise ScenePresetResolutionError(f"Preset「{name}」: {exc}", exc.node_id) from exc
+        except ScenePresetError as exc:
+            raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
+
         path = _preset_path(preset_id, user_id)
         revision = 1
         if path.exists():
@@ -491,26 +500,28 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     return _scene_prompt_closure(nodes, source[0]), source
 
 
-def _resolve_preset_tree(preset_id, resolved, stack, user_id="default", node_depth=0):
+def _resolve_preset_tree(preset_id, resolved, stack, user_id="default", node_depth=0, node_budget=None):
     preset_id = _clean_preset_id(preset_id)
     if len(stack) >= MAX_PRESET_REFERENCE_DEPTH:
         raise ScenePresetError(f"Preset参照の深さは{MAX_PRESET_REFERENCE_DEPTH}個までです。")
     if preset_id in stack:
         cycle = " -> ".join([*stack, preset_id])
         raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
-    if preset_id in resolved:
-        return
-    preset = load_preset(preset_id, user_id)
+    preset = resolved.get(preset_id)
+    if preset is None:
+        preset = load_preset(preset_id, user_id)
     preset_name = str(preset["metadata"].get("name") or preset_id)
-    next_node_depth = node_depth + len(_preset_nodes(preset))
+    budget = node_budget if node_budget is not None else {"total": node_depth}
+    next_node_depth = budget["total"] + len(_preset_nodes(preset))
     if next_node_depth > MAX_PRESET_REFERENCE_NODE_DEPTH:
         raise ScenePresetError(
             f"Preset参照内の累積ノード数は{MAX_PRESET_REFERENCE_NODE_DEPTH}個までです。"
         )
+    budget["total"] = next_node_depth
     next_stack = [*stack, preset_id]
     for _node_id, nested_id, _node in _find_references(_preset_nodes(preset)):
         try:
-            _resolve_preset_tree(nested_id, resolved, next_stack, user_id, next_node_depth)
+            _resolve_preset_tree(nested_id, resolved, next_stack, user_id, next_node_depth, budget)
         except ScenePresetError as exc:
             raise ScenePresetError(f"Preset「{preset_name}」: {exc}") from exc
     resolved[preset_id] = preset
@@ -518,11 +529,14 @@ def _resolve_preset_tree(preset_id, resolved, stack, user_id="default", node_dep
 
 def _purge_run_snapshots(now=None):
     current = time.monotonic() if now is None else now
-    for run_id in [key for key, cancelled_at in _CANCELLED_RUNS.items()
-                   if current - cancelled_at >= _CANCELLED_RUNS_TTL_SECONDS]:
-        _CANCELLED_RUNS.pop(run_id, None)
+    for key in [key for key, cancelled_at in _CANCELLED_RUNS.items()
+                if key not in _RESOLVING_RUNS and current - cancelled_at >= _CANCELLED_RUNS_TTL_SECONDS]:
+        _CANCELLED_RUNS.pop(key, None)
     while len(_CANCELLED_RUNS) > _CANCELLED_RUNS_MAX_ENTRIES:
-        _CANCELLED_RUNS.popitem(last=False)
+        removable = next((key for key in _CANCELLED_RUNS if key not in _RESOLVING_RUNS), None)
+        if removable is None:
+            break
+        _CANCELLED_RUNS.pop(removable, None)
 
 
 def _run_cache_key(run_id, user_id="default"):
@@ -680,52 +694,63 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             existing["last_access"] = time.monotonic()
             _RUN_SNAPSHOTS.move_to_end(cache_key)
             return copy.deepcopy(existing["response"])
+        _RESOLVING_RUNS[cache_key] = _RESOLVING_RUNS.get(cache_key, 0) + 1
 
-    resolved = {}
-    for reference_node_id, preset_id, _node in _find_references(scene_nodes):
-        try:
-            _resolve_preset_tree(preset_id, resolved, [], user_id, len(scene_nodes))
-        except ScenePresetError as exc:
-            raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
-    plan = (
-        _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id)
-        if source is not None else {"total_images": 1, "total_batches": 1}
-    )
-    response = {
-        "presets": [
-            {
-                "preset_id": preset_id,
-                "name": preset["metadata"]["name"],
-                "revision": preset["metadata"]["revision"],
-                "sha256": preset["metadata"]["sha256"],
-            }
-            for preset_id, preset in resolved.items()
-        ],
-        "preset_graphs": {
-            preset_id: {
-                "metadata": copy.deepcopy(preset["metadata"]),
-                "api_graph": copy.deepcopy(preset["api_graph"]),
-            }
-            for preset_id, preset in resolved.items()
-        },
-        "total_images": int(plan.get("total_images") or 0),
-        "total_batches": int(plan.get("total_batches") or 0),
-    }
-
-    with _PRESET_LOCK:
-        _assert_run_not_cancelled(run_id, user_id)
-        existing = _RUN_SNAPSHOTS.get(cache_key)
-        if existing:
-            existing["last_access"] = time.monotonic()
-            _RUN_SNAPSHOTS.move_to_end(cache_key)
-            return copy.deepcopy(existing["response"])
-        _RUN_SNAPSHOTS[cache_key] = {
-            "presets": copy.deepcopy(resolved),
-            "response": copy.deepcopy(response),
-            "last_access": time.monotonic(),
+    try:
+        resolved = {}
+        node_budget = {"total": len(scene_nodes)}
+        for reference_node_id, preset_id, _node in _find_references(scene_nodes):
+            try:
+                _resolve_preset_tree(preset_id, resolved, [], user_id, node_budget=node_budget)
+            except ScenePresetError as exc:
+                raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
+        plan = (
+            _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id)
+            if source is not None else {"total_images": 1, "total_batches": 1}
+        )
+        response = {
+            "presets": [
+                {
+                    "preset_id": preset_id,
+                    "name": preset["metadata"]["name"],
+                    "revision": preset["metadata"]["revision"],
+                    "sha256": preset["metadata"]["sha256"],
+                }
+                for preset_id, preset in resolved.items()
+            ],
+            "preset_graphs": {
+                preset_id: {
+                    "metadata": copy.deepcopy(preset["metadata"]),
+                    "api_graph": copy.deepcopy(preset["api_graph"]),
+                }
+                for preset_id, preset in resolved.items()
+            },
+            "total_images": int(plan.get("total_images") or 0),
+            "total_batches": int(plan.get("total_batches") or 0),
         }
-        _purge_run_snapshots()
-        return response
+
+        with _PRESET_LOCK:
+            _assert_run_not_cancelled(run_id, user_id)
+            existing = _RUN_SNAPSHOTS.get(cache_key)
+            if existing:
+                existing["last_access"] = time.monotonic()
+                _RUN_SNAPSHOTS.move_to_end(cache_key)
+                return copy.deepcopy(existing["response"])
+            _RUN_SNAPSHOTS[cache_key] = {
+                "presets": copy.deepcopy(resolved),
+                "response": copy.deepcopy(response),
+                "last_access": time.monotonic(),
+            }
+            _purge_run_snapshots()
+            return response
+    finally:
+        with _PRESET_LOCK:
+            remaining = _RESOLVING_RUNS.get(cache_key, 0) - 1
+            if remaining > 0:
+                _RESOLVING_RUNS[cache_key] = remaining
+            else:
+                _RESOLVING_RUNS.pop(cache_key, None)
+            _purge_run_snapshots()
 
 
 def release_scene_preset_snapshot(run_id, user_id="default"):

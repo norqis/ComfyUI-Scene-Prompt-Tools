@@ -151,6 +151,7 @@ const SCENE_DETACHED_MAX_RETRIES = 20;
 let chipMeasureContext = null;
 let sceneDownstreamRefreshTimer = null;
 let sceneQueuePromptSyncPaused = 0;
+let sceneWorkflowLoadDepth = 0;
 let hideInternalDomWidgetsScheduled = false;
 let hideInternalDomWidgetsTimerShort = null;
 let hideInternalDomWidgetsTimerLong = null;
@@ -533,11 +534,14 @@ function readStateFromWidget(node, stateWidgetName) {
         return matrixLineDraftSelectionState(matrixLineContext.draft, matrixLineContext.side);
     }
     const widget = findWidget(node, widgetName);
-    const raw = serializedSelectionStateValue(node, widget, widgetName) || widget?.value;
+    const raw = serializedSelectionStateValue(node, widget, widgetName);
     return parseSelectionState(raw);
 }
 
 function serializedSelectionStateValue(node, widget, widgetName) {
+    if (widget?.value != null && String(widget.value).trim()) {
+        return widget.value;
+    }
     if (!Array.isArray(node?.widgets_values)) {
         return "";
     }
@@ -1654,10 +1658,55 @@ function createButton(text, className = "") {
     return button;
 }
 
-function closePopup() {
+function beginPopupRequest(node) {
+    const requestId = Number(node?.scenePromptPopupRequestId || 0) + 1;
+    if (node) {
+        node.scenePromptPopupRequestId = requestId;
+    }
+    return requestId;
+}
+
+function isCurrentPopupRequest(node, requestId) {
+    return !!node
+        && node.scenePromptPopupRequestId === requestId
+        && node.graph === app.graph;
+}
+
+function invalidatePopupRequests(node) {
+    if (node) {
+        node.scenePromptPopupRequestId = Number(node.scenePromptPopupRequestId || 0) + 1;
+    }
+}
+
+async function loadPopupRequest(node, loader, failureMessage) {
+    const requestId = beginPopupRequest(node);
+    try {
+        const value = await loader();
+        return isCurrentPopupRequest(node, requestId) ? value : null;
+    } catch (error) {
+        if (isCurrentPopupRequest(node, requestId)) {
+            showSceneBatchError(failureMessage, error);
+        }
+        return null;
+    }
+}
+
+function readPopupSelectionState(node, stateWidgetName, data) {
+    try {
+        return pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
+    } catch (error) {
+        showSceneBatchError("選択内容を読み込めませんでした。", error);
+        return null;
+    }
+}
+
+function closePopup(options = {}) {
     if (activePopup) {
         const closingContext = activePopupContext;
         const parent = activePopupContext?.parent || null;
+        if (options.invalidateRequests !== false) {
+            invalidatePopupRequests(closingContext?.node);
+        }
         if (closingContext?.secondary && closingContext?.node) {
             rememberSecondaryPopupRect(closingContext.node, activePopup);
             if (parent?.context?.stateWidgetName) {
@@ -1678,9 +1727,9 @@ function closePopup() {
     activePopupContext = null;
 }
 
-function closeAllPopups() {
+function closeAllPopups(options = {}) {
     while (activePopup) {
-        closePopup();
+        closePopup(options);
     }
 }
 
@@ -1810,13 +1859,13 @@ function openPopupShell(node, titleText, options = {}) {
     let parent = null;
     if (isSecondary) {
         if (activePopupContext?.secondary) {
-            closePopup();
+            closePopup({ invalidateRequests: false });
         }
         parent = activePopup && activePopupContext
             ? { popup: activePopup, context: activePopupContext }
             : null;
     } else {
-        closeAllPopups();
+        closeAllPopups({ invalidateRequests: false });
     }
     if (isSecondary) {
         node.sceneMatrixLinePopupSecondary = true;
@@ -2036,12 +2085,19 @@ function createWeightControl(node, item, selectedItem, onUpdate, options = {}) {
     input.addEventListener("pointerdown", stop);
     input.addEventListener("keydown", stop);
     const storeWeight = (options = {}) => {
-        const updated = setItemWeight(node, item, input.value, { stateWidgetName });
-        if (options.normalize) {
-            input.value = formatWeight(itemWeight(updated));
-        }
-        if (options.notify) {
-            onUpdate?.();
+        try {
+            const updated = setItemWeight(node, item, input.value, { stateWidgetName });
+            input.setCustomValidity("");
+            if (options.normalize) {
+                input.value = formatWeight(itemWeight(updated));
+            }
+            if (options.notify) {
+                onUpdate?.();
+            }
+        } catch (error) {
+            input.setCustomValidity(error?.message || "強度を保存できませんでした。");
+            input.reportValidity?.();
+            showSceneBatchError("強度を保存できませんでした。", error);
         }
     };
     input.addEventListener("input", () => {
@@ -2072,18 +2128,32 @@ function createPartWeightInput(value, disabled, onChange) {
     input.addEventListener("mousedown", (event) => event.stopPropagation());
     input.addEventListener("pointerdown", (event) => event.stopPropagation());
     input.addEventListener("keydown", (event) => event.stopPropagation());
+    const applyWeight = (options = {}) => {
+        try {
+            onChange(input.value, options);
+            input.setCustomValidity("");
+            return true;
+        } catch (error) {
+            input.setCustomValidity(error?.message || "強度を保存できませんでした。");
+            input.reportValidity?.();
+            showSceneBatchError("強度を保存できませんでした。", error);
+            return false;
+        }
+    };
     input.addEventListener("input", () => {
         if (Number.isFinite(Number.parseFloat(String(input.value).trim()))) {
-            onChange(input.value, { notify: false });
+            applyWeight({ notify: false });
         }
     });
     input.addEventListener("change", () => {
-        onChange(input.value, { notify: true });
-        input.value = formatWeight(input.value);
+        if (applyWeight({ notify: true })) {
+            input.value = formatWeight(input.value);
+        }
     });
     input.addEventListener("blur", () => {
-        onChange(input.value, { notify: false });
-        input.value = formatWeight(input.value);
+        if (applyWeight({ notify: false })) {
+            input.value = formatWeight(input.value);
+        }
     });
     return input;
 }
@@ -2704,9 +2774,20 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
 
 async function openCategoryLevelPicker(node, path = [], options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
-    const [data, saved] = await Promise.all([loadPromptItems(), loadSavedPrompts()]);
+    const loaded = await loadPopupRequest(
+        node,
+        () => Promise.all([loadPromptItems(), loadSavedPrompts()]),
+        "候補を読み込めませんでした。",
+    );
+    if (!loaded) {
+        return;
+    }
+    const [data, saved] = loaded;
     setActiveStateWidget(node, stateWidgetName);
-    const state = pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
+    const state = readPopupSelectionState(node, stateWidgetName, data);
+    if (!state) {
+        return;
+    }
     const children = getChildSegments(data, path);
     const directItems = itemsForPath(data, path);
 
@@ -2788,9 +2869,20 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
 
 async function openSavedPromptLevelPicker(node, path = [], options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
-    const [data, saved] = await Promise.all([loadPromptItems(), loadSavedPrompts()]);
+    const loaded = await loadPopupRequest(
+        node,
+        () => Promise.all([loadPromptItems(), loadSavedPrompts()]),
+        "保存済みプロンプトを読み込めませんでした。",
+    );
+    if (!loaded) {
+        return;
+    }
+    const [data, saved] = loaded;
     setActiveStateWidget(node, stateWidgetName);
-    const state = pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
+    const state = readPopupSelectionState(node, stateWidgetName, data);
+    if (!state) {
+        return;
+    }
     const children = getSavedPromptChildSegments(saved, path);
     const directPrompts = savedPromptsForPath(saved, path);
     const title = path.length ? `保存済みプロンプト > ${displayPathLabel(path)}` : "保存済みプロンプト";
@@ -2859,7 +2951,10 @@ async function openSavedPromptLevelPicker(node, path = [], options = {}) {
 
 async function openPromptCandidatePopup(node, path, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
-    const data = await loadPromptItems();
+    const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
+    if (!data) {
+        return;
+    }
     setActiveStateWidget(node, stateWidgetName);
     const popup = openPopupShell(node, displayPathLabel(path), { stateWidgetName });
     if (activePopupContext?.popup === popup) {
@@ -2883,7 +2978,10 @@ async function openPromptCandidatePopup(node, path, options = {}) {
     popup.appendChild(list);
 
     const renderList = () => {
-        const state = pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
+        const state = readPopupSelectionState(node, stateWidgetName, data);
+        if (!state) {
+            return;
+        }
         const selected = selectedKeys(state);
         const query = filter.value.trim().toLowerCase();
         const candidates = data
@@ -2917,9 +3015,21 @@ async function openPromptCandidatePopup(node, path, options = {}) {
 
 async function openSelectedPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
-    const [data, saved] = await Promise.all([loadPromptItems(), loadSavedPrompts()]);
+    const loaded = await loadPopupRequest(
+        node,
+        () => Promise.all([loadPromptItems(), loadSavedPrompts()]),
+        "選択済み候補を読み込めませんでした。",
+    );
+    if (!loaded) {
+        return;
+    }
+    const [data, saved] = loaded;
     setActiveStateWidget(node, stateWidgetName);
-    const displayState = cloneSelectionState(pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName }));
+    const initialState = readPopupSelectionState(node, stateWidgetName, data);
+    if (!initialState) {
+        return;
+    }
+    const displayState = cloneSelectionState(initialState);
     const popup = openPopupShell(node, "選択済み一覧", { stateWidgetName });
     if (activePopupContext?.popup === popup) {
         activePopupContext.reopen = () => openSelectedPopup(node, { stateWidgetName });
@@ -2937,7 +3047,10 @@ async function openSelectedPopup(node, options = {}) {
     popup.appendChild(list);
 
     const renderSelected = () => {
-        const state = pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
+        const state = readPopupSelectionState(node, stateWidgetName, data);
+        if (!state) {
+            return;
+        }
         mergeSelectedItemsForDisplay(displayState, state);
         const matchedSaved = matchedSavedPrompts(displayState, saved);
         const categories = uncoveredCategories(displayState, matchedSaved);
@@ -2986,7 +3099,10 @@ async function openSelectedPopup(node, options = {}) {
 
 async function openSavedPromptDetailPopup(node, savedPrompt, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
-    await loadPromptItems();
+    const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
+    if (!data) {
+        return;
+    }
     setActiveStateWidget(node, stateWidgetName);
     const popup = openPopupShell(node, savedPrompt.name || "保存済みプロンプト", { stateWidgetName });
     if (activePopupContext?.popup === popup) {
@@ -3030,7 +3146,10 @@ async function openSavedPromptDetailPopup(node, savedPrompt, options = {}) {
 
 async function openSearchPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
-    const data = await loadPromptItems();
+    const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
+    if (!data) {
+        return;
+    }
     setActiveStateWidget(node, stateWidgetName);
     const popup = openPopupShell(node, "候補検索", { stateWidgetName });
     if (activePopupContext?.popup === popup) {
@@ -3054,7 +3173,10 @@ async function openSearchPopup(node, options = {}) {
     popup.appendChild(list);
 
     const renderResults = () => {
-        const state = pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
+        const state = readPopupSelectionState(node, stateWidgetName, data);
+        if (!state) {
+            return;
+        }
         const selected = selectedKeys(state);
         const query = input.value.trim().toLowerCase();
         const matchedCategories = query ? searchCategoryPaths(data, query, 1).slice(0, 80) : [];
@@ -7499,8 +7621,9 @@ function scheduleDetachedSceneBatchReconcile(run, delay = SCENE_DETACHED_RETRY_M
         return;
     }
     const retryCount = Number(run.detachedRetryCount || 0);
-    // Keep checking safely after the counter saturates; a queued prompt must
-    // never be released only because its node disappeared or retries elapsed.
+    // A confirmed or potentially queued prompt must keep its server-side run
+    // context. Retry count is bounded, but uncertainty is never treated as
+    // completion because that would break a legitimate long-running queue.
     run.detachedRetryCount = Math.min(retryCount + 1, SCENE_DETACHED_MAX_RETRIES);
     run.detachedTimer = setTimeout(() => {
         run.detachedTimer = null;
@@ -7839,6 +7962,22 @@ function scheduleScenePromptQueueSyncInstall() {
     installSceneBatchPromptCapture();
 }
 
+function installSceneWorkflowLoadGuard() {
+    if (app.__ScenePromptWorkflowLoadGuardInstalled || typeof app.loadGraphData !== "function") {
+        return;
+    }
+    const originalLoadGraphData = app.loadGraphData.bind(app);
+    app.loadGraphData = async function (...args) {
+        sceneWorkflowLoadDepth += 1;
+        try {
+            return await originalLoadGraphData(...args);
+        } finally {
+            sceneWorkflowLoadDepth = Math.max(0, sceneWorkflowLoadDepth - 1);
+        }
+    };
+    app.__ScenePromptWorkflowLoadGuardInstalled = true;
+}
+
 function resetSceneExpandRunControls(node, options = {}) {
     let changed = false;
     changed = setWidgetValue(node, "current_index", 0, { silent: true }) || changed;
@@ -8098,6 +8237,9 @@ function startSceneBatchRun(node) {
         for (const pending of sceneBatchPendingRuns) {
             refreshSceneBatchRunNode(pending, { graphChange: false, background: false });
         }
+        // Capture and resolve Presets now. A FIFO wait must not pick up edits
+        // made after this generation was requested.
+        prepareSceneBatchRunSnapshot(run, node);
         return;
     }
 
@@ -8455,9 +8597,13 @@ function matrixLineDraftsForNode(node) {
 
 function saveMatrixLineDrafts(node, drafts) {
     const sets = drafts.map((draft, index) => {
+        const name = String(draft?.name || "").trim();
+        if (!name) {
+            throw new Error(`Matrix 行 ${index + 1} の名前を入力してください。`);
+        }
         const namedDraft = {
             ...draft,
-            name: matrixLineDraftLabel(draft),
+            name,
         };
         namedDraft.path_label = namedDraft.name;
         refreshMatrixLineDraftComputedFields(namedDraft);
@@ -8517,6 +8663,10 @@ function openSceneMatrixLinesPopup(node) {
     toolbar.className = "pc-toolbar";
     popup.appendChild(toolbar);
 
+    const error = document.createElement("div");
+    error.className = "pc-error";
+    popup.appendChild(error);
+
     const list = document.createElement("div");
     list.className = "pc-popup-list";
     popup.appendChild(list);
@@ -8530,8 +8680,14 @@ function openSceneMatrixLinesPopup(node) {
 
     const save = createButton("保存", "pc-on");
     save.addEventListener("click", () => {
-        saveMatrixLineDrafts(node, drafts);
-        closeAllPopups();
+        try {
+            error.textContent = "";
+            saveMatrixLineDrafts(node, drafts);
+            closeAllPopups();
+        } catch (saveError) {
+            error.textContent = saveError?.message || "Matrix 行を保存できませんでした。";
+            fitPopupToContent(popup);
+        }
     });
     toolbar.appendChild(save);
 
@@ -8718,11 +8874,12 @@ async function refreshScenePresetReferenceList(node, force = false) {
 }
 
 async function openScenePresetPicker(node) {
-    let presets;
-    try {
-        presets = await refreshScenePresetReferenceList(node, true);
-    } catch (error) {
-        showSceneBatchError("Preset一覧を取得できませんでした。", error);
+    const presets = await loadPopupRequest(
+        node,
+        () => refreshScenePresetReferenceList(node, true),
+        "Preset一覧を取得できませんでした。",
+    );
+    if (!presets) {
         return;
     }
     const popup = openPopupShell(node, "Scene Presetを選択", { hideReload: true, hideClear: true });
@@ -8760,6 +8917,12 @@ async function openScenePresetPicker(node) {
 }
 
 async function saveScenePreset(node) {
+    // Preset graphs currently use root-graph node IDs. Do not save a graph we
+    // cannot later resolve correctly from a ComfyUI subgraph.
+    if (node?.graph !== app.graph) {
+        showSceneBatchError("Scene Presetはサブグラフ内では保存できません。ルートのワークフローで保存してください。");
+        return;
+    }
     const presetId = String(findWidget(node, "preset_id")?.value || "").trim();
     const name = String(findWidget(node, "preset_name")?.value || presetId).trim() || presetId;
     if (!presetId) {
@@ -8794,6 +8957,8 @@ async function saveScenePreset(node) {
             refreshAllScenePresetReferences(await loadScenePresetList(true));
         } catch (listError) {
             console.warn("[Scene Prompt]", listError);
+            showSceneBatchError("Presetは保存しましたが、一覧を更新できませんでした。", listError);
+            return;
         }
         showSceneNotification(`Preset「${metadata.name || name}」を保存しました。revision ${metadata.revision || 1}`);
     } catch (error) {
@@ -9008,6 +9173,7 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
     }
     const previousOnRemoved = node.onRemoved;
     node.onRemoved = function (...args) {
+        const isWorkflowLoad = sceneWorkflowLoadDepth > 0;
         sceneTitleSyncNodes.delete(this);
         sceneLoadedRefreshNodes.delete(this);
         sceneDownstreamRefreshSources.delete(this);
@@ -9015,10 +9181,11 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         clearTimeout(this.sceneRefreshTimer);
         this.sceneRefreshTimer = null;
         this.scenePendingRefreshOptions = null;
+        invalidatePopupRequests(this);
         if (popupContextReferencesNode(activePopupContext, this)) {
             closeAllPopups();
         }
-        if (isSceneExpandNodeName(nodeName)) {
+        if (isSceneExpandNodeName(nodeName) && !isWorkflowLoad) {
             cancelSceneBatchRunForNode(this);
         }
         return previousOnRemoved?.apply(this, args);
@@ -9181,6 +9348,7 @@ app.registerExtension({
         }
         window.__ScenePromptUISetupInstalled = true;
         scheduleScenePromptQueueSyncInstall();
+        installSceneWorkflowLoadGuard();
         window.addEventListener("pagehide", releaseSceneRunsOnPageHide);
         api.addEventListener("execution_start", () => {
             if (!sceneBatchRun) {

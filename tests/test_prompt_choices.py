@@ -118,6 +118,37 @@ def test_legacy_selection_entries_normalize_without_prompt_data_lookup():
     }
 
 
+def test_pre_public_legacy_keys_normalize_without_remapping():
+    legacy = {"version": 1, "categories": {"Outfit": [{
+        "label": "Summer", "prompt": "summer uniform",
+        "legacy_keys": ["Outfit::Summer", "Outfit::summer uniform"],
+    }]}}
+    item = _parse_selection_json(json.dumps(legacy))["Outfit"][0]
+    assert item == {
+        "label": "Summer",
+        "prompt": "summer uniform",
+        "category_path": ["Outfit"],
+        "category_key": "Outfit",
+        "category_label": "Outfit",
+    }
+
+
+def test_pre_public_legacy_keys_reject_invalid_values_and_unknown_fields():
+    base = {"label": "Summer", "prompt": "summer uniform"}
+    for item in (
+        {**base, "legacy_keys": "Outfit::Summer"},
+        {**base, "legacy_keys": [""]},
+        {**base, "legacy_keys": [1]},
+        {**base, "legacy_keys": ["Outfit::Summer"], "unknown": True},
+    ):
+        try:
+            _parse_selection_json(json.dumps({"version": 1, "categories": {"Outfit": [item]}}))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid legacy selection JSON must be rejected")
+
+
 def test_selection_rejects_unknown_or_conflicting_legacy_values():
     base = {"label": "Summer", "prompt": "summer uniform"}
     for item in (
@@ -171,6 +202,8 @@ class PromptChoiceTests(unittest.TestCase):
         test_selection_entries_are_strict()
         test_legacy_selection_entries_normalize_without_prompt_data_lookup()
         test_selection_rejects_unknown_or_conflicting_legacy_values()
+        test_pre_public_legacy_keys_normalize_without_remapping()
+        test_pre_public_legacy_keys_reject_invalid_values_and_unknown_fields()
 
     def test_selection_values_are_stored(self):
         test_selection_keeps_its_stored_prompt_and_partial_selection()

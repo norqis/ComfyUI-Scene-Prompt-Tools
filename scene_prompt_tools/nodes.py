@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -389,8 +390,12 @@ def _parse_matrix_sets(matrix_json):
     data = _parse_matrix_data(matrix_json)
     raw_sets = data.get("sets", [])
     sets = []
+    row_ids = set()
     for raw_set in raw_sets:
         matrix_line = _normalize_matrix_line_set(raw_set)
+        if matrix_line["row_id"] in row_ids:
+            raise ValueError("Scene Matrix row_id values must be unique.")
+        row_ids.add(matrix_line["row_id"])
         sets.append(matrix_line)
     return sets
 
@@ -578,7 +583,10 @@ def _reserve_output_path(directory, extension, padding, counter, filename_prefix
         except FileExistsError:
             counter += 1
             continue
-        except OSError:
+        except PermissionError as exc:
+            if exc.errno == errno.EACCES and os.path.lexists(reservation_path):
+                counter += 1
+                continue
             raise
         else:
             os.close(descriptor)
@@ -590,6 +598,14 @@ def _reserve_output_path(directory, extension, padding, counter, filename_prefix
                 counter += 1
                 continue
             return path, reservation_path, filename, counter
+
+
+def _remove_output_reservation(reservation_path):
+    with _FILENAME_RESERVATION_LOCK:
+        try:
+            os.unlink(reservation_path)
+        except FileNotFoundError:
+            pass
 
 
 def _auto_seed_base(seed_base):
@@ -1211,19 +1227,25 @@ class SceneSaveImage:
                 img.save(temp_path, format="PNG", pnginfo=metadata, compress_level=self.compress_level)
                 with Image.open(temp_path) as check:
                     check.verify()
-                if os.path.exists(output_path):
-                    raise FileExistsError(f"output filename was claimed while saving: {output_path}")
-                os.replace(temp_path, output_path)
+                os.link(temp_path, output_path)
+                os.unlink(temp_path)
                 temp_paths.remove(temp_path)
                 saved_paths.append(output_path)
-                os.unlink(reservation_path)
+                _remove_output_reservation(reservation_path)
                 reservation_paths.remove(reservation_path)
                 if preview_subfolder is not None:
                     preview_ref = {"filename": filename, "subfolder": preview_subfolder, "type": self.type}
                     results.append(preview_ref)
                 counter += 1
         except Exception:
-            for candidate in [*temp_paths, *reservation_paths, *saved_paths]:
+            for candidate in temp_paths:
+                try:
+                    os.unlink(candidate)
+                except OSError:
+                    pass
+            for reservation_path in reservation_paths:
+                _remove_output_reservation(reservation_path)
+            for candidate in saved_paths:
                 try:
                     os.unlink(candidate)
                 except OSError:

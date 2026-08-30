@@ -65,6 +65,22 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertEqual(self.package.WEB_DIRECTORY, "./web")
         self.assertTrue((ROOT / self.package.WEB_DIRECTORY).is_dir())
 
+    def test_loads_pre_public_png_scene_class_ids_without_old_display_labels(self):
+        old_base = "Scene" + "Prompter"
+        aliases = {
+            old_base: "ScenePrompt",
+            old_base + "Expand": "ScenePromptExpand",
+            old_base + "Queue": "ScenePromptQueue",
+            old_base + "Merge": "ScenePromptMerge",
+        }
+        for old_name, current_name in aliases.items():
+            with self.subTest(old_name=old_name):
+                self.assertIs(
+                    self.package.NODE_CLASS_MAPPINGS[old_name],
+                    self.package.NODE_CLASS_MAPPINGS[current_name],
+                )
+                self.assertNotIn(old_name, self.package.NODE_DISPLAY_NAME_MAPPINGS)
+
     def test_uses_real_comfyui_graph_builder_and_routes(self):
         from comfy_execution.graph_utils import GraphBuilder
         from server import PromptServer
