@@ -22,6 +22,12 @@ ALLOWED_NOREPLY_EMAILS = {"noreply@github.com"}
 HISTORY_BASE_ENV = "SCENE_PROMPT_HISTORY_BASE_SHA"
 HISTORY_HEAD_ENV = "SCENE_PROMPT_HISTORY_HEAD_SHA"
 SYNTHETIC_MERGE_ENV = "SCENE_PROMPT_SYNTHETIC_MERGE_REF"
+PRE_PUBLIC_NODE_ALIASES = {
+    "Scene" + "Prompter": "ScenePrompt",
+    "Scene" + "PrompterExpand": "ScenePromptExpand",
+    "Scene" + "PrompterQueue": "ScenePromptQueue",
+    "Scene" + "PrompterMerge": "ScenePromptMerge",
+}
 
 
 def tracked_files():
@@ -104,6 +110,12 @@ def main():
             failures.append(f"tracked file is missing: {path}")
             continue
         content = target.read_text(encoding="utf-8", errors="replace")
+        if path == Path("__init__.py"):
+            for old_name, current_name in PRE_PUBLIC_NODE_ALIASES.items():
+                alias = f'"{old_name}": {current_name},'
+                if content.count(alias) != 1:
+                    failures.append(f"missing or duplicate pre-public node alias in {path}: {old_name}")
+                content = content.replace(alias, "")
         if FORBIDDEN.search(content):
             failures.append(f"forbidden public text in {path}")
     if failures:

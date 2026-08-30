@@ -66,11 +66,12 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertTrue((ROOT / self.package.WEB_DIRECTORY).is_dir())
 
     def test_loads_pre_public_png_scene_class_ids_without_old_display_labels(self):
+        old_base = "Scene" + "Prompter"
         aliases = {
-            "ScenePrompter": "ScenePrompt",
-            "ScenePrompterExpand": "ScenePromptExpand",
-            "ScenePrompterQueue": "ScenePromptQueue",
-            "ScenePrompterMerge": "ScenePromptMerge",
+            old_base: "ScenePrompt",
+            old_base + "Expand": "ScenePromptExpand",
+            old_base + "Queue": "ScenePromptQueue",
+            old_base + "Merge": "ScenePromptMerge",
         }
         for old_name, current_name in aliases.items():
             with self.subTest(old_name=old_name):

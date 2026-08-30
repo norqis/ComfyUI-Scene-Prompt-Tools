@@ -4,6 +4,7 @@ from pathlib import Path
 
 from check_public_package import (
     FORBIDDEN,
+    PRE_PUBLIC_NODE_ALIASES,
     SYNTHETIC_MERGE_ENV,
     history_privacy_failures,
     history_revision_range,
@@ -64,12 +65,7 @@ class PublicPackageTests(unittest.TestCase):
                 self.assertIsNotNone(FORBIDDEN.search(candidate))
 
     def test_retired_names_and_private_brand_names_are_absent_from_runtime_ui(self):
-        legacy_aliases = {
-            "ScenePrompter": "ScenePrompt",
-            "ScenePrompterExpand": "ScenePromptExpand",
-            "ScenePrompterQueue": "ScenePromptQueue",
-            "ScenePrompterMerge": "ScenePromptMerge",
-        }
+        legacy_aliases = PRE_PUBLIC_NODE_ALIASES
         runtime_paths = [Path("__init__.py"), *(Path("scene_prompt_tools") / name for name in (
             "__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py",
         ))]
@@ -112,7 +108,7 @@ class PublicPackageTests(unittest.TestCase):
     def test_pre_public_node_ids_are_load_only_aliases(self):
         package_source = (ROOT / "__init__.py").read_text(encoding="utf-8")
         display_source = package_source.rsplit("NODE_DISPLAY_NAME_MAPPINGS =", 1)[1]
-        for old_name in ("ScenePrompter", "ScenePrompterExpand", "ScenePrompterQueue", "ScenePrompterMerge"):
+        for old_name in PRE_PUBLIC_NODE_ALIASES:
             with self.subTest(old_name=old_name):
                 self.assertIn(f'"{old_name}":', package_source)
                 self.assertNotIn(f'"{old_name}":', display_source)

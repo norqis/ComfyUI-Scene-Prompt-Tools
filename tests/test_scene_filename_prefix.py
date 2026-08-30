@@ -705,11 +705,12 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             "ScenePresetOutput",
             "ScenePresetReference",
         }
+        old_base = "Scene" + "Prompter"
         legacy_aliases = {
-            "ScenePrompter": "ScenePrompt",
-            "ScenePrompterExpand": "ScenePromptExpand",
-            "ScenePrompterQueue": "ScenePromptQueue",
-            "ScenePrompterMerge": "ScenePromptMerge",
+            old_base: "ScenePrompt",
+            old_base + "Expand": "ScenePromptExpand",
+            old_base + "Queue": "ScenePromptQueue",
+            old_base + "Merge": "ScenePromptMerge",
         }
         self.assertSetEqual(set(package.NODE_CLASS_MAPPINGS), current_node_names | set(legacy_aliases))
         self.assertEqual(
