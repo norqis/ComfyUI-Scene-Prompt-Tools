@@ -6,7 +6,12 @@ export const DEFAULT_SELECTED_JSON = "{\"version\":1,\"categories\":{}}";
 export const MATRIX_DEFAULT_JSON = "{\"version\":1,\"sets\":[]}";
 const SELECTION_ITEM_REQUIRED_KEYS = ["label", "prompt", "category_path", "category_key", "category_label"];
 const SELECTION_ITEM_OPTIONAL_KEYS = ["id", "description", "weight", "selected_parts"];
-const SELECTION_ITEM_KNOWN_KEYS = new Set([...SELECTION_ITEM_REQUIRED_KEYS, ...SELECTION_ITEM_OPTIONAL_KEYS]);
+const SELECTION_ITEM_LEGACY_OPTIONAL_KEYS = ["legacy_keys"];
+const SELECTION_ITEM_KNOWN_KEYS = new Set([
+    ...SELECTION_ITEM_REQUIRED_KEYS,
+    ...SELECTION_ITEM_OPTIONAL_KEYS,
+    ...SELECTION_ITEM_LEGACY_OPTIONAL_KEYS,
+]);
 const SELECTED_PART_REQUIRED_KEYS = ["index", "text"];
 const SELECTED_PART_OPTIONAL_KEYS = ["weight"];
 const MATRIX_LINE_KEYS = [
@@ -134,6 +139,12 @@ function parseSelectionItem(value, category, label) {
         }
     }
     const prompt = requireString(value.prompt, `${label} prompt`, { allowEmpty: false });
+    if (Object.hasOwn(value, "legacy_keys")) {
+        const legacyKeys = requireStringList(value.legacy_keys, `${label} legacy_keys`);
+        if (!legacyKeys.length || legacyKeys.some((key) => !key.trim())) {
+            throw new Error(`${label} legacy_keys must be a non-empty list of strings.`);
+        }
+    }
     if (Object.hasOwn(value, "weight") && Object.hasOwn(value, "selected_parts")) {
         throw new Error(`${label} cannot contain both weight and selected_parts.`);
     }

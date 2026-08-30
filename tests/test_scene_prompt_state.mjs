@@ -37,13 +37,31 @@ assert.deepEqual(legacySelection.categories["Outfit > School"][0], {
     category_key: "Outfit > School",
     category_label: "Outfit > School",
 });
+const legacyKeysSelection = parseSelectionState({
+    version: 1,
+    categories: { Outfit: [{ label: "Summer", prompt: "summer uniform", legacy_keys: ["Outfit::Summer"] }] },
+});
+assert.deepEqual(legacyKeysSelection.categories.Outfit[0], {
+    label: "Summer",
+    prompt: "summer uniform",
+    category_path: ["Outfit"],
+    category_key: "Outfit",
+    category_label: "Outfit",
+});
+assert.doesNotMatch(serializeSelectionState(legacyKeysSelection), /legacy_keys/u);
+for (const legacyKeys of ["Outfit::Summer", [], [""], [1]]) {
+    assert.throws(() => parseSelectionState({
+        version: 1,
+        categories: { Outfit: [{ label: "Summer", prompt: "summer uniform", legacy_keys: legacyKeys }] },
+    }), /legacy_keys/u);
+}
 assert.throws(() => parseSelectionState({
     version: 1,
     categories: { "Outfit > School": [{ label: "Summer", prompt: "summer uniform", category_key: "Wrong" }] },
 }), /inconsistent/u);
 assert.throws(() => parseSelectionState({
     version: 1,
-    categories: { Category: [{ label: "A", prompt: "a", unknown: true }] },
+    categories: { Category: [{ label: "A", prompt: "a", legacy_keys: ["Category::A"], unknown: true }] },
 }), /unsupported/u);
 
 const line = createMatrixLine("Night");
