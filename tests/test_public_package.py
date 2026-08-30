@@ -4,7 +4,6 @@ from pathlib import Path
 
 from check_public_package import (
     FORBIDDEN,
-    PRE_PUBLIC_NODE_ALIASES,
     SYNTHETIC_MERGE_ENV,
     history_privacy_failures,
     history_revision_range,
@@ -41,7 +40,7 @@ class PublicPackageTests(unittest.TestCase):
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.2.10"', pyproject)
+        self.assertIn('version = "0.2.11"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
@@ -49,22 +48,18 @@ class PublicPackageTests(unittest.TestCase):
         self.assertTrue((ROOT / "LICENSE").is_file())
         self.assertFalse((ROOT / "requirements.txt").exists())
 
-    def test_forbidden_pattern_matches_every_retired_name(self):
+    def test_forbidden_pattern_matches_private_brand_names(self):
         candidates = (
             "META" + "CAMP",
             "META" + "CHAMP",
             "meta" + "-" + "camp",
             "meta" + "_" + "champ",
-            "Scene" + " Promp" + "ter",
-            "scene-" + "prompter",
-            "scene_" + "prompter",
-            "scene" + "Prompter",
         )
         for candidate in candidates:
             with self.subTest(candidate=candidate):
                 self.assertIsNotNone(FORBIDDEN.search(candidate))
 
-    def test_retired_names_and_private_brand_names_are_absent_from_runtime_ui(self):
+    def test_private_brand_names_are_absent_from_runtime_ui(self):
         runtime_paths = [Path("__init__.py"), *(Path("scene_prompt_tools") / name for name in (
             "__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py",
         ))]
@@ -102,13 +97,12 @@ class PublicPackageTests(unittest.TestCase):
             self.assertNotIn("source_shape", source)
             self.assertNotIn("_migrate", source)
 
-    def test_pre_public_node_ids_are_load_only_aliases(self):
+    def test_node_ids_use_the_established_prompter_names(self):
         package_source = (ROOT / "__init__.py").read_text(encoding="utf-8")
-        display_source = package_source.rsplit("NODE_DISPLAY_NAME_MAPPINGS =", 1)[1]
-        self.assertIn("LEGACY_NODE_CLASS_MAPPINGS = {", package_source)
-        self.assertEqual(package_source.count("DEPRECATED = True"), len(PRE_PUBLIC_NODE_ALIASES))
-        self.assertIn("**LEGACY_NODE_CLASS_MAPPINGS", package_source)
-        self.assertNotIn("LEGACY_NODE_CLASS_MAPPINGS", display_source)
+        self.assertIn('"ScenePrompter": ScenePrompt', package_source)
+        self.assertIn('"ScenePrompterExpand": ScenePromptExpand', package_source)
+        self.assertNotIn('"ScenePrompt": ScenePrompt', package_source)
+        self.assertNotIn("DEPRECATED = True", package_source)
 
     def test_public_text_sources_have_no_utf8_bom(self):
         for relative_path in tracked_files():

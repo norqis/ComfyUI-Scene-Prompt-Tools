@@ -14,36 +14,27 @@ import {
     serializeSelectionState,
 } from "./scene_prompt_state.js";
 
-const LEGACY_SCENE_PREFIX = "Scene" + "Prompter";
-const LEGACY_SCENE_PROMPT = LEGACY_SCENE_PREFIX;
-const LEGACY_SCENE_PROMPT_EXPAND = `${LEGACY_SCENE_PREFIX}Expand`;
-const LEGACY_SCENE_PROMPT_QUEUE = `${LEGACY_SCENE_PREFIX}Queue`;
-const LEGACY_SCENE_PROMPT_MERGE = `${LEGACY_SCENE_PREFIX}Merge`;
-
-const PROMPT_NODE_NAMES = new Set(["ScenePrompt", "Scene Prompt", LEGACY_SCENE_PROMPT]);
+const PROMPT_NODE_NAMES = new Set(["ScenePrompter", "Scene Prompt"]);
 const PROMPT_MATRIX_NODE_NAMES = new Set(["SceneMatrix", "Scene Matrix"]);
 const SCENE_PATH_NODE_NAMES = new Set(["ScenePath", "Scene Path"]);
-const SCENE_PROMPT_MERGE_NODE_NAMES = new Set(["ScenePromptMerge", "Scene Prompt Merge", LEGACY_SCENE_PROMPT_MERGE]);
+const SCENE_PROMPT_MERGE_NODE_NAMES = new Set(["ScenePrompterMerge", "Scene Prompt Merge"]);
 const SCENE_PROMPT_COUNTER_NODE_NAMES = new Set(["ScenePromptCounter", "Scene Prompt Count"]);
-const SCENE_PROMPT_QUEUE_NODE_NAMES = new Set(["ScenePromptQueue", "Scene Prompt Queue", LEGACY_SCENE_PROMPT_QUEUE]);
+const SCENE_PROMPT_QUEUE_NODE_NAMES = new Set(["ScenePrompterQueue", "Scene Prompt Queue"]);
 const SCENE_EMPTY_LATENT_NODE_NAMES = new Set(["SceneEmptyLatent", "Scene Empty Latent"]);
-const SCENE_PROMPT_EXPAND_NODE_NAMES = new Set(["ScenePromptExpand", "Scene Prompt Expand", LEGACY_SCENE_PROMPT_EXPAND]);
+const SCENE_PROMPT_EXPAND_NODE_NAMES = new Set(["ScenePrompterExpand", "Scene Prompt Expand"]);
 const SCENE_SAVE_IMAGE_NODE_NAMES = new Set(["SceneSaveImage", "Scene Save Image"]);
 const SCENE_PRESET_INPUT_NODE_NAMES = new Set(["ScenePresetInput", "Scene Preset Input"]);
 const SCENE_PRESET_OUTPUT_NODE_NAMES = new Set(["ScenePresetOutput", "Scene Preset Output"]);
 const SCENE_PRESET_REFERENCE_NODE_NAMES = new Set(["ScenePresetReference", "Scene Preset Reference"]);
 const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
-    "ScenePrompt",
+    "ScenePrompter",
     "SceneMatrix",
     "ScenePath",
-    "ScenePromptMerge",
+    "ScenePrompterMerge",
     "ScenePromptCounter",
-    "ScenePromptQueue",
+    "ScenePrompterQueue",
     "SceneEmptyLatent",
     "ScenePresetReference",
-    LEGACY_SCENE_PROMPT,
-    LEGACY_SCENE_PROMPT_MERGE,
-    LEGACY_SCENE_PROMPT_QUEUE,
 ]);
 const NODE_NAMES = new Set([
     ...PROMPT_NODE_NAMES,
@@ -110,9 +101,9 @@ const SCENE_WIDGET_LABELS = {
     scene_prompt: "scene_prompt",
     matrix: "matrix",
     path_mode: "保存パスの扱い",
-    current_index: "処理位置",
+    current_index: "生成番号",
     run_id: "実行ID",
-    seed_base: "元シード",
+    seed_base: "開始シード",
     timestamp_dir: "タイムスタンプディレクトリ",
     prefix: "ファイル名プレフィックス",
     width: "width",
@@ -125,22 +116,18 @@ const SCENE_WIDGET_LABELS = {
     preset_name: "表示名",
 };
 const SCENE_NODE_DISPLAY_NAMES = {
-    ScenePrompt: "Scene Prompt",
+    ScenePrompter: "Scene Prompt",
     SceneMatrix: "Scene Matrix",
     ScenePath: "Scene Path",
-    ScenePromptMerge: "Scene Prompt Merge",
+    ScenePrompterMerge: "Scene Prompt Merge",
     ScenePromptCounter: "Scene Prompt Count",
-    ScenePromptQueue: "Scene Prompt Queue",
+    ScenePrompterQueue: "Scene Prompt Queue",
     SceneEmptyLatent: "Scene Empty Latent",
-    ScenePromptExpand: "Scene Prompt Expand",
+    ScenePrompterExpand: "Scene Prompt Expand",
     SceneSaveImage: "Scene Save Image",
     ScenePresetInput: "Scene Preset Input",
     ScenePresetOutput: "Scene Preset Output",
     ScenePresetReference: "Scene Preset Reference",
-    [LEGACY_SCENE_PROMPT]: "Scene Prompt",
-    [LEGACY_SCENE_PROMPT_MERGE]: "Scene Prompt Merge",
-    [LEGACY_SCENE_PROMPT_QUEUE]: "Scene Prompt Queue",
-    [LEGACY_SCENE_PROMPT_EXPAND]: "Scene Prompt Expand",
 };
 
 let promptItems = null;
@@ -3323,7 +3310,7 @@ function hideScenePromptCounterWidgets(node) {
 
 function scenePromptTitle(node) {
     const title = String(node?.title || "").trim();
-    if (title && title !== "ScenePrompt" && title !== "Scene Prompt" && title !== LEGACY_SCENE_PROMPT) {
+    if (title && title !== "ScenePrompter" && title !== "Scene Prompt") {
         return title;
     }
     return "Scene Prompt";
@@ -5661,7 +5648,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
         let result = emptyScenePromptStats();
         if (node.class_type === "ScenePresetInput") {
             result = upstream || { rows: 1, total: 1 };
-        } else if (["ScenePrompt", "Scene" + "Prompter"].includes(node.class_type)) {
+        } else if (node.class_type === "ScenePrompter") {
             result = source("scene_prompt") || { rows: 1, total: 1 };
         } else if (node.class_type === "SceneMatrix") {
             const base = source("scene_prompt") || { rows: 1, total: 1 };
@@ -5674,11 +5661,11 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             const base = source("scene_prompt") || { rows: 1, total: 1 };
             const count = clampSceneCount(apiInput(node, "count"), 1);
             result = { rows: base.rows, total: base.total * count };
-        } else if (["ScenePromptMerge", "Scene" + "PrompterMerge"].includes(node.class_type)) {
+        } else if (node.class_type === "ScenePrompterMerge") {
             const first = source("scene_prompt1") || { rows: 1, total: 1 };
             const second = source("scene_prompt2") || { rows: 1, total: 1 };
             result = { rows: first.rows * second.rows, total: first.total * second.total };
-        } else if (["ScenePromptQueue", "Scene" + "PrompterQueue"].includes(node.class_type)) {
+        } else if (node.class_type === "ScenePrompterQueue") {
             result = emptyScenePromptStats();
             for (let index = 1; index <= SCENE_PROMPT_QUEUE_INPUT_COUNT; index += 1) {
                 const item = source(`scene_prompt${index}`);
@@ -6917,19 +6904,19 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
 
 function sceneRunTargetNodes(apiGraph) {
     return Object.values(apiGraph?.output || {}).filter((node) => (
-        ["ScenePrompt", "Scene" + "Prompter"].includes(node?.class_type)
+        node?.class_type === "ScenePrompter"
         || node?.class_type === "SceneMatrix"
         || node?.class_type === "ScenePresetReference"
-        || ["ScenePromptExpand", "Scene" + "PrompterExpand"].includes(node?.class_type)
+        || node?.class_type === "ScenePrompterExpand"
     ));
 }
 
 function applySceneRunHandle(apiGraph, runHandle) {
     const targetNodes = Object.values(apiGraph?.output || {}).filter((node) => (
-        ["ScenePrompt", "Scene" + "Prompter"].includes(node?.class_type)
+        node?.class_type === "ScenePrompter"
         || node?.class_type === "SceneMatrix"
         || node?.class_type === "ScenePresetReference"
-        || ["ScenePromptExpand", "Scene" + "PrompterExpand"].includes(node?.class_type)
+        || node?.class_type === "ScenePrompterExpand"
     ));
     for (const node of targetNodes) {
         node.inputs = node.inputs || {};
@@ -7012,7 +6999,7 @@ function sliceSceneBatchPrompt(prompt, expandNodeId) {
     const branch = promptDescendantIds(nodes, expandId);
     const keep = promptAncestorIds(nodes, branch);
     for (const nodeId of keep) {
-        if (nodeId !== expandId && ["ScenePromptExpand", "Scene" + "PrompterExpand"].includes(nodes[nodeId]?.class_type)) {
+        if (nodeId !== expandId && nodes[nodeId]?.class_type === "ScenePrompterExpand") {
             throw new Error("この出力は複数の Scene Prompt Expand に接続されているため実行できません。");
         }
     }
@@ -7279,7 +7266,7 @@ function installSceneBatchPromptCapture() {
             && String(expandPrompt?.inputs?.run_id || "") === run.runId;
         if (!matchesActivePlan) {
             const detachedEntry = Object.values(prompt?.output || {}).find((promptNode) => (
-                ["ScenePromptExpand", "Scene" + "PrompterExpand"].includes(promptNode?.class_type)
+                promptNode?.class_type === "ScenePrompterExpand"
                 && sceneBatchDetachedRuns.has(String(promptNode.inputs?.run_id || ""))
             ));
             const detachedRunId = String(detachedEntry?.inputs?.run_id || "");
@@ -7288,7 +7275,7 @@ function installSceneBatchPromptCapture() {
         }
         const matchesFirstBatchPrompt = !!run?.firstApiPending
             && run.nextIndex === 0
-            && ["ScenePromptExpand", "Scene" + "PrompterExpand"].includes(expandPrompt?.class_type)
+            && expandPrompt?.class_type === "ScenePrompterExpand"
             && String(expandPrompt.inputs?.run_id || "") === run.runId
             && Number(expandPrompt.inputs?.current_index || 0) === 0;
         if (matchesFirstBatchPrompt) {

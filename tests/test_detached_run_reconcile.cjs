@@ -312,14 +312,14 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
         clearSceneFitHeightTimer() {},
         invalidatePopupRequests() {},
         closeAllPopups() { context.closeCalls += 1; },
-        isSceneExpandNodeName(name) { return name === "ScenePromptExpand"; },
+        isSceneExpandNodeName(name) { return name === "ScenePrompterExpand"; },
         cancelSceneBatchRunForNode() { context.expandCancels += 1; },
     };
     vm.createContext(context);
     vm.runInContext(functionSource("popupContextReferencesNode"), context);
     vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
-    context.installSceneNodeRemovalCleanup(node, "ScenePromptExpand");
-    context.installSceneNodeRemovalCleanup(node, "ScenePromptExpand");
+    context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
+    context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
     node.onRemoved();
     assert.equal(previousCalls, 1);
     assert.equal(context.closeCalls, 1);
@@ -343,13 +343,13 @@ function testWorkflowTabLoadDoesNotCancelExpandRun() {
         invalidatePopupRequests() {},
         closeAllPopups() {},
         popupContextReferencesNode() { return false; },
-        isSceneExpandNodeName(name) { return name === "ScenePromptExpand"; },
+        isSceneExpandNodeName(name) { return name === "ScenePrompterExpand"; },
         cancellations: 0,
         cancelSceneBatchRunForNode() { context.cancellations += 1; },
     };
     vm.createContext(context);
     vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
-    context.installSceneNodeRemovalCleanup(node, "ScenePromptExpand");
+    context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
     node.onRemoved();
     assert.equal(context.cancellations, 0, "workflow loading must not cancel a queued Expand run");
 }

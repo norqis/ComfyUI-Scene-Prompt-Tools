@@ -43,12 +43,12 @@ MAX_PRESET_REFERENCE_DEPTH = 64
 MAX_PRESET_REFERENCE_NODE_DEPTH = MAX_PRESET_NODES
 
 SAFE_NODE_CLASSES = {
-    "ScenePrompt": ScenePrompt,
+    "ScenePrompter": ScenePrompt,
     "SceneMatrix": SceneMatrix,
     "ScenePath": ScenePath,
-    "ScenePromptMerge": ScenePromptMerge,
+    "ScenePrompterMerge": ScenePromptMerge,
     "ScenePromptCounter": ScenePromptCounter,
-    "ScenePromptQueue": ScenePromptQueue,
+    "ScenePrompterQueue": ScenePromptQueue,
     "SceneEmptyLatent": SceneEmptyLatent,
     "ScenePresetReference": None,
 }
@@ -491,7 +491,7 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     expand = nodes.get(expand_id)
     if not isinstance(expand, dict):
         raise ScenePresetError(f"Scene Prompt Expand #{expand_id} が見つかりません。")
-    if expand.get("class_type") != "ScenePromptExpand":
+    if expand.get("class_type") != "ScenePrompterExpand":
         raise ScenePresetError(f"#{expand_id} は Scene Prompt Expand ではありません。")
 
     source = _node_inputs(expand).get("scene_prompt")
@@ -614,7 +614,7 @@ def _scene_node_value_impl(
     if cls is None:
         raise ScenePresetError(f"{_node_label(node_id, node)} はScene計画を計算できません。")
     kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
-    if class_type in {"ScenePrompt", "SceneMatrix"}:
+    if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     return result[0]
@@ -835,7 +835,13 @@ def _replace_link(value, input_id, upstream_link, graph):
     return source.out(output_index)
 
 
-def expand_preset_reference(preset_id, scene_prompt=None, run_handle="", _require_context=False):
+def expand_preset_reference(
+    preset_id,
+    scene_prompt=None,
+    run_handle="",
+    _require_context=False,
+    source_node_id="",
+):
     preset_id = _clean_preset_id(preset_id)
     if _require_context:
         user_id = require_run_context(run_handle)["user_id"]
@@ -872,7 +878,7 @@ def expand_preset_reference(preset_id, scene_prompt=None, run_handle="", _requir
         target = graph.lookup_node(str(node_id))
         for name, value in _node_inputs(node).items():
             target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
-        if class_type in {"ScenePrompt", "SceneMatrix"}:
+        if class_type in {"ScenePrompter", "SceneMatrix"}:
             target.set_input("run_handle", str(run_handle))
         if class_type == "ScenePresetReference":
             target.set_input("run_handle", str(run_handle))
@@ -881,6 +887,11 @@ def expand_preset_reference(preset_id, scene_prompt=None, run_handle="", _requir
     result = _replace_link(output_link, input_id, scene_prompt, graph)
     if is_link(result) and str(result[0]) == output_id:
         raise ScenePresetError("Scene Preset Outputの接続が不正です。")
+    marker = graph.node("ScenePromptCounter", "__scene_preset_source")
+    marker.set_input("scene_prompt", result)
+    marker.set_input("count", 1)
+    marker.set_input("source_node_id", str(source_node_id or ""))
+    result = marker.out(0)
     return {"result": (result,), "expand": graph.finalize()}
 
 
@@ -939,6 +950,7 @@ class ScenePresetReference:
                 "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "rawLink": True}),
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     @classmethod
@@ -949,5 +961,11 @@ class ScenePresetReference:
         metadata = preset["metadata"]
         return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_handle}"
 
-    def expand(self, preset_id, scene_prompt=None, run_handle=""):
-        return expand_preset_reference(preset_id, scene_prompt, run_handle, _require_context=True)
+    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None):
+        return expand_preset_reference(
+            preset_id,
+            scene_prompt,
+            run_handle,
+            _require_context=True,
+            source_node_id=unique_id,
+        )

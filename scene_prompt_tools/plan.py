@@ -24,7 +24,7 @@ PLAN_ITEM_KEYS = {
     "row", "count", "start_index", "row_index", "label", "queue_index", "source_id", "source_title",
 }
 ROW_KEYS = {
-    "labels", "positive_parts", "negative_parts", "path_parts", "display_labels", "display_label_groups", "set_refs",
+    "labels", "positive_parts", "negative_parts", "path_parts", "display_labels", "display_label_groups", "set_refs", "source_node_ids",
 }
 LATENT_KEYS = {"width", "height", "batch_size"}
 SOURCE_KEYS = {"index", "row_count", "total_images", "total_batches"}
@@ -104,6 +104,7 @@ def _clone_row(row):
         "display_labels": _require_string_list(row["display_labels"], "Scene Prompt row display_labels"),
         "display_label_groups": _require_string_groups(row["display_label_groups"], "Scene Prompt row display_label_groups"),
         "set_refs": cloned_refs,
+        "source_node_ids": _require_string_list(row["source_node_ids"], "Scene Prompt row source_node_ids"),
     }
     if "latent" in row:
         cloned["latent"] = _clone_latent(row["latent"])
@@ -113,7 +114,7 @@ def _clone_row(row):
 def empty_row():
     return {
         "labels": [], "positive_parts": [], "negative_parts": [], "path_parts": [],
-        "display_labels": [], "display_label_groups": [], "set_refs": [],
+        "display_labels": [], "display_label_groups": [], "set_refs": [], "source_node_ids": [],
     }
 
 
@@ -247,6 +248,20 @@ def transform(plan, transform_row):
     return make_plan(rows, sources=source["sources"])
 
 
+def with_source_node(plan, node_id):
+    """Record the Scene node that contributed to every output row."""
+    source_id = str(node_id or "").strip()
+    if not source_id:
+        return normalize_plan(plan)
+    return transform(
+        plan,
+        lambda row, _item: {
+            **row,
+            "source_node_ids": _unique_strings([*row["source_node_ids"], source_id]),
+        },
+    )
+
+
 def multiply_count(plan, factor):
     amount = _require_int(factor, "Scene Prompt count factor", 0, MAX_INPUT_COUNT)
     source = normalize_plan(plan)
@@ -286,6 +301,7 @@ def merge_rows(left, right):
         "display_labels": [*left_row["display_labels"], *right_row["display_labels"]],
         "display_label_groups": [*left_row["display_label_groups"], *right_row["display_label_groups"]],
         "set_refs": [*left_row["set_refs"], *right_row["set_refs"]],
+        "source_node_ids": _unique_strings([*left_row["source_node_ids"], *right_row["source_node_ids"]]),
     }
     latent = right_row.get("latent") or left_row.get("latent")
     if latent is not None:
@@ -347,7 +363,13 @@ def matrix_product(plan, matrix_rows, configured):
     rows = []
     for base in source["rows"]:
         for matrix_row in active:
-            row = merge_rows(base["row"], {key: matrix_row[key] for key in ROW_KEYS if key in matrix_row})
+            matrix_plan_row = {
+                key: matrix_row[key]
+                for key in ROW_KEYS
+                if key in matrix_row
+            }
+            matrix_plan_row["source_node_ids"] = []
+            row = merge_rows(base["row"], matrix_plan_row)
             name = _require_string(matrix_row.get("name"), "Scene Matrix row name", allow_empty=False).strip()
             row["labels"] = [*base["row"]["labels"], name]
             rows.append({"row": row, "count": base["count"]})

@@ -698,6 +698,83 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 if isinstance(value, list) and len(value) == 2:
                     self.assertIn(str(value[0]), saved)
 
+    def test_expand_records_selected_scene_node_provenance(self):
+        prompt_module = importlib.import_module(f"{self.nodes.__package__}.prompt")
+        prompt = prompt_module.ScenePrompt().build(
+            "branch_a", "tag_a", "{\"version\":1,\"categories\":{}}", "", "{\"version\":1,\"categories\":{}}", "", 0, True,
+            unique_id="branch_a",
+        )[0]
+        counted = self.nodes.ScenePromptCounter().count(prompt, 1, unique_id="count_a")[0]
+        queued = self.nodes.ScenePromptQueue().queue(scene_prompt1=counted, unique_id="queue_main")[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=0,
+            seed_base=1,
+            timestamp_dir=False,
+            scene_prompt=queued,
+            unique_id="expand_main",
+        )[2]
+        self.assertEqual(info["source_node_ids"], ["branch_a", "count_a", "queue_main", "expand_main"])
+
+    def test_generation_path_metadata_keeps_only_the_selected_scene_queue_branch(self):
+        prompt = {
+            "model": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "scene_a": {"class_type": "ScenePrompter", "inputs": {}},
+            "scene_b": {"class_type": "ScenePrompter", "inputs": {}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {
+                "scene_prompt1": ["scene_a", 0], "scene_prompt2": ["scene_b", 0],
+            }},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["queue", 0]}},
+            "positive": {"class_type": "CLIPTextEncode", "inputs": {"text": ["expand", 0]}},
+            "negative": {"class_type": "CLIPTextEncode", "inputs": {"text": ["expand", 1]}},
+            "sampler": {"class_type": "KSampler", "inputs": {
+                "model": ["model", 0], "positive": ["positive", 0], "negative": ["negative", 0],
+            }},
+            "decode": {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0]}},
+            "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["decode", 0], "scene_info": ["expand", 2]}},
+        }
+        workflow_nodes = [
+            {
+                "id": node_id, "type": node["class_type"], "pos": [index * 100, index * 25], "size": [220, 120],
+                "widgets_values": (["kept"] if node_id == "scene_a" else []),
+                "widgets_values_named": ({"selected": "kept"} if node_id == "scene_a" else {}),
+                "inputs": [], "outputs": [],
+            }
+            for index, (node_id, node) in enumerate(prompt.items())
+        ]
+        links = []
+        link_id = 1
+        workflow_by_id = {str(node["id"]): node for node in workflow_nodes}
+        for target_id, node in prompt.items():
+            for input_index, (input_name, value) in enumerate(node["inputs"].items()):
+                if not isinstance(value, list):
+                    continue
+                source_id = str(value[0])
+                links.append([link_id, source_id, value[1], target_id, input_index, "*"])
+                workflow_by_id[target_id]["inputs"].append({"name": input_name, "link": link_id})
+                workflow_by_id[source_id]["outputs"].append({"name": "output", "links": [link_id]})
+                link_id += 1
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": {"nodes": workflow_nodes, "links": links, "groups": []}},
+            "save",
+            self.nodes.SAVE_METADATA_EXECUTION_PATH,
+            {"source_node_ids": ["scene_a", "queue", "expand"]},
+        )
+        self.assertNotIn("scene_b", saved_prompt)
+        self.assertEqual(set(saved_prompt), {"model", "scene_a", "queue", "expand", "positive", "negative", "sampler", "decode", "save"})
+        saved_workflow = saved_extra["workflow"]
+        saved_ids = {str(node["id"]) for node in saved_workflow["nodes"]}
+        self.assertEqual(saved_ids, set(saved_prompt))
+        self.assertEqual(next(node for node in saved_workflow["nodes"] if node["id"] == "scene_a")["pos"], [100, 25])
+        self.assertEqual(next(node for node in saved_workflow["nodes"] if node["id"] == "scene_a")["widgets_values_named"], {"selected": "kept"})
+        for link in saved_workflow["links"]:
+            self.assertIn(str(link[1]), saved_ids)
+            self.assertIn(str(link[3]), saved_ids)
+        for node in saved_prompt.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and len(value) == 2:
+                    self.assertIn(str(value[0]), saved_prompt)
+
     def test_generation_path_metadata_rejects_unknown_target_and_invalid_links(self):
         prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {"images": ["missing", 0]}}}
         with self.assertRaisesRegex(ValueError, "保存対象のノードID"):
@@ -731,50 +808,37 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         package = _load_node_package(Path(self.temp_dir.name))
 
         current_node_names = {
-            "ScenePrompt",
+            "ScenePrompter",
             "SceneMatrix",
             "ScenePath",
-            "ScenePromptMerge",
+            "ScenePrompterMerge",
             "ScenePromptCounter",
-            "ScenePromptQueue",
+            "ScenePrompterQueue",
             "SceneEmptyLatent",
-            "ScenePromptExpand",
+            "ScenePrompterExpand",
             "SceneSaveImage",
             "ScenePresetInput",
             "ScenePresetOutput",
             "ScenePresetReference",
         }
-        old_base = "Scene" + "Prompter"
-        legacy_aliases = {
-            old_base: "ScenePrompt",
-            old_base + "Expand": "ScenePromptExpand",
-            old_base + "Queue": "ScenePromptQueue",
-            old_base + "Merge": "ScenePromptMerge",
-        }
-        self.assertSetEqual(set(package.NODE_CLASS_MAPPINGS), current_node_names | set(legacy_aliases))
+        self.assertSetEqual(set(package.NODE_CLASS_MAPPINGS), current_node_names)
         self.assertEqual(
             package.NODE_DISPLAY_NAME_MAPPINGS,
             {
-                "ScenePrompt": "Scene Prompt",
+                "ScenePrompter": "Scene Prompt",
                 "SceneMatrix": "Scene Matrix",
                 "ScenePath": "Scene Path",
-                "ScenePromptMerge": "Scene Prompt Merge",
+                "ScenePrompterMerge": "Scene Prompt Merge",
                 "ScenePromptCounter": "Scene Prompt Count",
-                "ScenePromptQueue": "Scene Prompt Queue",
+                "ScenePrompterQueue": "Scene Prompt Queue",
                 "SceneEmptyLatent": "Scene Empty Latent",
-                "ScenePromptExpand": "Scene Prompt Expand",
+                "ScenePrompterExpand": "Scene Prompt Expand",
                 "SceneSaveImage": "Scene Save Image",
                 "ScenePresetInput": "Scene Preset Input",
                 "ScenePresetOutput": "Scene Preset Output",
                 "ScenePresetReference": "Scene Preset Reference",
             },
         )
-        for old_name, current_name in legacy_aliases.items():
-            with self.subTest(old_name=old_name):
-                self.assertIsNot(package.NODE_CLASS_MAPPINGS[old_name], package.NODE_CLASS_MAPPINGS[current_name])
-                self.assertTrue(issubclass(package.NODE_CLASS_MAPPINGS[old_name], package.NODE_CLASS_MAPPINGS[current_name]))
-                self.assertTrue(package.NODE_CLASS_MAPPINGS[old_name].DEPRECATED)
-                self.assertNotIn(old_name, package.NODE_DISPLAY_NAME_MAPPINGS)
         for node_name, node_class in package.NODE_CLASS_MAPPINGS.items():
             with self.subTest(node=node_name):
                 description = getattr(node_class, "DESCRIPTION", "")
@@ -784,8 +848,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
 
     def test_expand_uses_clear_position_and_seed_labels(self):
         required = self.nodes.ScenePromptExpand.INPUT_TYPES()["required"]
-        self.assertEqual(required["current_index"][1]["display_name"], "処理位置")
-        self.assertEqual(required["seed_base"][1]["display_name"], "元シード")
+        self.assertEqual(required["current_index"][1]["display_name"], "生成番号")
+        self.assertEqual(required["seed_base"][1]["display_name"], "開始シード")
 
 
 if __name__ == "__main__":

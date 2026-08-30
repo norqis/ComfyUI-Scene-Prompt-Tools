@@ -51,7 +51,7 @@ const context = {
         context.prepared += 1;
         const handle = `opaque-handle-${context.prepared}`;
         for (const node of Object.values(prompt.output)) {
-            if (["ScenePrompt", "SceneMatrix", "ScenePresetReference", "ScenePromptExpand"].includes(node.class_type)) {
+            if (["ScenePrompter", "SceneMatrix", "ScenePresetReference", "ScenePrompterExpand"].includes(node.class_type)) {
                 node.inputs.run_handle = handle;
             }
         }
@@ -86,7 +86,7 @@ context.installSceneBatchPromptCapture();
 context.installSceneBatchPromptCapture();
 
 (async () => {
-    const scenePrompt = { output: { "1": { class_type: "ScenePrompt", inputs: {} } } };
+    const scenePrompt = { output: { "1": { class_type: "ScenePrompter", inputs: {} } } };
     const result = await context.api.queuePrompt(0, scenePrompt);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(context.prepared, 1, "Scene graph is prepared once");
@@ -102,12 +102,12 @@ context.installSceneBatchPromptCapture();
     assert.equal(context.queued, 2, "normal queue remains unchanged");
 
     await assert.rejects(
-        () => context.api.queuePrompt(0, { output: { "3": { class_type: "ScenePrompt", inputs: {} } } }),
+        () => context.api.queuePrompt(0, { output: { "3": { class_type: "ScenePrompter", inputs: {} } } }),
         /queue failed/,
     );
     assert.deepEqual(context.released, ["opaque-handle-1", "opaque-handle-2"], "failed queue releases its prepared handle");
 
-    await context.api.queuePrompt(0, { output: { "4": { class_type: "ScenePrompt", inputs: {} } } });
+    await context.api.queuePrompt(0, { output: { "4": { class_type: "ScenePrompter", inputs: {} } } });
     assert.equal(context.released.at(-1), "opaque-handle-3", "a queue response without prompt_id releases its prepared handle");
 
     context.releaseCompletedSceneRun({ prompt_id: "fast-prompt" });
@@ -162,9 +162,9 @@ context.installSceneBatchPromptCapture();
     };
     const multiExpand = {
         output: {
-            "1": { class_type: "ScenePrompt", inputs: {} },
-            "10": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["1", 0] } },
-            "20": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["1", 0] } },
+            "1": { class_type: "ScenePrompter", inputs: {} },
+            "10": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["1", 0] } },
+            "20": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["1", 0] } },
         },
     };
     await context.prepareSceneRunContext(multiExpand);

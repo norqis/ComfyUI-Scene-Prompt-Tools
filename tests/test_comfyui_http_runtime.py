@@ -50,14 +50,14 @@ def _scene_prompt_inputs():
 
 def _save_graph(mode, path="runtime", *, width=16, height=16, batch_size=1):
     return {
-        "1": {"class_type": "ScenePrompt", "inputs": _scene_prompt_inputs()},
+        "1": {"class_type": "ScenePrompter", "inputs": _scene_prompt_inputs()},
         "2": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 2}},
         "3": {
             "class_type": "SceneEmptyLatent",
             "inputs": {"scene_prompt": ["2", 0], "width": 512, "height": 512, "batch_size": 1},
         },
         "4": {
-            "class_type": "ScenePromptExpand",
+            "class_type": "ScenePrompterExpand",
             "inputs": {
                 "scene_prompt": ["3", 0],
                 "current_index": 0,
@@ -87,7 +87,7 @@ def _large_extra_pnginfo():
     workflow_nodes = [
         {
             "id": index,
-            "type": "ScenePrompt",
+            "type": "ScenePrompter",
             "title": f"Scene {index:03d}",
             "widgets_values": ["metadata-check", "x" * 256],
         }
@@ -133,7 +133,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         while time.monotonic() < deadline:
             try:
                 object_info = cls._request("/object_info")
-                if "ScenePrompt" in object_info and "SceneSaveImage" in object_info:
+                if "ScenePrompter" in object_info and "SceneSaveImage" in object_info:
                     return
             except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
                 pass
@@ -254,7 +254,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         preset_graph = {
             "output": {
                 "1": {"class_type": "ScenePresetInput", "inputs": {}},
-                "2": {"class_type": "ScenePrompt", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 0]}},
+                "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 0]}},
                 "3": {"class_type": "ScenePresetOutput", "inputs": {"preset_id": "http", "preset_name": "HTTP", "scene_prompt": ["2", 0]}},
             }
         }

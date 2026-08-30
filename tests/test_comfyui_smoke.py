@@ -59,28 +59,17 @@ class RealComfyUISmokeTests(unittest.TestCase):
         cls.loop.close()
 
     def test_registers_current_nodes_and_web_directory(self):
-        self.assertIn("ScenePrompt", self.package.NODE_CLASS_MAPPINGS)
-        self.assertEqual(self.package.NODE_DISPLAY_NAME_MAPPINGS["ScenePrompt"], "Scene Prompt")
+        self.assertIn("ScenePrompter", self.package.NODE_CLASS_MAPPINGS)
+        self.assertEqual(self.package.NODE_DISPLAY_NAME_MAPPINGS["ScenePrompter"], "Scene Prompt")
         self.assertEqual(self.package.NODE_CLASS_MAPPINGS["SceneSaveImage"].CATEGORY, "Scene/output")
         self.assertEqual(self.package.WEB_DIRECTORY, "./web")
         self.assertTrue((ROOT / self.package.WEB_DIRECTORY).is_dir())
 
-    def test_loads_pre_public_png_scene_class_ids_without_old_display_labels(self):
-        old_base = "Scene" + "Prompter"
-        aliases = {
-            old_base: "ScenePrompt",
-            old_base + "Expand": "ScenePromptExpand",
-            old_base + "Queue": "ScenePromptQueue",
-            old_base + "Merge": "ScenePromptMerge",
-        }
-        for old_name, current_name in aliases.items():
-            with self.subTest(old_name=old_name):
-                old_class = self.package.NODE_CLASS_MAPPINGS[old_name]
-                current_class = self.package.NODE_CLASS_MAPPINGS[current_name]
-                self.assertIsNot(old_class, current_class)
-                self.assertTrue(issubclass(old_class, current_class))
-                self.assertTrue(old_class.DEPRECATED)
-                self.assertNotIn(old_name, self.package.NODE_DISPLAY_NAME_MAPPINGS)
+    def test_uses_established_scene_node_ids_without_aliases(self):
+        self.assertNotIn("ScenePrompt", self.package.NODE_CLASS_MAPPINGS)
+        self.assertNotIn("ScenePromptExpand", self.package.NODE_CLASS_MAPPINGS)
+        self.assertNotIn("ScenePromptQueue", self.package.NODE_CLASS_MAPPINGS)
+        self.assertNotIn("ScenePromptMerge", self.package.NODE_CLASS_MAPPINGS)
 
     def test_uses_real_comfyui_graph_builder_and_routes(self):
         from comfy_execution.graph_utils import GraphBuilder
@@ -236,7 +225,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
             "output": {
                 "1": {"class_type": "ScenePresetInput", "inputs": {}},
                 "2": {
-                    "class_type": "ScenePrompt",
+                    "class_type": "ScenePrompter",
                     "inputs": {
                         "scene_prompt": ["1", 0],
                         "prompt_name": "cache smoke",
@@ -258,7 +247,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
         api_graph = {
             "output": {
                 "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "cache"}},
-                "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+                "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
             }
         }
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(

@@ -2,7 +2,7 @@ import json
 import random
 import re
 from collections import OrderedDict
-from .plan import make_plan, normalize_plan
+from .plan import make_plan, normalize_plan, with_source_node
 
 
 DEFAULT_CATEGORY_ORDER = ""
@@ -440,7 +440,8 @@ class _ScenePromptBase:
                     SCENE_PROMPT_TYPE,
                     {"forceInput": True, "display_name": "scene_prompt", "label": "scene_prompt"},
                 ),
-            }
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     @classmethod
@@ -456,6 +457,7 @@ class _ScenePromptBase:
         randomize,
         scene_prompt=None,
         run_handle="",
+        unique_id=None,
         **kwargs,
     ):
         return "|".join(
@@ -485,6 +487,7 @@ class _ScenePromptBase:
         randomize,
         scene_prompt=None,
         run_handle="",
+        unique_id=None,
         **kwargs,
     ):
         del kwargs
@@ -521,12 +524,13 @@ class _ScenePromptBase:
                 "display_labels": list(row.get("display_labels", [])),
                 "display_label_groups": list(row.get("display_label_groups", [])),
                 "set_refs": list(row.get("set_refs", [])),
+                "source_node_ids": list(row.get("source_node_ids", [])),
             }
             if "latent" in row:
                 output_row["latent"] = dict(row["latent"])
             rows.append({"row": output_row, "count": item["count"]})
 
-        return (make_plan(rows),)
+        return (with_source_node(make_plan(rows), unique_id),)
 
 
 class ScenePrompt(_ScenePromptBase):

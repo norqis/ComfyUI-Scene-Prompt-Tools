@@ -5,12 +5,9 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "web", "scene_prompt_ui.js"), "utf8");
 
-for (const suffix of ["", "Expand", "Queue", "Merge"]) {
-    const constant = suffix ? `LEGACY_SCENE_PROMPT_${suffix.toUpperCase()}` : "LEGACY_SCENE_PROMPT";
-    assert.match(source, new RegExp(`const ${constant} =`, "u"));
-}
-assert.match(source, /current_index: "処理位置"/u);
-assert.match(source, /seed_base: "元シード"/u);
+assert.match(source, /ScenePrompterExpand/u);
+assert.match(source, /current_index: "生成番号"/u);
+assert.match(source, /seed_base: "開始シード"/u);
 
 function functionSource(name) {
     const start = source.indexOf(`function ${name}(`);

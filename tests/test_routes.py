@@ -222,7 +222,7 @@ class PromptDataRouteTests(unittest.TestCase):
             "output": {
                 "1": {"class_type": "ScenePresetInput", "inputs": {}},
                 "2": {
-                    "class_type": "ScenePrompt",
+                    "class_type": "ScenePrompter",
                     "inputs": {
                         "prompt_name": "Preset", "positive_base": "preset", "positive_json": '{"version":1,"categories":{}}',
                         "negative_base": "", "negative_json": '{"version":1,"categories":{}}', "category_order": "",
@@ -241,7 +241,7 @@ class PromptDataRouteTests(unittest.TestCase):
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         claim = self.routes._test_routes[("POST", "/scene_prompt/runs/claim")]
         release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
-        prepared_graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+        prepared_graph = {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}
         prepared = asyncio.run(prepare(Request({"api_graph": prepared_graph})))
         handle = prepared["payload"]["run_handle"]
         self.assertTrue(asyncio.run(claim(Request({"run_handle": handle, "prompt_id": "route-prompt"})))["payload"]["claimed"])
@@ -280,7 +280,7 @@ class PromptDataRouteTests(unittest.TestCase):
 
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
-        graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+        graph = {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}
         response = asyncio.run(prepare(Request("alice", {"user_id": "bob", "api_graph": graph})))
         self.assertEqual(response["status"], 200)
         handle = response["payload"]["run_handle"]
@@ -307,7 +307,7 @@ class PromptDataRouteTests(unittest.TestCase):
             "id": "used", "label": "Used", "prompt": "used",
             "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
         }]}})
-        graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {"positive_json": selected}}}}
+        graph = {"output": {"1": {"class_type": "ScenePrompter", "inputs": {"positive_json": selected}}}}
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         claim = self.routes._test_routes[("POST", "/scene_prompt/runs/claim")]
         release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
@@ -329,7 +329,7 @@ class PromptDataRouteTests(unittest.TestCase):
                     "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
                 }]}})
                 return {"api_graph": {"output": {
-                    "1": {"class_type": "ScenePrompt", "inputs": {
+                    "1": {"class_type": "ScenePrompter", "inputs": {
                         "prompt_name": "Stored",
                         "positive_base": "",
                         "positive_json": selected,
@@ -339,7 +339,7 @@ class PromptDataRouteTests(unittest.TestCase):
                         "seed": 0,
                         "randomize": True,
                     }},
-                    "2": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+                    "2": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
                 }}, "expand_node_id": "2"}
 
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
@@ -386,10 +386,10 @@ class PromptDataRouteTests(unittest.TestCase):
             "randomize": True,
         }
         graph = {"output": {
-            "1": {"class_type": "ScenePrompt", "inputs": scene_inputs},
-            "2": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
-            "3": {"class_type": "ScenePrompt", "inputs": {"positive_json": stale}},
-            "4": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["3", 0]}},
+            "1": {"class_type": "ScenePrompter", "inputs": scene_inputs},
+            "2": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
+            "3": {"class_type": "ScenePrompter", "inputs": {"positive_json": stale}},
+            "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0]}},
         }}
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
@@ -419,9 +419,9 @@ class PromptDataRouteTests(unittest.TestCase):
             "category_path": ["Style"], "category_key": "Style", "category_label": "Style",
         }]}})
         graph = {"output": {
-            "1": {"class_type": "ScenePrompt", "inputs": {"positive_json": stale}},
-            "2": {"class_type": "ScenePromptExpand", "inputs": {}},
-            "3": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["1", 0]}},
+            "1": {"class_type": "ScenePrompter", "inputs": {"positive_json": stale}},
+            "2": {"class_type": "ScenePrompterExpand", "inputs": {}},
+            "3": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
         }}
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
@@ -449,7 +449,7 @@ class PromptDataRouteTests(unittest.TestCase):
             "1", "#1 は Scene Prompt Expand ではありません。",
         )):
             with self.subTest(expand_node_id=expand_node_id):
-                graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+                graph = {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}
                 response = asyncio.run(prepare(Request("alice", {
                     "api_graph": graph,
                     "expand_node_id": expand_node_id,
@@ -474,7 +474,7 @@ class PromptDataRouteTests(unittest.TestCase):
             released.append((handle, user_id))
             presets.release_scene_preset_snapshot(handle, user_id)
 
-        graph = {"output": {"1": {"class_type": "ScenePrompt", "inputs": {}}}}
+        graph = {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}
         handles = []
         try:
             store.maximum = 300
