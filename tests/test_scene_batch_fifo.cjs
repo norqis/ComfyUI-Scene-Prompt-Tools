@@ -276,6 +276,7 @@ testQueuedPrefixesStayWithTheirTabs()
     .then(testPresetRunCountDisplay)
     .then(testExpandCountTracksCompletedRuns)
     .then(testRunRefreshAndResetUpdateCount)
+    .then(testMismatchedSuccessDoesNotAdvanceExpandProgress)
     .then(testPresetErrorMarksOnlyTargetReference)
     .then(testPresetErrorClearStaysInSelectedBranch)
     .then(testPresetResolveClearsOnlyItsOwnReferences)
@@ -579,6 +580,34 @@ async function testRunRefreshAndResetUpdateCount() {
     vm.runInContext(functionSource("resetSceneExpandRunControls"), resetContext);
     resetContext.resetSceneExpandRunControls(node);
     assert.equal(resetContext.countUpdates, 1, "cancel or failure resets the count display");
+}
+
+async function testMismatchedSuccessDoesNotAdvanceExpandProgress() {
+    const run = {
+        waiting: true,
+        nextIndex: 0,
+        currentPromptId: "matched-prompt",
+        pendingPromptIds: new Set(["matched-prompt"]),
+    };
+    const progressContext = {
+        sceneBatchRun: run,
+        sceneBatchTerminalEvents: new Map(),
+        sceneBatchEventMatchesRun(_run, detail) { return detail?.prompt_id === "matched-prompt"; },
+        scenePromptIdFromValue(detail) { return detail?.prompt_id || ""; },
+        failSceneBatchRun() {},
+        sceneNodeForRun() { return {}; },
+        refreshes: 0,
+        refreshSceneBatchRunNode() { progressContext.refreshes += 1; },
+        scheduleNextSceneBatchItem() {},
+    };
+    vm.createContext(progressContext);
+    vm.runInContext(functionSource("continueSceneBatchRun"), progressContext);
+    progressContext.continueSceneBatchRun({ prompt_id: "another-expand-prompt" });
+    assert.equal(run.nextIndex, 0, "an unrelated Expand success cannot advance this run");
+    assert.equal(progressContext.refreshes, 0);
+    progressContext.continueSceneBatchRun({ prompt_id: "matched-prompt" });
+    assert.equal(run.nextIndex, 1);
+    assert.equal(progressContext.refreshes, 1);
 }
 
 async function testPresetErrorMarksOnlyTargetReference() {
