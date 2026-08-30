@@ -114,19 +114,22 @@ class ScenePresetTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def save(self, preset_id, nodes, name=None, workflow=None, user_id="default", output_node_id=None):
+    def save(self, preset_id, nodes, name=None, workflow=None, user_id="default", output_node_id=None, expected_revision=None):
         if output_node_id is None:
             output_node_id = next((
                 str(node_id) for node_id, node in nodes.items()
                 if isinstance(node, dict) and node.get("class_type") == "ScenePresetOutput"
             ), "3")
-        return self.module.save_preset({
+        payload = {
             "preset_id": preset_id,
             "name": name or preset_id,
             "output_node_id": output_node_id,
             "api_graph": graph(nodes),
             "workflow": workflow or {"version": 1, "nodes": []},
-        }, user_id)
+        }
+        if expected_revision is not None:
+            payload["expected_revision"] = expected_revision
+        return self.module.save_preset(payload, user_id)
 
     def write_preset_without_runtime_validation(self, preset_id, nodes, user_id="default"):
         workflow = {"version": 1, "nodes": []}
@@ -174,6 +177,35 @@ class ScenePresetTests(unittest.TestCase):
         self.assertNotEqual(first["metadata"]["sha256"], second["metadata"]["sha256"])
         with path.open("r", encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["metadata"]["name"], "Renamed")
+
+    def test_save_rejects_a_stale_editor_revision_without_mutation(self):
+        first = self.save("revision", basic_nodes("first"))
+        second = self.save("revision", basic_nodes("second"), expected_revision=first["metadata"]["revision"])
+        with self.assertRaisesRegex(self.module.ScenePresetConflictError, "別のタブ"):
+            self.save("revision", basic_nodes("stale"), expected_revision=first["metadata"]["revision"])
+        saved = self.module.load_preset("revision")
+        self.assertEqual(saved["metadata"]["revision"], second["metadata"]["revision"])
+        self.assertEqual(saved["api_graph"]["output"]["2"]["inputs"]["positive_base"], "second")
+
+    def test_preset_requires_connected_input_and_single_output(self):
+        missing_input = basic_nodes()
+        del missing_input["1"]
+        missing_input["2"]["inputs"].pop("scene_prompt")
+        with self.assertRaisesRegex(self.module.ScenePresetError, "Input は1個だけ必要"):
+            self.save("missing-input", missing_input)
+
+        disconnected_input = basic_nodes()
+        disconnected_input["2"]["inputs"].pop("scene_prompt")
+        with self.assertRaisesRegex(self.module.ScenePresetError, "Output へ接続"):
+            self.module._validate_preset_graph(disconnected_input)
+
+        multiple_output = basic_nodes()
+        multiple_output["4"] = {
+            "class_type": "ScenePresetOutput",
+            "inputs": {"scene_prompt": ["2", 0]},
+        }
+        with self.assertRaisesRegex(self.module.ScenePresetError, "Output は1個だけ必要"):
+            self.module._validate_preset_graph(multiple_output)
 
     def test_save_selected_scene_prompt_does_not_require_a_generation_context(self):
         nodes = basic_nodes()
@@ -315,7 +347,10 @@ class ScenePresetTests(unittest.TestCase):
 
     def test_validation_rejects_cycle_and_nonzero_output_index(self):
         nodes = basic_nodes()
-        nodes["2"]["inputs"]["scene_prompt"] = ["4", 0]
+        nodes["2"] = {
+            "class_type": "ScenePrompterMerge",
+            "inputs": {"scene_prompt1": ["1", 0], "scene_prompt2": ["4", 0]},
+        }
         nodes["4"] = {"class_type": "ScenePath", "inputs": {"scene_prompt": ["2", 0]}}
         with self.assertRaisesRegex(self.module.ScenePresetError, "循環"):
             self.save("cycle", nodes)
@@ -384,12 +419,12 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual(labels, [["A", "Right"], ["B", "Right"], ["A"], ["B"]])
         self.assertEqual(queued["total_images"], 4)
 
-    def test_preset_can_start_from_an_unconnected_optional_scene_input(self):
+    def test_preset_input_is_part_of_the_saved_preset_graph(self):
         nodes = {
             "1": {"class_type": "ScenePresetInput", "inputs": {}},
             "2": {
                 "class_type": "SceneEmptyLatent",
-                "inputs": {"width": 832, "height": 1216, "batch_size": 2},
+                "inputs": {"scene_prompt": ["1", 0], "width": 832, "height": 1216, "batch_size": 2},
             },
             "3": {
                 "class_type": "ScenePresetOutput",
@@ -398,7 +433,7 @@ class ScenePresetTests(unittest.TestCase):
         }
         self.save("standalone", nodes)
         expanded = self.module.expand_preset_reference("standalone")
-        self.assertFalse(any(
+        self.assertTrue(any(
             node["class_type"] == "ScenePresetInput"
             for node in expanded["expand"].values()
         ))

@@ -237,6 +237,12 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertEqual(response["status"], 200)
         list_presets = self.routes._test_routes[("GET", "/scene_presets/list")]
         self.assertEqual(asyncio.run(list_presets(Request()))["payload"]["presets"][0]["metadata"]["preset_id"], "route")
+        load_preset = self.routes._test_routes[("GET", "/scene_presets/load")]
+        loaded = asyncio.run(load_preset(Request(query={"preset_id": "route"})))
+        self.assertEqual(loaded["status"], 200)
+        self.assertSetEqual(set(loaded["payload"]), {"metadata", "workflow"})
+        self.assertEqual(loaded["payload"]["metadata"]["preset_id"], "route")
+        self.assertNotIn("api_graph", loaded["payload"])
 
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         claim = self.routes._test_routes[("POST", "/scene_prompt/runs/claim")]
@@ -246,6 +252,72 @@ class PromptDataRouteTests(unittest.TestCase):
         handle = prepared["payload"]["run_handle"]
         self.assertTrue(asyncio.run(claim(Request({"run_handle": handle, "prompt_id": "route-prompt"})))["payload"]["claimed"])
         self.assertTrue(asyncio.run(release(Request({"run_handle": handle})))["payload"]["released"])
+
+    def test_preset_load_route_is_user_scoped_and_has_clear_errors(self):
+        class Request:
+            def __init__(self, user_id, query):
+                self.user_id = user_id
+                self.query = query
+
+        graph = {
+            "output": {
+                "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                "2": {"class_type": "ScenePrompter", "inputs": {
+                    "prompt_name": "Preset", "positive_base": "alice", "positive_json": '{"version":1,"categories":{}}',
+                    "negative_base": "", "negative_json": '{"version":1,"categories":{}}', "category_order": "",
+                    "seed": 0, "randomize": True, "scene_prompt": ["1", 0],
+                }},
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            },
+        }
+        self.routes.save_preset({
+            "preset_id": "shared", "name": "Alice", "output_node_id": "3", "api_graph": graph,
+            "workflow": {"version": 1, "nodes": [{"id": 1, "type": "ScenePresetInput"}]},
+        }, "alice")
+        graph["output"]["2"]["inputs"]["positive_base"] = "bob"
+        self.routes.save_preset({
+            "preset_id": "shared", "name": "Bob", "output_node_id": "3", "api_graph": graph,
+            "workflow": {"version": 1, "nodes": [{"id": 1, "type": "ScenePresetInput"}]},
+        }, "bob")
+        load_preset = self.routes._test_routes[("GET", "/scene_presets/load")]
+        alice = asyncio.run(load_preset(Request("alice", {"preset_id": "shared"})))
+        bob = asyncio.run(load_preset(Request("bob", {"preset_id": "shared"})))
+        self.assertEqual(alice["payload"]["metadata"]["name"], "Alice")
+        self.assertEqual(bob["payload"]["metadata"]["name"], "Bob")
+        self.assertEqual(asyncio.run(load_preset(Request("alice", {"preset_id": "missing"})))["status"], 404)
+        self.assertEqual(asyncio.run(load_preset(Request("alice", {"preset_id": "bad/id"})))["status"], 400)
+        presets = sys.modules[f"{self.routes.__package__}.presets"]
+        broken = presets._preset_path("broken", "alice")
+        broken.write_text("{broken", encoding="utf-8")
+        self.assertEqual(asyncio.run(load_preset(Request("alice", {"preset_id": "broken"})))["status"], 400)
+
+    def test_preset_save_route_returns_conflict_for_stale_revision(self):
+        class Request:
+            user_id = "alice"
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        graph = {
+            "output": {
+                "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                "2": {"class_type": "ScenePrompter", "inputs": {
+                    "prompt_name": "Preset", "positive_base": "one", "positive_json": '{"version":1,"categories":{}}',
+                    "negative_base": "", "negative_json": '{"version":1,"categories":{}}', "category_order": "",
+                    "seed": 0, "randomize": True, "scene_prompt": ["1", 0],
+                }},
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            },
+        }
+        payload = {"preset_id": "conflict", "name": "Conflict", "output_node_id": "3", "api_graph": graph, "workflow": {"version": 1, "nodes": []}}
+        save = self.routes._test_routes[("POST", "/scene_presets/save")]
+        self.assertEqual(asyncio.run(save(Request(payload)))["status"], 200)
+        payload["expected_revision"] = 1
+        self.assertEqual(asyncio.run(save(Request(payload)))["status"], 200)
+        self.assertEqual(asyncio.run(save(Request(payload)))["status"], 409)
 
     def test_async_item_route_keeps_the_event_loop_responsive(self):
         handler = self.routes._test_routes[("GET", "/scene_prompt/items")]

@@ -262,6 +262,9 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         self.assertEqual(saved["metadata"]["preset_id"], "http")
         listed = self._request("/scene_presets/list")
         self.assertIn("http", [entry["metadata"]["preset_id"] for entry in listed["presets"]])
+        loaded = self._request("/scene_presets/load?preset_id=http")
+        self.assertSetEqual(set(loaded), {"metadata", "workflow"})
+        self.assertEqual(loaded["metadata"]["preset_id"], "http")
 
         graph = _save_graph("ワークフロー全体", "preset-output")
         graph["1"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "http"}}
