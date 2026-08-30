@@ -6607,10 +6607,11 @@ function sceneExpandCountLabel(node) {
     if (status === "pending" || run.preparing || !run.snapshotReady) {
         return `準備中（全${totalLabel}）`;
     }
-    const completed = Math.min(Math.max(0, Number(run.nextIndex)), totalBatches);
-    return totalImages === null
-        ? `${completed}/${totalBatches}回完了`
-        : `${completed}/${totalBatches}回完了（全${totalImages}枚）`;
+    if (status === "active" || status === "stopping" || status === "blocked") {
+        const completed = Math.min(Math.max(0, Number(run.nextIndex)), totalBatches);
+        return `${completed} / ${totalBatches}`;
+    }
+    return totalLabel;
 }
 
 function sceneBatchRunId(date = new Date()) {

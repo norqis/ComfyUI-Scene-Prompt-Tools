@@ -511,15 +511,17 @@ async function testPresetRunCountDisplay() {
 async function testExpandCountTracksCompletedRuns() {
     const run = { preparing: false, snapshotReady: true, nextIndex: 0, total: 80, totalImages: 80 };
     const otherRun = { preparing: false, snapshotReady: true, nextIndex: 11, total: 12, totalImages: 12 };
+    const mismatchRun = { preparing: false, snapshotReady: true, nextIndex: 1, total: 2, totalImages: 6, active: true };
     const node = { run };
     const otherNode = { run: otherRun };
+    const mismatchNode = { run: mismatchRun };
     const displayContext = {
         Math,
         Number,
         sceneExpandCounts(target) {
-            return target === otherNode
-                ? { totalBatches: 12, totalImages: 12 }
-                : { totalBatches: 80, totalImages: 80 };
+            if (target === otherNode) return { totalBatches: 12, totalImages: 12 };
+            if (target === mismatchNode) return { totalBatches: 2, totalImages: 6 };
+            return { totalBatches: 80, totalImages: 80 };
         },
         sceneBatchRunForNode(target) { return target.run || null; },
         sceneBatchRunStatus(targetRun) { return targetRun?.active ? (targetRun.status || "active") : "idle"; },
@@ -535,18 +537,22 @@ async function testExpandCountTracksCompletedRuns() {
     run.preparing = true;
     assert.equal(displayContext.sceneExpandCountLabel(node), "準備中（全80回 / 80枚）");
     run.preparing = false;
-    assert.equal(displayContext.sceneExpandCountLabel(node), "0/80回完了（全80枚）");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "0 / 80");
     run.nextIndex = 1;
-    assert.equal(displayContext.sceneExpandCountLabel(node), "1/80回完了（全80枚）", "only a matching success advances the display");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "only a matching success advances the display");
     run.status = "pending";
     assert.equal(displayContext.sceneExpandCountLabel(node), "準備中（全80回 / 80枚）", "re-queued work is preparation, not prior progress");
     run.status = "active";
     otherRun.active = true;
-    assert.equal(displayContext.sceneExpandCountLabel(otherNode), "11/12回完了（全12枚）", "each Expand tab reads its own run");
+    assert.equal(displayContext.sceneExpandCountLabel(otherNode), "11 / 12", "each Expand tab reads its own run");
+    assert.equal(displayContext.sceneExpandCountLabel(mismatchNode), "1 / 2", "progress counts batches rather than generated images");
     run.status = "stopping";
-    assert.equal(displayContext.sceneExpandCountLabel(node), "1/80回完了（全80枚）", "stopping preserves completed work without claiming image completion");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "stopping preserves completed work without claiming image completion");
     run.status = "blocked";
-    assert.equal(displayContext.sceneExpandCountLabel(node), "1/80回完了（全80枚）", "blocked cleanup preserves completed work");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "blocked cleanup preserves completed work");
+    run.status = "active";
+    run.nextIndex = 80;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "80 / 80", "completion shows completed batches without repeating image totals");
     run.active = false;
     assert.equal(displayContext.sceneExpandCountLabel(node), "80回 / 80枚", "cancelled or failed runs reset to the idle plan count");
 }
