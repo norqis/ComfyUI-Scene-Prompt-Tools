@@ -41,7 +41,7 @@ class PublicPackageTests(unittest.TestCase):
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.2.8"', pyproject)
+        self.assertIn('version = "0.2.9"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
@@ -101,9 +101,12 @@ class PublicPackageTests(unittest.TestCase):
             path.read_text(encoding="utf-8")
             for path in (ROOT / "scene_prompt_tools").glob("*.py")
         )
+        frontend_state_source = (ROOT / "web" / "scene_prompt_state.js").read_text(encoding="utf-8")
         self.assertIn('SELECTION_ITEM_LEGACY_OPTIONAL_KEYS = {"legacy_keys"}', runtime_source)
-        self.assertNotIn("source_shape", runtime_source)
-        self.assertNotIn("_migrate", runtime_source)
+        self.assertIn('SELECTION_ITEM_LEGACY_OPTIONAL_KEYS = ["legacy_keys"]', frontend_state_source)
+        for source in (runtime_source, frontend_state_source):
+            self.assertNotIn("source_shape", source)
+            self.assertNotIn("_migrate", source)
 
     def test_pre_public_node_ids_are_load_only_aliases(self):
         package_source = (ROOT / "__init__.py").read_text(encoding="utf-8")
