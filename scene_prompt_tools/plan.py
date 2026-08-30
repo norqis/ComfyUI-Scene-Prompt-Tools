@@ -8,7 +8,7 @@ import json
 
 
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
-PLAN_VERSION = 1
+PLAN_VERSION = 2
 MAX_INPUT_COUNT = 10_000
 MAX_DERIVED_COUNT = 1_000_000_000
 MAX_PLAN_ROWS = 100_000
@@ -24,7 +24,7 @@ PLAN_ITEM_KEYS = {
     "row", "count", "start_index", "row_index", "label", "queue_index", "source_id", "source_title",
 }
 ROW_KEYS = {
-    "labels", "positive_parts", "negative_parts", "path_parts", "display_labels", "display_label_groups", "set_refs", "source_node_ids",
+    "labels", "positive_parts", "negative_parts", "path_parts", "filename_parts", "display_labels", "display_label_groups", "set_refs", "source_node_ids",
 }
 LATENT_KEYS = {"width", "height", "batch_size"}
 SOURCE_KEYS = {"index", "row_count", "total_images", "total_batches"}
@@ -101,6 +101,7 @@ def _clone_row(row):
         "positive_parts": _require_string_list(row["positive_parts"], "Scene Prompt row positive_parts"),
         "negative_parts": _require_string_list(row["negative_parts"], "Scene Prompt row negative_parts"),
         "path_parts": _require_string_list(row["path_parts"], "Scene Prompt row path_parts"),
+        "filename_parts": _require_string_list(row["filename_parts"], "Scene Prompt row filename_parts"),
         "display_labels": _require_string_list(row["display_labels"], "Scene Prompt row display_labels"),
         "display_label_groups": _require_string_groups(row["display_label_groups"], "Scene Prompt row display_label_groups"),
         "set_refs": cloned_refs,
@@ -113,7 +114,7 @@ def _clone_row(row):
 
 def empty_row():
     return {
-        "labels": [], "positive_parts": [], "negative_parts": [], "path_parts": [],
+        "labels": [], "positive_parts": [], "negative_parts": [], "path_parts": [], "filename_parts": [],
         "display_labels": [], "display_label_groups": [], "set_refs": [], "source_node_ids": [],
     }
 
@@ -298,6 +299,7 @@ def merge_rows(left, right):
         "labels": _unique_strings([*left_row["labels"], *right_row["labels"]]),
         "positive_parts": positive_parts, "negative_parts": negative_parts,
         "path_parts": [*left_row["path_parts"], *right_row["path_parts"]],
+        "filename_parts": [*left_row["filename_parts"], *right_row["filename_parts"]],
         "display_labels": [*left_row["display_labels"], *right_row["display_labels"]],
         "display_label_groups": [*left_row["display_label_groups"], *right_row["display_label_groups"]],
         "set_refs": [*left_row["set_refs"], *right_row["set_refs"]],

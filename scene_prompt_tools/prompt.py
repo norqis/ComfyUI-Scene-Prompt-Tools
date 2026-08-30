@@ -436,6 +436,7 @@ class _ScenePromptBase:
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
             "optional": {
+                "filename_enabled": ("BOOLEAN", {"default": False, "display_name": "ファイル名付与", "label": "ファイル名付与"}),
                 "scene_prompt": (
                     SCENE_PROMPT_TYPE,
                     {"forceInput": True, "display_name": "scene_prompt", "label": "scene_prompt"},
@@ -458,6 +459,7 @@ class _ScenePromptBase:
         scene_prompt=None,
         run_handle="",
         unique_id=None,
+        filename_enabled=False,
         **kwargs,
     ):
         return "|".join(
@@ -470,6 +472,7 @@ class _ScenePromptBase:
                 category_order or "",
                 str(randomize),
                 str(seed),
+                str(bool(filename_enabled)),
                 _scene_prompt_change_key(scene_prompt),
                 str(run_handle or ""),
             ]
@@ -488,6 +491,7 @@ class _ScenePromptBase:
         scene_prompt=None,
         run_handle="",
         unique_id=None,
+        filename_enabled=False,
         **kwargs,
     ):
         del kwargs
@@ -521,6 +525,7 @@ class _ScenePromptBase:
                 "positive_parts": merged_positive_parts,
                 "negative_parts": merged_negative_parts,
                 "path_parts": list(row.get("path_parts", [])),
+                "filename_parts": [*row.get("filename_parts", []), *([label] if filename_enabled else [])],
                 "display_labels": list(row.get("display_labels", [])),
                 "display_label_groups": list(row.get("display_label_groups", [])),
                 "set_refs": list(row.get("set_refs", [])),

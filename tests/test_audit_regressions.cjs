@@ -306,6 +306,27 @@ function testMatrixToggleSavesOnlyEnabledState() {
     assert.equal(context.written.sets[0].positive_base, "saved");
 }
 
+function testMatrixFilenameToggleSavesOnlyItsState() {
+    const original = { row_id: "row-a", name: "Saved name", filename_enabled: false, negative_base: "saved" };
+    const context = {
+        String,
+        readMatrixState: () => ({ version: 1, sets: [original] }),
+        written: null,
+        writeMatrixState(_node, value) { context.written = value; },
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("saveMatrixLineFilenameEnabled"), context);
+    context.saveMatrixLineFilenameEnabled({}, {
+        row_id: "row-a",
+        name: "Unsaved name",
+        filename_enabled: true,
+        negative_base: "unsaved",
+    });
+    assert.equal(context.written.sets[0].filename_enabled, true);
+    assert.equal(context.written.sets[0].name, "Saved name");
+    assert.equal(context.written.sets[0].negative_base, "saved");
+}
+
 function testMatrixStateUsesFirstValidStoredValue() {
     const context = {
         String,
@@ -346,6 +367,11 @@ function testSourceOwnershipBoundaries() {
     const toggleSource = matrixEditor.slice(toggleStart, toggleEnd);
     assert.doesNotMatch(toggleSource, /saveMatrixLineDrafts/);
     assert.match(toggleSource, /saveMatrixLineEnabled/);
+
+    const negativeIndex = matrixEditor.indexOf('createButton("ネガティブ候補")');
+    const filenameIndex = matrixEditor.indexOf('createButton(draft.filename_enabled');
+    const removeIndex = matrixEditor.indexOf('createButton("削除")');
+    assert.ok(negativeIndex >= 0 && negativeIndex < filenameIndex && filenameIndex < removeIndex);
 
     const capture = functionSource("installSceneBatchPromptCapture");
     assert.doesNotMatch(capture, /releaseSceneBatchPlan/);
@@ -576,6 +602,7 @@ Promise.resolve()
     .then(testPresetListRetriesAfterLatestFailure)
     .then(testNodeRemovalCancelsItsRun)
     .then(testMatrixToggleSavesOnlyEnabledState)
+    .then(testMatrixFilenameToggleSavesOnlyItsState)
     .then(testMatrixStateUsesFirstValidStoredValue)
     .then(testSourceOwnershipBoundaries)
     .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)

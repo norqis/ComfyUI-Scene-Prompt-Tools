@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 import tempfile
 import types
@@ -83,6 +84,39 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(plan["total_batches"], 1)
         result = self.nodes.ScenePromptExpand().expand(current_index=0, timestamp_dir=False, scene_prompt=plan)
         self.assertEqual(result[0], "alpha")
+
+    def test_filename_parts_follow_prompt_matrix_merge_and_queue_order(self):
+        prompt = self.prompt.ScenePrompt()
+        first = prompt.build(
+            "A", "", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
+            filename_enabled=True,
+        )[0]
+        matrix = self.nodes.SceneMatrix().build(json.dumps({
+            "version": 1,
+            "sets": [
+                {"row_id": "b", "name": "B", "path_label": "B", "filename_enabled": True},
+                {"row_id": "c", "name": "C", "path_label": "C", "filename_enabled": True},
+            ],
+        }), scene_prompt=first)[0]
+        right = prompt.build(
+            "D", "", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
+            filename_enabled=True,
+        )[0]
+        merged = self.nodes.ScenePromptMerge().merge(matrix, right)[0]
+        queued = self.nodes.ScenePromptQueue().queue(scene_prompt1=merged, scene_prompt2=first)[0]
+
+        self.assertEqual(
+            [item["row"]["filename_parts"] for item in queued["rows"]],
+            [["A", "B", "D"], ["A", "C", "D"], ["A"]],
+        )
+        first_info = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, prefix="_base", scene_prompt=queued,
+        )[2]
+        second_info = self.nodes.ScenePromptExpand().expand(
+            current_index=1, timestamp_dir=False, prefix="_base", scene_prompt=queued,
+        )[2]
+        self.assertEqual(first_info["filename_prefix"], "ABD_base")
+        self.assertEqual(second_info["filename_prefix"], "ACD_base")
 
     def test_optional_inputs_do_not_raise_in_is_changed(self):
         self.nodes.SceneMatrix.IS_CHANGED('{"version":1,"sets":[]}')

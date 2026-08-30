@@ -274,6 +274,9 @@ testQueuedPrefixesStayWithTheirTabs()
     .then(testPresetResolutionKeepsClickFifo)
     .then(testPresetFailureDoesNotQueue)
     .then(testPresetRunCountDisplay)
+    .then(testExpandCountTracksCompletedRuns)
+    .then(testRunRefreshAndResetUpdateCount)
+    .then(testMismatchedSuccessDoesNotAdvanceExpandProgress)
     .then(testPresetErrorMarksOnlyTargetReference)
     .then(testPresetErrorClearStaysInSelectedBranch)
     .then(testPresetResolveClearsOnlyItsOwnReferences)
@@ -503,6 +506,108 @@ async function testPresetRunCountDisplay() {
     run.nextIndex = 2;
     displayContext.updateSceneExpandButton(node);
     assert.equal(node.widgets[0].name, "停止 3/6");
+}
+
+async function testExpandCountTracksCompletedRuns() {
+    const run = { preparing: false, snapshotReady: true, nextIndex: 0, total: 80, totalImages: 80 };
+    const otherRun = { preparing: false, snapshotReady: true, nextIndex: 11, total: 12, totalImages: 12 };
+    const node = { run };
+    const otherNode = { run: otherRun };
+    const displayContext = {
+        Math,
+        Number,
+        sceneExpandCounts(target) {
+            return target === otherNode
+                ? { totalBatches: 12, totalImages: 12 }
+                : { totalBatches: 80, totalImages: 80 };
+        },
+        sceneBatchRunForNode(target) { return target.run || null; },
+        sceneBatchRunStatus(targetRun) { return targetRun?.active ? (targetRun.status || "active") : "idle"; },
+        formatSceneExpandCounts(totalBatches, totalImages) {
+            return `${totalBatches}回 / ${totalImages}枚`;
+        },
+    };
+    vm.createContext(displayContext);
+    vm.runInContext(functionSource("sceneExpandCountLabel"), displayContext);
+
+    assert.equal(displayContext.sceneExpandCountLabel(node), "80回 / 80枚", "past runs never supply the next run's count");
+    run.active = true;
+    run.preparing = true;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "準備中（全80回 / 80枚）");
+    run.preparing = false;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "0/80回完了（全80枚）");
+    run.nextIndex = 1;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1/80回完了（全80枚）", "only a matching success advances the display");
+    run.status = "pending";
+    assert.equal(displayContext.sceneExpandCountLabel(node), "準備中（全80回 / 80枚）", "re-queued work is preparation, not prior progress");
+    run.status = "active";
+    otherRun.active = true;
+    assert.equal(displayContext.sceneExpandCountLabel(otherNode), "11/12回完了（全12枚）", "each Expand tab reads its own run");
+    run.status = "stopping";
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1/80回完了（全80枚）", "stopping preserves completed work without claiming image completion");
+    run.status = "blocked";
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1/80回完了（全80枚）", "blocked cleanup preserves completed work");
+    run.active = false;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "80回 / 80枚", "cancelled or failed runs reset to the idle plan count");
+}
+
+async function testRunRefreshAndResetUpdateCount() {
+    const node = { widgets: [] };
+    const run = { node };
+    const refreshContext = {
+        sceneNodeForRun() { return node; },
+        buttonUpdates: 0,
+        countUpdates: 0,
+        updateSceneExpandButton() { refreshContext.buttonUpdates += 1; },
+        updateSceneExpandCountWidget() { refreshContext.countUpdates += 1; },
+    };
+    vm.createContext(refreshContext);
+    vm.runInContext(functionSource("refreshSceneBatchRunNode"), refreshContext);
+    refreshContext.refreshSceneBatchRunNode(run);
+    assert.equal(refreshContext.buttonUpdates, 1);
+    assert.equal(refreshContext.countUpdates, 1, "snapshot, queue acceptance, and success refresh both displays");
+
+    const resetContext = {
+        setWidgetValue(_node, name, value) {
+            _node[name] = value;
+            return true;
+        },
+        countUpdates: 0,
+        updateSceneExpandCountWidget() { resetContext.countUpdates += 1; },
+        markSceneNodeChanged() {},
+    };
+    vm.createContext(resetContext);
+    vm.runInContext(functionSource("resetSceneExpandRunControls"), resetContext);
+    resetContext.resetSceneExpandRunControls(node);
+    assert.equal(resetContext.countUpdates, 1, "cancel or failure resets the count display");
+}
+
+async function testMismatchedSuccessDoesNotAdvanceExpandProgress() {
+    const run = {
+        waiting: true,
+        nextIndex: 0,
+        currentPromptId: "matched-prompt",
+        pendingPromptIds: new Set(["matched-prompt"]),
+    };
+    const progressContext = {
+        sceneBatchRun: run,
+        sceneBatchTerminalEvents: new Map(),
+        sceneBatchEventMatchesRun(_run, detail) { return detail?.prompt_id === "matched-prompt"; },
+        scenePromptIdFromValue(detail) { return detail?.prompt_id || ""; },
+        failSceneBatchRun() {},
+        sceneNodeForRun() { return {}; },
+        refreshes: 0,
+        refreshSceneBatchRunNode() { progressContext.refreshes += 1; },
+        scheduleNextSceneBatchItem() {},
+    };
+    vm.createContext(progressContext);
+    vm.runInContext(functionSource("continueSceneBatchRun"), progressContext);
+    progressContext.continueSceneBatchRun({ prompt_id: "another-expand-prompt" });
+    assert.equal(run.nextIndex, 0, "an unrelated Expand success cannot advance this run");
+    assert.equal(progressContext.refreshes, 0);
+    progressContext.continueSceneBatchRun({ prompt_id: "matched-prompt" });
+    assert.equal(run.nextIndex, 1);
+    assert.equal(progressContext.refreshes, 1);
 }
 
 async function testPresetErrorMarksOnlyTargetReference() {

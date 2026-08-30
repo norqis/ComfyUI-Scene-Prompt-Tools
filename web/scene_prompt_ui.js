@@ -89,12 +89,27 @@ const SCENE_QUEUE_GROUP_COLORS = [
     "#4269ff",
 ];
 const SCENE_COUNT_MAX = 10000;
+const SCENE_PROMPT_V030_WIDGET_VALUE_COUNT = 10;
+const SCENE_PROMPT_SERIALIZED_WIDGET_NAMES = [
+    "prompt_name",
+    "positive_base",
+    "positive_json",
+    "negative_base",
+    "negative_json",
+    "category_order",
+    "seed",
+    "control_after_generate",
+    "randomize",
+    "run_handle",
+    "filename_enabled",
+];
 const PATH_MODE_DIRECTORY = "フォルダに分ける";
 const PATH_MODE_APPEND = "前のフォルダ名に結合";
 const SCENE_WIDGET_LABELS = {
     category: "カテゴリ",
     count: "生成回数",
     prompt_name: "ノード名",
+    filename_enabled: "ファイル名付与",
     path_name: "ノード名",
     positive_base: "ポジティブ基本文",
     negative_base: "ネガティブ基本文",
@@ -4597,7 +4612,7 @@ function writeMatrixState(node, state, options = {}) {
 }
 
 function installScenePromptWidgetSyncHandlers(node) {
-    for (const widgetName of ["positive_base", "negative_base", "category_order"]) {
+    for (const widgetName of ["filename_enabled", "positive_base", "negative_base", "category_order"]) {
         const widget = findWidget(node, widgetName);
         if (!widget || widget.scenePromptSyncWrapped) {
             continue;
@@ -5448,6 +5463,7 @@ function scenePromptLocalCacheKey(node) {
         negative_base: String(findWidget(node, "negative_base")?.value || ""),
         negative_json: String(findWidget(node, "negative_json")?.value || ""),
         category_order: String(findWidget(node, "category_order")?.value || ""),
+        filename_enabled: Boolean(findWidget(node, "filename_enabled")?.value),
     });
 }
 
@@ -6582,7 +6598,19 @@ function sceneExpandCounts(node) {
 
 function sceneExpandCountLabel(node) {
     const { totalBatches, totalImages } = sceneExpandCounts(node);
-    return totalImages === null ? `${totalBatches}回` : formatSceneExpandCounts(totalBatches, totalImages);
+    const totalLabel = totalImages === null ? `${totalBatches}回` : formatSceneExpandCounts(totalBatches, totalImages);
+    const run = sceneBatchRunForNode(node);
+    const status = sceneBatchRunStatus(run);
+    if (status === "idle") {
+        return totalLabel;
+    }
+    if (status === "pending" || run.preparing || !run.snapshotReady) {
+        return `準備中（全${totalLabel}）`;
+    }
+    const completed = Math.min(Math.max(0, Number(run.nextIndex)), totalBatches);
+    return totalImages === null
+        ? `${completed}/${totalBatches}回完了`
+        : `${completed}/${totalBatches}回完了（全${totalImages}枚）`;
 }
 
 function sceneBatchRunId(date = new Date()) {
@@ -7314,6 +7342,7 @@ function acceptSceneBatchPrompt(run, result) {
     run.currentPromptId = promptId;
     run.pendingPromptIds.add(promptId);
     scheduleActiveSceneBatchReconcile(run);
+    refreshSceneBatchRunNode(run, { graphChange: false, background: false });
     if (run.runHandle && !run.runClaimed) {
         run.runClaimed = true;
         run.runClaimPromise = claimSceneRunHandle(run.runHandle, promptId).catch((error) => {
@@ -7990,6 +8019,7 @@ function resetSceneExpandRunControls(node, options = {}) {
     changed = setWidgetValue(node, "current_index", 0, { silent: true }) || changed;
     changed = setWidgetValue(node, "run_id", "", { silent: true }) || changed;
     changed = setWidgetValue(node, "seed_base", 0, { silent: true }) || changed;
+    updateSceneExpandCountWidget(node);
     if (changed && options.mark !== false) {
         markSceneNodeChanged(node, options);
     }
@@ -8000,6 +8030,7 @@ function refreshSceneBatchRunNode(run, options = {}) {
     const node = sceneNodeForRun(run);
     if (node) {
         updateSceneExpandButton(node, options);
+        updateSceneExpandCountWidget(node);
     }
 }
 
@@ -8175,7 +8206,7 @@ async function queueNextSceneBatchItem() {
             const changedRun = setWidgetValue(node, "run_id", run.runId, { silent: true });
             const changedSeed = setWidgetValue(node, "seed_base", run.currentSeed, { silent: true });
             const lightweightDirty = { graphChange: false, background: false };
-            updateSceneExpandButton(node, lightweightDirty);
+            refreshSceneBatchRunNode(run, lightweightDirty);
             if (changedIndex || changedRun || changedSeed) {
                 markSceneNodeChanged(node, lightweightDirty);
             }
@@ -8240,7 +8271,7 @@ function startSceneBatchRun(node) {
 
     if (sceneBatchRun || sceneBatchDetachedRuns.size) {
         sceneBatchPendingRuns.push(run);
-        updateSceneExpandButton(node);
+        refreshSceneBatchRunNode(run);
         for (const pending of sceneBatchPendingRuns) {
             refreshSceneBatchRunNode(pending, { graphChange: false, background: false });
         }
@@ -8252,7 +8283,7 @@ function startSceneBatchRun(node) {
 
     sceneBatchRun = run;
     clearSceneSavePreviews();
-    updateSceneExpandButton(node);
+    refreshSceneBatchRunNode(run);
     prepareSceneBatchRunSnapshot(run, node);
     queueNextSceneBatchItem();
 }
@@ -8284,7 +8315,7 @@ function continueSceneBatchRun(detail = null) {
     run.waiting = false;
     run.nextIndex += 1;
     if (node) {
-        updateSceneExpandButton(node, { graphChange: false, background: false });
+        refreshSceneBatchRunNode(run, { graphChange: false, background: false });
     }
     scheduleNextSceneBatchItem(run);
 }
@@ -8632,6 +8663,61 @@ function saveMatrixLineEnabled(node, draft) {
     writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
 }
 
+function ensureSceneFilenameToggle(node) {
+    const source = findWidget(node, "filename_enabled");
+    if (!source) {
+        return;
+    }
+    source.sceneRole = "filename_enabled";
+    showWidget(source);
+    const index = node.widgets.indexOf(source);
+    if (index > 0) {
+        node.widgets.splice(index, 1);
+        node.widgets.unshift(source);
+        if (Array.isArray(node.widgets_values) && index < node.widgets_values.length) {
+            const [storedValue] = node.widgets_values.splice(index, 1);
+            node.widgets_values.unshift(storedValue);
+        }
+    }
+}
+
+function scenePromptSerializedWidgetValues(node) {
+    return SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.map((name) => findWidget(node, name)?.value);
+}
+
+function scenePromptStoredWidgetValues(config) {
+    const values = config?.widgets_values;
+    if (!Array.isArray(values)) {
+        return null;
+    }
+    return values.length === SCENE_PROMPT_V030_WIDGET_VALUE_COUNT
+        ? [...values, false]
+        : values.length === SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.length
+            ? values
+            : null;
+}
+
+function scenePromptConfigureValues(config) {
+    const stored = scenePromptStoredWidgetValues(config);
+    if (!stored) {
+        return config;
+    }
+    return { ...config, widgets_values: [stored[stored.length - 1], ...stored.slice(0, -1)] };
+}
+
+function saveMatrixLineFilenameEnabled(node, draft) {
+    const state = readMatrixState(node);
+    const rowId = String(draft?.row_id || "");
+    const index = (state.sets || []).findIndex((line) => String(line?.row_id || "") === rowId);
+    if (index < 0) {
+        return;
+    }
+    const sets = state.sets.map((line, lineIndex) => (
+        lineIndex === index ? { ...line, filename_enabled: draft.filename_enabled === true } : line
+    ));
+    writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
+}
+
 function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
     const draft = drafts[index];
     if (!draft) {
@@ -8750,6 +8836,14 @@ function openSceneMatrixLinesPopup(node) {
             const negative = createButton("ネガティブ候補");
             negative.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "negative", renderRows));
             actions.appendChild(negative);
+
+            const filename = createButton(draft.filename_enabled === true ? "ファイル名付与: ON" : "ファイル名付与: OFF", draft.filename_enabled === true ? "pc-on" : "");
+            filename.addEventListener("click", () => {
+                draft.filename_enabled = draft.filename_enabled !== true;
+                saveMatrixLineFilenameEnabled(node, draft);
+                renderRows();
+            });
+            actions.appendChild(filename);
 
             const remove = createButton("削除");
             remove.addEventListener("click", () => {
@@ -9096,6 +9190,7 @@ function attachScenePrompt(node) {
         visibleNames: new Set(["scene_prompt"]),
         removeAllExceptVisible: true,
     });
+    ensureSceneFilenameToggle(node);
     ensurePromptSelectionControls(node);
     installScenePromptWidgetSyncHandlers(node);
     hideScenePromptWidgets(node);
@@ -9473,6 +9568,24 @@ app.registerExtension({
             attachSceneNode(this, nodeData.name);
             return result;
         };
+
+        if (nodeData.name === "ScenePrompter") {
+            const configure = nodeType.prototype.configure;
+            const serialize = nodeType.prototype.serialize;
+            nodeType.prototype.configure = function (...args) {
+                const stored = scenePromptStoredWidgetValues(args[0]);
+                args[0] = scenePromptConfigureValues(args[0]);
+                const result = configure?.apply(this, args);
+                if (stored) {
+                    setWidgetValue(this, "run_handle", stored[9], { silent: true });
+                }
+                return result;
+            };
+            nodeType.prototype.serialize = function (...args) {
+                const serialized = serialize?.apply(this, args);
+                return serialized ? { ...serialized, widgets_values: scenePromptSerializedWidgetValues(this) } : serialized;
+            };
+        }
 
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {

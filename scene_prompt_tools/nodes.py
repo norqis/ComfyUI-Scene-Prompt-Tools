@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import tempfile
+import unicodedata
 from datetime import datetime
 
 import numpy as np
@@ -53,7 +54,7 @@ from .runs import set_run_plan
 
 MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE"
 MATRIX_LINE_KEYS = {
-    "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled",
+    "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled", "filename_enabled",
     "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
     "positive_parts", "negative_parts", "display_labels", "display_label_groups",
 }
@@ -77,10 +78,7 @@ DEFAULT_MATRIX_JSON = "{\"version\":1,\"sets\":[]}"
 SCENE_PROMPT_INPUT_NAMES = tuple(f"scene_prompt{index}" for index in range(1, 11))
 BAD_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 BAD_FILENAME_PREFIX_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]+')
-WINDOWS_RESERVED_PREFIX_RE = re.compile(
-    r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])\.",
-    re.IGNORECASE,
-)
+WINDOWS_RESERVED_PREFIX_RE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.IGNORECASE)
 SEED_MODULO = 18446744073709551616
 SEED_MAX = SEED_MODULO - 1
 def _clean_string_list(values):
@@ -480,6 +478,8 @@ def _normalize_matrix_line_set(value):
             raise ValueError(f"Scene Matrix {field} must be a non-empty string.")
     if not isinstance(value.get("enabled", True), bool):
         raise ValueError("Scene Matrix entry enabled must be a boolean.")
+    if not isinstance(value.get("filename_enabled", False), bool):
+        raise ValueError("Scene Matrix entry filename_enabled must be a boolean.")
 
     node_id = value.get("node_id", "").strip()
     category = value.get("category", "").strip()
@@ -536,6 +536,7 @@ def _normalize_matrix_line_set(value):
         "name": name,
         "path_label": path_label,
         "enabled": value.get("enabled", True),
+        "filename_enabled": value.get("filename_enabled", False),
         "positive_parts": positive_parts,
         "negative_parts": negative_parts,
         "display_labels": display_labels,
@@ -550,6 +551,7 @@ def _normalize_matrix_line_set(value):
         ],
         "labels": [name],
         "path_parts": [],
+        "filename_parts": [name] if value.get("filename_enabled", False) else [],
     }
 
 
@@ -674,10 +676,23 @@ def _safe_relative_parts(value):
 
 
 def _safe_filename_prefix(value):
-    prefix = BAD_FILENAME_PREFIX_CHARS_RE.sub("_", str(value or ""))
-    if WINDOWS_RESERVED_PREFIX_RE.match(prefix):
-        return f"_{prefix}"
-    return prefix
+    prefix = unicodedata.normalize("NFC", str(value or ""))
+    prefix = BAD_FILENAME_PREFIX_CHARS_RE.sub("_", prefix)
+    first_component = prefix.split(".", 1)[0].rstrip(" ")
+    if WINDOWS_RESERVED_PREFIX_RE.match(first_component):
+        prefix = f"_{prefix}"
+    if sum(2 if ord(character) > 0xFFFF else 1 for character in prefix) <= 240:
+        return prefix
+    digest = hashlib.sha256(prefix.encode("utf-8")).hexdigest()[:8]
+    kept = []
+    units = 0
+    for character in prefix:
+        width = 2 if ord(character) > 0xFFFF else 1
+        if units + width > 231:
+            break
+        kept.append(character)
+        units += width
+    return f"{''.join(kept)}~{digest}"
 
 
 def _resolve_run_dir(run_dir):
@@ -1268,7 +1283,7 @@ class ScenePromptExpand:
             "run_dir": run_dir,
             "use_run_dir": use_run_dir,
             "path": _row_path(row),
-            "filename_prefix": _safe_filename_prefix(prefix),
+            "filename_prefix": _safe_filename_prefix("".join(row.get("filename_parts", [])) + str(prefix or "")),
             "file_index": global_index + 1,
             "positive": positive,
             "negative": negative,
