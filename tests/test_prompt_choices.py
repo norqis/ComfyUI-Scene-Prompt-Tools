@@ -13,7 +13,7 @@ folder_paths.get_user_directory = lambda: str(ROOT / ".test-user")
 folder_paths.get_public_user_directory = lambda user_id: str(ROOT / ".test-user" / user_id)
 sys.modules.setdefault("folder_paths", folder_paths)
 
-from scene_prompt_tools.prompt import _choice_rng, _compose_prompt_parts, _expand_prompt_parts, _parse_selection_json
+from scene_prompt_tools.prompt import _choice_rng, _compose_prompt_parts, _expand_choices, _expand_prompt_parts, _parse_selection_json
 
 
 EMPTY_SELECTION = '{"version":1,"categories":{}}'
@@ -47,12 +47,32 @@ def test_choice_with_commas_stays_intact_until_expanded():
     assert values == {("red dress", "boots"), ("blue dress", "heels")}
 
 
-def test_randomize_false_selects_the_first_choice():
-    assert _compose_prompt_parts("{A|B}", EMPTY_SELECTION, "", False, 99) == ["A"]
+def test_randomize_false_keeps_choices_for_expand():
+    assert _compose_prompt_parts("{A|B}", EMPTY_SELECTION, "", False, 99) == ["{A|B}"]
 
 
-def test_randomize_true_keeps_the_choice_for_expand():
+def test_randomize_true_keeps_choices_for_expand():
     assert _compose_prompt_parts("{A|B}", EMPTY_SELECTION, "", True, 99) == ["{A|B}"]
+
+
+def test_duplicate_empty_choice_slots_are_preserved():
+    class ChoiceSpy:
+        def __init__(self, index):
+            self.index = index
+            self.options = None
+
+        def choice(self, options):
+            self.options = list(options)
+            return options[self.index]
+
+    first = ChoiceSpy(0)
+    second = ChoiceSpy(1)
+    third = ChoiceSpy(2)
+
+    assert _expand_choices("{a||}", first) == "a"
+    assert _expand_choices("{a||}", second) == ""
+    assert _expand_choices("{a||}", third) == ""
+    assert first.options == second.options == third.options == ["a", "", ""]
 
 
 def test_same_seed_is_reproducible_and_streams_are_distinct():
@@ -192,8 +212,9 @@ class PromptChoiceTests(unittest.TestCase):
         test_optional_choice_can_be_present_or_empty()
         test_two_choices_can_produce_both_results()
         test_choice_with_commas_stays_intact_until_expanded()
-        test_randomize_false_selects_the_first_choice()
-        test_randomize_true_keeps_the_choice_for_expand()
+        test_randomize_false_keeps_choices_for_expand()
+        test_randomize_true_keeps_choices_for_expand()
+        test_duplicate_empty_choice_slots_are_preserved()
         test_same_seed_is_reproducible_and_streams_are_distinct()
         test_empty_choice_removes_empty_weight_and_extra_commas()
 

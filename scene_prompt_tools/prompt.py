@@ -94,7 +94,7 @@ def _join_unique(parts, separator, seen_keys=None):
     return separator.join(out)
 
 
-def _selected_prompt_parts(categories, order, rng, randomize, preserve_choices=False):
+def _selected_prompt_parts(categories, order):
     ordered_categories = []
     seen_categories = set()
     for category in order:
@@ -112,25 +112,19 @@ def _selected_prompt_parts(categories, order, rng, randomize, preserve_choices=F
             selected_parts = item.get("selected_parts")
             if selected_parts is not None:
                 for selected_part in selected_parts:
-                    part_text = _expand_choices(
-                        selected_part["text"], rng, randomize, preserve_choices
-                    )
+                    part_text = selected_part["text"]
                     weight = _item_weight(selected_part)
                     parts.extend(_apply_weight(part, weight) for part in _split_prompt(part_text))
                 continue
 
-            prompt = _expand_choices(prompt, rng, randomize, preserve_choices)
             weight = _item_weight(item)
             parts.extend(_apply_weight(part, weight) for part in _split_prompt(prompt))
     return parts
 
 
-def _expand_choices(text, rng, randomize, preserve_choices=False):
+def _expand_choices(text, rng):
     if not text:
         return ""
-
-    if randomize and preserve_choices:
-        return str(text)
 
     result = text
     guard = 0
@@ -143,10 +137,8 @@ def _expand_choices(text, rng, randomize, preserve_choices=False):
         options = [option.strip() for option in match.group(1).split("|")]
         if not options:
             replacement = ""
-        elif randomize:
-            replacement = rng.choice(options)
         else:
-            replacement = options[0]
+            replacement = rng.choice(options)
 
         result = result[: match.start()] + replacement + result[match.end() :]
 
@@ -172,7 +164,7 @@ def _expand_prompt_parts(parts, seed, stream):
     rng = _choice_rng(seed, stream)
     expanded = []
     for part in parts or []:
-        text = _expand_choices(part, rng, True)
+        text = _expand_choices(part, rng)
         for candidate in _split_prompt(text):
             if not _is_empty_weighted_part(candidate):
                 expanded.append(candidate)
@@ -330,11 +322,11 @@ def _scene_prompt_change_key(value):
 
 
 def _compose_prompt_parts(base_text, selection_json, category_order, randomize, seed):
-    rng = random.Random(int(seed or 0))
+    del randomize, seed
     categories = _parse_selection_json(selection_json)
     order = _parse_order(category_order)
-    parts = _split_prompt(_expand_choices(base_text or "", rng, randomize, bool(randomize)))
-    parts.extend(_selected_prompt_parts(categories, order, rng, randomize, bool(randomize)))
+    parts = _split_prompt(base_text or "")
+    parts.extend(_selected_prompt_parts(categories, order))
     return parts
 
 

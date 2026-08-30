@@ -159,14 +159,14 @@ try {
                 this.widgets = [
                     { name: "prompt_name", type: "text", value: "Prompt", options: {} },
                     { name: "filename_enabled", type: "toggle", value: false, options: {} },
-                    { name: "positive_base", type: "text", value: "positive base", options: {} },
+                    { name: "positive_base", type: "text", value: "positive base, {A|B}", options: {} },
                     { name: "positive_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
                     { name: "negative_base", type: "text", value: "negative base", options: {} },
                     { name: "negative_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
                     { name: "category_order", type: "text", value: "Outfit", options: {} },
                     { name: "seed", type: "number", value: 99, options: {} },
                     { name: "control_after_generate", type: "combo", value: "randomize", options: {} },
-                    { name: "randomize", type: "toggle", value: true, options: {} },
+                    { name: "randomize", type: "toggle", value: false, options: {} },
                     { name: "run_handle", type: "text", value: "", options: {} },
                 ];
                 this.widgets_values = this.widgets.map((widget) => widget.value);
@@ -260,6 +260,14 @@ try {
     assert.equal(selectedState.filenameEnabled.value, true);
     assert.equal(selectedState.filenameEnabled.stored, true);
     assert.equal(selectedState.filenameEnabled.topWidget, "filename_enabled");
+    assert.equal(
+        (await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.name === "positive_base").value)),
+        "positive base, {A|B}",
+    );
+    assert.equal(
+        (await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.name === "randomize").value)),
+        false,
+    );
     assert.equal(selectedState.selectedList.value, "1カテゴリ / 1候補");
     assert.ok(selectedState.selectedList.height > 0);
     assert.ok(selectedState.selectedList.drawCount > 0);
