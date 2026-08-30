@@ -13,55 +13,30 @@ from .scene_prompt_tools.presets import ScenePresetInput, ScenePresetOutput, Sce
 from .scene_prompt_tools.routes import define_routes
 
 
-class _LegacyScenePrompt(ScenePrompt):
-    DEPRECATED = True
-
-
-class _LegacyScenePromptExpand(ScenePromptExpand):
-    DEPRECATED = True
-
-
-class _LegacyScenePromptQueue(ScenePromptQueue):
-    DEPRECATED = True
-
-
-class _LegacyScenePromptMerge(ScenePromptMerge):
-    DEPRECATED = True
-
-
-_LEGACY_PREFIX = "Scene" + "Prompter"
-LEGACY_NODE_CLASS_MAPPINGS = {
-    _LEGACY_PREFIX: _LegacyScenePrompt,
-    _LEGACY_PREFIX + "Expand": _LegacyScenePromptExpand,
-    _LEGACY_PREFIX + "Queue": _LegacyScenePromptQueue,
-    _LEGACY_PREFIX + "Merge": _LegacyScenePromptMerge,
-}
-
 NODE_CLASS_MAPPINGS = {
-    "ScenePrompt": ScenePrompt,
+    "ScenePrompter": ScenePrompt,
     "SceneMatrix": SceneMatrix,
     "ScenePath": ScenePath,
-    "ScenePromptMerge": ScenePromptMerge,
+    "ScenePrompterMerge": ScenePromptMerge,
     "ScenePromptCounter": ScenePromptCounter,
-    "ScenePromptQueue": ScenePromptQueue,
+    "ScenePrompterQueue": ScenePromptQueue,
     "SceneEmptyLatent": SceneEmptyLatent,
-    "ScenePromptExpand": ScenePromptExpand,
+    "ScenePrompterExpand": ScenePromptExpand,
     "SceneSaveImage": SceneSaveImage,
     "ScenePresetInput": ScenePresetInput,
     "ScenePresetOutput": ScenePresetOutput,
     "ScenePresetReference": ScenePresetReference,
-    **LEGACY_NODE_CLASS_MAPPINGS,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ScenePrompt": "Scene Prompt",
+    "ScenePrompter": "Scene Prompt",
     "SceneMatrix": "Scene Matrix",
     "ScenePath": "Scene Path",
-    "ScenePromptMerge": "Scene Prompt Merge",
+    "ScenePrompterMerge": "Scene Prompt Merge",
     "ScenePromptCounter": "Scene Prompt Count",
-    "ScenePromptQueue": "Scene Prompt Queue",
+    "ScenePrompterQueue": "Scene Prompt Queue",
     "SceneEmptyLatent": "Scene Empty Latent",
-    "ScenePromptExpand": "Scene Prompt Expand",
+    "ScenePrompterExpand": "Scene Prompt Expand",
     "SceneSaveImage": "Scene Save Image",
     "ScenePresetInput": "Scene Preset Input",
     "ScenePresetOutput": "Scene Preset Output",

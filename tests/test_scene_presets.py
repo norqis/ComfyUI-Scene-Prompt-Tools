@@ -60,7 +60,7 @@ def basic_nodes(positive="first"):
     return {
         "1": {"class_type": "ScenePresetInput", "inputs": {}},
         "2": {
-            "class_type": "ScenePrompt",
+            "class_type": "ScenePrompter",
             "inputs": {
                 "prompt_name": "Preset prompt",
                 "positive_base": positive,
@@ -270,20 +270,20 @@ class ScenePresetTests(unittest.TestCase):
             self.save("missing_output", nodes)
 
         nodes = basic_nodes()
-        nodes["4"] = {"class_type": "ScenePrompt", "inputs": {}}
+        nodes["4"] = {"class_type": "ScenePrompter", "inputs": {}}
         saved = self.save("unused", nodes)
         self.assertSetEqual(set(saved["api_graph"]["output"]), {"1", "2", "3"})
 
     def test_save_prunes_disconnected_workflow_nodes_and_links(self):
         nodes = basic_nodes()
-        nodes["12"] = {"class_type": "ScenePrompt", "inputs": {}}
+        nodes["12"] = {"class_type": "ScenePrompter", "inputs": {}}
         workflow = {
             "version": 1,
             "nodes": [
                 {"id": 1, "type": "ScenePresetInput"},
-                {"id": 2, "type": "ScenePrompt"},
+                {"id": 2, "type": "ScenePrompter"},
                 {"id": 3, "type": "ScenePresetOutput"},
-                {"id": 12, "type": "ScenePrompt", "title": "パニック・恐怖"},
+                {"id": 12, "type": "ScenePrompter", "title": "パニック・恐怖"},
             ],
             "links": [
                 [1, 1, 0, 2, 0, "SCENE_PROMPT"],
@@ -298,7 +298,7 @@ class ScenePresetTests(unittest.TestCase):
     def test_save_uses_the_output_node_that_requested_the_save(self):
         nodes = basic_nodes("first")
         nodes["4"] = {
-            "class_type": "ScenePrompt",
+            "class_type": "ScenePrompter",
             "inputs": {
                 **nodes["2"]["inputs"],
                 "positive_base": "second",
@@ -330,7 +330,7 @@ class ScenePresetTests(unittest.TestCase):
             "version": 1,
             "nodes": [
                 {"id": 1, "type": "ScenePresetInput"},
-                {"id": 2, "type": "ScenePrompt"},
+                {"id": 2, "type": "ScenePrompter"},
                 {"id": 3, "type": "ScenePresetOutput"},
                 {"id": 90, "type": "Reroute"},
                 {"id": 91, "type": "Note"},
@@ -343,7 +343,7 @@ class ScenePresetTests(unittest.TestCase):
     def test_node_expansion_keeps_existing_scene_nodes_and_links(self):
         nodes = basic_nodes()
         nodes["4"] = {
-            "class_type": "ScenePromptQueue",
+            "class_type": "ScenePrompterQueue",
             "inputs": {"scene_prompt1": ["2", 0]},
         }
         nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
@@ -351,9 +351,9 @@ class ScenePresetTests(unittest.TestCase):
         result = self.module.expand_preset_reference("expanded", ["outer", 0], "")
         self.assertIn("result", result)
         self.assertIn("expand", result)
-        queue = next(value for value in result["expand"].values() if value["class_type"] == "ScenePromptQueue")
+        queue = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompterQueue")
         self.assertEqual(queue["inputs"]["scene_prompt1"][1], 0)
-        prompt = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompt")
+        prompt = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompter")
         self.assertEqual(prompt["inputs"]["scene_prompt"], ["outer", 0])
 
         source_result = self.module.expand_preset_reference("expanded")
@@ -396,7 +396,7 @@ class ScenePresetTests(unittest.TestCase):
 
         result = self.module.snapshot_presets_for_run("standalone-run", graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "standalone"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         }), "11")
         self.assertEqual(result["total_batches"], 1)
         self.assertEqual(result["total_images"], 2)
@@ -426,22 +426,22 @@ class ScenePresetTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.ScenePresetError, "循環"):
             self.module.snapshot_presets_for_run("run-cycle", graph({
                 "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "preset_a"}},
-                "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+                "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
             }), "11")
 
     def test_run_snapshot_is_fixed_after_later_save(self):
         self.save("fixed", basic_nodes("first"))
         self.module.snapshot_presets_for_run("run-fixed", graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         }), "11")
         self.save("fixed", basic_nodes("second"))
         result = self.module.expand_preset_reference("fixed", ["outer", 0], "run-fixed")
-        prompt = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompt")
+        prompt = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompter")
         self.assertEqual(prompt["inputs"]["positive_base"], "first")
         self.module.release_scene_preset_snapshot("run-fixed")
         fresh = self.module.expand_preset_reference("fixed", ["outer", 0], "")
-        prompt = next(value for value in fresh["expand"].values() if value["class_type"] == "ScenePrompt")
+        prompt = next(value for value in fresh["expand"].values() if value["class_type"] == "ScenePrompter")
         self.assertEqual(prompt["inputs"]["positive_base"], "second")
 
     def test_run_snapshot_never_falls_back_to_latest_preset(self):
@@ -453,7 +453,7 @@ class ScenePresetTests(unittest.TestCase):
             "run-without-fixed",
             graph({
                 "10": {"class_type": "ScenePresetInput", "inputs": {}},
-                "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+                "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
             }),
             "11",
         )
@@ -464,7 +464,7 @@ class ScenePresetTests(unittest.TestCase):
         self.save("fixed", basic_nodes("first"))
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         self.module.release_scene_preset_snapshot("cancelled-before-save")
         with self.assertRaisesRegex(self.module.ScenePresetError, "キャンセル"):
@@ -475,7 +475,7 @@ class ScenePresetTests(unittest.TestCase):
         self.save("fixed", basic_nodes("first"))
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         started = threading.Event()
         continue_resolve = threading.Event()
@@ -515,7 +515,7 @@ class ScenePresetTests(unittest.TestCase):
         self.save("fixed", basic_nodes("first"))
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         started = threading.Event()
         continue_resolve = threading.Event()
@@ -576,10 +576,10 @@ class ScenePresetTests(unittest.TestCase):
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "left"}},
             "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "right"}},
             "30": {
-                "class_type": "ScenePromptQueue",
+                "class_type": "ScenePrompterQueue",
                 "inputs": {"scene_prompt1": ["10", 0], "scene_prompt2": ["20", 0]},
             },
-            "40": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["30", 0]}},
+            "40": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["30", 0]}},
         })
         with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "累積ノード数") as error:
             self.module.snapshot_presets_for_run("siblings-over-limit", api_graph, "40")
@@ -633,9 +633,9 @@ class ScenePresetTests(unittest.TestCase):
         self.save("reachable", basic_nodes("reachable"))
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "reachable"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
             "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "missing_preset"}},
-            "21": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["20", 0]}},
+            "21": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["20", 0]}},
         })
         result = self.module.snapshot_presets_for_run("run-closure", api_graph, "11")
         self.assertEqual([item["preset_id"] for item in result["presets"]], ["reachable"])
@@ -648,9 +648,9 @@ class ScenePresetTests(unittest.TestCase):
         self.save("second", basic_nodes("second branch"))
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "first"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
             "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "second"}},
-            "21": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["20", 0]}},
+            "21": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["20", 0]}},
         })
 
         snapshot = self.module.snapshot_presets_for_run("queue-run", api_graph)
@@ -757,7 +757,7 @@ class ScenePresetTests(unittest.TestCase):
         self.write_preset_without_runtime_validation("nested-runtime-final", final_nodes)
         api_graph = graph({
             "100": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "nested-runtime-final"}},
-            "101": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["100", 0]}},
+            "101": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["100", 0]}},
         })
         with self.assertRaisesRegex(
             self.module.ScenePresetResolutionError,
@@ -784,7 +784,7 @@ class ScenePresetTests(unittest.TestCase):
                 "inputs": {"preset_id": "nested-small", "scene_prompt": [previous, 0]},
             }
             nodes["outer-expand"] = {
-                "class_type": "ScenePromptExpand",
+                "class_type": "ScenePrompterExpand",
                 "inputs": {"scene_prompt": ["outer-reference", 0]},
             }
             return graph(nodes)
@@ -814,7 +814,7 @@ class ScenePresetTests(unittest.TestCase):
         self.save("outer", outer, user_id="bob")
         graph_data = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "outer"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         runs = sys.modules[f"{self.module.__package__}.runs"]
         handle = runs.create_run_context("alice")
@@ -831,7 +831,7 @@ class ScenePresetTests(unittest.TestCase):
         self.save("fixed", basic_nodes("first"), user_id="alice")
         graph_data = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         runs = sys.modules[f"{self.module.__package__}.runs"]
         handle = runs.create_run_context("alice")
@@ -883,7 +883,7 @@ class ScenePresetTests(unittest.TestCase):
         self.save("fixed", basic_nodes("first"))
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         first = self.module.snapshot_presets_for_run("same-run", api_graph, "11")
         self.save("fixed", basic_nodes("second"))
@@ -896,7 +896,7 @@ class ScenePresetTests(unittest.TestCase):
         self.save("fixed", basic_nodes("first"))
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "fixed"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         barrier = threading.Barrier(2)
         original = self.module._resolve_preset_tree
@@ -932,7 +932,7 @@ class ScenePresetTests(unittest.TestCase):
 
     def test_unlinked_expand_run_is_snapshotted_and_cannot_be_reused_after_release(self):
         api_graph = graph({
-            "11": {"class_type": "ScenePromptExpand", "inputs": {}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {}},
         })
         first = self.module.snapshot_presets_for_run("unlinked-run", api_graph, "11")
         second = self.module.snapshot_presets_for_run("unlinked-run", api_graph, "11")
@@ -944,7 +944,7 @@ class ScenePresetTests(unittest.TestCase):
     def test_empty_top_level_reference_keeps_its_node_id(self):
         api_graph = graph({
             "51": {"class_type": "ScenePresetReference", "inputs": {"preset_id": ""}},
-            "52": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["51", 0]}},
+            "52": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["51", 0]}},
         })
         with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "preset_id") as error:
             self.module.snapshot_presets_for_run("run-empty-reference", api_graph, "52")
@@ -985,7 +985,7 @@ class ScenePresetTests(unittest.TestCase):
             },
         }
         nodes["5"] = {
-            "class_type": "ScenePrompt",
+            "class_type": "ScenePrompter",
             "inputs": {
                 "prompt_name": "right",
                 "positive_base": "right",
@@ -997,21 +997,21 @@ class ScenePresetTests(unittest.TestCase):
                 "randomize": True,
             },
         }
-        nodes["6"] = {"class_type": "ScenePromptMerge", "inputs": {"scene_prompt1": ["4", 0], "scene_prompt2": ["5", 0]}}
+        nodes["6"] = {"class_type": "ScenePrompterMerge", "inputs": {"scene_prompt1": ["4", 0], "scene_prompt2": ["5", 0]}}
         nodes["7"] = {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["6", 0], "count": 2}}
         nodes["8"] = {"class_type": "ScenePath", "inputs": {"scene_prompt": ["7", 0], "path_name": "preset_path", "path_mode": self.nodes.PATH_DIRECTORY}}
         nodes["9"] = {"class_type": "SceneEmptyLatent", "inputs": {"scene_prompt": ["8", 0], "width": 832, "height": 1216, "batch_size": 1}}
-        nodes["10"] = {"class_type": "ScenePromptQueue", "inputs": {"scene_prompt1": ["9", 0], "scene_prompt2": ["4", 0]}}
+        nodes["10"] = {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["9", 0], "scene_prompt2": ["4", 0]}}
         nodes["3"]["inputs"]["scene_prompt"] = ["10", 0]
         self.save("integrated", nodes)
         expanded = self.module.expand_preset_reference("integrated", ["outer", 0])
         expanded_classes = {node["class_type"] for node in expanded["expand"].values()}
-        self.assertTrue({"SceneMatrix", "ScenePromptMerge", "ScenePromptCounter", "ScenePath", "SceneEmptyLatent", "ScenePromptQueue"}.issubset(expanded_classes))
+        self.assertTrue({"SceneMatrix", "ScenePrompterMerge", "ScenePromptCounter", "ScenePath", "SceneEmptyLatent", "ScenePrompterQueue"}.issubset(expanded_classes))
         api_graph = graph({
             "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "integrated"}},
             "21": {"class_type": "PrimitiveInt", "inputs": {"value": 3}},
             "22": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["20", 0], "count": ["21", 0]}},
-            "23": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["22", 0]}},
+            "23": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["22", 0]}},
         })
         result = self.module.snapshot_presets_for_run("run-integrated", api_graph, "23")
         self.assertEqual(result["total_images"], 18)
@@ -1046,7 +1046,7 @@ class ScenePresetTests(unittest.TestCase):
         self.save("total", nodes, output_node_id="5")
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "total"}},
-            "11": {"class_type": "ScenePromptExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         result = self.module.snapshot_presets_for_run("run-total", api_graph, "11")
         self.assertEqual(result["total_images"], 2)
@@ -1057,7 +1057,7 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual(self.module.load_preset("shared", "alice")["api_graph"]["output"]["2"]["inputs"]["positive_base"], "alice")
         self.assertEqual(self.module.load_preset("shared", "bob")["api_graph"]["output"]["2"]["inputs"]["positive_base"], "bob")
 
-        graph_data = graph({"11": {"class_type": "ScenePromptExpand", "inputs": {}}})
+        graph_data = graph({"11": {"class_type": "ScenePrompterExpand", "inputs": {}}})
         self.module.snapshot_presets_for_run("same-run", graph_data, "11", "alice")
         self.module.snapshot_presets_for_run("same-run", graph_data, "11", "bob")
         self.assertIn(("alice", "same-run"), self.module._RUN_SNAPSHOTS)
@@ -1069,7 +1069,7 @@ class ScenePresetTests(unittest.TestCase):
         original_cancel_limit = self.module._CANCELLED_RUNS_MAX_ENTRIES
         self.module._CANCELLED_RUNS_MAX_ENTRIES = 2
         try:
-            graph_data = graph({"11": {"class_type": "ScenePromptExpand", "inputs": {}}})
+            graph_data = graph({"11": {"class_type": "ScenePrompterExpand", "inputs": {}}})
             self.module.snapshot_presets_for_run("one", graph_data, "11")
             self.module.snapshot_presets_for_run("two", graph_data, "11")
             self.module.snapshot_presets_for_run("one", graph_data, "11")

@@ -180,8 +180,8 @@ async function testQueuedPrefixesStayWithTheirTabs() {
 }
 
 async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
-    const graphA = { name: "A", prompt: { output: { "41": { class_type: "ScenePromptExpand", inputs: { prefix: "tab_a_" } } } } };
-    const graphB = { name: "B", prompt: { output: { "41": { class_type: "ScenePromptExpand", inputs: { prefix: "tab_b_" } } } } };
+    const graphA = { name: "A", prompt: { output: { "41": { class_type: "ScenePrompterExpand", inputs: { prefix: "tab_a_" } } } } };
+    const graphB = { name: "B", prompt: { output: { "41": { class_type: "ScenePrompterExpand", inputs: { prefix: "tab_b_" } } } } };
     const nodeB = { id: 41, graph: graphB, widgets: [
         { name: "current_index", value: 0 },
         { name: "run_id", value: "" },
@@ -379,7 +379,7 @@ async function testScenePresetResolution() {
     const snapshot = {
         output: {
             "9": { class_type: "ScenePresetReference", inputs: { preset_id: "preset-a" } },
-            "10": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["9", 0] } },
+            "10": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["9", 0] } },
         },
     };
     const run = { runId: "run-a" };
@@ -533,8 +533,8 @@ async function testPresetErrorMarksOnlyTargetReference() {
     const relatedIds = graphContext.scenePresetReferenceIdsForExpand({
         output: {
             "1": { class_type: "ScenePresetReference", inputs: {} },
-            "2": { class_type: "ScenePrompt", inputs: { scene_prompt: ["1", 0] } },
-            "3": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["2", 0] } },
+            "2": { class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0] } },
+            "3": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["2", 0] } },
             "4": { class_type: "ScenePresetReference", inputs: {} },
         },
     }, "3");
@@ -560,12 +560,12 @@ async function testSelectedExpandBranchOnlyQueues() {
     const fullPrompt = {
         output: {
             "1": { class_type: "ScenePresetReference", inputs: { preset_id: "A" } },
-            "2": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["1", 0] } },
+            "2": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["1", 0] } },
             "3": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "a.safetensors" } },
             "4": { class_type: "KSampler", inputs: { model: ["3", 0], scene_prompt: ["2", 0] } },
             "5": { class_type: "SaveImage", inputs: { images: ["4", 0] } },
             "10": { class_type: "ScenePresetReference", inputs: { preset_id: "B" } },
-            "11": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["10", 0] } },
+            "11": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["10", 0] } },
             "12": { class_type: "KSampler", inputs: { model: ["3", 0], scene_prompt: ["11", 0] } },
             "13": { class_type: "SaveImage", inputs: { images: ["12", 0] } },
         },
@@ -685,14 +685,14 @@ async function testPresetResolveClearsOnlyItsOwnReferences() {
     resolveContext.markScenePresetReferenceErrors("A is broken", { nodeId: "1" });
     await resolveContext.resolveScenePresetsForRun(
         { runId: "fixed-A" },
-        { output: { "1": { class_type: "ScenePresetReference", inputs: {} }, "2": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["1", 0] } } } },
+        { output: { "1": { class_type: "ScenePresetReference", inputs: {} }, "2": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["1", 0] } } } },
         "2",
     );
     assert.equal(nodes[0].color, "a");
     await assert.rejects(
         () => resolveContext.resolveScenePresetsForRun(
             { runId: "broken-B" },
-            { output: { "3": { class_type: "ScenePresetReference", inputs: {} }, "4": { class_type: "ScenePromptExpand", inputs: { scene_prompt: ["3", 0] } } } },
+            { output: { "3": { class_type: "ScenePresetReference", inputs: {} }, "4": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["3", 0] } } } },
             "4",
         ),
         /B is broken/,

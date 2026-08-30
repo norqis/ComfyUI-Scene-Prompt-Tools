@@ -12,8 +12,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_TERMS = (
     r"meta[ _-]?(?:camp|champ)",
-    "scene[ _-]?prompt" + "er",
-    "scene" + "Prompt" + "er",
     r"(?<![A-Za-z])[A-Za-z]:[\\\\/]",
 )
 FORBIDDEN = re.compile("|".join(FORBIDDEN_TERMS), re.IGNORECASE)
@@ -22,13 +20,6 @@ ALLOWED_NOREPLY_EMAILS = {"noreply@github.com"}
 HISTORY_BASE_ENV = "SCENE_PROMPT_HISTORY_BASE_SHA"
 HISTORY_HEAD_ENV = "SCENE_PROMPT_HISTORY_HEAD_SHA"
 SYNTHETIC_MERGE_ENV = "SCENE_PROMPT_SYNTHETIC_MERGE_REF"
-PRE_PUBLIC_NODE_ALIASES = {
-    "Scene" + "Prompter": "ScenePrompt",
-    "Scene" + "PrompterExpand": "ScenePromptExpand",
-    "Scene" + "PrompterQueue": "ScenePromptQueue",
-    "Scene" + "PrompterMerge": "ScenePromptMerge",
-}
-
 
 def tracked_files():
     result = subprocess.run(
@@ -110,18 +101,6 @@ def main():
             failures.append(f"tracked file is missing: {path}")
             continue
         content = target.read_text(encoding="utf-8", errors="replace")
-        if path == Path("__init__.py"):
-            required_markers = (
-                'LEGACY_NODE_CLASS_MAPPINGS = {',
-                '_LEGACY_PREFIX: _LegacyScenePrompt,',
-                '_LEGACY_PREFIX + "Expand": _LegacyScenePromptExpand,',
-                '_LEGACY_PREFIX + "Queue": _LegacyScenePromptQueue,',
-                '_LEGACY_PREFIX + "Merge": _LegacyScenePromptMerge,',
-                'DEPRECATED = True',
-            )
-            for marker in required_markers:
-                if marker not in content:
-                    failures.append(f"missing load-only legacy node marker in {path}: {marker}")
         if FORBIDDEN.search(content):
             failures.append(f"forbidden public text in {path}")
     if failures:

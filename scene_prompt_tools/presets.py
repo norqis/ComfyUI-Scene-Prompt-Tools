@@ -43,12 +43,12 @@ MAX_PRESET_REFERENCE_DEPTH = 64
 MAX_PRESET_REFERENCE_NODE_DEPTH = MAX_PRESET_NODES
 
 SAFE_NODE_CLASSES = {
-    "ScenePrompt": ScenePrompt,
+    "ScenePrompter": ScenePrompt,
     "SceneMatrix": SceneMatrix,
     "ScenePath": ScenePath,
-    "ScenePromptMerge": ScenePromptMerge,
+    "ScenePrompterMerge": ScenePromptMerge,
     "ScenePromptCounter": ScenePromptCounter,
-    "ScenePromptQueue": ScenePromptQueue,
+    "ScenePrompterQueue": ScenePromptQueue,
     "SceneEmptyLatent": SceneEmptyLatent,
     "ScenePresetReference": None,
 }
@@ -491,7 +491,7 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     expand = nodes.get(expand_id)
     if not isinstance(expand, dict):
         raise ScenePresetError(f"Scene Prompt Expand #{expand_id} が見つかりません。")
-    if expand.get("class_type") != "ScenePromptExpand":
+    if expand.get("class_type") != "ScenePrompterExpand":
         raise ScenePresetError(f"#{expand_id} は Scene Prompt Expand ではありません。")
 
     source = _node_inputs(expand).get("scene_prompt")
@@ -614,7 +614,7 @@ def _scene_node_value_impl(
     if cls is None:
         raise ScenePresetError(f"{_node_label(node_id, node)} はScene計画を計算できません。")
     kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
-    if class_type in {"ScenePrompt", "SceneMatrix"}:
+    if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     return result[0]
@@ -872,7 +872,7 @@ def expand_preset_reference(preset_id, scene_prompt=None, run_handle="", _requir
         target = graph.lookup_node(str(node_id))
         for name, value in _node_inputs(node).items():
             target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
-        if class_type in {"ScenePrompt", "SceneMatrix"}:
+        if class_type in {"ScenePrompter", "SceneMatrix"}:
             target.set_input("run_handle", str(run_handle))
         if class_type == "ScenePresetReference":
             target.set_input("run_handle", str(run_handle))

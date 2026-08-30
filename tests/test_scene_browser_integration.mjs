@@ -83,7 +83,7 @@ async function createPreparedRun(page) {
     await page.evaluate(async () => {
         await window.api.queuePrompt(0, {
             output: {
-                1: { class_type: "ScenePrompt", inputs: {} },
+                1: { class_type: "ScenePrompter", inputs: {} },
             },
         });
     });
@@ -125,8 +125,8 @@ try {
         class ScenePromptNode {
             constructor() {
                 this.id = 1;
-                this.type = "ScenePrompt";
-                this.comfyClass = "ScenePrompt";
+                this.type = "ScenePrompter";
+                this.comfyClass = "ScenePrompter";
                 this.size = [420, 300];
                 this.inputs = [];
                 this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
@@ -159,7 +159,7 @@ try {
             setDirtyCanvas() {}
             setSize(size) { this.size = [...size]; }
         }
-        await window.__scenePromptExtension.beforeRegisterNodeDef(ScenePromptNode, { name: "ScenePrompt" });
+        await window.__scenePromptExtension.beforeRegisterNodeDef(ScenePromptNode, { name: "ScenePrompter" });
         const node = new ScenePromptNode();
         window.app.graph._nodes = [node];
         node.onNodeCreated();
