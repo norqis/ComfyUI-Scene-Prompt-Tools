@@ -15,7 +15,7 @@ const SELECTION_ITEM_KNOWN_KEYS = new Set([
 const SELECTED_PART_REQUIRED_KEYS = ["index", "text"];
 const SELECTED_PART_OPTIONAL_KEYS = ["weight"];
 const MATRIX_LINE_KEYS = [
-    "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled",
+    "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled", "filename_enabled",
     "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
     "positive_parts", "negative_parts", "display_labels", "display_label_groups",
 ];
@@ -218,6 +218,7 @@ export function createMatrixLine(name) {
         name: title,
         path_label: title,
         enabled: true,
+        filename_enabled: false,
         positive_base: "",
         positive_json: DEFAULT_SELECTED_JSON,
         negative_base: "",
@@ -243,6 +244,9 @@ export function parseMatrixLine(value) {
     if (Object.hasOwn(value, "enabled") && typeof value.enabled !== "boolean") {
         throw new Error("Scene Matrix entry enabled must be a boolean.");
     }
+    if (Object.hasOwn(value, "filename_enabled") && typeof value.filename_enabled !== "boolean") {
+        throw new Error("Scene Matrix entry filename_enabled must be a boolean.");
+    }
 
     const name = requireString(value.name, "Scene Matrix line name", { allowEmpty: false }).trim();
     const pathLabel = requireString(value.path_label, "Scene Matrix line path label", { allowEmpty: false }).trim();
@@ -258,6 +262,7 @@ export function parseMatrixLine(value) {
         name,
         path_label: pathLabel,
         enabled: fieldOrDefault("enabled", true),
+        filename_enabled: fieldOrDefault("filename_enabled", false),
         positive_base: requireString(fieldOrDefault("positive_base", ""), "Scene Matrix positive base"),
         positive_json: serializeSelectionState(fieldOrDefault("positive_json", DEFAULT_SELECTED_JSON)),
         negative_base: requireString(fieldOrDefault("negative_base", ""), "Scene Matrix negative base"),

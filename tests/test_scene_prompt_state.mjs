@@ -65,6 +65,7 @@ assert.throws(() => parseSelectionState({
 }), /unsupported/u);
 
 const line = createMatrixLine("Night");
+assert.equal(line.filename_enabled, false);
 line.positive_base = "night, forest";
 line.negative_base = "daylight";
 const state = { version: 1, sets: [line] };
@@ -72,8 +73,10 @@ assert.deepEqual(parseMatrixState(serializeMatrixState(state)), state);
 assert.equal(parseMatrixState(serializeMatrixState(state)).sets[0].positive_base, "night, forest");
 assert.throws(() => parseMatrixState('{"version":1,"sets":[{"name":"old"}]}'), /unsupported|schema/u);
 assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, enabled: "true" }] }), /boolean/u);
+assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, filename_enabled: "true" }] }), /boolean/u);
 const { positive_base, ...oldLine } = line;
 assert.equal(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].enabled, true);
+assert.equal(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].filename_enabled, false);
 assert.deepEqual(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].display_label_groups, []);
 assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...oldLine, unknown: true }] }), /unsupported/u);
 assert.equal(serializeSelectionState(createSelectionState()), '{"version":1,"categories":{}}');

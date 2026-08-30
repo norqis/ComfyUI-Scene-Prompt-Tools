@@ -175,6 +175,15 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(self.nodes._safe_filename_prefix("NUL."), "_NUL.")
         self.assertEqual(self.nodes._safe_filename_prefix("COM¹."), "_COM¹.")
 
+    def test_prefix_sanitizer_normalizes_reserved_names_and_utf16_length(self):
+        self.assertEqual(self.nodes._safe_filename_prefix("e\u0301"), "é")
+        self.assertEqual(self.nodes._safe_filename_prefix("aux"), "_aux")
+        self.assertEqual(self.nodes._safe_filename_prefix("LPT9 .txt"), "_LPT9 .txt")
+        long_prefix = "😀" * 121
+        safe = self.nodes._safe_filename_prefix(long_prefix)
+        self.assertLessEqual(len(safe.encode("utf-16-le")) // 2, 240)
+        self.assertRegex(safe, r"~[0-9a-f]{8}$")
+
     def test_is_changed_includes_prefix(self):
         scene_prompt = _scene_prompt(self.nodes)
         first = self.nodes.ScenePromptExpand.IS_CHANGED(
@@ -241,6 +250,9 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [invalid]}))
 
         invalid = _matrix_line("A", enabled="true")
+        with self.assertRaises(ValueError):
+            self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [invalid]}))
+        invalid = _matrix_line("A", filename_enabled="true")
         with self.assertRaises(ValueError):
             self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [invalid]}))
 

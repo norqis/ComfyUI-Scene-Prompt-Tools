@@ -95,6 +95,7 @@ const SCENE_WIDGET_LABELS = {
     category: "カテゴリ",
     count: "生成回数",
     prompt_name: "ノード名",
+    filename_enabled: "ファイル名付与",
     path_name: "ノード名",
     positive_base: "ポジティブ基本文",
     negative_base: "ネガティブ基本文",
@@ -4597,7 +4598,7 @@ function writeMatrixState(node, state, options = {}) {
 }
 
 function installScenePromptWidgetSyncHandlers(node) {
-    for (const widgetName of ["positive_base", "negative_base", "category_order"]) {
+    for (const widgetName of ["filename_enabled", "positive_base", "negative_base", "category_order"]) {
         const widget = findWidget(node, widgetName);
         if (!widget || widget.scenePromptSyncWrapped) {
             continue;
@@ -5448,6 +5449,7 @@ function scenePromptLocalCacheKey(node) {
         negative_base: String(findWidget(node, "negative_base")?.value || ""),
         negative_json: String(findWidget(node, "negative_json")?.value || ""),
         category_order: String(findWidget(node, "category_order")?.value || ""),
+        filename_enabled: Boolean(findWidget(node, "filename_enabled")?.value),
     });
 }
 
@@ -8632,6 +8634,43 @@ function saveMatrixLineEnabled(node, draft) {
     writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
 }
 
+function ensureSceneFilenameToggle(node) {
+    const source = findWidget(node, "filename_enabled");
+    if (!source) {
+        return;
+    }
+    hideWidget(source);
+    const refresh = () => {
+        const enabled = source.value === true;
+        const toggle = addSceneButton(node, "filename_enabled_toggle", enabled ? "ファイル名付与: ON" : "ファイル名付与: OFF", () => {
+            setWidgetValue(node, "filename_enabled", source.value !== true);
+            refresh();
+        });
+        const index = node.widgets.indexOf(toggle);
+        if (index > 0) {
+            node.widgets.splice(index, 1);
+            node.widgets.unshift(toggle);
+            if (Array.isArray(node.widgets_values)) {
+                node.widgets_values.unshift(undefined);
+            }
+        }
+    };
+    refresh();
+}
+
+function saveMatrixLineFilenameEnabled(node, draft) {
+    const state = readMatrixState(node);
+    const rowId = String(draft?.row_id || "");
+    const index = (state.sets || []).findIndex((line) => String(line?.row_id || "") === rowId);
+    if (index < 0) {
+        return;
+    }
+    const sets = state.sets.map((line, lineIndex) => (
+        lineIndex === index ? { ...line, filename_enabled: draft.filename_enabled === true } : line
+    ));
+    writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
+}
+
 function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
     const draft = drafts[index];
     if (!draft) {
@@ -8750,6 +8789,14 @@ function openSceneMatrixLinesPopup(node) {
             const negative = createButton("ネガティブ候補");
             negative.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "negative", renderRows));
             actions.appendChild(negative);
+
+            const filename = createButton(draft.filename_enabled === true ? "ファイル名付与: ON" : "ファイル名付与: OFF", draft.filename_enabled === true ? "pc-on" : "");
+            filename.addEventListener("click", () => {
+                draft.filename_enabled = draft.filename_enabled !== true;
+                saveMatrixLineFilenameEnabled(node, draft);
+                renderRows();
+            });
+            actions.appendChild(filename);
 
             const remove = createButton("削除");
             remove.addEventListener("click", () => {
@@ -9096,6 +9143,7 @@ function attachScenePrompt(node) {
         visibleNames: new Set(["scene_prompt"]),
         removeAllExceptVisible: true,
     });
+    ensureSceneFilenameToggle(node);
     ensurePromptSelectionControls(node);
     installScenePromptWidgetSyncHandlers(node);
     hideScenePromptWidgets(node);

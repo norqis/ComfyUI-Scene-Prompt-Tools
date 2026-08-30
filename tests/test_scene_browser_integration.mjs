@@ -148,6 +148,7 @@ try {
                 this.graph = window.app.graph;
                 this.widgets = [
                     { name: "prompt_name", type: "text", value: "Prompt", options: {} },
+                    { name: "filename_enabled", type: "toggle", value: false, options: {} },
                     { name: "positive_base", type: "text", value: "", options: {} },
                     { name: "positive_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
                     { name: "negative_base", type: "text", value: "", options: {} },
@@ -178,6 +179,8 @@ try {
         const node = new ScenePromptNode();
         window.app.graph._nodes = [node];
         node.onNodeCreated();
+        if (node.widgets[0].sceneRole !== "filename_enabled_toggle") throw new Error("filename toggle must be first");
+        node.widgets[0].callback();
         window.__scenePromptTestNode = node;
         node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
     });
@@ -193,6 +196,14 @@ try {
         return {
             widget: JSON.parse(widget.value),
             stored: JSON.parse(node.widgets_values[node.widgets.indexOf(widget)]),
+            filenameEnabled: (() => {
+                const widget = node.widgets.find((candidateWidget) => candidateWidget.name === "filename_enabled");
+                return {
+                    value: widget.value,
+                    stored: node.widgets_values[node.widgets.indexOf(widget)],
+                    toggle: node.widgets[0].name,
+                };
+            })(),
             selectedList: (() => {
                 const list = node.widgets.find((candidateWidget) => candidateWidget.sceneRole === "positive_selected_list");
                 const canvas = document.createElement("canvas");
@@ -217,6 +228,9 @@ try {
     assert.equal(selectedState.widget.categories.Outfit[0].id, "summer");
     assert.equal(Object.hasOwn(selectedState.widget.categories.Outfit[0], "weight"), false);
     assert.deepEqual(selectedState.stored, selectedState.widget);
+    assert.equal(selectedState.filenameEnabled.value, true);
+    assert.equal(selectedState.filenameEnabled.stored, true);
+    assert.equal(selectedState.filenameEnabled.toggle, "ファイル名付与: ON");
     assert.equal(selectedState.selectedList.value, "1カテゴリ / 1候補");
     assert.ok(selectedState.selectedList.height > 0);
     assert.ok(selectedState.selectedList.drawCount > 0);
