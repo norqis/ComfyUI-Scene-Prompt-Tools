@@ -75,10 +75,11 @@ class RealComfyUISmokeTests(unittest.TestCase):
         }
         for old_name, current_name in aliases.items():
             with self.subTest(old_name=old_name):
-                self.assertIs(
-                    self.package.NODE_CLASS_MAPPINGS[old_name],
-                    self.package.NODE_CLASS_MAPPINGS[current_name],
-                )
+                old_class = self.package.NODE_CLASS_MAPPINGS[old_name]
+                current_class = self.package.NODE_CLASS_MAPPINGS[current_name]
+                self.assertIsNot(old_class, current_class)
+                self.assertTrue(issubclass(old_class, current_class))
+                self.assertTrue(old_class.DEPRECATED)
                 self.assertNotIn(old_name, self.package.NODE_DISPLAY_NAME_MAPPINGS)
 
     def test_uses_real_comfyui_graph_builder_and_routes(self):
@@ -123,7 +124,15 @@ class RealComfyUISmokeTests(unittest.TestCase):
         }
         extra_pnginfo = {
             "prompt": {"reserved": "ignored outside full workflow"},
-            "workflow": {"nodes": [{"id": "4", "pos": [1, 2]}]},
+            "workflow": {
+                "nodes": [
+                    {"id": 1, "type": "EmptyImage", "pos": [10, 20], "outputs": [{"links": [7]}]},
+                    {"id": 2, "type": "EmptyImage", "pos": [30, 40], "outputs": [{"links": []}]},
+                    {"id": 4, "type": "SceneSaveImage", "pos": [50, 60], "inputs": [{"link": 7}]},
+                ],
+                "links": [[7, 1, 0, 4, 0, "IMAGE"]],
+                "groups": [],
+            },
             "custom": {"kept": True},
         }
 
@@ -153,8 +162,11 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertEqual(json.loads(saved[nodes.SAVE_METADATA_PROMPT_ONLY]["custom"]), {"kept": True})
 
         execution_path = json.loads(saved[nodes.SAVE_METADATA_EXECUTION_PATH]["prompt"])
-        self.assertNotIn("workflow", saved[nodes.SAVE_METADATA_EXECUTION_PATH])
         self.assertEqual(set(execution_path), {"1", "4"})
+        execution_workflow = json.loads(saved[nodes.SAVE_METADATA_EXECUTION_PATH]["workflow"])
+        self.assertEqual({str(node["id"]) for node in execution_workflow["nodes"]}, {"1", "4"})
+        self.assertEqual(execution_workflow["links"], [[7, 1, 0, 4, 0, "IMAGE"]])
+        self.assertEqual(next(node for node in execution_workflow["nodes"] if node["id"] == 1)["pos"], [10, 20])
         self.assertEqual(json.loads(saved[nodes.SAVE_METADATA_EXECUTION_PATH]["custom"]), {"kept": True})
         for node in execution_path.values():
             for value in node["inputs"].values():

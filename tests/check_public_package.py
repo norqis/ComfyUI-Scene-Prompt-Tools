@@ -111,11 +111,17 @@ def main():
             continue
         content = target.read_text(encoding="utf-8", errors="replace")
         if path == Path("__init__.py"):
-            for old_name, current_name in PRE_PUBLIC_NODE_ALIASES.items():
-                alias = f'"{old_name}": {current_name},'
-                if content.count(alias) != 1:
-                    failures.append(f"missing or duplicate pre-public node alias in {path}: {old_name}")
-                content = content.replace(alias, "")
+            required_markers = (
+                'LEGACY_NODE_CLASS_MAPPINGS = {',
+                '_LEGACY_PREFIX: _LegacyScenePrompt,',
+                '_LEGACY_PREFIX + "Expand": _LegacyScenePromptExpand,',
+                '_LEGACY_PREFIX + "Queue": _LegacyScenePromptQueue,',
+                '_LEGACY_PREFIX + "Merge": _LegacyScenePromptMerge,',
+                'DEPRECATED = True',
+            )
+            for marker in required_markers:
+                if marker not in content:
+                    failures.append(f"missing load-only legacy node marker in {path}: {marker}")
         if FORBIDDEN.search(content):
             failures.append(f"forbidden public text in {path}")
     if failures:

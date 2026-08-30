@@ -1,3 +1,4 @@
+import copy
 import errno
 import hashlib
 import json
@@ -62,8 +63,8 @@ SAVE_METADATA_PROMPT_ONLY = "プロンプトのみ"
 SAVE_METADATA_EXECUTION_PATH = "生成経路ノードのみ"
 SAVE_METADATA_CHOICES = (
     SAVE_METADATA_WORKFLOW,
-    SAVE_METADATA_PROMPT_ONLY,
     SAVE_METADATA_EXECUTION_PATH,
+    SAVE_METADATA_PROMPT_ONLY,
 )
 DEFAULT_LATENT = {"width": 512, "height": 512, "batch_size": 1}
 MAX_RESOLUTION = MAX_DIMENSION
@@ -176,6 +177,117 @@ def _slice_prompt_for_output(prompt, target_id):
     }
 
 
+def _workflow_node_id(node):
+    if not isinstance(node, dict) or "id" not in node:
+        return None
+    return str(node["id"])
+
+
+def _workflow_link_endpoint_ids(link):
+    if isinstance(link, (list, tuple)) and len(link) >= 4:
+        return str(link[1]), str(link[3])
+    if isinstance(link, dict) and "origin_id" in link and "target_id" in link:
+        return str(link["origin_id"]), str(link["target_id"])
+    return None
+
+
+def _workflow_link_id(link):
+    if isinstance(link, (list, tuple)) and link:
+        return link[0]
+    if isinstance(link, dict):
+        return link.get("id")
+    return None
+
+
+def _prune_workflow_node_links(nodes, link_ids):
+    for node in nodes:
+        for input_slot in node.get("inputs", []) if isinstance(node, dict) else []:
+            if isinstance(input_slot, dict) and input_slot.get("link") not in link_ids:
+                input_slot["link"] = None
+        for output_slot in node.get("outputs", []) if isinstance(node, dict) else []:
+            if not isinstance(output_slot, dict) or not isinstance(output_slot.get("links"), list):
+                continue
+            output_slot["links"] = [link_id for link_id in output_slot["links"] if link_id in link_ids]
+
+
+def _workflow_group_intersects_node(group, node):
+    if not isinstance(group, dict) or not isinstance(node, dict):
+        return False
+    bounding = group.get("bounding")
+    position = node.get("pos")
+    size = node.get("size")
+    if (
+        not isinstance(bounding, (list, tuple)) or len(bounding) != 4
+        or not isinstance(position, (list, tuple)) or len(position) != 2
+        or not isinstance(size, (list, tuple)) or len(size) != 2
+    ):
+        return False
+    try:
+        group_x, group_y, group_width, group_height = (float(value) for value in bounding)
+        node_x, node_y = (float(value) for value in position)
+        node_width, node_height = (float(value) for value in size)
+    except (TypeError, ValueError):
+        return False
+    return (
+        node_x < group_x + group_width
+        and node_x + node_width > group_x
+        and node_y < group_y + group_height
+        and node_y + node_height > group_y
+    )
+
+
+def _slice_workflow_for_output(workflow, ancestor_ids):
+    if not isinstance(workflow, dict):
+        raise ValueError("Scene Save Image の生成経路を保存できません: workflow がノード定義ではありません。")
+    workflow_nodes = workflow.get("nodes")
+    if not isinstance(workflow_nodes, list):
+        raise ValueError("Scene Save Image の生成経路を保存できません: workflow の nodes が不正です。")
+
+    included_nodes = [
+        node
+        for node in workflow_nodes
+        if _workflow_node_id(node) in ancestor_ids
+    ]
+    included_ids = {_workflow_node_id(node) for node in included_nodes}
+    if included_ids != ancestor_ids:
+        missing = ", ".join(sorted(ancestor_ids - included_ids))
+        raise ValueError(
+            "Scene Save Image の生成経路を保存できません: workflow にノードIDがありません: " + missing
+        )
+
+    result = copy.deepcopy({
+        key: value
+        for key, value in workflow.items()
+        if key not in {"nodes", "links", "groups", "reroutes"}
+    })
+    result["nodes"] = copy.deepcopy(included_nodes)
+
+    workflow_links = workflow.get("links", [])
+    if not isinstance(workflow_links, list):
+        raise ValueError("Scene Save Image の生成経路を保存できません: workflow の links が不正です。")
+    result["links"] = [
+        copy.deepcopy(link)
+        for link in workflow_links
+        if (endpoint_ids := _workflow_link_endpoint_ids(link)) is not None
+        and endpoint_ids[0] in included_ids
+        and endpoint_ids[1] in included_ids
+    ]
+    link_ids = {_workflow_link_id(link) for link in result["links"]}
+    _prune_workflow_node_links(result["nodes"], link_ids)
+
+    workflow_groups = workflow.get("groups", [])
+    if not isinstance(workflow_groups, list):
+        raise ValueError("Scene Save Image の生成経路を保存できません: workflow の groups が不正です。")
+    result["groups"] = [
+        copy.deepcopy(group)
+        for group in workflow_groups
+        if any(_workflow_group_intersects_node(group, node) for node in included_nodes)
+    ]
+    if "reroutes" in workflow:
+        result["reroutes"] = []
+    return result
+
+
 def _metadata_for_save_mode(prompt, extra_pnginfo, unique_id, metadata_mode):
     if metadata_mode not in SAVE_METADATA_CHOICES:
         raise ValueError("Scene Save Image のメタデータ保存モードが不正です。")
@@ -185,20 +297,32 @@ def _metadata_for_save_mode(prompt, extra_pnginfo, unique_id, metadata_mode):
     if metadata_mode == SAVE_METADATA_WORKFLOW:
         return prompt, extra_pnginfo
 
-    saved_prompt = (
-        None
-        if metadata_mode == SAVE_METADATA_PROMPT_ONLY
-        else _slice_prompt_for_output(prompt, unique_id)
-    )
-    saved_extra = (
-        None
-        if extra_pnginfo is None
-        else {
+    if metadata_mode == SAVE_METADATA_PROMPT_ONLY:
+        saved_prompt = None
+        saved_extra = (
+            None
+            if extra_pnginfo is None
+            else {
+                key: value
+                for key, value in extra_pnginfo.items()
+                if key not in {"prompt", "workflow"}
+            }
+        )
+        return saved_prompt, saved_extra
+
+    ancestor_ids = _prompt_ancestor_ids(prompt, unique_id)
+    saved_prompt = _slice_prompt_for_output(prompt, unique_id)
+    saved_extra = None
+    if extra_pnginfo is not None:
+        saved_extra = {
             key: value
             for key, value in extra_pnginfo.items()
             if key not in {"prompt", "workflow"}
         }
-    )
+        if "workflow" in extra_pnginfo:
+            saved_extra["workflow"] = _slice_workflow_for_output(
+                extra_pnginfo["workflow"], ancestor_ids
+            )
     return saved_prompt, saved_extra
 
 
@@ -939,7 +1063,7 @@ class SceneEmptyLatent:
 
 
 class ScenePromptExpand:
-    DESCRIPTION = """Scene生成計画から、現在の生成番号に該当する1件を取り出して展開します。\nポジティブ、ネガティブ、保存用メタ情報、シード、空の潜在画像を出力し、{A|B|C} 形式の候補もこの段階でシードに基づいて確定します。\n連続生成では計画全体を1枚ずつ処理し、複数の実行要求はFIFOで順番に実行されます。このノード自身は画像を保存しません。"""
+    DESCRIPTION = """Scene生成計画から、処理位置に該当する1件を取り出して展開します。\nポジティブ、ネガティブ、保存用メタ情報、シード、空の潜在画像を出力し、{A|B|C} 形式の候補もこの段階で元シードに基づいて確定します。\n連続生成では計画全体を1枚ずつ処理し、複数の実行要求はFIFOで順番に実行されます。このノード自身は画像を保存しません。"""
     CATEGORY = "Scene/prompt"
     RETURN_TYPES = ("STRING", "STRING", SCENE_SAVE_INFO_TYPE, "INT", "LATENT")
     RETURN_NAMES = ("ポジティブ", "ネガティブ", "メタ情報", "シード", "潜在画像")
@@ -955,8 +1079,8 @@ class ScenePromptExpand:
                         "default": 0,
                         "min": 0,
                         "max": 1000000000,
-                        "display_name": "生成番号",
-                        "label": "生成番号",
+                        "display_name": "処理位置",
+                        "label": "処理位置",
                     },
                 ),
                 "run_id": (
@@ -974,8 +1098,8 @@ class ScenePromptExpand:
                         "default": 0,
                         "min": 0,
                         "max": SEED_MAX,
-                        "display_name": "シード基準",
-                        "label": "シード基準",
+                        "display_name": "元シード",
+                        "label": "元シード",
                     },
                 ),
                 "timestamp_dir": (
@@ -1089,7 +1213,7 @@ class ScenePromptExpand:
 
 
 class SceneSaveImage:
-    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「プロンプトのみ」「生成経路ノードのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。生成経路ノードのみはこの保存ノードへの入力接続を逆走した祖先を保存するため、Lazy入力の未使用枝を含む場合があり、配置やグループは保存しません。"""
+    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「生成経路ノードのみ」「プロンプトのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。生成経路ノードのみはこの保存ノードへの入力接続を逆走した祖先だけを、元の配置と設定を保って保存します。"""
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
@@ -1107,7 +1231,7 @@ class SceneSaveImage:
                         "default": SAVE_METADATA_WORKFLOW,
                         "display_name": "メタデータ保存",
                         "label": "メタデータ保存",
-                        "tooltip": "ワークフロー全体: 配置を含む全体を保存。プロンプトのみ: ワークフローは保存しない。生成経路ノードのみ: この保存ノードへの入力接続を逆走した祖先だけを保存し、配置やグループは保存しない。",
+                        "tooltip": "ワークフロー全体: 配置を含む全体を保存。生成経路ノードのみ: この保存ノードへの入力接続を逆走した祖先だけを、元の配置と設定を保って保存。プロンプトのみ: ワークフローは保存しない。",
                     },
                 ),
             },
