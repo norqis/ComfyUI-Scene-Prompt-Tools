@@ -391,6 +391,53 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertTrue(asyncio.run(claim(Request("alice", {"run_handle": handle, "prompt_id": "p1"})))["payload"]["claimed"])
         self.assertTrue(asyncio.run(release(Request("alice", {"run_handle": handle})))["payload"]["released"])
 
+    def test_prepare_ignores_canvas_only_presets_without_connected_full_save(self):
+        class Request:
+            def __init__(self, payload):
+                self.user_id = "alice"
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+        workflow = {"nodes": [{"id": 50, "type": "ScenePresetReference", "widgets_values": ["missing"]}], "links": []}
+        scene_inputs = {
+            "prompt_name": "Test",
+            "positive_base": "",
+            "positive_json": '{"version":1,"categories":{}}',
+            "negative_base": "",
+            "negative_json": '{"version":1,"categories":{}}',
+            "category_order": "",
+            "seed": 0,
+            "randomize": False,
+        }
+        cases = (
+            ("off", {"metadata_mode": "ワークフロー全体", "expand_preset_contents": False, "scene_info": ["2", 2]}),
+            ("prompt only", {"metadata_mode": "プロンプトのみ", "expand_preset_contents": True, "scene_info": ["2", 2]}),
+            ("execution path", {"metadata_mode": "生成経路ノードのみ", "expand_preset_contents": True, "scene_info": ["2", 2]}),
+            ("other expand", {"metadata_mode": "ワークフロー全体", "expand_preset_contents": True, "scene_info": ["4", 2]}),
+        )
+        for label, save_inputs in cases:
+            with self.subTest(label=label):
+                graph = {"output": {
+                    "1": {"class_type": "ScenePrompter", "inputs": scene_inputs},
+                    "2": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
+                    "3": {"class_type": "ScenePrompter", "inputs": scene_inputs},
+                    "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0]}},
+                    "9": {"class_type": "SceneSaveImage", "inputs": save_inputs},
+                }}
+                response = asyncio.run(prepare(Request({
+                    "api_graph": graph,
+                    "expand_node_id": "2",
+                    "workflow": workflow,
+                })))
+                self.assertEqual(response["status"], 200, response["payload"])
+                self.assertEqual(response["payload"]["presets"], [])
+                handle = response["payload"]["run_handle"]
+                self.assertTrue(asyncio.run(release(Request({"run_handle": handle})))["payload"]["released"])
+
     def test_prepare_uses_stored_selections_without_reading_prompt_data(self):
         class Request:
             user_id = "alice"

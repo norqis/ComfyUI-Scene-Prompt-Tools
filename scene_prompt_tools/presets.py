@@ -29,6 +29,7 @@ from .runs import peek_run_context, require_run_context
 PRESET_SCHEMA_VERSION = 1
 PRESET_FILE_SUFFIX = ".json"
 PRESET_DIRECTORY_NAME = "scene_presets"
+SAVE_METADATA_WORKFLOW = "ワークフロー全体"
 PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,80}$")
 _PRESET_LOCK = threading.RLock()
 _RUN_SNAPSHOTS = OrderedDict()
@@ -496,6 +497,26 @@ def _workflow_references(workflow):
     return references
 
 
+def _needs_workflow_preset_snapshots(nodes, expand_node_id):
+    """Only full-workflow saves connected to this run need canvas-only Presets."""
+    for node in nodes.values():
+        if not isinstance(node, dict) or node.get("class_type") != "SceneSaveImage":
+            continue
+        inputs = _node_inputs(node)
+        if (
+            inputs.get("metadata_mode") != SAVE_METADATA_WORKFLOW
+            or inputs.get("expand_preset_contents") is not True
+            or not is_link(inputs.get("images"))
+        ):
+            continue
+        scene_info = inputs.get("scene_info")
+        if not is_link(scene_info):
+            continue
+        if expand_node_id is None or str(scene_info[0]) == str(expand_node_id):
+            return True
+    return False
+
+
 def _scene_prompt_closure(nodes, source_id):
     closure = {}
     visiting = set()
@@ -734,8 +755,13 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
 
     try:
         resolved = {}
-        node_budget = {"total": len(scene_nodes) + len(_workflow_references(workflow))}
-        references = [*_find_references(scene_nodes), *_workflow_references(workflow)]
+        workflow_references = (
+            _workflow_references(workflow)
+            if _needs_workflow_preset_snapshots(nodes, expand_node_id)
+            else []
+        )
+        node_budget = {"total": len(scene_nodes) + len(workflow_references)}
+        references = [*_find_references(scene_nodes), *workflow_references]
         for reference_node_id, preset_id, _node in references:
             try:
                 _resolve_preset_tree(preset_id, resolved, [], user_id, node_budget=node_budget)

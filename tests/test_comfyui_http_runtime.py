@@ -17,6 +17,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCENE_RUN_NODE_CLASSES = {"ScenePrompter", "SceneMatrix", "ScenePresetReference", "ScenePrompterExpand"}
 
 
 def _source_root():
@@ -113,6 +114,13 @@ def _workflow_for_graph(graph):
             links.append([link_id, int(source_id), source_slot, int(target_id), target_slot, "*"])
             link_id += 1
     return {"version": 1, "nodes": nodes, "links": links, "groups": [], "last_node_id": max(int(node_id) for node_id in graph), "last_link_id": link_id - 1}
+
+
+def _apply_run_handle(graph, handle):
+    for node in graph.values():
+        if node.get("class_type") not in SCENE_RUN_NODE_CLASSES:
+            continue
+        node.setdefault("inputs", {})["run_handle"] = handle
 
 
 def _large_extra_pnginfo():
@@ -308,8 +316,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             "workflow": workflow,
         })
         handle = prepared["run_handle"]
-        graph["1"]["inputs"]["run_handle"] = handle
-        graph["4"]["inputs"]["run_handle"] = handle
+        _apply_run_handle(graph, handle)
         queued = self._request("/prompt", {"prompt": graph, "extra_data": {"extra_pnginfo": {"workflow": workflow}}})
         self._request("/scene_prompt/runs/claim", {"run_handle": handle, "prompt_id": queued["prompt_id"]})
         first = self._wait_for_prompt(queued["prompt_id"])
@@ -327,12 +334,25 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         self.assertNotIn("ScenePresetInput", {node["type"] for node in reloaded_workflow["nodes"]})
         self.assertNotIn("ScenePresetOutput", {node["type"] for node in reloaded_workflow["nodes"]})
 
-        replay = self._queue_and_wait(
-            reloaded_prompt,
-            extra_data={"extra_pnginfo": {"workflow": reloaded_workflow}},
-        )
-        self.assertEqual(set(replay["outputs"]).intersection({"6", "7"}), {"6", "7"})
         self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+        replay_prepared = self._request("/scene_prompt/runs/prepare", {
+            "api_graph": {"output": reloaded_prompt},
+            "expand_node_id": "4",
+            "workflow": reloaded_workflow,
+        })
+        replay_handle = replay_prepared["run_handle"]
+        _apply_run_handle(reloaded_prompt, replay_handle)
+        replay_queued = self._request("/prompt", {
+            "prompt": reloaded_prompt,
+            "extra_data": {"extra_pnginfo": {"workflow": reloaded_workflow}},
+        })
+        self._request("/scene_prompt/runs/claim", {
+            "run_handle": replay_handle,
+            "prompt_id": replay_queued["prompt_id"],
+        })
+        replay = self._wait_for_prompt(replay_queued["prompt_id"])
+        self.assertEqual(set(replay["outputs"]).intersection({"6", "7"}), {"6", "7"})
+        self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})["released"])
 
     def test_preset_http_lifecycle_and_save_failure_recovery(self):
         preset_graph = {
