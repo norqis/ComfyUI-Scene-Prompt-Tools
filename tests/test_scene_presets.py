@@ -726,6 +726,32 @@ class ScenePresetTests(unittest.TestCase):
             "workflow only",
         )
 
+    def test_one_shot_full_save_snapshots_canvas_references_without_scene_info(self):
+        self.save("workflow_only", basic_nodes("workflow only"))
+        nodes = basic_nodes("outer")
+        nodes["12"] = {
+            "class_type": "SceneSaveImage",
+            "inputs": {
+                "images": ["13", 0],
+                "metadata_mode": "ワークフロー全体",
+                "expand_preset_contents": True,
+            },
+        }
+        nodes["13"] = {
+            "class_type": "EmptyImage",
+            "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0},
+        }
+        workflow = {
+            "nodes": [
+                {"id": 50, "type": "ScenePresetReference", "widgets_values": ["workflow_only"]},
+            ],
+            "links": [],
+        }
+        result = self.module.snapshot_presets_for_run(
+            "one-shot-workflow-run", graph(nodes), workflow=workflow
+        )
+        self.assertEqual([item["preset_id"] for item in result["presets"]], ["workflow_only"])
+
     def test_snapshot_ignores_disconnected_workflow_references_without_connected_full_save(self):
         workflow = {
             "nodes": [

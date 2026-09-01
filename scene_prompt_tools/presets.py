@@ -509,10 +509,10 @@ def _needs_workflow_preset_snapshots(nodes, expand_node_id):
             or not is_link(inputs.get("images"))
         ):
             continue
+        if expand_node_id is None:
+            return True
         scene_info = inputs.get("scene_info")
-        if not is_link(scene_info):
-            continue
-        if expand_node_id is None or str(scene_info[0]) == str(expand_node_id):
+        if is_link(scene_info) and str(scene_info[0]) == str(expand_node_id):
             return True
     return False
 
