@@ -264,6 +264,60 @@ class PresetMetadataTests(unittest.TestCase):
         sibling_after = next(node for node in saved_extra["workflow"]["nodes"] if node["id"] == 72)
         self.assertEqual(sibling_after["inputs"][0]["link"], fanout[0])
 
+    def test_full_expansion_removes_only_reroutes_for_replaced_reference_links(self):
+        self.put_snapshots({"one": simple_preset("one")})
+        prompt = {
+            "1": scene_prompt("outside"),
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "one", "scene_prompt": ["1", 0]}},
+            "3": scene_prompt("after", ["2", 0]),
+            "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["3", 0]}},
+        }
+        workflow = outer_workflow(prompt)
+        nodes = {str(node["id"]): node for node in workflow["nodes"]}
+        nodes["1"]["outputs"][0]["links"] = [101]
+        nodes["2"]["inputs"][0]["link"] = 101
+        nodes["2"]["outputs"][0]["links"] = [102]
+        nodes["3"]["inputs"][0]["link"] = 102
+        source = workflow_node("80", "UnrelatedSource", [700, 0])
+        target = workflow_node("81", "UnrelatedTarget", [900, 0], ("scene_prompt",))
+        source["outputs"][0]["links"] = [501]
+        target["inputs"][0]["link"] = 501
+        workflow["nodes"].extend([source, target])
+        workflow["links"] = [
+            [101, 1, 0, 2, 0, "SCENE_PROMPT"],
+            [102, 2, 0, 3, 0, "SCENE_PROMPT"],
+            [501, 80, 0, 81, 0, "SCENE_PROMPT"],
+        ]
+        unchanged_reroute = {"id": 3, "linkIds": [501], "pos": [800, 0]}
+        workflow["reroutes"] = [
+            {"id": 1, "linkIds": [101], "pos": [75, 0]},
+            {"id": 2, "linkIds": [102], "pos": [225, 0]},
+            unchanged_reroute,
+            {"id": 4, "linkIds": [101, 501], "pos": [400, 0]},
+        ]
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "9",
+            self.nodes.SAVE_METADATA_WORKFLOW,
+            {"run_handle": self.run_handle, "source_node_ids": ["1", "2", "3"]},
+            True,
+        )
+        self.assertNotIn("2", saved_prompt)
+        reroutes = saved_extra["workflow"]["reroutes"]
+        self.assertEqual(next(reroute for reroute in reroutes if reroute["id"] == 3), unchanged_reroute)
+        self.assertEqual(next(reroute for reroute in reroutes if reroute["id"] == 4)["linkIds"], [501])
+        self.assertEqual({reroute["id"] for reroute in reroutes}, {3, 4})
+        link_ids = {link[0] for link in saved_extra["workflow"]["links"]}
+        self.assertTrue(all(link_id in link_ids for reroute in reroutes for link_id in reroute["linkIds"]))
+        for node in saved_extra["workflow"]["nodes"]:
+            for slot in node.get("inputs", []):
+                if isinstance(slot, dict) and slot.get("link") is not None:
+                    self.assertIn(slot["link"], link_ids)
+            for slot in node.get("outputs", []):
+                if isinstance(slot, dict):
+                    self.assertTrue(all(link_id in link_ids for link_id in slot.get("links", [])))
+
     def test_full_expansion_keeps_existing_reroute_link_ids(self):
         self.put_snapshots({"one": simple_preset("one")})
         prompt = {

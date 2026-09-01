@@ -295,6 +295,24 @@ def _add_workflow_link(links, by_id, next_link_id, source_id, source_slot, targe
     return next_link_id + 1
 
 
+def _remove_reference_reroutes(workflow, removed_link_ids):
+    reroutes = workflow.get("reroutes")
+    if not isinstance(reroutes, list) or not removed_link_ids:
+        return
+    updated = []
+    for reroute in reroutes:
+        link_ids = reroute.get("linkIds") if isinstance(reroute, dict) else None
+        if not isinstance(link_ids, list) or not any(link_id in removed_link_ids for link_id in link_ids):
+            updated.append(reroute)
+            continue
+        kept_ids = [link_id for link_id in link_ids if link_id not in removed_link_ids]
+        if kept_ids:
+            copied = copy.deepcopy(reroute)
+            copied["linkIds"] = kept_ids
+            updated.append(copied)
+    workflow["reroutes"] = updated
+
+
 def _rebuild_expanded_workflow_links(prompt, workflow, state):
     """Replace only Reference links; leave every unrelated workflow link untouched."""
     nodes = workflow.get("nodes")
@@ -317,6 +335,10 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
             _remove_link_from_slots(by_id, link)
         else:
             links.append(link)
+    _remove_reference_reroutes(
+        workflow,
+        {parts[0] for link in removed if (parts := _workflow_link_parts(link)) is not None},
+    )
 
     added = set()
     for target_id, target in prompt.items():
