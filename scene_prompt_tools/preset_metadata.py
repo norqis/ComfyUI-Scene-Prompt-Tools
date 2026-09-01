@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 
 
 PRESET_REFERENCE = "ScenePresetReference"
@@ -389,7 +390,119 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
     workflow["last_link_id"] = next_link_id - 1
 
 
-def expand_preset_references(prompt, workflow, preset_snapshots):
+def _workflow_reference_preset_id(node):
+    values = node.get("widgets_values") if isinstance(node, dict) else None
+    preset_id = str(values[0] or "").strip() if isinstance(values, list) and values else ""
+    if not preset_id:
+        raise ValueError("workflow のScene Preset ReferenceにPreset IDがありません。")
+    return preset_id
+
+
+def _expand_workflow_only_reference(workflow, reference_id, preset):
+    nodes = workflow.get("nodes")
+    links = workflow.get("links")
+    if not isinstance(nodes, list) or not isinstance(links, list):
+        raise ValueError("Scene Save Image の workflow が不正です。")
+    by_id = {str(node.get("id")): node for node in nodes if isinstance(node, dict) and node.get("id") is not None}
+    reference = by_id.get(reference_id)
+    if reference is None:
+        raise ValueError(f"workflow にPreset参照ノード #{reference_id} がありません。")
+
+    preset_nodes = _nodes(preset)
+    input_id, _output_id, output_link = _boundary_ids(preset_nodes)
+    allocate = _new_node_ids({}, workflow)
+    mapping = {
+        str(node_id): allocate()
+        for node_id, node in preset_nodes.items()
+        if node.get("class_type") not in BOUNDARIES
+    }
+    entry_targets = []
+    internal_edges = []
+    for target_id, target in preset_nodes.items():
+        target_id = str(target_id)
+        if target.get("class_type") in BOUNDARIES:
+            continue
+        inputs = target.get("inputs") if isinstance(target.get("inputs"), dict) else {}
+        for name, value in inputs.items():
+            if not _link(value):
+                continue
+            source_id, source_slot = str(value[0]), value[1]
+            if source_id == input_id:
+                entry_targets.append((mapping[target_id], name))
+            else:
+                internal_edges.append((mapping[source_id], source_slot, mapping[target_id], name))
+
+    removed = []
+    retained = []
+    for link in links:
+        parts = _workflow_link_parts(link)
+        if parts is not None and (parts[1] == reference_id or parts[3] == reference_id):
+            removed.append(link)
+            _remove_link_from_slots(by_id, link)
+        else:
+            retained.append(link)
+    _remove_reference_reroutes(
+        workflow,
+        {parts[0] for link in removed if (parts := _workflow_link_parts(link)) is not None},
+    )
+    workflow["nodes"] = [node for node in nodes if str(node.get("id")) != reference_id]
+    workflow["nodes"].extend(_clone_preset_workflow_nodes(preset, mapping, reference))
+    by_id = {str(node.get("id")): node for node in workflow["nodes"] if isinstance(node, dict) and node.get("id") is not None}
+
+    old_link_ids = [parts[0] for link in links if (parts := _workflow_link_parts(link)) is not None and isinstance(parts[0], int)]
+    old_link_ids.append(workflow.get("last_link_id") if isinstance(workflow.get("last_link_id"), int) else 0)
+    next_link_id = max(old_link_ids, default=0) + 1
+    added = set()
+    for source_id, source_slot, target_id, input_name in internal_edges:
+        next_link_id = _add_workflow_link(
+            retained, by_id, next_link_id, source_id, source_slot, target_id,
+            _input_slot(by_id[target_id], input_name), None, added,
+        )
+    incoming = [parts for link in removed if (parts := _workflow_link_parts(link)) is not None and parts[3] == reference_id]
+    outgoing = [parts for link in removed if (parts := _workflow_link_parts(link)) is not None and parts[1] == reference_id]
+    for _link_id, source_id, source_slot, _target_id, _target_slot, link_type in incoming:
+        for target_id, input_name in entry_targets:
+            next_link_id = _add_workflow_link(
+                retained, by_id, next_link_id, source_id, source_slot, target_id,
+                _input_slot(by_id[target_id], input_name), link_type, added,
+            )
+    if str(output_link[0]) == input_id:
+        for _link_id, source_id, source_slot, _target_id, _target_slot, _link_type in incoming:
+            for _out_link_id, _output_id, _output_slot, target_id, target_slot, link_type in outgoing:
+                next_link_id = _add_workflow_link(
+                    retained, by_id, next_link_id, source_id, source_slot, target_id, target_slot, link_type, added,
+                )
+    else:
+        output_id, output_slot = mapping[str(output_link[0])], output_link[1]
+        for _link_id, _source_id, _source_slot, target_id, target_slot, link_type in outgoing:
+            next_link_id = _add_workflow_link(
+                retained, by_id, next_link_id, output_id, output_slot, target_id, target_slot, link_type, added,
+            )
+    workflow["links"] = retained
+    numeric_ids = [int(node_id) for node_id in by_id if node_id.isdigit()]
+    workflow["last_node_id"] = max(numeric_ids, default=0)
+    workflow["last_link_id"] = next_link_id - 1
+
+
+def _expand_workflow_only_references(workflow, preset_snapshots):
+    while True:
+        reference = next(
+            (
+                node for node in workflow.get("nodes", [])
+                if isinstance(node, dict) and node.get("type") == PRESET_REFERENCE
+            ),
+            None,
+        )
+        if reference is None:
+            return
+        preset_id = _workflow_reference_preset_id(reference)
+        preset = preset_snapshots.get(preset_id) if isinstance(preset_snapshots, Mapping) else None
+        if not isinstance(preset, dict):
+            raise ValueError(f"Preset「{preset_id}」の実行開始時スナップショットがありません。")
+        _expand_workflow_only_reference(workflow, str(reference.get("id")), preset)
+
+
+def expand_preset_references(prompt, workflow, preset_snapshots, expand_workflow_references=False):
     """Return an expanded prompt/workflow plus source-id aliases for path slicing."""
     if not isinstance(prompt, dict):
         raise ValueError("Scene Save Image の prompt が不正です。")
@@ -412,9 +525,11 @@ def expand_preset_references(prompt, workflow, preset_snapshots):
             break
         inputs = expanded_prompt[reference_id].get("inputs")
         preset_id = str(inputs.get("preset_id") or "").strip() if isinstance(inputs, dict) else ""
-        preset = preset_snapshots.get(preset_id) if isinstance(preset_snapshots, dict) else None
+        preset = preset_snapshots.get(preset_id) if isinstance(preset_snapshots, Mapping) else None
         if not isinstance(preset, dict):
             raise ValueError(f"Preset「{preset_id or reference_id}」の実行開始時スナップショットがありません。")
         _inline_reference(expanded_prompt, expanded_workflow, reference_id, preset, source_ids, state)
     _rebuild_expanded_workflow_links(expanded_prompt, expanded_workflow, state)
+    if expand_workflow_references:
+        _expand_workflow_only_references(expanded_workflow, preset_snapshots)
     return expanded_prompt, expanded_workflow, source_ids

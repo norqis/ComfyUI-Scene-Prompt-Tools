@@ -264,6 +264,77 @@ class PresetMetadataTests(unittest.TestCase):
         sibling_after = next(node for node in saved_extra["workflow"]["nodes"] if node["id"] == 72)
         self.assertEqual(sibling_after["inputs"][0]["link"], fanout[0])
 
+    def test_full_expansion_replaces_disconnected_workflow_reference_from_snapshot(self):
+        self.put_snapshots({"one": simple_preset("one")})
+        prompt = {
+            "1": scene_prompt("outside"),
+            "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        workflow = outer_workflow(prompt)
+        source = workflow_node("50", "ScenePrompter", [500, 0])
+        reference = workflow_node("51", "ScenePresetReference", [700, 0], ("scene_prompt",))
+        reference["widgets_values"] = ["one"]
+        target = workflow_node("52", "ScenePromptCounter", [900, 0], ("scene_prompt",))
+        source["outputs"][0]["links"] = [701]
+        reference["inputs"][0]["link"] = 701
+        reference["outputs"][0]["links"] = [702]
+        target["inputs"][0]["link"] = 702
+        workflow["nodes"].extend([source, reference, target])
+        workflow["links"] = [
+            [701, 50, 0, 51, 0, "SCENE_PROMPT"],
+            [702, 51, 0, 52, 0, "SCENE_PROMPT"],
+        ]
+        workflow["last_link_id"] = 702
+        _saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "9",
+            self.nodes.SAVE_METADATA_WORKFLOW,
+            {"run_handle": self.run_handle},
+            True,
+        )
+        saved_workflow = saved_extra["workflow"]
+        self.assertNotIn("ScenePresetReference", {node["type"] for node in saved_workflow["nodes"]})
+        self.assertNotIn("ScenePresetInput", {node["type"] for node in saved_workflow["nodes"]})
+        self.assertNotIn("ScenePresetOutput", {node["type"] for node in saved_workflow["nodes"]})
+        inside = next(node for node in saved_workflow["nodes"] if node["type"] == "ScenePrompter" and node["id"] not in {1, 50})
+        self.assertTrue(any(str(link[1]) == "50" and str(link[3]) == str(inside["id"]) for link in saved_workflow["links"]))
+        self.assertTrue(any(str(link[1]) == str(inside["id"]) and str(link[3]) == "52" for link in saved_workflow["links"]))
+
+    def test_full_expansion_recurses_through_disconnected_workflow_references(self):
+        child = simple_preset("child", name="child inside")
+        parent_nodes = {
+            "20": {"class_type": "ScenePresetInput", "inputs": {}},
+            "21": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "child", "scene_prompt": ["20", 0]}},
+            "22": {"class_type": "ScenePresetOutput", "inputs": {"preset_id": "parent", "preset_name": "parent", "scene_prompt": ["21", 0]}},
+        }
+        parent_workflow = [
+            workflow_node("20", "ScenePresetInput", [0, 0]),
+            workflow_node("21", "ScenePresetReference", [80, 0], ("scene_prompt",)),
+            workflow_node("22", "ScenePresetOutput", [240, 0], ("scene_prompt",)),
+        ]
+        parent_workflow[1]["widgets_values"] = ["child"]
+        self.put_snapshots({"child": child, "parent": preset("parent", parent_nodes, parent_workflow)})
+        prompt = {"1": scene_prompt("outside"), "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["1", 0]}}}
+        workflow = outer_workflow(prompt)
+        reference = workflow_node("50", "ScenePresetReference", [500, 0])
+        reference["widgets_values"] = ["parent"]
+        workflow["nodes"].append(reference)
+
+        _saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "9",
+            self.nodes.SAVE_METADATA_WORKFLOW,
+            {"run_handle": self.run_handle},
+            True,
+        )
+        types = {node["type"] for node in saved_extra["workflow"]["nodes"]}
+        self.assertNotIn("ScenePresetReference", types)
+        self.assertNotIn("ScenePresetInput", types)
+        self.assertNotIn("ScenePresetOutput", types)
+        self.assertIn("ScenePrompter", types)
+
     def test_full_expansion_removes_only_reroutes_for_replaced_reference_links(self):
         self.put_snapshots({"one": simple_preset("one")})
         prompt = {
@@ -450,11 +521,14 @@ class PresetMetadataTests(unittest.TestCase):
         self.assertIsNone(prompt_only)
         self.assertNotIn("workflow", prompt_only_extra)
 
-    def test_boolean_input_is_required_and_default_false(self):
-        required = self.nodes.SceneSaveImage.INPUT_TYPES()["required"]
-        self.assertEqual(list(required).index("expand_preset_contents"), list(required).index("metadata_mode") + 1)
-        self.assertEqual(required["expand_preset_contents"][0], "BOOLEAN")
-        self.assertIs(required["expand_preset_contents"][1]["default"], False)
+    def test_boolean_input_is_optional_and_default_false(self):
+        input_types = self.nodes.SceneSaveImage.INPUT_TYPES()
+        self.assertNotIn("expand_preset_contents", input_types["required"])
+        optional = input_types["optional"]
+        self.assertEqual(list(optional).index("expand_preset_contents"), 0)
+        self.assertEqual(list(optional).index("scene_info"), 1)
+        self.assertEqual(optional["expand_preset_contents"][0], "BOOLEAN")
+        self.assertIs(optional["expand_preset_contents"][1]["default"], False)
 
     def test_runtime_preset_nodes_record_their_expanded_source_lineage(self):
         value = simple_preset("one")

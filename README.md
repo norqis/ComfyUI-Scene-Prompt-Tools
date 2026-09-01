@@ -143,7 +143,7 @@ Choose the metadata mode on **Scene Save Image**:
 
 Dragging a PNG back into ComfyUI can restore a workflow for the first two modes. **Prompt only** cannot restore a workflow.
 
-Enable **Presetの中身を展開** to replace each Scene Preset Reference in saved metadata with the Preset's actual connected Scene nodes. The saved graph uses the Preset revision fixed when generation started, including nested Presets. This setting has no effect in **Prompt only** mode.
+**Presetの中身を展開** is optional and off by default, so existing workflows can omit it. Enable it to replace Scene Preset Reference nodes with the connected Scene nodes from the Preset revision fixed when generation started, including nested Presets. In **Full workflow**, this also expands disconnected Reference nodes visible on the canvas. In **Execution path nodes only**, only the Reference branch used for that image is expanded. This setting has no effect in **Prompt only** mode.
 
 ## Import HTML Prompt Tables
 

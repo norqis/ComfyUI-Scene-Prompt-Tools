@@ -110,6 +110,7 @@ class ScenePresetTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.module = load_presets_module(self.root)
         self.nodes = sys.modules[f"{self.module.__package__}.nodes"]
+        self.preset_metadata = importlib.import_module(f"{self.module.__package__}.preset_metadata")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -687,6 +688,34 @@ class ScenePresetTests(unittest.TestCase):
             self.module.snapshot_presets_for_run("run-other-closure", api_graph, "21")
         self.assertEqual(error.exception.node_id, "20")
 
+    def test_snapshot_includes_disconnected_workflow_references(self):
+        self.save("workflow_only", basic_nodes("workflow only"))
+        outer_nodes = basic_nodes("outer")
+        outer_nodes.pop("3")
+        outer_nodes["11"] = {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["2", 0]}}
+        api_graph = graph(outer_nodes)
+        workflow = {
+            "nodes": [
+                {"id": 50, "type": "ScenePresetReference", "widgets_values": ["workflow_only"]},
+            ],
+            "links": [],
+            "groups": [],
+        }
+        result = self.module.snapshot_presets_for_run(
+            "workflow-only-run", api_graph, "11", workflow=workflow
+        )
+        self.assertEqual([item["preset_id"] for item in result["presets"]], ["workflow_only"])
+        snapshots = self.module.snapshot_presets_for_metadata("workflow-only-run")
+        self.assertIn("workflow_only", snapshots)
+        self.assertEqual(snapshots, self.module._RUN_SNAPSHOTS[("default", "workflow-only-run")]["presets"])
+        with self.assertRaises(TypeError):
+            snapshots["workflow_only"] = {}
+        self.save("workflow_only", basic_nodes("updated"))
+        self.assertEqual(
+            snapshots["workflow_only"]["api_graph"]["output"]["2"]["inputs"]["positive_base"],
+            "workflow only",
+        )
+
     def test_standard_queue_snapshot_covers_every_expand_branch(self):
         self.save("first", basic_nodes("first branch"))
         self.save("second", basic_nodes("second branch"))
@@ -1069,6 +1098,67 @@ class ScenePresetTests(unittest.TestCase):
         )
         self.assertEqual(scene["rows"][0]["row"]["path_parts"], ["preset_path"])
         self.assertEqual(scene["rows"][0]["row"]["latent"], {"width": 832, "height": 1216, "batch_size": 1})
+
+    def test_expanded_queue_matrix_lineage_drives_selected_save_path(self):
+        nodes = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePrompter", "inputs": {**basic_nodes("left")["2"]["inputs"], "scene_prompt": ["1", 0]}},
+            "3": {"class_type": "ScenePrompter", "inputs": {**basic_nodes("right")["2"]["inputs"], "scene_prompt": ["1", 0]}},
+            "4": {"class_type": "SceneMatrix", "inputs": {
+                "scene_prompt": ["2", 0],
+                "matrix_json": json.dumps({"version": 1, "sets": [matrix_line("A"), matrix_line("B")]})}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["4", 0], "scene_prompt2": ["3", 0]}},
+            "6": {"class_type": "ScenePresetOutput", "inputs": {"preset_id": "lineage", "preset_name": "Lineage", "scene_prompt": ["5", 0]}},
+        }
+        preset_workflow = {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": int(node_id),
+                    "type": node["class_type"],
+                    "pos": [int(node_id) * 100, 0],
+                    "inputs": [],
+                    "outputs": [],
+                }
+                for node_id, node in nodes.items()
+            ],
+            "links": [],
+        }
+        self.save("lineage", nodes, output_node_id="6", workflow=preset_workflow)
+        outer_graph = graph({
+            "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "lineage"}},
+            "21": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["20", 0]}},
+        })
+        self.module.snapshot_presets_for_run("lineage-run", outer_graph, "21")
+        expanded = self.module.expand_preset_reference("lineage", run_handle="lineage-run", source_node_id="20")["expand"]
+        plan = self.module._scene_node_value(expanded, "__scene_preset_source", {}, set(), run_handle="lineage-run")
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=2,
+            timestamp_dir=False,
+            scene_prompt=plan,
+            unique_id="21",
+        )[2]
+        self.assertIn("20/3", info["source_node_ids"])
+        self.assertNotIn("20/2", info["source_node_ids"])
+        self.assertNotIn("20/4", info["source_node_ids"])
+        workflow = {
+            "nodes": [
+                {"id": 20, "type": "ScenePresetReference", "widgets_values": ["lineage"]},
+                {"id": 21, "type": "ScenePrompterExpand", "widgets_values": []},
+            ],
+            "links": [],
+        }
+        _expanded_prompt, _expanded_workflow, aliases = self.preset_metadata.expand_preset_references(
+            outer_graph["output"], workflow, self.module.snapshot_presets_for_metadata("lineage-run")
+        )
+        selected_ids = {
+            node_id for node_id, source_id in aliases.items()
+            if source_id in info["source_node_ids"]
+        }
+        selected_sources = {aliases[node_id] for node_id in selected_ids}
+        self.assertIn("20/3", selected_sources)
+        self.assertNotIn("20/2", selected_sources)
+        self.assertNotIn("20/4", selected_sources)
 
     def test_snapshot_uses_real_scene_nodes_for_expand_total(self):
         nodes = basic_nodes()

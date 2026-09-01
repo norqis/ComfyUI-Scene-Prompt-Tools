@@ -377,10 +377,20 @@ def _metadata_for_save_mode(
         return saved_prompt, saved_extra
 
     if expand_preset_contents and isinstance(prompt, dict):
-        expand_preset_contents = any(
+        has_prompt_reference = any(
             isinstance(node, dict) and node.get("class_type") == "ScenePresetReference"
             for node in prompt.values()
         )
+        workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+        has_workflow_reference = (
+            metadata_mode == SAVE_METADATA_WORKFLOW
+            and isinstance(workflow, dict)
+            and any(
+                isinstance(node, dict) and node.get("type") == "ScenePresetReference"
+                for node in workflow.get("nodes", [])
+            )
+        )
+        expand_preset_contents = has_prompt_reference or has_workflow_reference
 
     if expand_preset_contents:
         if not isinstance(prompt, dict):
@@ -395,7 +405,10 @@ def _metadata_for_save_mode(
 
         snapshots = snapshot_presets_for_metadata(run_handle, context["user_id"])
         expanded_prompt, expanded_workflow, source_aliases = expand_preset_references(
-            prompt, workflow, snapshots
+            prompt,
+            workflow,
+            snapshots,
+            expand_workflow_references=metadata_mode == SAVE_METADATA_WORKFLOW,
         )
         expanded_extra = {
             key: copy.deepcopy(value)
@@ -1396,6 +1409,8 @@ class SceneSaveImage:
                         "tooltip": "ワークフロー全体: 配置を含む全体を保存。生成経路ノードのみ: 今回の画像に使われたScene枝と画像生成ノードだけを保存。プロンプトのみ: ワークフローは保存しない。",
                     },
                 ),
+            },
+            "optional": {
                 "expand_preset_contents": (
                     "BOOLEAN",
                     {
@@ -1405,8 +1420,6 @@ class SceneSaveImage:
                         "tooltip": "ONにすると、保存されるメタデータ内のScene Preset ReferenceをPresetの実ノードと接続へ置き換えます。",
                     },
                 ),
-            },
-            "optional": {
                 "scene_info": (SCENE_SAVE_INFO_TYPE, {"display_name": "メタ情報", "label": "メタ情報"}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "unique_id": "UNIQUE_ID"},

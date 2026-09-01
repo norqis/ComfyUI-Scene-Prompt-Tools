@@ -8,6 +8,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
+from types import MappingProxyType
 
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
@@ -481,6 +482,20 @@ def _find_references(nodes):
     return references
 
 
+def _workflow_references(workflow):
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list):
+        return []
+    references = []
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != "ScenePresetReference":
+            continue
+        values = node.get("widgets_values")
+        preset_id = str(values[0] or "").strip() if isinstance(values, list) and values else ""
+        references.append((str(node.get("id") or ""), preset_id, node))
+    return references
+
+
 def _scene_prompt_closure(nodes, source_id):
     closure = {}
     visiting = set()
@@ -699,7 +714,7 @@ def _evaluate_preset_scene(
     )
 
 
-def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="default"):
+def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="default", workflow=None):
     run_id = str(run_id or "").strip()
     if not run_id:
         raise ScenePresetError("実行IDがありません。")
@@ -719,8 +734,9 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
 
     try:
         resolved = {}
-        node_budget = {"total": len(scene_nodes)}
-        for reference_node_id, preset_id, _node in _find_references(scene_nodes):
+        node_budget = {"total": len(scene_nodes) + len(_workflow_references(workflow))}
+        references = [*_find_references(scene_nodes), *_workflow_references(workflow)]
+        for reference_node_id, preset_id, _node in references:
             try:
                 _resolve_preset_tree(preset_id, resolved, [], user_id, node_budget=node_budget)
             except ScenePresetError as exc:
@@ -758,7 +774,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
                 _RUN_SNAPSHOTS.move_to_end(cache_key)
                 return copy.deepcopy(existing["response"])
             _RUN_SNAPSHOTS[cache_key] = {
-                "presets": copy.deepcopy(resolved),
+                "presets": resolved,
                 "response": copy.deepcopy(response),
                 "last_access": time.monotonic(),
             }
@@ -799,7 +815,7 @@ def _snapshot_preset(run_id, preset_id, user_id="default"):
             _RUN_SNAPSHOTS.move_to_end(cache_key)
             preset = entry["presets"].get(preset_id)
             if preset:
-                return copy.deepcopy(preset)
+                return preset
             raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
     return load_preset(preset_id, user_id)
 
@@ -828,7 +844,7 @@ def snapshot_presets_for_metadata(run_id, user_id="default"):
         entry = _RUN_SNAPSHOTS.get(_run_cache_key(run_id, user_id))
         if not entry:
             raise ScenePresetError(f"実行「{run_id}」のPresetスナップショットがありません。")
-        return copy.deepcopy(entry["presets"])
+        return MappingProxyType(entry["presets"])
 
 
 def list_presets(user_id="default"):
