@@ -27,6 +27,7 @@ const context = {
     encodeURIComponent,
     setTimeout,
     clearTimeout,
+    app: { graph: { serialize() { return { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] }; } } },
     sceneBatchRun: null,
     sceneBatchDetachedRuns: new Map(),
     sceneRunHandlesByPromptId: new Map(),
@@ -169,6 +170,7 @@ context.installSceneBatchPromptCapture();
     };
     await context.prepareSceneRunContext(multiExpand);
     assert.equal(preparedPayload.expand_node_id, null, "standard Queue prepares all Expand branches, not the first one");
+    assert.deepEqual(preparedPayload.workflow, { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] });
     assert.equal(multiExpand.output["10"].inputs.run_handle, "two-expand-handle");
     assert.equal(multiExpand.output["20"].inputs.run_handle, "two-expand-handle");
     console.log("Scene Prompt queue wrapper wiring tests passed.");

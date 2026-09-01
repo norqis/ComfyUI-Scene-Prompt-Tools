@@ -128,7 +128,7 @@ In a regular workflow, add **Scene Preset Reference**, choose the saved Preset, 
 | Scene Path | Adds output-folder parts without changing the prompt. |
 | Scene Empty Latent | Sets width, height, and batch size for the plan. |
 | Scene Prompt Expand | Produces one planned batch with prompt strings, seed, metadata, and latent image. |
-| Scene Save Image | Saves PNGs using the Scene output path and filename information. |
+| Scene Save Image | Saves PNGs using the Scene output path, filename information, and selected metadata mode. |
 | Scene Preset Input / Output / Reference | Save, reuse, and edit Scene plan fragments. |
 
 ## Scene Save Image Metadata
@@ -142,6 +142,8 @@ Choose the metadata mode on **Scene Save Image**:
 | Prompt only | No ComfyUI prompt graph or workflow. When メタ情報 is connected, Scene prompt text and seed are retained. |
 
 Dragging a PNG back into ComfyUI can restore a workflow for the first two modes. **Prompt only** cannot restore a workflow.
+
+**Presetの中身を展開** is optional and off by default, so existing workflows can omit it. Enable it to replace Scene Preset Reference nodes with the connected Scene nodes from the Preset revision fixed when generation started, including nested Presets. In **Full workflow**, this also expands disconnected Reference nodes visible on the canvas. In **Execution path nodes only**, only the Reference branch used for that image is expanded. This setting has no effect in **Prompt only** mode.
 
 ## Import HTML Prompt Tables
 

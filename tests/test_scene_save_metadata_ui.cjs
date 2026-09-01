@@ -36,10 +36,12 @@ vm.runInContext(functionSource("hideSceneUtilityWidgets"), context);
 const widgets = [
     { name: "path" },
     { name: "metadata_mode" },
+    { name: "expand_preset_contents" },
     { name: "scene_info" },
 ];
 context.hideSceneUtilityWidgets({ widgets }, "SceneSaveImage");
 
 assert.equal(widgets[0].hidden, false);
 assert.equal(widgets[1].hidden, false);
-assert.equal(widgets[2].hidden, true);
+assert.equal(widgets[2].hidden, false);
+assert.equal(widgets[3].hidden, true);

@@ -8,6 +8,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
+from types import MappingProxyType
 
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
@@ -28,6 +29,7 @@ from .runs import peek_run_context, require_run_context
 PRESET_SCHEMA_VERSION = 1
 PRESET_FILE_SUFFIX = ".json"
 PRESET_DIRECTORY_NAME = "scene_presets"
+SAVE_METADATA_WORKFLOW = "ワークフロー全体"
 PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,80}$")
 _PRESET_LOCK = threading.RLock()
 _RUN_SNAPSHOTS = OrderedDict()
@@ -481,6 +483,40 @@ def _find_references(nodes):
     return references
 
 
+def _workflow_references(workflow):
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list):
+        return []
+    references = []
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != "ScenePresetReference":
+            continue
+        values = node.get("widgets_values")
+        preset_id = str(values[0] or "").strip() if isinstance(values, list) and values else ""
+        references.append((str(node.get("id") or ""), preset_id, node))
+    return references
+
+
+def _needs_workflow_preset_snapshots(nodes, expand_node_id):
+    """Only full-workflow saves connected to this run need canvas-only Presets."""
+    for node in nodes.values():
+        if not isinstance(node, dict) or node.get("class_type") != "SceneSaveImage":
+            continue
+        inputs = _node_inputs(node)
+        if (
+            inputs.get("metadata_mode") != SAVE_METADATA_WORKFLOW
+            or inputs.get("expand_preset_contents") is not True
+            or not is_link(inputs.get("images"))
+        ):
+            continue
+        if expand_node_id is None:
+            return True
+        scene_info = inputs.get("scene_info")
+        if is_link(scene_info) and str(scene_info[0]) == str(expand_node_id):
+            return True
+    return False
+
+
 def _scene_prompt_closure(nodes, source_id):
     closure = {}
     visiting = set()
@@ -699,7 +735,7 @@ def _evaluate_preset_scene(
     )
 
 
-def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="default"):
+def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="default", workflow=None):
     run_id = str(run_id or "").strip()
     if not run_id:
         raise ScenePresetError("実行IDがありません。")
@@ -719,8 +755,14 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
 
     try:
         resolved = {}
-        node_budget = {"total": len(scene_nodes)}
-        for reference_node_id, preset_id, _node in _find_references(scene_nodes):
+        workflow_references = (
+            _workflow_references(workflow)
+            if _needs_workflow_preset_snapshots(nodes, expand_node_id)
+            else []
+        )
+        node_budget = {"total": len(scene_nodes) + len(workflow_references)}
+        references = [*_find_references(scene_nodes), *workflow_references]
+        for reference_node_id, preset_id, _node in references:
             try:
                 _resolve_preset_tree(preset_id, resolved, [], user_id, node_budget=node_budget)
             except ScenePresetError as exc:
@@ -758,7 +800,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
                 _RUN_SNAPSHOTS.move_to_end(cache_key)
                 return copy.deepcopy(existing["response"])
             _RUN_SNAPSHOTS[cache_key] = {
-                "presets": copy.deepcopy(resolved),
+                "presets": resolved,
                 "response": copy.deepcopy(response),
                 "last_access": time.monotonic(),
             }
@@ -799,7 +841,7 @@ def _snapshot_preset(run_id, preset_id, user_id="default"):
             _RUN_SNAPSHOTS.move_to_end(cache_key)
             preset = entry["presets"].get(preset_id)
             if preset:
-                return copy.deepcopy(preset)
+                return preset
             raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
     return load_preset(preset_id, user_id)
 
@@ -817,6 +859,18 @@ def _peek_snapshot_preset(run_id, preset_id, user_id="default"):
         if not preset:
             raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
         return preset
+
+
+def snapshot_presets_for_metadata(run_id, user_id="default"):
+    """Return the immutable Preset payloads prepared for an active run."""
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        raise ScenePresetError("実行コンテキストがありません。画像生成を開始し直してください。")
+    with _PRESET_LOCK:
+        entry = _RUN_SNAPSHOTS.get(_run_cache_key(run_id, user_id))
+        if not entry:
+            raise ScenePresetError(f"実行「{run_id}」のPresetスナップショットがありません。")
+        return MappingProxyType(entry["presets"])
 
 
 def list_presets(user_id="default"):
@@ -862,6 +916,7 @@ def expand_preset_reference(
     run_handle="",
     _require_context=False,
     source_node_id="",
+    unique_id=None,
 ):
     preset_id = _clean_preset_id(preset_id)
     if _require_context:
@@ -879,6 +934,7 @@ def expand_preset_reference(
     input_id = validation["input_id"]
     output_id = validation["output_id"]
     graph = GraphBuilder()
+    reference_source_id = str(source_node_id or unique_id or "").strip()
 
     input_is_referenced = any(
         any(is_link(value) and str(value[0]) == str(input_id) for value in _node_inputs(node).values())
@@ -899,6 +955,8 @@ def expand_preset_reference(
         target = graph.lookup_node(str(node_id))
         for name, value in _node_inputs(node).items():
             target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
+        if class_type in SAFE_NODE_CLASSES or class_type == "ScenePresetReference":
+            target.set_input("source_node_id", f"{reference_source_id}/{node_id}" if reference_source_id else str(node_id))
         if class_type in {"ScenePrompter", "SceneMatrix"}:
             target.set_input("run_handle", str(run_handle))
         if class_type == "ScenePresetReference":
@@ -911,7 +969,7 @@ def expand_preset_reference(
     marker = graph.node("ScenePromptCounter", "__scene_preset_source")
     marker.set_input("scene_prompt", result)
     marker.set_input("count", 1)
-    marker.set_input("source_node_id", str(source_node_id or ""))
+    marker.set_input("source_node_id", reference_source_id)
     result = marker.out(0)
     return {"result": (result,), "expand": graph.finalize()}
 
@@ -971,7 +1029,10 @@ class ScenePresetReference:
                 "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "rawLink": True}),
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -982,11 +1043,12 @@ class ScenePresetReference:
         metadata = preset["metadata"]
         return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_handle}"
 
-    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None):
+    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id=""):
         return expand_preset_reference(
             preset_id,
             scene_prompt,
             run_handle,
             _require_context=True,
-            source_node_id=unique_id,
+            source_node_id=source_node_id,
+            unique_id=unique_id,
         )

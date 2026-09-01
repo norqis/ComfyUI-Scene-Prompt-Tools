@@ -3386,7 +3386,7 @@ function hideNonSceneRoleWidgets(node) {
 
 function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
-        ? new Set(["path", "metadata_mode"])
+        ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : isSceneExpandNodeName(nodeName)
             ? new Set(["timestamp_dir", "prefix"])
             : SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
@@ -6956,14 +6956,17 @@ function applySceneRunHandle(apiGraph, runHandle) {
     return apiGraph;
 }
 
-async function prepareSceneRunContext(apiGraph, expandNodeId = null) {
+async function prepareSceneRunContext(apiGraph, expandNodeId = null, workflow = null) {
     if (!sceneRunTargetNodes(apiGraph).length) {
         return null;
+    }
+    if (workflow == null && typeof app !== "undefined") {
+        workflow = app.graph?.serialize?.() || null;
     }
     const response = await api.fetchApi("/scene_prompt/runs/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId }),
+        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId, workflow }),
     });
     const data = await readApiJson(response, "Scene Promptの実行準備に失敗しました");
     if (!response.ok || !data?.run_handle) {

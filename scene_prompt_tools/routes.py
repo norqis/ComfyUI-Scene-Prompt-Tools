@@ -618,9 +618,12 @@ def define_routes():
             payload = await request.json()
             api_graph = payload.get("api_graph") if isinstance(payload, dict) else None
             expand_node_id = payload.get("expand_node_id") if isinstance(payload, dict) else None
+            workflow = payload.get("workflow") if isinstance(payload, dict) else None
             user_id = _request_user_id(request)
             handle = create_run_context(user_id)
-            snapshot = await asyncio.to_thread(snapshot_presets_for_run, handle, api_graph, expand_node_id, user_id)
+            snapshot = await asyncio.to_thread(
+                snapshot_presets_for_run, handle, api_graph, expand_node_id, user_id, workflow
+            )
             return web.json_response({"run_handle": handle, **snapshot})
         except ScenePresetResolutionError as exc:
             if handle:
