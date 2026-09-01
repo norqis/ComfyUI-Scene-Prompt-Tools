@@ -434,7 +434,10 @@ class _ScenePromptBase:
                     {"forceInput": True, "display_name": "scene_prompt", "label": "scene_prompt"},
                 ),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -483,6 +486,7 @@ class _ScenePromptBase:
         scene_prompt=None,
         run_handle="",
         unique_id=None,
+        source_node_id="",
         filename_enabled=False,
         **kwargs,
     ):
@@ -527,7 +531,7 @@ class _ScenePromptBase:
                 output_row["latent"] = dict(row["latent"])
             rows.append({"row": output_row, "count": item["count"]})
 
-        return (with_source_node(make_plan(rows), unique_id),)
+        return (with_source_node(make_plan(rows), source_node_id or unique_id),)
 
 
 class ScenePrompt(_ScenePromptBase):

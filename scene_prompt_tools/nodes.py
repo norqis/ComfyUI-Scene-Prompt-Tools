@@ -49,7 +49,7 @@ from .plan import (
     transform,
     with_source_node,
 )
-from .runs import set_run_plan
+from .runs import require_run_context, set_run_plan
 
 
 MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE"
@@ -314,9 +314,9 @@ def _scene_source_ids(scene_info):
     return {str(value) for value in values if str(value).strip()} if isinstance(values, list) else set()
 
 
-def _selected_ancestor_ids(prompt, target_id, scene_info):
+def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=None):
     """Keep ordinary image ancestors, but only selected Scene-plan branches."""
-    selected_scene_ids = _scene_source_ids(scene_info)
+    selected_scene_ids = _scene_source_ids(scene_info) if selected_scene_ids is None else selected_scene_ids
     if not selected_scene_ids:
         return _prompt_ancestor_ids(prompt, target_id)
 
@@ -347,13 +347,20 @@ def _selected_ancestor_ids(prompt, target_id, scene_info):
     return included
 
 
-def _metadata_for_save_mode(prompt, extra_pnginfo, unique_id, metadata_mode, scene_info=None):
+def _metadata_for_save_mode(
+    prompt,
+    extra_pnginfo,
+    unique_id,
+    metadata_mode,
+    scene_info=None,
+    expand_preset_contents=False,
+):
     if metadata_mode not in SAVE_METADATA_CHOICES:
         raise ValueError("Scene Save Image のメタデータ保存モードが不正です。")
     if extra_pnginfo is not None and not isinstance(extra_pnginfo, dict):
         raise ValueError("Scene Save Image の extra_pnginfo が不正です。")
 
-    if metadata_mode == SAVE_METADATA_WORKFLOW:
+    if metadata_mode == SAVE_METADATA_WORKFLOW and not expand_preset_contents:
         return prompt, extra_pnginfo
 
     if metadata_mode == SAVE_METADATA_PROMPT_ONLY:
@@ -368,6 +375,55 @@ def _metadata_for_save_mode(prompt, extra_pnginfo, unique_id, metadata_mode, sce
             }
         )
         return saved_prompt, saved_extra
+
+    if expand_preset_contents and isinstance(prompt, dict):
+        expand_preset_contents = any(
+            isinstance(node, dict) and node.get("class_type") == "ScenePresetReference"
+            for node in prompt.values()
+        )
+
+    if expand_preset_contents:
+        if not isinstance(prompt, dict):
+            raise ValueError("Scene Save Image のPreset展開には prompt が必要です。")
+        workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+        if not isinstance(workflow, dict):
+            raise ValueError("Scene Save Image のPreset展開には workflow が必要です。")
+        run_handle = str((scene_info or {}).get("run_handle") or "").strip()
+        context = require_run_context(run_handle)
+        from .preset_metadata import expand_preset_references
+        from .presets import snapshot_presets_for_metadata
+
+        snapshots = snapshot_presets_for_metadata(run_handle, context["user_id"])
+        expanded_prompt, expanded_workflow, source_aliases = expand_preset_references(
+            prompt, workflow, snapshots
+        )
+        expanded_extra = {
+            key: copy.deepcopy(value)
+            for key, value in extra_pnginfo.items()
+        }
+        expanded_extra["workflow"] = expanded_workflow
+        if metadata_mode == SAVE_METADATA_WORKFLOW:
+            return expanded_prompt, expanded_extra
+        selected_sources = _scene_source_ids(scene_info)
+        selected_ids = {
+            node_id
+            for node_id, source_id in source_aliases.items()
+            if source_id in selected_sources
+        }
+        ancestor_ids = _selected_ancestor_ids(
+            expanded_prompt, unique_id, scene_info, selected_ids
+        )
+        saved_prompt = _slice_prompt_to_ids(expanded_prompt, ancestor_ids)
+        saved_extra = {
+            key: value
+            for key, value in expanded_extra.items()
+            if key not in {"prompt", "workflow"}
+        }
+        saved_extra["workflow"] = _slice_workflow_for_output(expanded_workflow, ancestor_ids)
+        return saved_prompt, saved_extra
+
+    if metadata_mode == SAVE_METADATA_WORKFLOW:
+        return prompt, extra_pnginfo
 
     ancestor_ids = _selected_ancestor_ids(prompt, unique_id, scene_info)
     saved_prompt = _slice_prompt_to_ids(prompt, ancestor_ids)
@@ -864,6 +920,7 @@ def _normalize_scene_save_info(value):
         "repeat_count": _metadata_count(value.get("repeat_count"), "repeat_count", MAX_DERIVED_COUNT, 0),
         "total_count": _metadata_count(value.get("total_count"), "total_count", MAX_TOTAL_IMAGES, 0),
         "source_node_ids": [str(node_id) for node_id in value.get("source_node_ids", []) if str(node_id).strip()] if isinstance(value.get("source_node_ids"), list) else [],
+        "run_handle": str(value.get("run_handle") or "").strip(),
     }
 
 class SceneMatrix:
@@ -888,7 +945,10 @@ class SceneMatrix:
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
             },
             "optional": optional,
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -913,6 +973,7 @@ class SceneMatrix:
         run_handle="",
         scene_prompt=None,
         unique_id=None,
+        source_node_id="",
         **kwargs,
     ):
         del kwargs
@@ -921,7 +982,7 @@ class SceneMatrix:
                 scene_prompt,
                 _parse_matrix_sets(matrix_json),
                 _matrix_has_configured_sets(matrix_json),
-            ), unique_id),
+            ), source_node_id or unique_id),
         )
 
 
@@ -943,7 +1004,10 @@ class ScenePath:
                 ),
             },
             "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"})},
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -957,13 +1021,13 @@ class ScenePath:
             ]
         )
 
-    def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, unique_id=None):
+    def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, unique_id=None, source_node_id=""):
         label = str(path_name or "").strip() or "Scene Path"
         return (
             with_source_node(transform(
                 scene_prompt,
                 lambda row, _item: {**row, "path_parts": _append_path_part(row.get("path_parts", []), label, path_mode)},
-            ), unique_id),
+            ), source_node_id or unique_id),
         )
 
 
@@ -986,7 +1050,10 @@ class ScenePromptQueue:
         return {
             "required": {},
             "optional": optional,
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -998,8 +1065,8 @@ class ScenePromptQueue:
                 parts.append(_scene_prompt_change_key(value))
         return "|".join(parts)
 
-    def queue(self, unique_id=None, **kwargs):
-        return (with_source_node(queue([kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES]), unique_id),)
+    def queue(self, unique_id=None, source_node_id="", **kwargs):
+        return (with_source_node(queue([kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES]), source_node_id or unique_id),)
 
 
 class ScenePromptMerge:
@@ -1023,7 +1090,10 @@ class ScenePromptMerge:
                     {"display_name": "scene_prompt2", "label": "scene_prompt2"},
                 ),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -1035,8 +1105,8 @@ class ScenePromptMerge:
             ]
         )
 
-    def merge(self, scene_prompt1=None, scene_prompt2=None, unique_id=None):
-        return (with_source_node(merge(scene_prompt1, scene_prompt2), unique_id),)
+    def merge(self, scene_prompt1=None, scene_prompt2=None, unique_id=None, source_node_id=""):
+        return (with_source_node(merge(scene_prompt1, scene_prompt2), source_node_id or unique_id),)
 
 
 class ScenePromptCounter:
@@ -1078,8 +1148,7 @@ class ScenePromptCounter:
         )
 
     def count(self, scene_prompt=None, count=1, unique_id=None, source_node_id=""):
-        plan = with_source_node(multiply_count(scene_prompt, count), unique_id)
-        return (with_source_node(plan, source_node_id),)
+        return (with_source_node(multiply_count(scene_prompt, count), source_node_id or unique_id),)
 
 
 class SceneEmptyLatent:
@@ -1130,7 +1199,10 @@ class SceneEmptyLatent:
                 ),
             },
             "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"})},
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+            },
         }
 
     @classmethod
@@ -1145,9 +1217,9 @@ class SceneEmptyLatent:
             ]
         )
 
-    def apply_latent(self, scene_prompt=None, width=512, height=512, batch_size=1, unique_id=None):
+    def apply_latent(self, scene_prompt=None, width=512, height=512, batch_size=1, unique_id=None, source_node_id=""):
         latent = _normalize_latent_config({"width": width, "height": height, "batch_size": batch_size})
-        return (with_source_node(transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)}), unique_id),)
+        return (with_source_node(transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)}), source_node_id or unique_id),)
 
 
 class ScenePromptExpand:
@@ -1295,6 +1367,7 @@ class ScenePromptExpand:
             "total_count": _metadata_count(item["total_images"], "total_count", MAX_TOTAL_IMAGES),
             "latent": latent_config,
             "source_node_ids": [*row.get("source_node_ids", []), str(unique_id)] if unique_id is not None else list(row.get("source_node_ids", [])),
+            "run_handle": str(run_handle or ""),
         }
 
         return (positive, negative, save_info, seed, latent)
@@ -1302,7 +1375,7 @@ class ScenePromptExpand:
 
 
 class SceneSaveImage:
-    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「生成経路ノードのみ」「プロンプトのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。生成経路ノードのみは今回の画像に使われたScene枝と画像生成ノードだけを、元の配置と設定を保って保存します。"""
+    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「生成経路ノードのみ」「プロンプトのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。Presetの中身を展開すると、保存時に固定されたPresetを実ノードと接続へ置き換えます。"""
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
@@ -1323,6 +1396,15 @@ class SceneSaveImage:
                         "tooltip": "ワークフロー全体: 配置を含む全体を保存。生成経路ノードのみ: 今回の画像に使われたScene枝と画像生成ノードだけを保存。プロンプトのみ: ワークフローは保存しない。",
                     },
                 ),
+                "expand_preset_contents": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "Presetの中身を展開",
+                        "label": "Presetの中身を展開",
+                        "tooltip": "ONにすると、保存されるメタデータ内のScene Preset ReferenceをPresetの実ノードと接続へ置き換えます。",
+                    },
+                ),
             },
             "optional": {
                 "scene_info": (SCENE_SAVE_INFO_TYPE, {"display_name": "メタ情報", "label": "メタ情報"}),
@@ -1341,6 +1423,7 @@ class SceneSaveImage:
         images,
         path,
         metadata_mode=SAVE_METADATA_WORKFLOW,
+        expand_preset_contents=False,
         scene_info=None,
         prompt=None,
         extra_pnginfo=None,
@@ -1383,6 +1466,7 @@ class SceneSaveImage:
                 unique_id,
                 metadata_mode,
                 info,
+                _scene_bool(expand_preset_contents, False),
             )
             if saved_prompt is not None:
                 prompt_metadata = json.dumps(saved_prompt, separators=(",", ":"))

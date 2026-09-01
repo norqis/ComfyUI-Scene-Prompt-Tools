@@ -3386,7 +3386,7 @@ function hideNonSceneRoleWidgets(node) {
 
 function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
-        ? new Set(["path", "metadata_mode"])
+        ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : isSceneExpandNodeName(nodeName)
             ? new Set(["timestamp_dir", "prefix"])
             : SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicPackageTests(unittest.TestCase):
     def test_runtime_modules_are_in_one_internal_package(self):
-        expected = {"__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py"}
+        expected = {"__init__.py", "nodes.py", "plan.py", "preset_metadata.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py"}
         self.assertSetEqual({path.name for path in (ROOT / "scene_prompt_tools").glob("*.py")}, expected)
         for filename in expected - {"__init__.py"}:
             self.assertFalse((ROOT / filename).exists())
@@ -40,7 +40,7 @@ class PublicPackageTests(unittest.TestCase):
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.3.3"', pyproject)
+        self.assertIn('version = "0.3.4"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
@@ -61,7 +61,7 @@ class PublicPackageTests(unittest.TestCase):
 
     def test_private_brand_names_are_absent_from_runtime_ui(self):
         runtime_paths = [Path("__init__.py"), *(Path("scene_prompt_tools") / name for name in (
-            "__init__.py", "nodes.py", "plan.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py",
+            "__init__.py", "nodes.py", "plan.py", "preset_metadata.py", "prompt.py", "presets.py", "routes.py", "runs.py", "storage.py",
         ))]
         for relative_path in runtime_paths:
             path = ROOT / relative_path
