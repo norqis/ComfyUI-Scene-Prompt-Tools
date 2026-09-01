@@ -195,6 +195,103 @@ class PresetMetadataTests(unittest.TestCase):
         self.assertEqual(workflow["last_link_id"], len(workflow["links"]))
         self.assertTrue(all(str(link[1]) in workflow_by_id and str(link[3]) in workflow_by_id for link in workflow["links"]))
 
+    def test_full_expansion_preserves_unrelated_workflow_branch_byte_for_byte(self):
+        self.put_snapshots({"one": simple_preset("one")})
+        prompt = {
+            "1": scene_prompt("outside"),
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "one", "scene_prompt": ["1", 0]}},
+            "3": scene_prompt("after", ["2", 0]),
+            "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["3", 0]}},
+        }
+        workflow = outer_workflow(prompt)
+        unrelated_source = workflow_node("70", "UnrelatedSource", [900, 20])
+        unrelated_target = workflow_node("71", "UnrelatedTarget", [1100, 20], ("scene_prompt",))
+        unrelated_source["outputs"][0]["links"] = [501]
+        unrelated_target["inputs"][0]["link"] = 501
+        workflow["nodes"].extend([unrelated_source, unrelated_target])
+        workflow["links"] = [[501, 70, 0, 71, 0, "SCENE_PROMPT"]]
+        workflow["reroutes"] = [{"id": 44, "linkIds": [501], "pos": [1000, 70]}]
+        workflow["groups"] = [{"title": "unchanged", "bounding": [880, 0, 300, 140]}]
+        workflow["last_link_id"] = 501
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "9",
+            self.nodes.SAVE_METADATA_WORKFLOW,
+            {"run_handle": self.run_handle, "source_node_ids": ["1", "2", "3"]},
+            True,
+        )
+        saved_workflow = saved_extra["workflow"]
+        self.assertNotIn("2", saved_prompt)
+        self.assertIn([501, 70, 0, 71, 0, "SCENE_PROMPT"], saved_workflow["links"])
+        saved_nodes = {str(node["id"]): node for node in saved_workflow["nodes"]}
+        self.assertEqual(saved_nodes["70"], unrelated_source)
+        self.assertEqual(saved_nodes["71"], unrelated_target)
+        self.assertEqual(saved_workflow["reroutes"], workflow["reroutes"])
+        self.assertEqual(saved_workflow["groups"], workflow["groups"])
+
+    def test_full_expansion_rewires_reference_fanout_outside_api_prompt(self):
+        self.put_snapshots({"one": simple_preset("one")})
+        prompt = {
+            "1": scene_prompt("outside"),
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "one", "scene_prompt": ["1", 0]}},
+            "3": scene_prompt("after", ["2", 0]),
+            "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["3", 0]}},
+        }
+        workflow = outer_workflow(prompt)
+        reference = next(node for node in workflow["nodes"] if node["id"] == 2)
+        sibling = workflow_node("72", "WorkflowOnlySibling", [520, 90], ("scene_prompt",))
+        reference["outputs"][0]["links"] = [601]
+        sibling["inputs"][0]["link"] = 601
+        workflow["nodes"].append(sibling)
+        workflow["links"] = [[601, 2, 0, 72, 0, "SCENE_PROMPT"]]
+        workflow["last_link_id"] = 601
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "9",
+            self.nodes.SAVE_METADATA_WORKFLOW,
+            {"run_handle": self.run_handle, "source_node_ids": ["1", "2", "3"]},
+            True,
+        )
+        inside_id = next(
+            node_id for node_id, node in saved_prompt.items()
+            if node.get("inputs", {}).get("prompt_name") == "inside"
+        )
+        fanout = next(link for link in saved_extra["workflow"]["links"] if str(link[3]) == "72")
+        self.assertGreater(fanout[0], 601)
+        self.assertEqual((str(fanout[1]), fanout[2], fanout[4]), (inside_id, 0, 0))
+        sibling_after = next(node for node in saved_extra["workflow"]["nodes"] if node["id"] == 72)
+        self.assertEqual(sibling_after["inputs"][0]["link"], fanout[0])
+
+    def test_full_expansion_keeps_existing_reroute_link_ids(self):
+        self.put_snapshots({"one": simple_preset("one")})
+        prompt = {
+            "1": scene_prompt("outside"),
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "one", "scene_prompt": ["1", 0]}},
+            "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["2", 0]}},
+        }
+        workflow = outer_workflow(prompt)
+        source = workflow_node("80", "RerouteSource", [700, 0])
+        target = workflow_node("81", "RerouteTarget", [900, 0], ("scene_prompt",))
+        source["outputs"][0]["links"] = [812]
+        target["inputs"][0]["link"] = 812
+        workflow["nodes"].extend([source, target])
+        workflow["links"] = [[812, 80, 0, 81, 0, "SCENE_PROMPT"]]
+        workflow["reroutes"] = [{"id": 98, "linkIds": [812], "pos": [800, 0]}]
+        workflow["last_link_id"] = 900
+        _saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "9",
+            self.nodes.SAVE_METADATA_WORKFLOW,
+            {"run_handle": self.run_handle, "source_node_ids": ["1", "2"]},
+            True,
+        )
+        self.assertIn([812, 80, 0, 81, 0, "SCENE_PROMPT"], saved_extra["workflow"]["links"])
+        self.assertEqual(saved_extra["workflow"]["reroutes"], workflow["reroutes"])
+        self.assertGreater(saved_extra["workflow"]["last_link_id"], 900)
+
     def test_execution_path_keeps_the_selected_queue_branch_inside_a_preset(self):
         preset_nodes = {
             "10": {"class_type": "ScenePresetInput", "inputs": {}},
