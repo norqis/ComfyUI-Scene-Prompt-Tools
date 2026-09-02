@@ -155,6 +155,7 @@ let promptItemsRequestGeneration = 0;
 let savedPromptsRequestGeneration = 0;
 let activePopup = null;
 let activePopupContext = null;
+const popupSessionsByNode = new WeakMap();
 let sceneBatchRun = null;
 const sceneBatchRunsById = new Map();
 const sceneBatchPendingRuns = [];
@@ -541,6 +542,82 @@ function activatePopupStateWidget(node, options = {}) {
     const stateWidgetName = popupStateWidgetName(node, options);
     setActiveStateWidget(node, stateWidgetName);
     return stateWidgetName;
+}
+
+function createPopupSession() {
+    return {
+        list: { kind: "categories", path: [] },
+        candidateQueries: {},
+        searchQuery: "",
+        forms: {
+            save: { name: "", description: "" },
+            create: { category: "", subcategory: "", name: "", prompt: "", description: "" },
+        },
+        selected: { detailId: null },
+        scrollTops: {},
+    };
+}
+
+function popupSessionScopeKey(node, stateWidgetName) {
+    const widgetName = stateWidgetName || activeStateWidgetName(node);
+    const matrixContext = matrixLineDraftContextFor(node, widgetName);
+    if (!matrixContext) {
+        return widgetName;
+    }
+    const rowId = String(matrixContext.draft?.row_id || matrixContext.index);
+    return `${widgetName}::matrix-row:${rowId}`;
+}
+
+function popupSessionFor(node, stateWidgetName, scopeKey = null) {
+    let sessions = popupSessionsByNode.get(node);
+    if (!sessions) {
+        sessions = new Map();
+        popupSessionsByNode.set(node, sessions);
+    }
+    const key = scopeKey || popupSessionScopeKey(node, stateWidgetName);
+    if (!sessions.has(key)) {
+        sessions.set(key, createPopupSession());
+    }
+    return sessions.get(key);
+}
+
+function discardPopupSession(node, scopeKey) {
+    const sessions = popupSessionsByNode.get(node);
+    if (!sessions) {
+        return;
+    }
+    sessions.delete(scopeKey);
+    if (!sessions.size) {
+        popupSessionsByNode.delete(node);
+    }
+}
+
+function setPopupListLocation(session, kind, path = []) {
+    session.list = { kind, path: [...path] };
+}
+
+function popupListScrollKey(kind, path = []) {
+    return `list:${kind}:${pathKey(path)}`;
+}
+
+function rememberPopupScroll(session, key, element) {
+    if (!element) {
+        return;
+    }
+    element.addEventListener("scroll", () => {
+        session.scrollTops[key] = element.scrollTop;
+    });
+    requestAnimationFrame(() => {
+        element.scrollTop = session.scrollTops[key] || 0;
+    });
+}
+
+function resetPopupForm(session, formName) {
+    if (formName === "save") {
+        session.forms.save = { name: "", description: "" };
+    } else if (formName === "create") {
+        session.forms.create = { category: "", subcategory: "", name: "", prompt: "", description: "" };
+    }
 }
 
 function readStateFromWidget(node, stateWidgetName) {
@@ -1734,15 +1811,22 @@ function closePopup(options = {}) {
         }
         if (closingContext?.secondary && closingContext?.node) {
             rememberSecondaryPopupRect(closingContext.node, activePopup);
+            if (options.discardPopupSession !== false) {
+                discardPopupSession(closingContext.node, closingContext.popupSessionScopeKey);
+            }
             if (parent?.context?.stateWidgetName) {
                 setActiveStateWidget(closingContext.node, parent.context.stateWidgetName);
-            } else {
+            }
+            if (options.discardPopupSession !== false) {
                 clearMatrixLineDraftContext(closingContext.node);
             }
         }
         if (closingContext?.node && !closingContext?.secondary) {
             rememberPopupRect(closingContext.node, activePopup);
             clearMatrixLineDraftContext(closingContext.node);
+            if (options.discardPopupSession !== false) {
+                discardPopupSession(closingContext.node, closingContext.popupSessionScopeKey);
+            }
         }
         activePopup.remove();
         activePopup = parent?.popup || null;
@@ -1877,6 +1961,8 @@ function makePopupDraggable(node, popup, handle) {
 
 function openPopupShell(node, titleText, options = {}) {
     const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
+    const popupSessionScopeKeyValue = options.popupSessionScopeKey || popupSessionScopeKey(node, stateWidgetName);
+    const popupSession = options.popupSession || popupSessionFor(node, stateWidgetName, popupSessionScopeKeyValue);
     const isSecondary = !!options.secondary
         || !!matrixLineDraftContextFor(node, stateWidgetName)
         || (!!node?.sceneMatrixLinePopupSecondary && !!matrixLineDraftContextFor(node, stateWidgetName))
@@ -1884,13 +1970,15 @@ function openPopupShell(node, titleText, options = {}) {
     let parent = null;
     if (isSecondary) {
         if (activePopupContext?.secondary) {
-            closePopup({ invalidateRequests: false });
+            closePopup({ invalidateRequests: false, discardPopupSession: false });
         }
         parent = activePopup && activePopupContext
             ? { popup: activePopup, context: activePopupContext }
             : null;
     } else {
-        closeAllPopups({ invalidateRequests: false });
+        const preservesCurrentSession = activePopupContext?.node === node
+            && activePopupContext?.popupSessionScopeKey === popupSessionScopeKeyValue;
+        closeAllPopups({ invalidateRequests: false, discardPopupSession: !preservesCurrentSession });
     }
     if (isSecondary) {
         node.sceneMatrixLinePopupSecondary = true;
@@ -1975,20 +2063,48 @@ function openPopupShell(node, titleText, options = {}) {
     makePopupDraggable(node, popup, head);
 
     activePopup = popup;
-    activePopupContext = { node, popup, reopen: null, stateWidgetName, secondary: isSecondary, parent };
+    activePopupContext = {
+        node,
+        popup,
+        reopen: null,
+        stateWidgetName,
+        popupSession,
+        popupSessionScopeKey: popupSessionScopeKeyValue,
+        secondary: isSecondary,
+        parent,
+    };
     return popup;
+}
+
+function openListFromPopupSession(node, options = {}) {
+    const stateWidgetName = popupStateWidgetName(node, options);
+    const session = popupSessionFor(node, stateWidgetName);
+    const location = session.list;
+    if (location.kind === "saved") {
+        openSavedPromptLevelPicker(node, location.path, { stateWidgetName, popupSession: session });
+    } else if (location.kind === "candidates") {
+        openPromptCandidatePopup(node, location.path, { stateWidgetName, popupSession: session });
+    } else {
+        openCategoryLevelPicker(node, location.path, { stateWidgetName, popupSession: session });
+    }
+}
+
+function openSelectedFromPopupSession(node, options = {}) {
+    const stateWidgetName = popupStateWidgetName(node, options);
+    const session = popupSessionFor(node, stateWidgetName);
+    openSelectedPopup(node, { stateWidgetName, popupSession: session, restoreDetail: true });
 }
 
 function appendPopupNavButtons(toolbar, node, current = "", options = {}) {
     const stateWidgetName = popupStateWidgetName(node, options);
     const list = createButton("一覧");
     list.classList.toggle("pc-on", current === "list");
-    list.addEventListener("click", () => openCategoryLevelPicker(node, [], { stateWidgetName }));
+    list.addEventListener("click", () => openListFromPopupSession(node, { stateWidgetName }));
     toolbar.appendChild(list);
 
     const selected = createButton("選択済み一覧");
     selected.classList.toggle("pc-on", current === "selected");
-    selected.addEventListener("click", () => openSelectedPopup(node, { stateWidgetName }));
+    selected.addEventListener("click", () => openSelectedFromPopupSession(node, { stateWidgetName }));
     toolbar.appendChild(selected);
 
     const save = createButton("プロンプトまとめて保存");
@@ -2476,13 +2592,17 @@ function appendSavedPromptRow(container, savedPrompt, onClick) {
 
 async function openSavePromptPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
-    const data = await loadPromptItems();
+    const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
+    if (!data) {
+        return;
+    }
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
     setActiveStateWidget(node, stateWidgetName);
     const state = pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
     const items = selectedItems(state);
-    const popup = openPopupShell(node, "プロンプトまとめて保存", { stateWidgetName });
+    const popup = openPopupShell(node, "プロンプトまとめて保存", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openSavePromptPopup(node, { stateWidgetName });
+        activePopupContext.reopen = () => openSavePromptPopup(node, { stateWidgetName, popupSession: session });
     }
 
     const nav = document.createElement("div");
@@ -2497,6 +2617,7 @@ async function openSavePromptPopup(node, options = {}) {
     nameLabel.textContent = "名前";
     const nameInput = document.createElement("input");
     nameInput.placeholder = "例: ギャルOL基本セット";
+    nameInput.value = session.forms.save.name;
     nameLabel.appendChild(nameInput);
     form.appendChild(nameLabel);
 
@@ -2504,8 +2625,16 @@ async function openSavePromptPopup(node, options = {}) {
     descLabel.textContent = "説明";
     const descInput = document.createElement("textarea");
     descInput.placeholder = "用途や狙いをメモ";
+    descInput.value = session.forms.save.description;
     descLabel.appendChild(descInput);
     form.appendChild(descLabel);
+
+    nameInput.addEventListener("input", () => {
+        session.forms.save.name = nameInput.value;
+    });
+    descInput.addEventListener("input", () => {
+        session.forms.save.description = descInput.value;
+    });
 
     const note = document.createElement("div");
     note.className = "pc-form-note";
@@ -2534,8 +2663,9 @@ async function openSavePromptPopup(node, options = {}) {
         try {
             await saveCurrentPrompt(nameInput.value, descInput.value, items);
             await loadSavedPrompts(true);
+            resetPopupForm(session, "save");
             refreshNode(node, { fitHeight: true });
-            openSelectedPopup(node, { stateWidgetName });
+            openSelectedPopup(node, { stateWidgetName, popupSession: session });
         } catch (saveError) {
             error.textContent = saveError.message || "プロンプトまとめの保存に失敗しました";
             fitPopupToContent(popup);
@@ -2544,22 +2674,27 @@ async function openSavePromptPopup(node, options = {}) {
     toolbar.appendChild(save);
 
     const back = createButton("←戻る");
-    back.addEventListener("click", () => openSelectedPopup(node, { stateWidgetName }));
+    back.addEventListener("click", () => openSelectedFromPopupSession(node, { stateWidgetName }));
     toolbar.appendChild(back);
     form.appendChild(toolbar);
 
     popup.appendChild(form);
+    rememberPopupScroll(session, "save", popup);
     fitPopupToContent(popup);
     nameInput.focus();
 }
 
 async function openCreatePromptPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
-    const data = await loadPromptItems();
+    const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
+    if (!data) {
+        return;
+    }
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
     setActiveStateWidget(node, stateWidgetName);
-    const popup = openPopupShell(node, "プロンプト作成", { stateWidgetName });
+    const popup = openPopupShell(node, "プロンプト作成", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openCreatePromptPopup(node, { stateWidgetName });
+        activePopupContext.reopen = () => openCreatePromptPopup(node, { stateWidgetName, popupSession: session });
     }
 
     const nav = document.createElement("div");
@@ -2574,6 +2709,7 @@ async function openCreatePromptPopup(node, options = {}) {
     categoryLabel.textContent = "カテゴリ（必須）";
     const categoryInput = document.createElement("input");
     categoryInput.placeholder = "新規入力、または既存カテゴリを選択";
+    categoryInput.value = session.forms.create.category;
     categoryLabel.appendChild(categoryInput);
     const categorySelect = document.createElement("select");
     categoryLabel.appendChild(categorySelect);
@@ -2583,6 +2719,7 @@ async function openCreatePromptPopup(node, options = {}) {
     subcategoryLabel.textContent = "サブカテゴリ（任意）";
     const subcategoryInput = document.createElement("input");
     subcategoryInput.placeholder = "新規入力、または既存サブカテゴリを選択";
+    subcategoryInput.value = session.forms.create.subcategory;
     subcategoryLabel.appendChild(subcategoryInput);
     const subcategorySelect = document.createElement("select");
     subcategoryLabel.appendChild(subcategorySelect);
@@ -2592,6 +2729,7 @@ async function openCreatePromptPopup(node, options = {}) {
     nameLabel.textContent = "名前";
     const nameInput = document.createElement("input");
     nameInput.placeholder = "例: アングルセット";
+    nameInput.value = session.forms.create.name;
     nameLabel.appendChild(nameInput);
     form.appendChild(nameLabel);
 
@@ -2599,6 +2737,7 @@ async function openCreatePromptPopup(node, options = {}) {
     promptLabel.textContent = "プロンプト";
     const promptInput = document.createElement("textarea");
     promptInput.placeholder = "例: low angle, from below";
+    promptInput.value = session.forms.create.prompt;
     promptLabel.appendChild(promptInput);
     form.appendChild(promptLabel);
 
@@ -2606,6 +2745,7 @@ async function openCreatePromptPopup(node, options = {}) {
     descLabel.textContent = "説明";
     const descInput = document.createElement("textarea");
     descInput.placeholder = "用途やニュアンスをメモ";
+    descInput.value = session.forms.create.description;
     descLabel.appendChild(descInput);
     form.appendChild(descLabel);
 
@@ -2646,6 +2786,8 @@ async function openCreatePromptPopup(node, options = {}) {
         currentCategory = categoryInput.value;
         syncCategorySelect();
         refreshSubcategories();
+        session.forms.create.category = categoryInput.value;
+        session.forms.create.subcategory = subcategoryInput.value;
     };
 
     categorySelect.addEventListener("change", () => {
@@ -2662,6 +2804,25 @@ async function openCreatePromptPopup(node, options = {}) {
     });
     subcategorySelect.addEventListener("change", () => {
         subcategoryInput.value = subcategorySelect.value;
+        session.forms.create.subcategory = subcategoryInput.value;
+    });
+    currentCategory = categoryInput.value;
+    syncCategorySelect();
+    categoryInput.addEventListener("input", () => {
+        session.forms.create.category = categoryInput.value;
+        session.forms.create.subcategory = subcategoryInput.value;
+    });
+    subcategoryInput.addEventListener("input", () => {
+        session.forms.create.subcategory = subcategoryInput.value;
+    });
+    nameInput.addEventListener("input", () => {
+        session.forms.create.name = nameInput.value;
+    });
+    promptInput.addEventListener("input", () => {
+        session.forms.create.prompt = promptInput.value;
+    });
+    descInput.addEventListener("input", () => {
+        session.forms.create.description = descInput.value;
     });
     refreshSubcategories();
 
@@ -2680,8 +2841,9 @@ async function openCreatePromptPopup(node, options = {}) {
             });
             promptItems = null;
             await loadPromptItems();
+            resetPopupForm(session, "create");
             refreshNode(node, { fitHeight: true });
-            openPromptCandidatePopup(node, item.category_path || [categoryInput.value].filter(Boolean), { stateWidgetName });
+            openPromptCandidatePopup(node, item.category_path || [categoryInput.value].filter(Boolean), { stateWidgetName, popupSession: session });
         } catch (createError) {
             error.textContent = createError.message || "プロンプト作成に失敗しました";
             fitPopupToContent(popup);
@@ -2690,11 +2852,12 @@ async function openCreatePromptPopup(node, options = {}) {
     toolbar.appendChild(create);
 
     const back = createButton("←戻る");
-    back.addEventListener("click", () => openCategoryLevelPicker(node, [], { stateWidgetName }));
+    back.addEventListener("click", () => openListFromPopupSession(node, { stateWidgetName }));
     toolbar.appendChild(back);
     form.appendChild(toolbar);
 
     popup.appendChild(form);
+    rememberPopupScroll(session, "create", popup);
     fitPopupToContent(popup);
     categoryInput.focus();
 }
@@ -2799,6 +2962,7 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
 
 async function openCategoryLevelPicker(node, path = [], options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
     const loaded = await loadPopupRequest(
         node,
         () => Promise.all([loadPromptItems(), loadSavedPrompts()]),
@@ -2817,13 +2981,14 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
     const directItems = itemsForPath(data, path);
 
     if (!children.length && directItems.length) {
-        openPromptCandidatePopup(node, path, { stateWidgetName });
+        openPromptCandidatePopup(node, path, { stateWidgetName, popupSession: session });
         return;
     }
 
-    const popup = openPopupShell(node, path.length ? displayPathLabel(path) : "カテゴリ", { stateWidgetName });
+    setPopupListLocation(session, "categories", path);
+    const popup = openPopupShell(node, path.length ? displayPathLabel(path) : "カテゴリ", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openCategoryLevelPicker(node, path, { stateWidgetName });
+        activePopupContext.reopen = () => openCategoryLevelPicker(node, path, { stateWidgetName, popupSession: session });
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
@@ -2836,9 +3001,10 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
     const list = document.createElement("div");
     list.className = "pc-popup-list pc-popup-category-list";
     popup.appendChild(list);
+    rememberPopupScroll(session, popupListScrollKey("categories", path), list);
 
     if (path.length) {
-        appendBackButton(list, "←戻る", () => openCategoryLevelPicker(node, path.slice(0, -1), { stateWidgetName }));
+        appendBackButton(list, "←戻る", () => openCategoryLevelPicker(node, path.slice(0, -1), { stateWidgetName, popupSession: session }));
     }
 
     if (directItems.length && children.length) {
@@ -2846,7 +3012,7 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
         const directCount = formatCategoryCount(directCounts);
         const direct = createButton(`この階層の候補 (${directCount})`);
         direct.classList.toggle("pc-on", !!directCounts.selected);
-        direct.addEventListener("click", () => openPromptCandidatePopup(node, path, { stateWidgetName }));
+        direct.addEventListener("click", () => openPromptCandidatePopup(node, path, { stateWidgetName, popupSession: session }));
         list.appendChild(direct);
     }
 
@@ -2855,7 +3021,7 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
         const countLabel = formatCategoryCount(counts);
         const option = createButton(`保存済みプロンプト (${countLabel})`);
         option.classList.toggle("pc-on", !!counts.selected);
-        option.addEventListener("click", () => openSavedPromptLevelPicker(node, [], { stateWidgetName }));
+        option.addEventListener("click", () => openSavedPromptLevelPicker(node, [], { stateWidgetName, popupSession: session }));
         list.appendChild(option);
     }
 
@@ -2880,11 +3046,11 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
             const hasChildren = getChildSegments(data, nextPath).length > 0;
             const hasDirectItems = itemsForPath(data, nextPath).length > 0;
             if (hasChildren) {
-                openCategoryLevelPicker(node, nextPath, { stateWidgetName });
+                openCategoryLevelPicker(node, nextPath, { stateWidgetName, popupSession: session });
             } else if (hasDirectItems) {
-                openPromptCandidatePopup(node, nextPath, { stateWidgetName });
+                openPromptCandidatePopup(node, nextPath, { stateWidgetName, popupSession: session });
             } else {
-                openCategoryLevelPicker(node, nextPath, { stateWidgetName });
+                openCategoryLevelPicker(node, nextPath, { stateWidgetName, popupSession: session });
             }
         });
         list.appendChild(option);
@@ -2894,6 +3060,7 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
 
 async function openSavedPromptLevelPicker(node, path = [], options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
     const loaded = await loadPopupRequest(
         node,
         () => Promise.all([loadPromptItems(), loadSavedPrompts()]),
@@ -2912,9 +3079,10 @@ async function openSavedPromptLevelPicker(node, path = [], options = {}) {
     const directPrompts = savedPromptsForPath(saved, path);
     const title = path.length ? `保存済みプロンプト > ${displayPathLabel(path)}` : "保存済みプロンプト";
 
-    const popup = openPopupShell(node, title, { stateWidgetName });
+    setPopupListLocation(session, "saved", path);
+    const popup = openPopupShell(node, title, { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openSavedPromptLevelPicker(node, path, { stateWidgetName });
+        activePopupContext.reopen = () => openSavedPromptLevelPicker(node, path, { stateWidgetName, popupSession: session });
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
@@ -2927,12 +3095,13 @@ async function openSavedPromptLevelPicker(node, path = [], options = {}) {
     const list = document.createElement("div");
     list.className = "pc-popup-list pc-popup-category-list";
     popup.appendChild(list);
+    rememberPopupScroll(session, popupListScrollKey("saved", path), list);
 
     appendBackButton(list, "←戻る", () => {
         if (path.length) {
-            openSavedPromptLevelPicker(node, path.slice(0, -1), { stateWidgetName });
+            openSavedPromptLevelPicker(node, path.slice(0, -1), { stateWidgetName, popupSession: session });
         } else {
-            openCategoryLevelPicker(node, [], { stateWidgetName });
+            openCategoryLevelPicker(node, [], { stateWidgetName, popupSession: session });
         }
     });
 
@@ -2941,7 +3110,7 @@ async function openSavedPromptLevelPicker(node, path = [], options = {}) {
         const row = appendSavedPromptRow(list, savedPrompt, () => {
             const nextSelected = selectedKeys(readStateFromWidget(node, stateWidgetName));
             setSavedPromptChecked(node, savedPrompt, !savedPromptMatches(savedPrompt, nextSelected), { stateWidgetName });
-            openSavedPromptLevelPicker(node, path, { stateWidgetName });
+            openSavedPromptLevelPicker(node, path, { stateWidgetName, popupSession: session });
         });
         row.classList.toggle("pc-on", savedPromptMatches(savedPrompt, selected));
     }
@@ -2956,9 +3125,9 @@ async function openSavedPromptLevelPicker(node, path = [], options = {}) {
         option.classList.toggle("pc-on", !!counts.selected);
         option.addEventListener("click", () => {
             if (!childSegments.length && childDirect.length === 1) {
-                openSavedPromptLevelPicker(node, nextPath, { stateWidgetName });
+                openSavedPromptLevelPicker(node, nextPath, { stateWidgetName, popupSession: session });
             } else {
-                openSavedPromptLevelPicker(node, nextPath, { stateWidgetName });
+                openSavedPromptLevelPicker(node, nextPath, { stateWidgetName, popupSession: session });
             }
         });
         list.appendChild(option);
@@ -2976,14 +3145,16 @@ async function openSavedPromptLevelPicker(node, path = [], options = {}) {
 
 async function openPromptCandidatePopup(node, path, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
     const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
     if (!data) {
         return;
     }
     setActiveStateWidget(node, stateWidgetName);
-    const popup = openPopupShell(node, displayPathLabel(path), { stateWidgetName });
+    setPopupListLocation(session, "candidates", path);
+    const popup = openPopupShell(node, displayPathLabel(path), { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openPromptCandidatePopup(node, path, { stateWidgetName });
+        activePopupContext.reopen = () => openPromptCandidatePopup(node, path, { stateWidgetName, popupSession: session });
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
@@ -2996,11 +3167,14 @@ async function openPromptCandidatePopup(node, path, options = {}) {
     const filter = document.createElement("input");
     filter.className = "pc-searchbox";
     filter.placeholder = "この階層内を検索";
+    const candidatePathKey = pathKey(path);
+    filter.value = session.candidateQueries[candidatePathKey] || "";
     popup.appendChild(filter);
 
     const list = document.createElement("div");
     list.className = "pc-popup-list";
     popup.appendChild(list);
+    rememberPopupScroll(session, popupListScrollKey("candidates", path), list);
 
     const renderList = () => {
         const state = readPopupSelectionState(node, stateWidgetName, data);
@@ -3015,7 +3189,7 @@ async function openPromptCandidatePopup(node, path, options = {}) {
 
         list.innerHTML = "";
         if (path.length) {
-            appendBackButton(list, "←戻る", () => openCategoryLevelPicker(node, path.slice(0, -1), { stateWidgetName }));
+            appendBackButton(list, "←戻る", () => openCategoryLevelPicker(node, path.slice(0, -1), { stateWidgetName, popupSession: session }));
         }
         if (!candidates.length) {
             const empty = document.createElement("div");
@@ -3032,7 +3206,10 @@ async function openPromptCandidatePopup(node, path, options = {}) {
         fitPopupToContent(popup);
     };
 
-    filter.addEventListener("input", renderList);
+    filter.addEventListener("input", () => {
+        session.candidateQueries[candidatePathKey] = filter.value;
+        renderList();
+    });
     renderList();
     fitPopupToContent(popup);
     filter.focus();
@@ -3040,6 +3217,7 @@ async function openPromptCandidatePopup(node, path, options = {}) {
 
 async function openSelectedPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
     const loaded = await loadPopupRequest(
         node,
         () => Promise.all([loadPromptItems(), loadSavedPrompts()]),
@@ -3050,14 +3228,22 @@ async function openSelectedPopup(node, options = {}) {
     }
     const [data, saved] = loaded;
     setActiveStateWidget(node, stateWidgetName);
+    if (options.restoreDetail && session.selected.detailId) {
+        const savedPrompt = saved.find((candidate) => String(candidate.id || candidate.name || "") === session.selected.detailId);
+        if (savedPrompt) {
+            openSavedPromptDetailPopup(node, savedPrompt, { stateWidgetName, popupSession: session });
+            return;
+        }
+    }
+    session.selected.detailId = null;
     const initialState = readPopupSelectionState(node, stateWidgetName, data);
     if (!initialState) {
         return;
     }
     const displayState = cloneSelectionState(initialState);
-    const popup = openPopupShell(node, "選択済み一覧", { stateWidgetName });
+    const popup = openPopupShell(node, "選択済み一覧", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openSelectedPopup(node, { stateWidgetName });
+        activePopupContext.reopen = () => openSelectedPopup(node, { stateWidgetName, popupSession: session });
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
@@ -3070,6 +3256,7 @@ async function openSelectedPopup(node, options = {}) {
     const list = document.createElement("div");
     list.className = "pc-popup-list";
     popup.appendChild(list);
+    rememberPopupScroll(session, "selected", list);
 
     const renderSelected = () => {
         const state = readPopupSelectionState(node, stateWidgetName, data);
@@ -3088,7 +3275,7 @@ async function openSelectedPopup(node, options = {}) {
             heading.textContent = "保存済みプロンプト";
             list.appendChild(heading);
             for (const savedPrompt of matchedSaved) {
-                appendSavedPromptRow(list, savedPrompt, () => openSavedPromptDetailPopup(node, savedPrompt, { stateWidgetName }));
+                appendSavedPromptRow(list, savedPrompt, () => openSavedPromptDetailPopup(node, savedPrompt, { stateWidgetName, popupSession: session }));
             }
         }
 
@@ -3124,14 +3311,16 @@ async function openSelectedPopup(node, options = {}) {
 
 async function openSavedPromptDetailPopup(node, savedPrompt, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
     const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
     if (!data) {
         return;
     }
     setActiveStateWidget(node, stateWidgetName);
-    const popup = openPopupShell(node, savedPrompt.name || "保存済みプロンプト", { stateWidgetName });
+    session.selected.detailId = String(savedPrompt.id || savedPrompt.name || "");
+    const popup = openPopupShell(node, savedPrompt.name || "保存済みプロンプト", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openSavedPromptDetailPopup(node, savedPrompt, { stateWidgetName });
+        activePopupContext.reopen = () => openSavedPromptDetailPopup(node, savedPrompt, { stateWidgetName, popupSession: session });
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
@@ -3144,11 +3333,12 @@ async function openSavedPromptDetailPopup(node, savedPrompt, options = {}) {
     const list = document.createElement("div");
     list.className = "pc-popup-list";
     popup.appendChild(list);
+    rememberPopupScroll(session, `selected:${session.selected.detailId}`, list);
 
     const renderItems = () => {
         const selected = selectedKeys(readStateFromWidget(node, stateWidgetName));
         list.innerHTML = "";
-        appendBackButton(list, "←戻る", () => openSelectedPopup(node, { stateWidgetName }));
+        appendBackButton(list, "←戻る", () => openSelectedPopup(node, { stateWidgetName, popupSession: session }));
         const chipList = document.createElement("div");
         chipList.className = "pc-chip-list";
         for (const item of savedPrompt.items || []) {
@@ -3171,14 +3361,15 @@ async function openSavedPromptDetailPopup(node, savedPrompt, options = {}) {
 
 async function openSearchPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
     const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
     if (!data) {
         return;
     }
     setActiveStateWidget(node, stateWidgetName);
-    const popup = openPopupShell(node, "候補検索", { stateWidgetName });
+    const popup = openPopupShell(node, "候補検索", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openSearchPopup(node, { stateWidgetName });
+        activePopupContext.reopen = () => openSearchPopup(node, { stateWidgetName, popupSession: session });
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
@@ -3191,11 +3382,13 @@ async function openSearchPopup(node, options = {}) {
     const input = document.createElement("input");
     input.className = "pc-searchbox";
     input.placeholder = "カテゴリ / サブカテゴリ / ラベル / 説明 / prompt を検索";
+    input.value = session.searchQuery;
     popup.appendChild(input);
 
     const list = document.createElement("div");
     list.className = "pc-popup-list";
     popup.appendChild(list);
+    rememberPopupScroll(session, "search", list);
 
     const renderResults = () => {
         const state = readPopupSelectionState(node, stateWidgetName, data);
@@ -3248,7 +3441,10 @@ async function openSearchPopup(node, options = {}) {
         fitPopupToContent(popup);
     };
 
-    input.addEventListener("input", renderResults);
+    input.addEventListener("input", () => {
+        session.searchQuery = input.value;
+        renderResults();
+    });
     renderResults();
     fitPopupToContent(popup);
     input.focus();
