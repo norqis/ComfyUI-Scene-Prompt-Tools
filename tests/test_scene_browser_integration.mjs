@@ -33,6 +33,7 @@ window.__scenePromptLoadedGraphs = loadedGraphs;
 const apiModule = `
 const listeners = new Map();
 const calls = [];
+let releaseDelayedItems = null;
 const baseItem = {
   id: "summer",
   label: "Summer",
@@ -52,6 +53,11 @@ const savedPrompt = { id: "browser-set", name: "Browser Set", description: "", i
 export const api = {
   fetchApi: async (url, options = {}) => {
     calls.push({ url, options });
+    if (url.includes("/scene_prompt/items") && options.method !== "POST" && window.__delayNextScenePromptItems) {
+      window.__delayNextScenePromptItems = false;
+      await new Promise((resolveDelay) => { releaseDelayedItems = resolveDelay; });
+      releaseDelayedItems = null;
+    }
     let payload = { items: [] };
     let status = 200;
     if (url.includes("/scene_prompt/items")) payload = { items: promptItems };
@@ -85,6 +91,9 @@ export const api = {
 window.api = api;
 window.__scenePromptCalls = calls;
 window.__scenePromptListeners = listeners;
+window.__delayScenePromptItems = () => { window.__delayNextScenePromptItems = true; };
+window.__releaseScenePromptItems = () => releaseDelayedItems?.();
+window.__scenePromptItemsDelayed = () => !!releaseDelayedItems;
 `;
 const index = `<!doctype html><script type="module">
   import { injectStyle } from "/extensions/scene-prompt/web/scene_prompt_style.js";
@@ -108,7 +117,15 @@ const server = http.createServer(async (request, response) => {
     const asset = assets.get(request.url);
     if (asset) {
         response.writeHead(200, { "content-type": "text/javascript" });
-        response.end(await readFile(resolve(root, asset), "utf8"));
+        let source = await readFile(resolve(root, asset), "utf8");
+        if (asset === "web/scene_prompt_ui.js") {
+            source += `\nwindow.__scenePromptPopupTestHooks = {\n`
+                + `  openSavePromptPopup,\n`
+                + `  openCreatePromptPopup,\n`
+                + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
+                + `};\n`;
+        }
+        response.end(source);
         return;
     }
     response.writeHead(404);
@@ -344,6 +361,35 @@ try {
     await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
     await page.getByRole("button", { name: "検索", exact: true }).click();
     assert.equal(await page.locator(".pc-popup .pc-searchbox").inputValue(), "", "explicit close resets the popup session");
+    await page.getByRole("button", { name: "閉じる", exact: true }).click();
+
+    await page.evaluate(() => {
+        const node = window.__scenePromptTestNode;
+        node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
+        window.__scenePromptPopupTestHooks.clearPromptItemsCache();
+        window.__delayScenePromptItems();
+    });
+    await page.getByRole("button", { name: "プロンプト作成", exact: true }).click();
+    await page.waitForFunction(() => window.__scenePromptItemsDelayed());
+    await page.getByRole("button", { name: "閉じる", exact: true }).click();
+    await page.evaluate(() => window.__releaseScenePromptItems());
+    await page.waitForTimeout(80);
+    assert.equal(await page.locator(".pc-popup").count(), 0, "closing during create load cannot resurrect its popup");
+
+    await page.evaluate(() => {
+        const node = window.__scenePromptTestNode;
+        node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
+        window.__scenePromptPopupTestHooks.clearPromptItemsCache();
+        window.__delayScenePromptItems();
+    });
+    await page.getByRole("button", { name: "プロンプトまとめて保存", exact: true }).click();
+    await page.waitForFunction(() => window.__scenePromptItemsDelayed());
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    await page.evaluate(() => window.__releaseScenePromptItems());
+    await assert.doesNotReject(async () => page.locator(".pc-popup-title").filter({ hasText: "候補検索" }).waitFor({ state: "visible" }));
+    await page.waitForTimeout(80);
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補検索", "stale save load cannot replace the navigated view");
+    assert.equal(await page.locator(".pc-popup .pc-searchbox").inputValue(), "", "navigation after delayed load keeps a clean session");
     await page.getByRole("button", { name: "閉じる", exact: true }).click();
 
     await page.keyboard.press("Escape");

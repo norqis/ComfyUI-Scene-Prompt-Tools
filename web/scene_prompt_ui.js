@@ -2592,8 +2592,11 @@ function appendSavedPromptRow(container, savedPrompt, onClick) {
 
 async function openSavePromptPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
+    const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
+    if (!data) {
+        return;
+    }
     const session = options.popupSession || popupSessionFor(node, stateWidgetName);
-    const data = await loadPromptItems();
     setActiveStateWidget(node, stateWidgetName);
     const state = pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
     const items = selectedItems(state);
@@ -2683,8 +2686,11 @@ async function openSavePromptPopup(node, options = {}) {
 
 async function openCreatePromptPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
+    const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
+    if (!data) {
+        return;
+    }
     const session = options.popupSession || popupSessionFor(node, stateWidgetName);
-    const data = await loadPromptItems();
     setActiveStateWidget(node, stateWidgetName);
     const popup = openPopupShell(node, "プロンプト作成", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
