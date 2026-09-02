@@ -19,6 +19,7 @@ from .runs import (
     claim_run_context,
     create_run_context,
     purge_expired_run_contexts,
+    reconcile_active_run_contexts,
     release_run_context,
     set_run_expiration_callback,
 )
@@ -53,6 +54,27 @@ _CACHE_GENERATION = 0
 
 def _request_user_id(request):
     return PromptServer.instance.user_manager.get_request_user_id(request)
+
+
+def _queued_prompt_ids():
+    prompt_queue = getattr(PromptServer.instance, "prompt_queue", None)
+    if prompt_queue is None:
+        return None
+    running, pending = prompt_queue.get_current_queue_volatile()
+    return {
+        str(item[1])
+        for item in (*running, *pending)
+        if isinstance(item, (tuple, list)) and len(item) > 1 and str(item[1])
+    }
+
+
+def _is_continuous_scene_run(api_graph, expand_node_id):
+    node = ((api_graph or {}).get("output") or {}).get(str(expand_node_id or ""))
+    return bool(
+        isinstance(node, dict)
+        and node.get("class_type") == "ScenePrompterExpand"
+        and str((node.get("inputs") or {}).get("run_id") or "").strip()
+    )
 
 
 def _data_dir(user_id="default"):
@@ -620,7 +642,10 @@ def define_routes():
             expand_node_id = payload.get("expand_node_id") if isinstance(payload, dict) else None
             workflow = payload.get("workflow") if isinstance(payload, dict) else None
             user_id = _request_user_id(request)
-            handle = create_run_context(user_id)
+            live_prompt_ids = _queued_prompt_ids()
+            if live_prompt_ids is not None:
+                reconcile_active_run_contexts(live_prompt_ids)
+            handle = create_run_context(user_id, _is_continuous_scene_run(api_graph, expand_node_id))
             snapshot = await asyncio.to_thread(
                 snapshot_presets_for_run, handle, api_graph, expand_node_id, user_id, workflow
             )

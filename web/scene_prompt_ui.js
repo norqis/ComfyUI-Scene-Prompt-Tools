@@ -1380,13 +1380,22 @@ function pruneStateToData(node, state, items, options = {}) {
 
         const kept = [];
         for (const item of selected || []) {
-            const currentItem = currentItems.get(itemKey(item));
+            let currentItem = currentItems.get(itemKey(item));
             if (!currentItem || itemCategoryKey(currentItem) !== category) {
-                throw new Error(`選択済み候補「${item.label || item.prompt}」が候補データにありません。`);
+                const matchingItems = items.filter((candidate) => (
+                    itemCategoryKey(candidate) === category
+                    && candidate.label === item.label
+                    && candidate.prompt === item.prompt
+                ));
+                if (matchingItems.length !== 1) {
+                    throw new Error(`選択済み候補「${item.label || item.prompt}」が候補データにありません。`);
+                }
+                currentItem = matchingItems[0];
             }
             const keptItem = itemForState(currentItem, item);
             kept.push(keptItem);
-            if (itemSelectionSignature(item) !== itemSelectionSignature(keptItem)) changed = true;
+            if (itemKey(item) !== itemKey(keptItem)
+                || itemSelectionSignature(item) !== itemSelectionSignature(keptItem)) changed = true;
         }
 
         if (kept.length) {

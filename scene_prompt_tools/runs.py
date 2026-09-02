@@ -86,7 +86,7 @@ class RunContextStore:
         states = Counter(entry["state"] for entry in self._entries.values() if entry["user_id"] == str(user_id))
         return states["prepared"], states["active"]
 
-    def create(self, user_id):
+    def create(self, user_id, continuous=False):
         now = time.monotonic()
         with self._lock:
             expired = self._purge_expired_locked(now)
@@ -107,6 +107,7 @@ class RunContextStore:
                     "plans": {},
                     "state": "prepared",
                     "prompt_id": "",
+                    "continuous": bool(continuous),
                     "created_at": now,
                     "last_access": now,
                 }
@@ -114,6 +115,21 @@ class RunContextStore:
         if error:
             raise SceneRunError(error)
         return handle
+
+    def reconcile_active(self, live_prompt_ids):
+        """Release ordinary active runs that are no longer in ComfyUI's queue."""
+        live_ids = {str(prompt_id) for prompt_id in live_prompt_ids if str(prompt_id)}
+        with self._lock:
+            released = []
+            for handle, entry in list(self._entries.items()):
+                if entry["state"] != "active" or entry.get("continuous"):
+                    continue
+                if str(entry.get("prompt_id") or "") in live_ids:
+                    continue
+                self._entries.pop(handle, None)
+                released.append((handle, entry["user_id"]))
+        self._notify_expired(released)
+        return released
 
     def require(self, handle):
         value = str(handle or "").strip()
@@ -209,8 +225,12 @@ def set_run_expiration_callback(callback):
     RUN_CONTEXTS.set_expiration_callback(callback)
 
 
-def create_run_context(user_id):
-    return RUN_CONTEXTS.create(user_id)
+def create_run_context(user_id, continuous=False):
+    return RUN_CONTEXTS.create(user_id, continuous)
+
+
+def reconcile_active_run_contexts(live_prompt_ids):
+    return RUN_CONTEXTS.reconcile_active(live_prompt_ids)
 
 
 def require_run_context(handle):
