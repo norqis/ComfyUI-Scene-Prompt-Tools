@@ -56,6 +56,46 @@ class RunContextTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNS.SceneRunError, "実行中または準備済み"):
             store.create("alice")
 
+    def test_reconcile_releases_stale_ordinary_active_contexts(self):
+        store = RUNS.RunContextStore(active_limit=1, prepared_limit=1)
+        stale = store.create("alice")
+        self.assertTrue(store.claim(stale, "alice", "finished-prompt"))
+
+        self.assertEqual(store.reconcile_active(set()), [(stale, "alice")])
+        self.assertTrue(store.create("alice"))
+        with self.assertRaises(RUNS.SceneRunError):
+            store.require(stale)
+
+    def test_reconcile_preserves_live_running_and_pending_contexts(self):
+        store = RUNS.RunContextStore(active_limit=3, prepared_limit=3)
+        running = store.create("alice")
+        pending = store.create("alice")
+        self.assertTrue(store.claim(running, "alice", "running-prompt"))
+        self.assertTrue(store.claim(pending, "alice", "pending-prompt"))
+
+        self.assertEqual(store.reconcile_active({"running-prompt", "pending-prompt"}), [])
+        self.assertEqual(store.require(running)["state"], "active")
+        self.assertEqual(store.require(pending)["state"], "active")
+
+    def test_reconcile_preserves_continuous_contexts_between_jobs(self):
+        store = RUNS.RunContextStore(active_limit=1, prepared_limit=1)
+        handle = store.create("alice", continuous=True)
+        self.assertTrue(store.claim(handle, "alice", "completed-batch-item"))
+
+        self.assertEqual(store.reconcile_active(set()), [])
+        self.assertEqual(store.require(handle)["state"], "active")
+
+    def test_reconcile_keeps_the_real_live_limit(self):
+        store = RUNS.RunContextStore(active_limit=2, prepared_limit=2)
+        first = store.create("alice")
+        second = store.create("alice")
+        self.assertTrue(store.claim(first, "alice", "running"))
+        self.assertTrue(store.claim(second, "alice", "pending"))
+
+        self.assertEqual(store.reconcile_active({"running", "pending"}), [])
+        with self.assertRaisesRegex(RUNS.SceneRunError, "実行中または準備済み"):
+            store.create("alice")
+
     def test_idle_active_contexts_expire_but_recently_used_contexts_do_not(self):
         expiring = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=0)
         old = expiring.create("alice")

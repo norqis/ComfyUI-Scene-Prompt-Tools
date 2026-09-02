@@ -366,6 +366,46 @@ class PromptDataRouteTests(unittest.TestCase):
         with self.assertRaises(runs.SceneRunError):
             runs.require_run_context(handle)
 
+    def test_prepare_reconciles_only_stale_ordinary_active_contexts(self):
+        class Request:
+            user_id = "alice"
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        runs.RUN_CONTEXTS = runs.RunContextStore(active_limit=3, prepared_limit=3)
+        stale = runs.create_run_context("alice")
+        running = runs.create_run_context("alice")
+        continuous = runs.create_run_context("alice", continuous=True)
+        self.assertTrue(runs.claim_run_context(stale, "alice", "finished"))
+        self.assertTrue(runs.claim_run_context(running, "alice", "running"))
+        self.assertTrue(runs.claim_run_context(continuous, "alice", "batch-finished"))
+
+        self.routes.PromptServer.instance.prompt_queue = types.SimpleNamespace(
+            get_current_queue_volatile=lambda: ([(0, "running")], []),
+        )
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        graph = {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}
+        response = asyncio.run(prepare(Request({"api_graph": graph})))
+
+        self.assertEqual(response["status"], 200)
+        with self.assertRaises(runs.SceneRunError):
+            runs.require_run_context(stale)
+        self.assertEqual(runs.require_run_context(running)["state"], "active")
+        self.assertEqual(runs.require_run_context(continuous)["state"], "active")
+
+    def test_continuous_run_detection_uses_the_target_expand_only(self):
+        graph = {"output": {
+            "1": {"class_type": "ScenePrompterExpand", "inputs": {"run_id": "continuous"}},
+            "2": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }}
+        self.assertTrue(self.routes._is_continuous_scene_run(graph, "1"))
+        self.assertFalse(self.routes._is_continuous_scene_run(graph, "2"))
+
     def test_prepare_and_claim_are_owner_bound(self):
         class Request:
             def __init__(self, user_id, payload):
