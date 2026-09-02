@@ -30,8 +30,10 @@ vm.runInContext("const popupSessionsByNode = new WeakMap();", context);
 vm.runInContext("let activePopupContext = null;", context);
 for (const name of [
     "activeStateWidgetName",
+    "matrixLineDraftContextFor",
     "popupStateWidgetName",
     "createPopupSession",
+    "popupSessionScopeKey",
     "popupSessionFor",
     "discardPopupSession",
     "setPopupListLocation",
@@ -95,12 +97,40 @@ assert.equal(negative.searchQuery, "", "another widget starts empty");
 assert.equal(secondNode.searchQuery, "", "another node starts empty");
 assert.deepEqual(Object.keys(firstNode), ["sceneDefaultStateWidgetName"], "popup state is never stored on the node");
 
+const matrixNode = {
+    sceneDefaultStateWidgetName: "matrix_line_positive_json",
+    sceneMatrixLineDraftContext: {
+        index: 0,
+        stateWidgetName: "matrix_line_positive_json",
+        draft: { row_id: "row-a" },
+    },
+};
+const rowA = context.popupSessionFor(matrixNode, "matrix_line_positive_json");
+rowA.searchQuery = "row-a-query";
+matrixNode.sceneMatrixLineDraftContext = {
+    index: 1,
+    stateWidgetName: "matrix_line_positive_json",
+    draft: { row_id: "row-b" },
+};
+const rowB = context.popupSessionFor(matrixNode, "matrix_line_positive_json");
+assert.notEqual(rowB, rowA, "Matrix rows with the same positive widget use isolated sessions");
+assert.equal(rowB.searchQuery, "", "a different Matrix row starts empty");
+matrixNode.sceneMatrixLineDraftContext = {
+    index: 0,
+    stateWidgetName: "matrix_line_positive_json",
+    draft: { row_id: "row-a" },
+};
+assert.equal(context.popupSessionFor(matrixNode, "matrix_line_positive_json"), rowA, "internal navigation in one Matrix row keeps its session");
+const rowAScope = context.popupSessionScopeKey(matrixNode, "matrix_line_positive_json");
+context.discardPopupSession(matrixNode, rowAScope);
+assert.notEqual(context.popupSessionFor(matrixNode, "matrix_line_positive_json"), rowA, "explicit Matrix picker close discards that row session");
+
 context.discardPopupSession(firstNode, "positive_json");
 const reopened = context.popupSessionFor(firstNode, "positive_json");
 assert.notEqual(reopened, first, "explicit close discards the popup session");
 assert.equal(reopened.searchQuery, "", "close and reopen starts fresh");
 assert.equal(JSON.stringify(reopened.list), JSON.stringify({ kind: "categories", path: [] }));
-assert.match(functionSource("closePopup"), /discardPopupSession\(closingContext\.node, closingContext\.stateWidgetName\)/u, "explicit popup close discards the transient session");
+assert.match(functionSource("closePopup"), /discardPopupSession\(closingContext\.node, closingContext\.popupSessionScopeKey\)/u, "explicit popup close discards the transient session");
 
 for (const marker of [
     'rememberPopupScroll(session, popupListScrollKey("categories", path), list)',

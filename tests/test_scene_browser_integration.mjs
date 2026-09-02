@@ -33,30 +33,51 @@ window.__scenePromptLoadedGraphs = loadedGraphs;
 const apiModule = `
 const listeners = new Map();
 const calls = [];
+const baseItem = {
+  id: "summer",
+  label: "Summer",
+  prompt: "summer dress",
+  description: "",
+  category_path: ["Outfit"],
+  category_key: "Outfit",
+  category_label: "Outfit",
+};
+const promptItems = [baseItem, ...Array.from({ length: 60 }, (_value, index) => ({
+  ...baseItem,
+  id: "summer-" + index,
+  label: "Summer " + index,
+  prompt: "summer dress " + index,
+}))];
+const savedPrompt = { id: "browser-set", name: "Browser Set", description: "", items: [baseItem] };
 export const api = {
   fetchApi: async (url, options = {}) => {
     calls.push({ url, options });
     let payload = { items: [] };
-    if (url.includes("/scene_prompt/items")) payload = { items: [{
-      id: "summer",
-      label: "Summer",
-      prompt: "summer dress",
-      description: "",
-      category_path: ["Outfit"],
-      category_key: "Outfit",
-      category_label: "Outfit",
-    }] };
+    let status = 200;
+    if (url.includes("/scene_prompt/items")) payload = { items: promptItems };
+    if (url === "/scene_prompt/items" && options.method === "POST") {
+      const request = JSON.parse(options.body || "{}");
+      if (request.name === "Failure") {
+        status = 400;
+        payload = { error: "creation failed" };
+      } else {
+        payload = {
+          items: promptItems,
+          item: { ...baseItem, id: "created", label: request.name, prompt: request.prompt },
+        };
+      }
+    }
     if (url.includes("/runs/prepare")) payload = { run_handle: "browser-run" };
     if (url.includes("/runs/claim")) payload = { claimed: true };
     if (url.includes("/runs/release")) payload = { released: true };
-    if (url.includes("saved_prompts")) payload = { saved_prompts: [] };
+    if (url.includes("saved_prompts")) payload = { saved_prompts: [savedPrompt], saved_prompt: savedPrompt };
     if (url.includes("/scene_presets/list")) payload = { presets: [{ metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 3 } }], errors: [] };
     if (url.includes("/scene_presets/load")) payload = {
       metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 3 },
       workflow: { id: "stored-workflow", version: 1, nodes: [{ id: 1, type: "ScenePresetInput" }], extra: { stored: true } },
     };
     if (url.includes("/scene_presets/save")) payload = { metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 4 } };
-    return new Response(JSON.stringify(payload), { status: 200 });
+    return new Response(JSON.stringify(payload), { status });
   },
   queuePrompt: async () => ({ prompt_id: "browser-prompt" }),
   addEventListener(name, callback) { listeners.set(name, callback); },
@@ -214,7 +235,7 @@ try {
         node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
     });
     await page.getByText("Outfit", { exact: false }).click();
-    const candidate = page.locator(".pc-candidate").filter({ hasText: "Summer" });
+    const candidate = page.getByTitle("summer dress", { exact: true });
     await candidate.click();
     await assert.doesNotReject(async () => candidate.waitFor({ state: "visible" }));
     assert.equal(await candidate.locator('input[type="checkbox"]').isChecked(), true);
@@ -272,6 +293,58 @@ try {
     assert.ok(selectedState.selectedList.height > 0);
     assert.ok(selectedState.selectedList.drawCount > 0);
     assert.ok(selectedState.selectedList.paintedPixels > 0);
+
+    const candidateFilter = page.locator(".pc-popup .pc-searchbox");
+    await candidateFilter.fill("Summer");
+    const candidateList = page.locator(".pc-popup .pc-popup-list");
+    const rememberedScrollTop = await candidateList.evaluate((element) => {
+        element.scrollTop = 180;
+        element.dispatchEvent(new Event("scroll"));
+        return element.scrollTop;
+    });
+    assert.ok(rememberedScrollTop > 0, "candidate list is scrollable for restoration coverage");
+
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    await page.locator(".pc-popup .pc-searchbox").fill("Summer 5");
+    await page.getByRole("button", { name: "プロンプト作成", exact: true }).click();
+    const createForm = page.locator(".pc-popup .pc-form");
+    await createForm.locator("label").filter({ hasText: "カテゴリ（必須）" }).locator("input").fill("Outfit");
+    await createForm.locator("label").filter({ hasText: "サブカテゴリ（任意）" }).locator("input").fill("Style");
+    await createForm.locator("label").filter({ hasText: "名前" }).locator("input").fill("Failure");
+    await createForm.locator("label").filter({ hasText: "プロンプト" }).locator("textarea").fill("test prompt");
+    await createForm.locator("label").filter({ hasText: "説明" }).locator("textarea").fill("draft description");
+
+    await page.getByRole("button", { name: "一覧", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup .pc-searchbox").inputValue(), "Summer");
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator(".pc-popup .pc-popup-list").evaluate((element) => element.scrollTop), rememberedScrollTop);
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup .pc-searchbox").inputValue(), "Summer 5");
+    await page.getByRole("button", { name: "プロンプト作成", exact: true }).click();
+    assert.equal(await createForm.locator("label").filter({ hasText: "名前" }).locator("input").inputValue(), "Failure");
+    assert.equal(await createForm.locator("label").filter({ hasText: "プロンプト" }).locator("textarea").inputValue(), "test prompt");
+
+    await page.getByRole("button", { name: "作成", exact: true }).click();
+    await assert.doesNotReject(async () => page.getByText("creation failed", { exact: true }).waitFor({ state: "visible" }));
+    assert.equal(await createForm.locator("label").filter({ hasText: "名前" }).locator("input").inputValue(), "Failure");
+    await createForm.locator("label").filter({ hasText: "名前" }).locator("input").fill("Success");
+    await page.getByRole("button", { name: "作成", exact: true }).click();
+    await page.getByRole("button", { name: "プロンプト作成", exact: true }).click();
+    assert.equal(await createForm.locator("label").filter({ hasText: "名前" }).locator("input").inputValue(), "");
+    assert.equal(await createForm.locator("label").filter({ hasText: "プロンプト" }).locator("textarea").inputValue(), "");
+
+    await page.getByRole("button", { name: "選択済み一覧", exact: true }).click();
+    await page.getByText("Browser Set", { exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Browser Set");
+    await page.getByRole("button", { name: "プロンプトまとめて保存", exact: true }).click();
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Browser Set", "save back restores selected detail");
+
+    await page.getByRole("button", { name: "閉じる", exact: true }).click();
+    await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup .pc-searchbox").inputValue(), "", "explicit close resets the popup session");
+    await page.getByRole("button", { name: "閉じる", exact: true }).click();
 
     await page.keyboard.press("Escape");
     await page.evaluate(async () => {
@@ -337,13 +410,32 @@ try {
     });
     await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
     await page.getByText("Outfit", { exact: false }).click();
-    await page.getByTitle("summer dress").click();
+    await page.getByPlaceholder("この階層内を検索").fill("Summer 1");
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    await page.getByPlaceholder("カテゴリ / サブカテゴリ / ラベル / 説明 / prompt を検索").fill("row-one-query");
+    await page.getByRole("button", { name: "一覧", exact: true }).click();
+    assert.equal(await page.getByPlaceholder("この階層内を検索").inputValue(), "Summer 1", "Matrix row keeps internal navigation state");
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(1).click();
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    assert.equal(await page.getByPlaceholder("カテゴリ / サブカテゴリ / ラベル / 説明 / prompt を検索").inputValue(), "", "Matrix rows do not share popup state");
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    assert.equal(await page.getByPlaceholder("カテゴリ / サブカテゴリ / ラベル / 説明 / prompt を検索").inputValue(), "", "explicit Matrix picker close resets that row session");
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
+    await page.getByText("Outfit", { exact: false }).click();
+    await page.getByTitle("summer dress", { exact: true }).click();
     await page.getByRole("button", { name: "行編集へ戻る" }).click();
     await assert.doesNotReject(async () => page.getByText("Summer", { exact: true }).waitFor({ state: "visible" }));
 
     await page.getByRole("button", { name: "ネガティブ候補" }).nth(1).click();
     await page.getByText("Outfit", { exact: false }).click();
-    await page.getByTitle("summer dress").click();
+    await page.getByTitle("summer dress", { exact: true }).click();
     await page.getByRole("button", { name: "行編集へ戻る" }).click();
     await page.getByRole("button", { name: "保存", exact: true }).click();
     const matrixState = await page.evaluate(() => {

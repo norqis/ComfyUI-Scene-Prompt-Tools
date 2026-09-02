@@ -558,25 +558,35 @@ function createPopupSession() {
     };
 }
 
-function popupSessionFor(node, stateWidgetName) {
+function popupSessionScopeKey(node, stateWidgetName) {
+    const widgetName = stateWidgetName || activeStateWidgetName(node);
+    const matrixContext = matrixLineDraftContextFor(node, widgetName);
+    if (!matrixContext) {
+        return widgetName;
+    }
+    const rowId = String(matrixContext.draft?.row_id || matrixContext.index);
+    return `${widgetName}::matrix-row:${rowId}`;
+}
+
+function popupSessionFor(node, stateWidgetName, scopeKey = null) {
     let sessions = popupSessionsByNode.get(node);
     if (!sessions) {
         sessions = new Map();
         popupSessionsByNode.set(node, sessions);
     }
-    const key = stateWidgetName || activeStateWidgetName(node);
+    const key = scopeKey || popupSessionScopeKey(node, stateWidgetName);
     if (!sessions.has(key)) {
         sessions.set(key, createPopupSession());
     }
     return sessions.get(key);
 }
 
-function discardPopupSession(node, stateWidgetName) {
+function discardPopupSession(node, scopeKey) {
     const sessions = popupSessionsByNode.get(node);
     if (!sessions) {
         return;
     }
-    sessions.delete(stateWidgetName || activeStateWidgetName(node));
+    sessions.delete(scopeKey);
     if (!sessions.size) {
         popupSessionsByNode.delete(node);
     }
@@ -1801,9 +1811,13 @@ function closePopup(options = {}) {
         }
         if (closingContext?.secondary && closingContext?.node) {
             rememberSecondaryPopupRect(closingContext.node, activePopup);
+            if (options.discardPopupSession !== false) {
+                discardPopupSession(closingContext.node, closingContext.popupSessionScopeKey);
+            }
             if (parent?.context?.stateWidgetName) {
                 setActiveStateWidget(closingContext.node, parent.context.stateWidgetName);
-            } else {
+            }
+            if (options.discardPopupSession !== false) {
                 clearMatrixLineDraftContext(closingContext.node);
             }
         }
@@ -1811,7 +1825,7 @@ function closePopup(options = {}) {
             rememberPopupRect(closingContext.node, activePopup);
             clearMatrixLineDraftContext(closingContext.node);
             if (options.discardPopupSession !== false) {
-                discardPopupSession(closingContext.node, closingContext.stateWidgetName);
+                discardPopupSession(closingContext.node, closingContext.popupSessionScopeKey);
             }
         }
         activePopup.remove();
@@ -1947,6 +1961,8 @@ function makePopupDraggable(node, popup, handle) {
 
 function openPopupShell(node, titleText, options = {}) {
     const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
+    const popupSessionScopeKeyValue = options.popupSessionScopeKey || popupSessionScopeKey(node, stateWidgetName);
+    const popupSession = options.popupSession || popupSessionFor(node, stateWidgetName, popupSessionScopeKeyValue);
     const isSecondary = !!options.secondary
         || !!matrixLineDraftContextFor(node, stateWidgetName)
         || (!!node?.sceneMatrixLinePopupSecondary && !!matrixLineDraftContextFor(node, stateWidgetName))
@@ -1954,14 +1970,14 @@ function openPopupShell(node, titleText, options = {}) {
     let parent = null;
     if (isSecondary) {
         if (activePopupContext?.secondary) {
-            closePopup({ invalidateRequests: false });
+            closePopup({ invalidateRequests: false, discardPopupSession: false });
         }
         parent = activePopup && activePopupContext
             ? { popup: activePopup, context: activePopupContext }
             : null;
     } else {
         const preservesCurrentSession = activePopupContext?.node === node
-            && activePopupContext?.stateWidgetName === stateWidgetName;
+            && activePopupContext?.popupSessionScopeKey === popupSessionScopeKeyValue;
         closeAllPopups({ invalidateRequests: false, discardPopupSession: !preservesCurrentSession });
     }
     if (isSecondary) {
@@ -2052,7 +2068,8 @@ function openPopupShell(node, titleText, options = {}) {
         popup,
         reopen: null,
         stateWidgetName,
-        popupSession: options.popupSession || popupSessionFor(node, stateWidgetName),
+        popupSession,
+        popupSessionScopeKey: popupSessionScopeKeyValue,
         secondary: isSecondary,
         parent,
     };
@@ -2654,7 +2671,7 @@ async function openSavePromptPopup(node, options = {}) {
     toolbar.appendChild(save);
 
     const back = createButton("←戻る");
-    back.addEventListener("click", () => openSelectedPopup(node, { stateWidgetName }));
+    back.addEventListener("click", () => openSelectedFromPopupSession(node, { stateWidgetName }));
     toolbar.appendChild(back);
     form.appendChild(toolbar);
 
@@ -2829,7 +2846,7 @@ async function openCreatePromptPopup(node, options = {}) {
     toolbar.appendChild(create);
 
     const back = createButton("←戻る");
-    back.addEventListener("click", () => openCategoryLevelPicker(node, [], { stateWidgetName }));
+    back.addEventListener("click", () => openListFromPopupSession(node, { stateWidgetName }));
     toolbar.appendChild(back);
     form.appendChild(toolbar);
 
