@@ -78,6 +78,7 @@ const SCENE_COMPACT_WIDGET_HEIGHT = 18;
 const SCENE_NODE_AUTO_FIT_MAX_HEIGHT = 720;
 const SCENE_WIDGET_CANVAS_MAX_PIXELS = 2500000;
 const SCENE_SAVE_PREVIEW_LIMIT = 1;
+const CUSTOM_SCRIPTS_AUTOCOMPLETE_URL = "/extensions/ComfyUI-Custom-Scripts/js/common/autocomplete.js";
 const SCENE_QUEUE_GROUP_COLORS = [
     "#c9a4ff",
     "#ff7777",
@@ -156,6 +157,8 @@ let savedPromptsRequestGeneration = 0;
 let activePopup = null;
 let activePopupContext = null;
 const popupSessionsByNode = new WeakMap();
+const matrixTextAreaAutocompleteInstances = new WeakMap();
+let matrixTextAreaAutocompleteModulePromise = null;
 let sceneBatchRun = null;
 const sceneBatchRunsById = new Map();
 const sceneBatchPendingRuns = [];
@@ -1828,6 +1831,7 @@ function closePopup(options = {}) {
                 discardPopupSession(closingContext.node, closingContext.popupSessionScopeKey);
             }
         }
+        disposeMatrixTextAreaAutocompleteIn(activePopup);
         activePopup.remove();
         activePopup = parent?.popup || null;
         activePopupContext = parent?.context || null;
@@ -8983,6 +8987,56 @@ function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
     openCategoryLevelPicker(node, [], { stateWidgetName });
 }
 
+function loadMatrixTextAreaAutocomplete() {
+    if (!matrixTextAreaAutocompleteModulePromise) {
+        matrixTextAreaAutocompleteModulePromise = import(CUSTOM_SCRIPTS_AUTOCOMPLETE_URL)
+            .then(({ TextAreaAutoComplete }) => (
+                typeof TextAreaAutoComplete === "function" ? TextAreaAutoComplete : null
+            ))
+            .catch(() => null);
+    }
+    return matrixTextAreaAutocompleteModulePromise;
+}
+
+function disposeMatrixTextAreaAutocomplete(input) {
+    const instance = matrixTextAreaAutocompleteInstances.get(input);
+    instance?.dropdown?.remove?.();
+    input?.blur?.();
+    matrixTextAreaAutocompleteInstances.delete(input);
+}
+
+function disposeMatrixTextAreaAutocompleteIn(container) {
+    for (const input of container?.querySelectorAll?.("textarea[data-scene-prompt-matrix-autocomplete]") || []) {
+        disposeMatrixTextAreaAutocomplete(input);
+    }
+}
+
+function attachMatrixTextAreaAutocomplete(input) {
+    if (!input || matrixTextAreaAutocompleteInstances.has(input) || input.dataset.scenePromptMatrixAutocomplete) {
+        return;
+    }
+    input.dataset.scenePromptMatrixAutocomplete = "loading";
+    void loadMatrixTextAreaAutocomplete().then((TextAreaAutoComplete) => {
+        if (!input.isConnected || input.dataset.scenePromptMatrixAutocomplete !== "loading") {
+            return;
+        }
+        if (!TextAreaAutoComplete) {
+            input.dataset.scenePromptMatrixAutocomplete = "unavailable";
+            return;
+        }
+        try {
+            const instance = new TextAreaAutoComplete(input);
+            if (instance?.helper && typeof instance.helper === "object") {
+                instance.helper.getScale = () => 1;
+            }
+            matrixTextAreaAutocompleteInstances.set(input, instance);
+            input.dataset.scenePromptMatrixAutocomplete = "ready";
+        } catch {
+            input.dataset.scenePromptMatrixAutocomplete = "unavailable";
+        }
+    });
+}
+
 function createMatrixLineBaseInput(draft, side) {
     const key = side === "negative" ? "negative_base" : "positive_base";
     const input = document.createElement("textarea");
@@ -8997,6 +9051,7 @@ function createMatrixLineBaseInput(draft, side) {
         draft[key] = input.value;
         refreshMatrixLineDraftComputedFields(draft);
     });
+    attachMatrixTextAreaAutocomplete(input);
     return input;
 }
 
