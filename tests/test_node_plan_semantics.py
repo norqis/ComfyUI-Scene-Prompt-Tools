@@ -85,6 +85,69 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         result = self.nodes.ScenePromptExpand().expand(current_index=0, timestamp_dir=False, scene_prompt=plan)
         self.assertEqual(result[0], "alpha")
 
+    def test_expand_model_mode_only_changes_final_prompt_text(self):
+        plan = self.prompt.ScenePrompt().build(
+            "A", "blue_hair, score_7", '{"version":1,"categories":{}}', "bad_hands", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        expander = self.nodes.ScenePromptExpand()
+
+        illustrious = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=plan)
+        anima = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=plan, model_mode="Anima")
+
+        self.assertEqual(illustrious[0], "blue_hair, score_7")
+        self.assertEqual(illustrious[1], "bad_hands")
+        self.assertEqual(anima[0], "blue hair, score 7")
+        self.assertEqual(anima[1], "bad hands")
+        self.assertEqual(anima[2]["positive"], anima[0])
+        self.assertEqual(anima[2]["negative"], anima[1])
+        self.assertEqual(anima[2]["filename_prefix"], illustrious[2]["filename_prefix"])
+        self.assertEqual(anima[3], illustrious[3])
+        self.assertEqual(anima[4]["samples"].shape, illustrious[4]["samples"].shape)
+        self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["blue_hair", "score_7"])
+        self.assertEqual(plan["rows"][0]["row"]["negative_parts"], ["bad_hands"])
+
+    def test_expand_model_mode_is_an_optional_trailing_widget_and_changes_cache_key(self):
+        input_types = self.nodes.ScenePromptExpand.INPUT_TYPES()
+        self.assertEqual(input_types["optional"]["model_mode"][0], ["Illustrious", "Anima"])
+        self.assertEqual(input_types["optional"]["model_mode"][1]["default"], "Illustrious")
+        plan = self.prompt.ScenePrompt().build(
+            "A", "blue_hair", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        self.assertNotEqual(
+            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, model_mode="Illustrious"),
+            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, model_mode="Anima"),
+        )
+
+    def test_expand_anima_mode_converts_matrix_parts_without_mutating_the_plan(self):
+        source = self.prompt.ScenePrompt().build(
+            "Source", "source_hair", '{"version":1,"categories":{}}', "source_hands", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        matrix = self.nodes.SceneMatrix().build(json.dumps({
+            "version": 1,
+            "sets": [{
+                "row_id": "matrix-row",
+                "name": "Matrix",
+                "path_label": "Matrix",
+                "positive_parts": ["matrix_hair"],
+                "negative_parts": ["matrix_hands"],
+            }],
+        }), scene_prompt=source)[0]
+
+        expanded = self.nodes.ScenePromptExpand().expand(
+            current_index=0,
+            seed_base=7,
+            timestamp_dir=False,
+            scene_prompt=matrix,
+            model_mode="Anima",
+        )
+
+        self.assertEqual(expanded[0], "source hair, matrix hair")
+        self.assertEqual(expanded[1], "source hands, matrix hands")
+        self.assertEqual(expanded[2]["positive"], expanded[0])
+        self.assertEqual(expanded[2]["negative"], expanded[1])
+        self.assertEqual(matrix["rows"][0]["row"]["positive_parts"], ["source_hair", "matrix_hair"])
+        self.assertEqual(matrix["rows"][0]["row"]["negative_parts"], ["source_hands", "matrix_hands"])
+
     def test_randomize_false_choices_expand_with_consecutive_seeds(self):
         plan = self.prompt.ScenePrompt().build(
             "A", "{A|B}", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, False,

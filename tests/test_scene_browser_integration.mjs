@@ -43,7 +43,16 @@ const baseItem = {
   category_key: "Outfit",
   category_label: "Outfit",
 };
-const promptItems = [baseItem, ...Array.from({ length: 60 }, (_value, index) => ({
+const nestedItem = {
+  id: "search-detail",
+  label: "Search Detail",
+  prompt: "blue_hair, white_shirt",
+  description: "Nested search test item",
+  category_path: ["Search", "Nested"],
+  category_key: "Search/Nested",
+  category_label: "Search > Nested",
+};
+const promptItems = [baseItem, nestedItem, ...Array.from({ length: 60 }, (_value, index) => ({
   ...baseItem,
   id: "summer-" + index,
   label: "Summer " + index,
@@ -356,6 +365,36 @@ try {
     await page.getByRole("button", { name: "プロンプトまとめて保存", exact: true }).click();
     await page.getByRole("button", { name: "←戻る", exact: true }).click();
     assert.equal(await page.locator(".pc-popup-title").textContent(), "Browser Set", "save back restores selected detail");
+
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    const searchInput = page.locator(".pc-popup .pc-searchbox");
+    await searchInput.fill("Search");
+    await page.locator('button.pc-search-path[title="Search"]').click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Search");
+    assert.equal(await page.getByRole("button", { name: "検索", exact: true }).evaluate((element) => element.classList.contains("pc-on")), true);
+    await page.getByRole("button", { name: /^Nested \(/ }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Search > Nested");
+    assert.equal(await page.getByRole("button", { name: "検索", exact: true }).evaluate((element) => element.classList.contains("pc-on")), true);
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Search");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補検索");
+    assert.equal(await searchInput.inputValue(), "Search");
+    await page.getByRole("button", { name: "一覧", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Outfit", "search navigation does not overwrite the list location");
+
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    await searchInput.fill("Search Detail");
+    await page.getByRole("button", { name: "個別選択", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Search Detail 個別選択");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補検索");
+    assert.equal(await searchInput.inputValue(), "Search Detail");
+    await page.getByRole("button", { name: "編集", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補を編集");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補検索");
+    assert.equal(await searchInput.inputValue(), "Search Detail");
 
     await page.getByRole("button", { name: "閉じる", exact: true }).click();
     await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());

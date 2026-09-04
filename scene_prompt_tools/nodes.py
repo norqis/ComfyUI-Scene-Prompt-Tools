@@ -73,6 +73,9 @@ MAX_RESOLUTION = MAX_DIMENSION
 
 PATH_DIRECTORY = "フォルダに分ける"
 PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
+MODEL_MODE_ILLUSTRIOUS = "Illustrious"
+MODEL_MODE_ANIMA = "Anima"
+MODEL_MODE_CHOICES = (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
 
 DEFAULT_MATRIX_JSON = "{\"version\":1,\"sets\":[]}"
 SCENE_PROMPT_INPUT_NAMES = tuple(f"scene_prompt{index}" for index in range(1, 11))
@@ -108,6 +111,10 @@ def _normalize_path_mode(value):
     if text == PATH_APPEND_TO_PREVIOUS:
         return PATH_APPEND_TO_PREVIOUS
     return PATH_DIRECTORY
+
+
+def _normalize_model_mode(value):
+    return MODEL_MODE_ANIMA if str(value or "").strip() == MODEL_MODE_ANIMA else MODEL_MODE_ILLUSTRIOUS
 
 
 def _scene_bool(value, default=True):
@@ -1298,6 +1305,14 @@ class ScenePromptExpand:
                     SCENE_PROMPT_TYPE,
                     {"display_name": "scene_prompt", "label": "scene_prompt"},
                 ),
+                "model_mode": (
+                    list(MODEL_MODE_CHOICES),
+                    {
+                        "default": MODEL_MODE_ILLUSTRIOUS,
+                        "display_name": "Model Mode",
+                        "label": "Model Mode",
+                    },
+                ),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
@@ -1314,6 +1329,7 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
+        model_mode=MODEL_MODE_ILLUSTRIOUS,
         run_handle="",
         unique_id=None,
     ):
@@ -1325,6 +1341,7 @@ class ScenePromptExpand:
                 _seed_change_key(seed_base),
                 str(_scene_bool(timestamp_dir)),
                 _safe_filename_prefix(prefix),
+                _normalize_model_mode(model_mode),
             ]
         )
 
@@ -1336,6 +1353,7 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
+        model_mode=MODEL_MODE_ILLUSTRIOUS,
         run_handle="",
         unique_id=None,
     ):
@@ -1355,6 +1373,9 @@ class ScenePromptExpand:
         )
         positive = _join_unique(positive_parts, separator)
         negative = _join_unique(negative_parts, separator)
+        if _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA:
+            positive = positive.replace("_", " ")
+            negative = negative.replace("_", " ")
         latent_config = _row_latent(row)
         latent = _empty_latent(latent_config)
         use_run_dir = _scene_bool(timestamp_dir)

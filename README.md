@@ -131,6 +131,8 @@ In a regular workflow, add **Scene Preset Reference**, choose the saved Preset, 
 | Scene Save Image | Saves PNGs using the Scene output path, filename information, and selected metadata mode. |
 | Scene Preset Input / Output / Reference | Save, reuse, and edit Scene plan fragments. |
 
+`Scene Prompt Expand` uses **Illustrious** mode by default. Select **Anima** to replace ASCII underscores in the final positive and negative prompts with spaces before they reach CLIP or PNG metadata.
+
 ## Scene Save Image Metadata
 
 Choose the metadata mode on **Scene Save Image**:
