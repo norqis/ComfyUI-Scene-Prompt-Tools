@@ -1974,6 +1974,7 @@ function makePopupDraggable(node, popup, handle) {
 }
 
 function openPopupShell(node, titleText, options = {}) {
+    popupRequestIntent += 1;
     const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
     const popupSessionScopeKeyValue = options.popupSessionScopeKey || popupSessionScopeKey(node, stateWidgetName);
     const popupSession = options.popupSession || popupSessionFor(node, stateWidgetName, popupSessionScopeKeyValue);
@@ -5873,7 +5874,8 @@ function scenePromptSourceCacheKey(node, seen = new Set()) {
 }
 
 function scenePromptTotalCount(node) {
-    return scenePromptStats(node).total;
+    const stats = scenePromptStats(node);
+    return stats.error ? null : stats.total;
 }
 
 function scenePresetGraphNodes(preset) {
@@ -5977,17 +5979,17 @@ function emptyScenePromptStats() {
 
 function sceneStatNumber(value) {
     const number = Number(value || 0);
-    return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+    return Number.isSafeInteger(number) && number >= 0 ? number : Number.NaN;
 }
 
 function sceneStatProduct(...values) {
     const result = values.reduce((total, value) => total * sceneStatNumber(value), 1);
-    return Number.isSafeInteger(result) ? result : 0;
+    return Number.isSafeInteger(result) ? result : Number.NaN;
 }
 
 function sceneStatSum(...values) {
     const result = values.reduce((total, value) => total + sceneStatNumber(value), 0);
-    return Number.isSafeInteger(result) ? result : 0;
+    return Number.isSafeInteger(result) ? result : Number.NaN;
 }
 
 function sceneStatsSeed() {
@@ -5995,6 +5997,13 @@ function sceneStatsSeed() {
 }
 
 function sceneStatsResult(stats) {
+    if (stats?.error
+        || !Number.isSafeInteger(stats?.rows) || stats.rows < 0
+        || !Number.isSafeInteger(stats?.total) || stats.total < 0
+        || !Number.isSafeInteger(stats?.totalImages ?? stats?.total) || (stats.totalImages ?? stats.total) < 0
+        || !Number.isSafeInteger(stats?.unsetBatches ?? stats?.total) || (stats.unsetBatches ?? stats.total) < 0) {
+        return { ...emptyScenePromptStats(), error: stats?.error || "件数が大きすぎます。" };
+    }
     return {
         rows: sceneStatNumber(stats.rows),
         total: sceneStatNumber(stats.total),
@@ -6004,6 +6013,7 @@ function sceneStatsResult(stats) {
 }
 
 function sceneStatsMatrix(stats, factor) {
+    if (stats?.error) return stats;
     return {
         rows: sceneStatProduct(stats.rows, factor),
         total: sceneStatProduct(stats.total, factor),
@@ -6013,6 +6023,7 @@ function sceneStatsMatrix(stats, factor) {
 }
 
 function sceneStatsCount(stats, factor) {
+    if (stats?.error) return stats;
     return {
         ...stats,
         total: sceneStatProduct(stats.total, factor),
@@ -6022,6 +6033,7 @@ function sceneStatsCount(stats, factor) {
 }
 
 function sceneStatsWithLatent(stats, batchSize) {
+    if (stats?.error) return stats;
     return {
         ...stats,
         totalImages: sceneStatProduct(stats.total, batchSize),
@@ -6030,6 +6042,7 @@ function sceneStatsWithLatent(stats, batchSize) {
 }
 
 function sceneStatsMerge(left, right) {
+    if (left?.error || right?.error) return { ...emptyScenePromptStats(), error: left?.error || right?.error };
     return {
         rows: sceneStatProduct(left.rows, right.rows),
         total: sceneStatProduct(left.total, right.total),
@@ -6045,12 +6058,15 @@ function sceneStatsQueue(items, hasConnectedSource) {
     if (!hasConnectedSource) {
         return sceneStatsSeed();
     }
-    return items.reduce((total, item) => ({
+    return items.reduce((total, item) => {
+        if (total?.error || item?.error) return { ...emptyScenePromptStats(), error: total?.error || item?.error };
+        return {
         rows: sceneStatSum(total.rows, item.rows),
         total: sceneStatSum(total.total, item.total),
         totalImages: sceneStatSum(total.totalImages, item.totalImages),
         unsetBatches: sceneStatSum(total.unsetBatches, item.unsetBatches),
-    }), emptyScenePromptStats());
+        };
+    }, emptyScenePromptStats());
 }
 
 function scenePromptStats(node, seen = new Set(), memo = new Map()) {
@@ -6356,74 +6372,6 @@ function scenePromptLineageKey(node, limit = 80) {
     return parts.join("|");
 }
 
-function sceneMatrixRowEntries(node, seen = new Set(), memo = new Map()) {
-    if (isSceneNodeMuted(node)) {
-        return [];
-    }
-    if (isSceneNodeBypassed(node)) {
-        const bypassSource = sceneBypassInputSource(node);
-        return bypassSource ? scenePromptRowEntries(bypassSource, new Set(seen), memo) : [];
-    }
-
-    const upstream = scenePromptInputSource(node);
-    const upstreamEntries = upstream ? scenePromptRowEntries(upstream, new Set(seen), memo) : [];
-    if (upstream && !upstreamEntries.length) {
-        return [];
-    }
-    const baseEntries = upstream
-        ? upstreamEntries
-        : [{
-            parts: [],
-            count: 1,
-            row: emptyMatrixRow(),
-        }];
-    const matrixRows = matrixLinesForNode(node);
-    const rows = [];
-
-    if (!matrixRows.length) {
-        return matrixConfiguredLineCount(node) > 0 ? [] : (upstream ? upstreamEntries : []);
-    }
-
-    for (const entry of baseEntries) {
-        for (const matrixRow of matrixRows) {
-            const row = entry.row || emptyMatrixRow();
-            const label = matrixLineLabel(matrixRow);
-            const displayLabels = matrixLineDisplayLabels(matrixRow);
-            const merged = mergePositiveNegativeParts(
-                row.positive_parts || [],
-                row.negative_parts || [],
-                matrixRow.positive_parts || [],
-                matrixRow.negative_parts || [],
-            );
-            rows.push({
-                ...entry,
-                parts: [...(entry.parts || []), label],
-                row: {
-                    ...row,
-                    labels: [...(row.labels || []), label],
-                    positive_parts: merged.positiveParts,
-                    negative_parts: merged.negativeParts,
-                    path_parts: [...(row.path_parts || [])],
-                    set_refs: [
-                        ...(row.set_refs || []),
-                        matrixLineRef(matrixRow),
-                    ],
-                    display_labels: [
-                        ...(row.display_labels || []),
-                        ...displayLabels,
-                    ],
-                    display_label_groups: [
-                        ...(row.display_label_groups || []),
-                        displayLabels,
-                    ],
-                },
-            });
-        }
-    }
-
-    return rows;
-}
-
 function sceneQueueDisplayPartsForEntry(entry) {
     return (entry?.parts || [])
         .slice(-2)
@@ -6518,7 +6466,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
                     },
                 });
                 if (entries.length >= maxEntries) {
-                    break;
+                    return finish(entries);
                 }
             }
         }
@@ -6825,6 +6773,7 @@ function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null
         enabledCount: stats.rows,
         totalBatches: stats.total,
         totalImages: stats.totalImages,
+        error: stats.error || "",
         entries,
         naturalHeight: sceneQueueDisplayNaturalHeight(entries, drawWidth),
     };
@@ -6917,13 +6866,19 @@ function sceneExpandCounts(node) {
     }
     const scenePromptSource = sceneExpandScenePromptSourceNode(node);
     if (isScenePromptSourceNode(scenePromptSource)) {
-        return { totalBatches: scenePromptTotalCount(scenePromptSource), totalImages: null };
+        const stats = scenePromptStats(scenePromptSource);
+        return stats.error
+            ? { totalBatches: null, totalImages: null, error: stats.error }
+            : { totalBatches: stats.total, totalImages: null };
     }
     return { totalBatches: 0, totalImages: null };
 }
 
 function sceneExpandCountLabel(node) {
-    const { totalBatches, totalImages } = sceneExpandCounts(node);
+    const { totalBatches, totalImages, error } = sceneExpandCounts(node);
+    if (error) {
+        return error;
+    }
     const totalLabel = totalImages === null ? `${totalBatches}回` : formatSceneExpandCounts(totalBatches, totalImages);
     const run = sceneBatchRunForNode(node);
     const status = sceneBatchRunStatus(run);
@@ -8797,10 +8752,15 @@ function drawSceneQueueListContent(ctx, cache, width, y, maxHeight = Infinity) {
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#dfe8f5";
     ctx.fillText(
-        `${cache.title || "生成キュー"}: ${cache.enabledCount}/${cache.rowCount}行 / ${formatSceneExpandCounts(cache.totalBatches, cache.totalImages)}`,
+        cache.error
+            ? `${cache.title || "生成キュー"}: ${cache.error}`
+            : `${cache.title || "生成キュー"}: ${cache.enabledCount}/${cache.rowCount}行 / ${formatSceneExpandCounts(cache.totalBatches, cache.totalImages)}`,
         10,
         y + 12,
     );
+    if (cache.error) {
+        return;
+    }
     if (!cache.hasMatrix) {
         ctx.fillStyle = "#aab3c4";
         ctx.fillText(cache.emptyText || "matrixを接続してください", 10, y + 32);
@@ -8868,7 +8828,9 @@ function refreshScenePromptQueueNode(node, options = {}) {
     const stats = measureDetails ? scenePromptStats(node) : null;
     const list = findSceneWidget(node, "scene_prompt_queue_list");
     if (list) {
-        list.value = measureDetails ? `${stats.rows}行 / ${formatSceneExpandCounts(stats.total, stats.totalImages)}` : "";
+        list.value = measureDetails
+            ? (stats.error || `${stats.rows}行 / ${formatSceneExpandCounts(stats.total, stats.totalImages)}`)
+            : "";
         list.computedHeight = SCENE_COMPACT_WIDGET_HEIGHT;
     }
     node.setDirtyCanvas?.(true, true);
@@ -9838,7 +9800,20 @@ function appendSceneSavePreview(detail) {
     node.imgs = Array.isArray(node.imgs) ? node.imgs : [];
 
     const needed = [];
+    const seenKeys = new Set();
     for (const imageRef of [...images].reverse()) {
+        const key = imageRefKey(imageRef);
+        if (seenKeys.has(key)) {
+            continue;
+        }
+        seenKeys.add(key);
+        needed.push(imageRef);
+        if (needed.length >= SCENE_SAVE_PREVIEW_LIMIT) {
+            break;
+        }
+    }
+
+    for (const imageRef of needed.reverse()) {
         const key = imageRefKey(imageRef);
         if (node.scenePreviewKeys.has(key) && node.scenePreviewImages.has(key)) {
             const existingImage = node.scenePreviewImages.get(key);
@@ -9848,14 +9823,6 @@ function appendSceneSavePreview(detail) {
             }
             continue;
         }
-        needed.push(imageRef);
-        if (needed.length >= SCENE_SAVE_PREVIEW_LIMIT) {
-            break;
-        }
-    }
-
-    for (const imageRef of needed.reverse()) {
-        const key = imageRefKey(imageRef);
         node.scenePreviewKeys.add(key);
         const image = new Image();
         image.scenePreviewKey = key;

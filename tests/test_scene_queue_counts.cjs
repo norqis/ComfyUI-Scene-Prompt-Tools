@@ -77,6 +77,9 @@ const mergedStats = context.sceneStatsMerge(left, right);
 assert.equal(JSON.stringify(mergedStats), JSON.stringify({ rows: 2, total: 4, totalImages: 14, unsetBatches: 0 }), "Merge uses the right latent batch and preserves mixed unset batches");
 assert.equal(JSON.stringify(context.sceneStatsQueue([context.emptyScenePromptStats()], true)), JSON.stringify(context.emptyScenePromptStats()), "a connected empty Queue remains empty");
 assert.equal(JSON.stringify(context.sceneStatsQueue([], false)), JSON.stringify(context.sceneStatsSeed()), "an unconnected Queue keeps the seed plan");
+const overflow = context.sceneStatsResult(context.sceneStatsCount(context.sceneStatsCount(context.sceneStatsSeed(), Number.MAX_SAFE_INTEGER), 2));
+assert.match(overflow.error, /大きすぎ/u, "unsafe totals carry an error instead of becoming a plausible zero");
+assert.match(context.sceneStatsQueue([overflow, context.sceneStatsSeed()], true).error, /大きすぎ/u, "Queue propagates an overflowing branch error");
 assert.match(
     source,
     /formatSceneExpandCounts\(cache\.totalBatches, cache\.totalImages\)/u,
