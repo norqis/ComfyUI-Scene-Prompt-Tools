@@ -89,7 +89,7 @@ const SCENE_QUEUE_GROUP_COLORS = [
     "#64b7ff",
     "#4269ff",
 ];
-const SCENE_COUNT_MAX = 10000;
+const SCENE_COUNT_MAX = Number.MAX_SAFE_INTEGER;
 const SCENE_PROMPT_V030_WIDGET_VALUE_COUNT = 10;
 const SCENE_PROMPT_SERIALIZED_WIDGET_NAMES = [
     "prompt_name",
@@ -3644,7 +3644,7 @@ function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : isSceneExpandNodeName(nodeName)
-            ? new Set(["timestamp_dir", "prefix"])
+            ? new Set(["timestamp_dir", "prefix", "model_mode"])
             : SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
                 ? new Set(["width", "height", "batch_size"])
                 : new Set();
@@ -5544,11 +5544,11 @@ function scheduleLoadedSceneNodeRefresh(node) {
 }
 
 function clampSceneCount(value, defaultValue = 0) {
-    const number = Number.parseInt(String(value ?? "").trim(), 10);
-    if (!Number.isFinite(number)) {
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 0) {
         return clamp(defaultValue, 0, SCENE_COUNT_MAX);
     }
-    return clamp(number, 0, SCENE_COUNT_MAX);
+    return number;
 }
 
 function sceneQueueLeafDisplayLabel(entry) {

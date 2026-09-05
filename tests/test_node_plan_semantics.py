@@ -110,6 +110,7 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         input_types = self.nodes.ScenePromptExpand.INPUT_TYPES()
         self.assertEqual(input_types["optional"]["model_mode"][0], ["Illustrious", "Anima"])
         self.assertEqual(input_types["optional"]["model_mode"][1]["default"], "Illustrious")
+        self.assertEqual(input_types["optional"]["model_mode"][1]["label"], "モデル")
         plan = self.prompt.ScenePrompt().build(
             "A", "blue_hair", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
         )[0]
@@ -213,12 +214,13 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
 
     def test_counter_rejects_non_integer_or_out_of_range_counts(self):
         counter = self.nodes.ScenePromptCounter()
-        for invalid in ("2", True, -1, self.nodes.MAX_INPUT_COUNT + 1):
+        for invalid in ("2", True, -1, self.nodes.MAX_SAFE_INTEGER + 1):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(self.nodes.ScenePlanError):
                     counter.count(count=invalid)
                 with self.assertRaises(self.nodes.ScenePlanError):
                     counter.IS_CHANGED(count=invalid)
+        self.assertEqual(counter.count(count=1_000_000_001)[0]["total_batches"], 1_000_000_001)
 
     def test_expand_uses_batches_but_reports_final_image_count(self):
         plan = self.nodes.SceneEmptyLatent().apply_latent(width=512, height=512, batch_size=3)[0]
@@ -243,18 +245,16 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(expanded[2]["repeat_count"], 100_000_000)
         self.assertEqual(expanded[2]["total_count"], 100_000_000)
 
-    def test_maximum_total_images_are_preserved_in_expand_metadata(self):
+    def test_javascript_safe_totals_are_preserved_in_expand_metadata(self):
         plan = self.nodes.SceneEmptyLatent().apply_latent(
             width=16,
             height=16,
-            batch_size=self.nodes.MAX_BATCH_SIZE,
+            batch_size=1,
         )[0]
         counter = self.nodes.ScenePromptCounter()
-        plan = counter.count(plan, 10_000)[0]
-        plan = counter.count(plan, 10_000)[0]
-        plan = counter.count(plan, 10)[0]
-        self.assertEqual(plan["total_batches"], self.nodes.MAX_DERIVED_COUNT)
-        self.assertEqual(plan["total_images"], self.nodes.MAX_TOTAL_IMAGES)
+        plan = counter.count(plan, self.nodes.MAX_SAFE_INTEGER)[0]
+        self.assertEqual(plan["total_batches"], self.nodes.MAX_SAFE_INTEGER)
+        self.assertEqual(plan["total_images"], self.nodes.MAX_SAFE_INTEGER)
 
         original_empty_latent = self.nodes._empty_latent
         self.nodes._empty_latent = lambda _config: {"samples": None}
@@ -267,10 +267,10 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         finally:
             self.nodes._empty_latent = original_empty_latent
 
-        self.assertEqual(info["repeat_count"], self.nodes.MAX_DERIVED_COUNT)
-        self.assertEqual(info["total_count"], self.nodes.MAX_TOTAL_IMAGES)
+        self.assertEqual(info["repeat_count"], self.nodes.MAX_SAFE_INTEGER)
+        self.assertEqual(info["total_count"], self.nodes.MAX_SAFE_INTEGER)
         with self.assertRaises(self.nodes.ScenePlanError):
-            self.nodes._normalize_scene_save_info({"total_count": self.nodes.MAX_TOTAL_IMAGES + 1})
+            self.nodes._normalize_scene_save_info({"total_count": self.nodes.MAX_SAFE_INTEGER + 1})
 
 
 if __name__ == "__main__":

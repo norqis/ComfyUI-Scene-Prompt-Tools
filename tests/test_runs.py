@@ -21,20 +21,15 @@ class RunContextTests(unittest.TestCase):
         with self.assertRaises(RUNS.SceneRunError):
             store.require(handle)
 
-    def test_capacity_never_evicts_active_contexts(self):
-        store = RUNS.RunContextStore(maximum=2)
-        first = store.create("alice")
-        second = store.create("bob")
-        with self.assertRaisesRegex(RUNS.SceneRunError, "上限"):
-            store.create("charlie")
-        self.assertEqual(store.require(first)["user_id"], "alice")
-        self.assertEqual(store.require(second)["user_id"], "bob")
+    def test_create_has_no_plugin_imposed_context_limit(self):
+        store = RUNS.RunContextStore()
+        handles = [store.create("alice") for _ in range(300)]
+        for handle in handles:
+            self.assertEqual(store.require(handle)["user_id"], "alice")
 
-    def test_create_purges_expired_entries_before_capacity_check(self):
+    def test_create_purges_expired_entries(self):
         expired = []
         store = RUNS.RunContextStore(
-            maximum=1,
-            prepared_limit=1,
             prepared_ttl_seconds=10,
             expiration_callback=lambda handle, user_id: expired.append((handle, user_id)),
         )
@@ -46,18 +41,17 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store._entries[fresh]["user_id"], "alice")
 
     def test_claim_is_idempotent_and_active_contexts_stay_until_idle_ttl(self):
-        store = RUNS.RunContextStore(maximum=3, prepared_limit=2, active_limit=1, prepared_ttl_seconds=999)
+        store = RUNS.RunContextStore(prepared_ttl_seconds=999)
         handle = store.create("alice")
         self.assertTrue(store.claim(handle, "alice", "prompt-1"))
         self.assertTrue(store.claim(handle, "alice", "prompt-1"))
         self.assertFalse(store.claim(handle, "alice", "prompt-2"))
         self.assertEqual(store.purge_expired(), [])
         self.assertEqual(store.require(handle)["state"], "active")
-        with self.assertRaisesRegex(RUNS.SceneRunError, "実行中または準備済み"):
-            store.create("alice")
+        self.assertTrue(store.create("alice"))
 
     def test_reconcile_releases_stale_ordinary_active_contexts(self):
-        store = RUNS.RunContextStore(active_limit=1, prepared_limit=1)
+        store = RUNS.RunContextStore()
         stale = store.create("alice")
         self.assertTrue(store.claim(stale, "alice", "finished-prompt"))
 
@@ -67,7 +61,7 @@ class RunContextTests(unittest.TestCase):
             store.require(stale)
 
     def test_reconcile_preserves_live_running_and_pending_contexts(self):
-        store = RUNS.RunContextStore(active_limit=3, prepared_limit=3)
+        store = RUNS.RunContextStore()
         running = store.create("alice")
         pending = store.create("alice")
         self.assertTrue(store.claim(running, "alice", "running-prompt"))
@@ -78,39 +72,38 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.require(pending)["state"], "active")
 
     def test_reconcile_preserves_continuous_contexts_between_jobs(self):
-        store = RUNS.RunContextStore(active_limit=1, prepared_limit=1)
+        store = RUNS.RunContextStore()
         handle = store.create("alice", continuous=True)
         self.assertTrue(store.claim(handle, "alice", "completed-batch-item"))
 
         self.assertEqual(store.reconcile_active(set()), [])
         self.assertEqual(store.require(handle)["state"], "active")
 
-    def test_reconcile_keeps_the_real_live_limit(self):
-        store = RUNS.RunContextStore(active_limit=2, prepared_limit=2)
+    def test_reconcile_keeps_live_contexts_without_limit_errors(self):
+        store = RUNS.RunContextStore()
         first = store.create("alice")
         second = store.create("alice")
         self.assertTrue(store.claim(first, "alice", "running"))
         self.assertTrue(store.claim(second, "alice", "pending"))
 
         self.assertEqual(store.reconcile_active({"running", "pending"}), [])
-        with self.assertRaisesRegex(RUNS.SceneRunError, "実行中または準備済み"):
-            store.create("alice")
+        self.assertTrue(store.create("alice"))
 
     def test_idle_active_contexts_expire_but_recently_used_contexts_do_not(self):
-        expiring = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=0)
+        expiring = RUNS.RunContextStore(active_idle_ttl_seconds=0)
         old = expiring.create("alice")
         self.assertTrue(expiring.claim(old, "alice", "prompt-old"))
         self.assertEqual(expiring.purge_expired(), [(old, "alice")])
         self.assertTrue(expiring.create("alice"))
 
-        live = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=999)
+        live = RUNS.RunContextStore(active_idle_ttl_seconds=999)
         handle = live.create("alice")
         self.assertTrue(live.claim(handle, "alice", "prompt-live"))
         live.require(handle)
         self.assertEqual(live.purge_expired(), [])
 
     def test_scene_node_access_refreshes_the_active_idle_deadline(self):
-        store = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=10)
+        store = RUNS.RunContextStore(active_idle_ttl_seconds=10)
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 3, 6, 9, 18]):
             handle = store.create("alice")
             store.require(handle)
@@ -119,7 +112,7 @@ class RunContextTests(unittest.TestCase):
             self.assertEqual(store.purge_expired(), [])
 
     def test_require_rejects_expired_context_before_touching_it(self):
-        prepared = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=10)
+        prepared = RUNS.RunContextStore(prepared_ttl_seconds=10)
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
             handle = prepared.create("alice")
             with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
@@ -127,7 +120,13 @@ class RunContextTests(unittest.TestCase):
         with self.assertRaises(RUNS.SceneRunError):
             prepared.require(handle)
 
-        active = RUNS.RunContextStore(maximum=4, active_idle_ttl_seconds=10)
+    def test_continuous_prepared_context_can_wait_past_the_ordinary_ttl(self):
+        store = RUNS.RunContextStore(prepared_ttl_seconds=10, active_idle_ttl_seconds=100)
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
+            handle = store.create("alice", continuous=True)
+            self.assertEqual(store.require(handle)["state"], "prepared")
+
+        active = RUNS.RunContextStore(active_idle_ttl_seconds=10)
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 1, 12]):
             handle = active.create("alice")
             self.assertTrue(active.claim(handle, "alice", "prompt-1"))
@@ -135,7 +134,7 @@ class RunContextTests(unittest.TestCase):
                 active.require(handle)
 
     def test_claim_cannot_revive_an_expired_prepared_context(self):
-        store = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=10)
+        store = RUNS.RunContextStore(prepared_ttl_seconds=10)
         with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
             handle = store.create("alice")
             self.assertFalse(store.claim(handle, "alice", "prompt-late"))
@@ -145,9 +144,6 @@ class RunContextTests(unittest.TestCase):
     def test_every_expiration_path_notifies_exactly_once(self):
         expired = []
         store = RUNS.RunContextStore(
-            maximum=4,
-            prepared_limit=4,
-            active_limit=4,
             prepared_ttl_seconds=10,
             expiration_callback=lambda handle, user_id: expired.append((handle, user_id)),
         )
@@ -168,10 +164,10 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(len(expired), 3)
 
     def test_prepared_contexts_expire_and_plans_are_expand_specific(self):
-        expiring = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=0)
+        expiring = RUNS.RunContextStore(prepared_ttl_seconds=0)
         old = expiring.create("alice")
         self.assertEqual(expiring.purge_expired()[0][0], old)
-        store = RUNS.RunContextStore(maximum=4, prepared_ttl_seconds=999)
+        store = RUNS.RunContextStore(prepared_ttl_seconds=999)
         handle = store.create("alice")
         first = {"rows": [{"row": {"positive_parts": ["A"]}}]}
         second = {"rows": [{"row": {"positive_parts": ["B"]}}]}

@@ -27,6 +27,8 @@ function functionSource(name) {
 const context = {
     Set,
     SCENE_SAVE_IMAGE_NODE_NAMES: new Set(["SceneSaveImage"]),
+    isSceneExpandNodeName(nodeName) { return nodeName === "ScenePrompterExpand"; },
+    SCENE_EMPTY_LATENT_NODE_NAMES: new Set(),
     hideWidget(widget) { widget.hidden = true; },
     showWidget(widget) { widget.hidden = false; },
 };
@@ -45,3 +47,15 @@ assert.equal(widgets[0].hidden, false);
 assert.equal(widgets[1].hidden, false);
 assert.equal(widgets[2].hidden, false);
 assert.equal(widgets[3].hidden, true);
+
+const expandWidgets = [
+    { name: "timestamp_dir" },
+    { name: "prefix" },
+    { name: "model_mode" },
+    { name: "current_index" },
+];
+context.hideSceneUtilityWidgets({ widgets: expandWidgets }, "ScenePrompterExpand");
+assert.equal(expandWidgets[0].hidden, false);
+assert.equal(expandWidgets[1].hidden, false);
+assert.equal(expandWidgets[2].hidden, false);
+assert.equal(expandWidgets[3].hidden, true);

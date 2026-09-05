@@ -6,12 +6,8 @@ import copy
 import secrets
 import threading
 import time
-from collections import Counter
 
 
-MAX_RUN_CONTEXTS = 256
-MAX_PREPARED_PER_USER = 8
-MAX_ACTIVE_PER_USER = 32
 PREPARED_TTL_SECONDS = 120
 # Active contexts are touched by every Scene node evaluation. Twelve hours is
 # intentionally much longer than ordinary image runs, while eventually
@@ -26,22 +22,16 @@ class SceneRunError(ValueError):
 class RunContextStore:
     """Owns opaque handles created by authenticated HTTP requests.
 
-    Prepared contexts expire quickly. Active contexts stay alive while Scene
-    nodes use them and expire only after a conservative idle interval.
+    Ordinary prepared contexts expire quickly. Continuous contexts can wait in
+    the browser FIFO, so they use the active idle timeout until claimed.
     """
 
     def __init__(
         self,
-        maximum=MAX_RUN_CONTEXTS,
-        prepared_limit=MAX_PREPARED_PER_USER,
-        active_limit=MAX_ACTIVE_PER_USER,
         prepared_ttl_seconds=PREPARED_TTL_SECONDS,
         active_idle_ttl_seconds=ACTIVE_IDLE_TTL_SECONDS,
         expiration_callback=None,
     ):
-        self.maximum = maximum
-        self.prepared_limit = prepared_limit
-        self.active_limit = active_limit
         self.prepared_ttl_seconds = prepared_ttl_seconds
         self.active_idle_ttl_seconds = active_idle_ttl_seconds
         self._expiration_callback = expiration_callback
@@ -69,7 +59,8 @@ class RunContextStore:
 
     def _is_expired_locked(self, entry, now):
         if entry["state"] == "prepared":
-            return now - entry["created_at"] >= self.prepared_ttl_seconds
+            timeout = self.active_idle_ttl_seconds if entry.get("continuous") else self.prepared_ttl_seconds
+            return now - entry["last_access"] >= timeout
         return entry["state"] == "active" and now - entry["last_access"] >= self.active_idle_ttl_seconds
 
     def purge_expired(self):
@@ -82,38 +73,22 @@ class RunContextStore:
     def _touch_locked(entry, now):
         entry["last_access"] = now
 
-    def _counts_locked(self, user_id):
-        states = Counter(entry["state"] for entry in self._entries.values() if entry["user_id"] == str(user_id))
-        return states["prepared"], states["active"]
-
     def create(self, user_id, continuous=False):
         now = time.monotonic()
         with self._lock:
             expired = self._purge_expired_locked(now)
-            prepared, active = self._counts_locked(user_id)
-            error = None
-            if len(self._entries) >= self.maximum:
-                error = "実行コンテキストが上限に達しています。実行中の生成が終わってから再試行してください。"
-            elif prepared >= self.prepared_limit:
-                error = "実行準備が上限に達しています。開始していない生成を減らしてから再試行してください。"
-            elif prepared + active >= self.active_limit:
-                error = "実行中または準備済みのScene Promptが上限に達しています。完了を待ってから再試行してください。"
-            else:
+            handle = secrets.token_urlsafe(32)
+            while handle in self._entries:
                 handle = secrets.token_urlsafe(32)
-                while handle in self._entries:
-                    handle = secrets.token_urlsafe(32)
-                self._entries[handle] = {
-                    "user_id": str(user_id),
-                    "plans": {},
-                    "state": "prepared",
-                    "prompt_id": "",
-                    "continuous": bool(continuous),
-                    "created_at": now,
-                    "last_access": now,
-                }
+            self._entries[handle] = {
+                "user_id": str(user_id),
+                "plans": {},
+                "state": "prepared",
+                "prompt_id": "",
+                "continuous": bool(continuous),
+                "last_access": now,
+            }
         self._notify_expired(expired)
-        if error:
-            raise SceneRunError(error)
         return handle
 
     def reconcile_active(self, live_prompt_ids):

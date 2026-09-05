@@ -9,14 +9,11 @@ import json
 
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
 PLAN_VERSION = 2
-MAX_INPUT_COUNT = 10_000
-MAX_DERIVED_COUNT = 1_000_000_000
-MAX_PLAN_ROWS = 100_000
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MIN_DIMENSION = 16
 MAX_DIMENSION = 16_384
 MIN_BATCH_SIZE = 1
 MAX_BATCH_SIZE = 4_096
-MAX_TOTAL_IMAGES = MAX_DERIVED_COUNT * MAX_BATCH_SIZE
 
 PLAN_KEYS = {"type", "version", "rows", "total_batches", "total_images", "sources", "change_key"}
 PLAN_BUILD_ITEM_KEYS = {"row", "count"}
@@ -146,27 +143,25 @@ def _clone_sources(sources):
             raise ScenePlanError("Scene Prompt plan sources must contain objects.")
         _require_exact_keys(source, SOURCE_KEYS, "Scene Prompt plan source")
         cloned.append({
-            "index": _require_int(source["index"], "Scene Prompt source index", 1, MAX_DERIVED_COUNT),
-            "row_count": _require_int(source["row_count"], "Scene Prompt source row_count", 0, MAX_DERIVED_COUNT),
-            "total_images": _require_int(source["total_images"], "Scene Prompt source total_images", 0, MAX_TOTAL_IMAGES),
-            "total_batches": _require_int(source["total_batches"], "Scene Prompt source total_batches", 0, MAX_DERIVED_COUNT),
+            "index": _require_int(source["index"], "Scene Prompt source index", 1, MAX_SAFE_INTEGER),
+            "row_count": _require_int(source["row_count"], "Scene Prompt source row_count", 0, MAX_SAFE_INTEGER),
+            "total_images": _require_int(source["total_images"], "Scene Prompt source total_images", 0, MAX_SAFE_INTEGER),
+            "total_batches": _require_int(source["total_batches"], "Scene Prompt source total_batches", 0, MAX_SAFE_INTEGER),
         })
     return cloned
 
 
 def _build_plan(items, sources):
-    if len(items) > MAX_PLAN_ROWS:
-        raise ScenePlanError(f"Scene Prompt plan cannot contain more than {MAX_PLAN_ROWS} rows.")
     batch_cursor = 0
     total_images = 0
     rows = []
     for index, item in enumerate(items):
         row = _clone_row(item["row"])
-        count = _require_int(item["count"], "Scene Prompt plan count", 0, MAX_DERIVED_COUNT)
+        count = _require_int(item["count"], "Scene Prompt plan count", 0, MAX_SAFE_INTEGER)
         batch_cursor += count
         total_images += count * _row_batch_size(row)
-        if batch_cursor > MAX_DERIVED_COUNT or total_images > MAX_TOTAL_IMAGES:
-            raise ScenePlanError("Scene Prompt derived total is too large.")
+        if batch_cursor > MAX_SAFE_INTEGER or total_images > MAX_SAFE_INTEGER:
+            raise ScenePlanError("Scene Prompt total exceeds JavaScript's safe integer range.")
         rows.append({
             "row": row, "count": count, "start_index": batch_cursor - count, "row_index": index,
             "label": row_label(row), "queue_index": 0, "source_id": "", "source_title": "",
@@ -189,7 +184,7 @@ def make_plan(rows, *, sources=None):
         _require_exact_keys(item, PLAN_BUILD_ITEM_KEYS, "Scene Prompt plan item")
         items.append({
             "row": _clone_row(item["row"]),
-            "count": _require_int(item["count"], "Scene Prompt plan count", 0, MAX_DERIVED_COUNT),
+            "count": _require_int(item["count"], "Scene Prompt plan count", 0, MAX_SAFE_INTEGER),
         })
     return _build_plan(items, [] if sources is None else sources)
 
@@ -211,8 +206,6 @@ def normalize_plan(value):
         raise ScenePlanError("Unsupported Scene Prompt plan version.")
     if not isinstance(value["rows"], list):
         raise ScenePlanError("Scene Prompt plan rows must be a list.")
-    if len(value["rows"]) > MAX_PLAN_ROWS:
-        raise ScenePlanError(f"Scene Prompt plan cannot contain more than {MAX_PLAN_ROWS} rows.")
     items = []
     start_index = 0
     for index, item in enumerate(value["rows"]):
@@ -220,7 +213,7 @@ def normalize_plan(value):
             raise ScenePlanError("Scene Prompt plan items must be objects.")
         _require_exact_keys(item, PLAN_ITEM_KEYS, "Scene Prompt plan item")
         row = _clone_row(item["row"])
-        count = _require_int(item["count"], "Scene Prompt plan count", 0, MAX_DERIVED_COUNT)
+        count = _require_int(item["count"], "Scene Prompt plan count", 0, MAX_SAFE_INTEGER)
         expected = {
             "start_index": start_index, "row_index": index,
             "label": row_label(row), "queue_index": 0, "source_id": "", "source_title": "",
@@ -264,13 +257,13 @@ def with_source_node(plan, node_id):
 
 
 def multiply_count(plan, factor):
-    amount = _require_int(factor, "Scene Prompt count factor", 0, MAX_INPUT_COUNT)
+    amount = _require_int(factor, "Scene Prompt count factor", 0, MAX_SAFE_INTEGER)
     source = normalize_plan(plan)
     rows = []
     for item in source["rows"]:
         count = item["count"] * amount
-        if count > MAX_DERIVED_COUNT:
-            raise ScenePlanError(f"Scene Prompt derived count must be between 0 and {MAX_DERIVED_COUNT}.")
+        if count > MAX_SAFE_INTEGER:
+            raise ScenePlanError("Scene Prompt total exceeds JavaScript's safe integer range.")
         rows.append({"row": item["row"], "count": count})
     return make_plan(rows, sources=source["sources"])
 
@@ -314,15 +307,12 @@ def merge_rows(left, right):
 def merge(left, right):
     first = normalize_plan(left)
     second = normalize_plan(right)
-    row_count = len(first["rows"]) * len(second["rows"])
-    if row_count > MAX_PLAN_ROWS:
-        raise ScenePlanError(f"Scene Prompt merge would create more than {MAX_PLAN_ROWS} rows.")
     rows = []
     for left_item in first["rows"]:
         for right_item in second["rows"]:
             count = left_item["count"] * right_item["count"]
-            if count > MAX_DERIVED_COUNT:
-                raise ScenePlanError(f"Scene Prompt derived count must be between 0 and {MAX_DERIVED_COUNT}.")
+            if count > MAX_SAFE_INTEGER:
+                raise ScenePlanError("Scene Prompt total exceeds JavaScript's safe integer range.")
             rows.append({"row": merge_rows(left_item["row"], right_item["row"]), "count": count})
     return make_plan(rows)
 
@@ -331,9 +321,6 @@ def queue(values):
     connected = [normalize_plan(value) for value in values if value is not None]
     if not connected:
         return seed_plan()
-    row_count = sum(len(plan["rows"]) for plan in connected)
-    if row_count > MAX_PLAN_ROWS:
-        raise ScenePlanError(f"Scene Prompt queue cannot contain more than {MAX_PLAN_ROWS} rows.")
     rows = []
     sources = []
     for index, plan in enumerate(connected, start=1):
@@ -359,9 +346,6 @@ def matrix_product(plan, matrix_rows, configured):
         return source
     if not active:
         return make_plan([])
-    row_count = len(source["rows"]) * len(active)
-    if row_count > MAX_PLAN_ROWS:
-        raise ScenePlanError(f"Scene Matrix would create more than {MAX_PLAN_ROWS} rows.")
     rows = []
     for base in source["rows"]:
         for matrix_row in active:
