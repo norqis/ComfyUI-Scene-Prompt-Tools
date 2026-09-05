@@ -184,6 +184,44 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertLessEqual(len(safe.encode("utf-16-le")) // 2, 240)
         self.assertRegex(safe, r"~[0-9a-f]{8}$")
 
+    def test_output_prefix_keeps_png_and_reservation_component_lengths_safe(self):
+        prefix = self.nodes._output_filename_prefix("😀" * 200, "png", 5, 10**20)
+        filename = f"{prefix}{10**20}.png"
+        reservation = f"{filename}.scene-save-reservation"
+        self.assertLessEqual(len(filename.encode("utf-8")), 255)
+        self.assertLessEqual(len(filename.encode("utf-16-le")) // 2, 255)
+        self.assertLessEqual(len(reservation.encode("utf-8")), 255)
+        self.assertLessEqual(len(reservation.encode("utf-16-le")) // 2, 255)
+        with self.assertRaisesRegex(ValueError, "長すぎます"):
+            self.nodes._output_filename_prefix("", "x" * 256, 5)
+
+    def test_output_prefix_stays_stable_for_valid_counter_growth(self):
+        value = "日" * 400
+        prefixes = {
+            self.nodes._output_filename_prefix(value, "png", 5, counter)
+            for counter in (1, 99_999, self.nodes.MAX_SAFE_INTEGER)
+        }
+        self.assertEqual(len(prefixes), 1)
+
+    def test_save_long_prefixes_keep_final_and_reservation_components_safe(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saver = self.nodes.SceneSaveImage()
+        for prefix in ("a" * 500, "日" * 500, "😀" * 300):
+            with self.subTest(prefix_kind=prefix[:1]):
+                result = saver.save_images(
+                    [image],
+                    "",
+                    scene_info={"use_run_dir": False, "file_index": 1, "filename_prefix": prefix},
+                )
+                path = Path(result["result"][1])
+                reservation = f"{path.name}.scene-save-reservation"
+                self.assertTrue(path.is_file())
+                self.assertLessEqual(len(path.name.encode("utf-8")), 255)
+                self.assertLessEqual(len(path.name.encode("utf-16-le")) // 2, 255)
+                self.assertLessEqual(len(reservation.encode("utf-8")), 255)
+                self.assertLessEqual(len(reservation.encode("utf-16-le")) // 2, 255)
+                self.assertFalse(Path(f"{path}.scene-save-reservation").exists())
+
     def test_is_changed_includes_prefix(self):
         scene_prompt = _scene_prompt(self.nodes)
         first = self.nodes.ScenePromptExpand.IS_CHANGED(
@@ -272,6 +310,12 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(row["positive_parts"], ["night", "forest"])
         self.assertEqual(row["negative_parts"], ["daylight"])
 
+    def test_matrix_build_parses_its_json_once(self):
+        matrix_json = json.dumps({"version": 1, "sets": [_matrix_line("A")]})
+        with mock.patch.object(self.nodes, "_parse_matrix_data", wraps=self.nodes._parse_matrix_data) as parse:
+            self.nodes.SceneMatrix().build(matrix_json)
+        self.assertEqual(parse.call_count, 1)
+
     def test_save_uses_prefix_and_records_it_in_png_metadata(self):
         saver = self.nodes.SceneSaveImage()
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
@@ -296,6 +340,18 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
         result = saver.save_images([image], "", scene_info={"use_run_dir": False, "file_index": 1})
         self.assertEqual(Path(result["result"][1]).name, "00001.png")
+
+    def test_next_index_cache_is_bounded_and_keeps_recent_roots(self):
+        with self.nodes._NEXT_INDEX_CACHE_LOCK:
+            self.nodes._NEXT_INDEX_CACHE.clear()
+        for index in range(1_000):
+            self.nodes._remember_next_index(str(Path(self.temp_dir.name) / f"root-{index}"), "png", 5, index + 1)
+        with self.nodes._NEXT_INDEX_CACHE_LOCK:
+            self.assertLessEqual(len(self.nodes._NEXT_INDEX_CACHE), 256)
+            first_key = next(iter(self.nodes._NEXT_INDEX_CACHE))
+        self.nodes._cached_next_index(*first_key[:3], first_key[3])
+        with self.nodes._NEXT_INDEX_CACHE_LOCK:
+            self.assertEqual(next(reversed(self.nodes._NEXT_INDEX_CACHE)), first_key)
 
     def test_save_metadata_keeps_large_effective_counts(self):
         plan = _scene_prompt(self.nodes, 10_000)
@@ -325,6 +381,28 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         runs.release_run_context(handle, "alice")
         with self.assertRaises(runs.SceneRunError):
             self.nodes._scene_run_plan(handle, first)
+
+    def test_expand_reuses_the_internal_cached_plan_without_normalizing_or_copying(self):
+        runs = sys.modules[f"{self.nodes.__package__}.runs"]
+        runs.RUN_CONTEXTS.clear()
+        handle = runs.create_run_context("alice")
+        plan = _scene_prompt(self.nodes)
+        try:
+            self.nodes._scene_run_plan(handle, plan, "expand")
+            with mock.patch.object(self.nodes, "normalize_plan", side_effect=AssertionError("must not normalize")), mock.patch.object(
+                runs.RUN_CONTEXTS, "get_plan", side_effect=AssertionError("must not use public copied plan")
+            ):
+                expanded = self.nodes.ScenePromptExpand().expand(
+                    current_index=0,
+                    seed_base=7,
+                    timestamp_dir=False,
+                    scene_prompt=plan,
+                    run_handle=handle,
+                    unique_id="expand",
+                )
+            self.assertEqual(expanded[0], "test")
+        finally:
+            runs.release_run_context(handle, "alice")
 
     def test_is_changed_does_not_register_a_seed_plan_before_expand(self):
         runs = sys.modules[f"{self.nodes.__package__}.runs"]

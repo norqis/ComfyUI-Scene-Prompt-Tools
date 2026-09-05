@@ -62,6 +62,8 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            git diff-tree --check --no-commit-id -r HEAD
           else
             before="${{ github.event.before }}"
             after="${{ github.sha }}"
@@ -78,10 +80,13 @@ jobs:
           git fetch --no-tags origin "refs/pull/${{ github.event.pull_request.number }}/merge:$ref"
           echo "SCENE_PROMPT_SYNTHETIC_MERGE_REF=$ref" >> "$GITHUB_ENV"
       - name: Check public package
-        env:
-          SCENE_PROMPT_HISTORY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          SCENE_PROMPT_HISTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: python tests/check_public_package.py
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            SCENE_PROMPT_HISTORY_BASE_SHA= SCENE_PROMPT_HISTORY_HEAD_SHA= python tests/check_public_package.py
+          else
+            SCENE_PROMPT_HISTORY_BASE_SHA="${{ github.event.pull_request.base.sha || github.event.before }}" SCENE_PROMPT_HISTORY_HEAD_SHA="${{ github.event.pull_request.head.sha || github.sha }}" python tests/check_public_package.py
+          fi
 
   comfy-smoke:
     name: ComfyUI smoke

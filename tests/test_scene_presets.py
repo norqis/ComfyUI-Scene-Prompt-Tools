@@ -7,6 +7,7 @@ import threading
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from comfy_stubs import install_comfy_execution_stub, install_torch_stub
 
@@ -361,7 +362,7 @@ class ScenePresetTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.ScenePresetError, "出力0"):
             self.save("bad_output", nodes)
 
-    def test_workflow_ignores_disconnected_execution_nodes_and_annotations(self):
+    def test_workflow_ignores_disconnected_execution_nodes_and_preserves_annotations(self):
         workflow = {
             "version": 1,
             "nodes": [
@@ -374,7 +375,22 @@ class ScenePresetTests(unittest.TestCase):
             ],
         }
         saved = self.save("workflow_side_effect", basic_nodes(), workflow=workflow)
-        self.assertEqual([node["id"] for node in saved["workflow"]["nodes"]], [1, 2, 3])
+        self.assertEqual([node["id"] for node in saved["workflow"]["nodes"]], [1, 2, 3, 90, 91])
+
+    def test_workflow_rejects_type_mismatch_and_duplicate_in_the_selected_branch(self):
+        connected = [
+            {"id": 1, "type": "ScenePresetInput"},
+            {"id": 2, "type": "ScenePrompter"},
+            {"id": 3, "type": "ScenePresetOutput"},
+        ]
+        with self.assertRaisesRegex(self.module.ScenePresetError, "種類が一致"):
+            self.save("workflow-type", basic_nodes(), workflow={"nodes": [
+                connected[0], {"id": 2, "type": "ScenePath"}, connected[2],
+            ]})
+        with self.assertRaisesRegex(self.module.ScenePresetError, "重複"):
+            self.save("workflow-duplicate", basic_nodes(), workflow={"nodes": [
+                *connected, {"id": 2, "type": "ScenePrompter"},
+            ]})
 
     def test_node_expansion_keeps_existing_scene_nodes_and_links(self):
         nodes = basic_nodes()
@@ -419,6 +435,59 @@ class ScenePresetTests(unittest.TestCase):
         labels = [item["row"]["labels"] for item in self.nodes.normalize_plan(queued)["rows"]]
         self.assertEqual(labels, [["A", "Right"], ["B", "Right"], ["A"], ["B"]])
         self.assertEqual(queued["total_images"], 4)
+
+    def test_scene_dag_memo_evaluates_a_nine_node_shared_branch_once_each(self):
+        source_inputs = {
+            name: value for name, value in basic_nodes("root")["2"]["inputs"].items()
+            if name != "scene_prompt"
+        }
+        nodes = {"1": {"class_type": "ScenePrompter", "inputs": source_inputs}}
+        for index in range(2, 10):
+            nodes[str(index)] = {
+                "class_type": "ScenePrompterMerge",
+                "inputs": {"scene_prompt1": [str(index - 1), 0], "scene_prompt2": [str(index - 1), 0]},
+            }
+        calls = []
+        original_build = self.module.ScenePrompt.build
+        original_merge = self.module.ScenePromptMerge.merge
+
+        def count_build(instance, *args, **kwargs):
+            calls.append("build")
+            return original_build(instance, *args, **kwargs)
+
+        def count_merge(instance, *args, **kwargs):
+            calls.append("merge")
+            return original_merge(instance, *args, **kwargs)
+
+        with mock.patch.object(self.module.ScenePrompt, "build", count_build), mock.patch.object(
+            self.module.ScenePromptMerge, "merge", count_merge
+        ):
+            self.module._scene_node_value(nodes, "9", {}, set())
+        self.assertEqual(len(calls), 9)  # The un-memoized shared branch takes 2**9 - 1 evaluations.
+
+    def test_nested_preset_evaluation_keeps_distinct_input_scopes(self):
+        self.save("inner", basic_nodes("inner"))
+
+        def outer_prompt(label):
+            inputs = {
+                name: value for name, value in basic_nodes(label)["2"]["inputs"].items()
+                if name != "scene_prompt"
+            }
+            inputs["prompt_name"] = label
+            return {"class_type": "ScenePrompter", "inputs": inputs}
+
+        outer = {
+            "1": outer_prompt("left"),
+            "2": outer_prompt("right"),
+            "3": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "inner", "scene_prompt": ["1", 0]}},
+            "4": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "inner", "scene_prompt": ["2", 0]}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
+        }
+        plan = self.module._scene_node_value(outer, "5", {"inner": self.module.load_preset("inner")}, set())
+        self.assertEqual(
+            [row["row"]["positive_parts"] for row in plan["rows"]],
+            [["left", "inner"], ["right", "inner"]],
+        )
 
     def test_preset_input_is_part_of_the_saved_preset_graph(self):
         nodes = {

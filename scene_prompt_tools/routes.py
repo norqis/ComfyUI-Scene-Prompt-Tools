@@ -116,9 +116,10 @@ def _prompt_file_signature(root):
 
 
 def _cache_get(cache, signature):
-    if cache.get("signature") == signature and cache.get("expires", 0.0) > time.monotonic():
+    if cache.get("signature") == signature:
         value = cache.get("value")
         if value is not None:
+            cache["expires"] = time.monotonic() + _CACHE_TTL_SECONDS
             return value
     return None
 
@@ -222,11 +223,14 @@ def _load_items(user_id="default", force=False, with_errors=False):
                     except ValueError as exc:
                         errors.append({"file": prompt_file.relative_to(data_dir).as_posix(), "error": str(exc)})
 
+        refreshed_signature = _prompt_file_signature(data_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
+            if signature != refreshed_signature:
+                continue
             value = {"items": items, "errors": errors}
-            return _cache_value(_cache_set(cache, signature, value), "items", with_errors)
+            return _cache_value(_cache_set(cache, refreshed_signature, value), "items", with_errors)
 
 
 def _folder_component(value, field):
@@ -530,11 +534,14 @@ def _load_saved_prompts(user_id="default", force=False, with_errors=False):
                 except ValueError as exc:
                     errors.append({"file": prompt_file.relative_to(saved_prompts_dir).as_posix(), "error": str(exc)})
 
+        refreshed_signature = _prompt_file_signature(saved_prompts_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
+            if signature != refreshed_signature:
+                continue
             value = {"saved_prompts": saved, "errors": errors}
-            return _cache_value(_cache_set(cache, signature, value), "saved_prompts", with_errors)
+            return _cache_value(_cache_set(cache, refreshed_signature, value), "saved_prompts", with_errors)
 
 
 def _save_prompt_payload(payload, user_id="default"):

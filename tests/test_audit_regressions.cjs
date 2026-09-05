@@ -578,6 +578,7 @@ async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange()
         showSceneBatchError(message) { context.errors.push(message); },
     };
     vm.createContext(context);
+    vm.runInContext("let popupRequestIntent = 0;", context);
     for (const name of ["beginPopupRequest", "isCurrentPopupRequest", "invalidatePopupRequests", "loadPopupRequest"]) {
         vm.runInContext(functionSource(name), context);
     }
@@ -586,6 +587,55 @@ async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange()
     resolveLoad(["late response"]);
     assert.equal(await request, null);
     assert.deepEqual(context.errors, []);
+}
+
+function testOverflowCountsDoNotStartABatchRun() {
+    const errors = [];
+    const context = {
+        Map,
+        sceneBatchRun: null,
+        sceneBatchDetachedRuns: new Map(),
+        sceneBatchPendingRuns: [],
+        sceneBatchRunForNode() { return null; },
+        sceneBatchRunStatus() { return "idle"; },
+        syncSceneNodeModes() {}, syncAllScenePromptNames() {},
+        sceneExpandCounts() { return { totalBatches: null, error: "件数が大きすぎます。" }; },
+        createSceneBatchRun() { throw new Error("must not create"); },
+        prepareSceneBatchRunSnapshot() { throw new Error("must not prepare"); },
+        updateSceneExpandButton() {}, resetSceneExpandRunControls() {},
+        showSceneBatchError(message, error) { errors.push([message, error.message]); },
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("startSceneBatchRun"), context);
+    context.startSceneBatchRun({ id: 1 });
+    assert.deepEqual(errors, [["連続生成を開始できませんでした。", "件数が大きすぎます。"]]);
+}
+
+async function testPopupRequestsUseOneIntentAcrossNodes() {
+    let resolveFirst;
+    let resolveSecond;
+    const firstLoad = new Promise((resolve) => { resolveFirst = resolve; });
+    const secondLoad = new Promise((resolve) => { resolveSecond = resolve; });
+    const graph = {};
+    const context = { Number, app: { graph }, showSceneBatchError() {} };
+    vm.createContext(context);
+    vm.runInContext("let popupRequestIntent = 0;", context);
+    for (const name of ["beginPopupRequest", "isCurrentPopupRequest", "invalidatePopupRequests", "loadPopupRequest"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    const first = context.loadPopupRequest({ graph }, () => firstLoad, "failed");
+    const secondNode = { graph };
+    const second = context.loadPopupRequest(secondNode, () => secondLoad, "failed");
+    resolveSecond("new popup");
+    assert.equal(await second, "new popup", "the newer node may open its popup");
+    resolveFirst("old popup");
+    assert.equal(await first, null, "a slower node cannot replace a newer popup");
+    let resolveClosed;
+    const closedLoad = new Promise((resolve) => { resolveClosed = resolve; });
+    const closed = context.loadPopupRequest(secondNode, () => closedLoad, "failed");
+    context.invalidatePopupRequests(secondNode);
+    resolveClosed("closed popup");
+    assert.equal(await closed, null, "closing a popup invalidates its pending open");
 }
 
 Promise.resolve()
@@ -612,8 +662,10 @@ Promise.resolve()
     .then(testMatrixEmptyNameFailsBeforePersisting)
     .then(testWorkflowLoadGuardMarksOnlyLoadWindow)
     .then(testPendingFifoRunPreparesPresetSnapshotImmediately)
+    .then(testOverflowCountsDoNotStartABatchRun)
     .then(testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure)
     .then(testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange)
+    .then(testPopupRequestsUseOneIntentAcrossNodes)
     .then(() => console.log("Audit regression tests passed."))
     .catch((error) => {
         console.error(error);

@@ -23,7 +23,7 @@ from .nodes import (
     ScenePromptQueue,
     ScenePromptCounter,
 )
-from .runs import peek_run_context, require_run_context
+from .runs import get_run_user_id, require_run_context
 
 
 PRESET_SCHEMA_VERSION = 1
@@ -166,7 +166,13 @@ def _validate_workflow_nodes(workflow, api_nodes):
     workflow_nodes = workflow.get("nodes")
     if not isinstance(workflow_nodes, list):
         raise ScenePresetError("Presetの編集用ワークフローが不正です。")
-    api_node_ids = {str(node_id) for node_id in api_nodes}
+    api_by_id = {}
+    for node_id, api_node in api_nodes.items():
+        normalized_id = str(node_id)
+        if normalized_id in api_by_id:
+            raise ScenePresetError(f"実行グラフのノードID #{normalized_id} が重複しています。")
+        api_by_id[normalized_id] = api_node
+    workflow_by_id = set()
     for node in workflow_nodes:
         if not isinstance(node, dict):
             raise ScenePresetError("編集用ワークフローのノード形式が不正です。")
@@ -174,9 +180,18 @@ def _validate_workflow_nodes(workflow, api_nodes):
             continue
         node_id = node.get("id")
         node_type = str(node.get("type") or "不明なノード")
-        if node_id is None or str(node_id) not in api_node_ids:
+        normalized_id = str(node_id)
+        if node_id is None or normalized_id not in api_by_id:
             raise ScenePresetError(
                 f"編集用ワークフローの {node_type} #{node_id} は実行グラフに含まれていません。"
+            )
+        if normalized_id in workflow_by_id:
+            raise ScenePresetError(f"編集用ワークフローのノードID #{normalized_id} が重複しています。")
+        workflow_by_id.add(normalized_id)
+        api_type = str(api_by_id[normalized_id].get("class_type") or "不明なノード")
+        if node_type != api_type:
+            raise ScenePresetError(
+                f"編集用ワークフローの {node_type} #{node_id} と実行グラフの {api_type} の種類が一致しません。"
             )
 
 
@@ -209,7 +224,9 @@ def _connected_preset_workflow(workflow, node_ids):
     connected = {str(node_id) for node_id in node_ids}
     result["nodes"] = [
         node for node in result["nodes"]
-        if isinstance(node, dict) and str(node.get("id")) in connected
+        if isinstance(node, dict) and (
+            _is_non_execution_workflow_node(node) or str(node.get("id")) in connected
+        )
     ]
     links = result.get("links")
     if isinstance(links, list):
@@ -610,21 +627,26 @@ def _scene_node_value_impl(
     nodes,
     node_id,
     resolved,
-    stack,
+    node_stack,
     input_values=None,
     user_id="default",
     run_handle="",
+    memo=None,
+    preset_stack=(),
 ):
     node_id = str(node_id)
     if input_values and node_id in input_values:
         return input_values[node_id]
-    if node_id in stack:
+    if node_id in node_stack:
         raise ScenePresetError(f"Sceneグラフが循環しています: #{node_id}")
+    memo = {} if memo is None else memo
+    if node_id in memo:
+        return memo[node_id]
     node = nodes.get(node_id)
     if not isinstance(node, dict):
         raise ScenePresetError(f"Sceneノード #{node_id} が見つかりません。")
     class_type = node.get("class_type")
-    next_stack = {*(stack or set()), node_id}
+    next_stack = {*(node_stack or set()), node_id}
 
     def value(raw):
         if not is_link(raw):
@@ -637,6 +659,8 @@ def _scene_node_value_impl(
             input_values,
             user_id,
             run_handle,
+            memo,
+            preset_stack,
         )
 
     if class_type in SAFE_VALUE_NODE_CLASSES:
@@ -647,26 +671,33 @@ def _scene_node_value_impl(
             if class_type == "PrimitiveBoolean" and not isinstance(raw_value, bool):
                 if str(raw_value).lower() not in {"true", "false"}:
                     raise ValueError(raw_value)
-                return str(raw_value).lower() == "true"
-            return SAFE_VALUE_NODE_CLASSES[class_type](raw_value)
+                result = str(raw_value).lower() == "true"
+            else:
+                result = SAFE_VALUE_NODE_CLASSES[class_type](raw_value)
+            memo[node_id] = result
+            return result
         except (TypeError, ValueError) as exc:
             raise ScenePresetError(f"{_node_label(node_id, node)} の値が不正です。") from exc
     if class_type == BOUNDARY_INPUT:
-        return ScenePresetInput().build()[0]
+        result = ScenePresetInput().build()[0]
+        memo[node_id] = result
+        return result
     if class_type == "ScenePresetReference":
         preset_id = _clean_preset_id(_node_inputs(node).get("preset_id"))
         preset = resolved.get(preset_id)
         if not preset:
             raise ScenePresetError(f"Preset「{preset_id}」のスナップショットがありません。")
         upstream = value(_node_inputs(node).get("scene_prompt")) if is_link(_node_inputs(node).get("scene_prompt")) else None
-        return _evaluate_preset_scene(
+        result = _evaluate_preset_scene(
             preset,
             resolved,
             upstream,
-            set(),
             user_id,
             run_handle,
+            preset_stack,
         )
+        memo[node_id] = result
+        return result
     cls = SAFE_NODE_CLASSES.get(class_type)
     if cls is None:
         raise ScenePresetError(f"{_node_label(node_id, node)} はScene計画を計算できません。")
@@ -674,6 +705,7 @@ def _scene_node_value_impl(
     if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
+    memo[node_id] = result[0]
     return result[0]
 
 
@@ -685,6 +717,8 @@ def _scene_node_value(
     input_values=None,
     user_id="default",
     run_handle="",
+    memo=None,
+    preset_stack=(),
 ):
     try:
         return _scene_node_value_impl(
@@ -695,6 +729,8 @@ def _scene_node_value(
             input_values,
             user_id,
             run_handle,
+            memo,
+            preset_stack,
         )
     except ScenePresetResolutionError:
         raise
@@ -711,13 +747,13 @@ def _evaluate_preset_scene(
     preset,
     resolved,
     upstream,
-    stack,
     user_id="default",
     run_handle="",
+    preset_stack=(),
 ):
     preset_id = str(preset["metadata"]["preset_id"])
-    if preset_id in stack:
-        cycle = " -> ".join([*stack, preset_id])
+    if preset_id in preset_stack:
+        cycle = " -> ".join([*preset_stack, preset_id])
         raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
     validation = _validate_preset_payload(preset)
     nodes = _preset_nodes(preset)
@@ -732,6 +768,8 @@ def _evaluate_preset_scene(
         input_values,
         user_id,
         run_handle,
+        {},
+        (*preset_stack, preset_id),
     )
 
 
@@ -1038,8 +1076,8 @@ class ScenePresetReference:
     @classmethod
     def IS_CHANGED(cls, preset_id="", scene_prompt=None, run_handle="", **kwargs):
         del scene_prompt, kwargs
-        context = peek_run_context(run_handle)
-        preset = _peek_snapshot_preset(run_handle, _clean_preset_id(preset_id), context["user_id"])
+        user_id = get_run_user_id(run_handle)
+        preset = _peek_snapshot_preset(run_handle, _clean_preset_id(preset_id), user_id)
         metadata = preset["metadata"]
         return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_handle}"
 

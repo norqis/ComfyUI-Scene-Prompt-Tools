@@ -60,6 +60,10 @@ const promptItems = [baseItem, nestedItem, ...Array.from({ length: 60 }, (_value
 }))];
 const savedPrompt = { id: "browser-set", name: "Browser Set", description: "", items: [baseItem] };
 export const api = {
+  fileURL(route) {
+    calls.push({ url: "fileURL:" + route, options: {} });
+    return route;
+  },
   fetchApi: async (url, options = {}) => {
     calls.push({ url, options });
     if (url.includes("/scene_prompt/items") && options.method !== "POST" && window.__delayNextScenePromptItems) {
@@ -542,6 +546,7 @@ try {
     assert.equal(positiveAutocomplete.count, positiveAutocomplete.before, "a Matrix textarea is connected once");
     assert.equal(positiveAutocomplete.scale, 1, "Matrix autocomplete ignores canvas zoom");
     assert.equal(positiveAutocomplete.draft, "blue_hair", "autocomplete insertion updates the Matrix positive draft");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("fileURL:/extensions/ComfyUI-Custom-Scripts/"))), true, "Matrix autocomplete resolves its static extension with ComfyUI's base-aware file URL");
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     assert.equal(await page.locator(".pysssss-autocomplete").count(), 0, "closing a Matrix picker removes its autocomplete dropdown");
 
@@ -734,10 +739,9 @@ try {
     await closingPage.waitForFunction(() => window.__scenePromptBrowserReady === true, null, { timeout: 5_000 });
     await createPreparedRun(closingPage);
     await closingPage.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
-    await closingPage.waitForFunction(() => window.__scenePromptCalls.some((call) => call.url.includes("/runs/release")));
+    await closingPage.waitForTimeout(50);
     const releases = await releaseCalls(closingPage);
-    assert.equal(releases.length, 1);
-    assert.equal(releases[0].options.keepalive, true);
+    assert.equal(releases.length, 0, "pagehide preserves an accepted ordinary run for queued generation");
     await closingPage.close();
     console.log("Scene Prompt browser integration tests passed.");
 } finally {

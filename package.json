@@ -6,7 +6,7 @@
   },
   "scripts": {
     "test": "npm run check:frontend && npm run test:frontend",
-    "test:frontend": "node tests/test_scene_batch_fifo.cjs && node tests/test_detached_run_reconcile.cjs && node tests/test_scene_queue_wrapper.cjs && node tests/test_scene_prompt_state.mjs && node tests/test_scene_prompt_selection_normalization.cjs && node tests/test_popup_session_state.cjs && node tests/test_scene_queue_counts.cjs && node tests/test_audit_regressions.cjs && node tests/test_scene_save_metadata_ui.cjs && node tests/test_scene_run_release.cjs && node tests/test_scene_browser_integration.mjs",
+    "test:frontend": "node tests/test_scene_batch_fifo.cjs && node tests/test_detached_run_reconcile.cjs && node tests/test_scene_queue_wrapper.cjs && node tests/test_scene_prompt_state.mjs && node tests/test_scene_prompt_selection_normalization.cjs && node tests/test_popup_session_state.cjs && node tests/test_scene_queue_counts.cjs && node tests/test_scene_ui_audit_behaviors.cjs && node tests/test_audit_regressions.cjs && node tests/test_scene_save_metadata_ui.cjs && node tests/test_scene_run_release.cjs && node tests/test_scene_browser_integration.mjs",
     "test:real-comfy-browser": "node tests/test_comfyui_browser_runtime.mjs",
     "check:frontend": "node --check web/scene_prompt_ui.js && node --check web/scene_prompt_state.js && node --check web/scene_prompt_style.js"
   }

@@ -175,6 +175,47 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.set_plan(handle, "22", second), second)
         self.assertEqual(store.set_plan(handle, "11", second), first)
 
+    def test_get_plan_touches_and_copies_while_peek_expires_once(self):
+        expired = []
+        store = RUNS.RunContextStore(
+            prepared_ttl_seconds=10,
+            expiration_callback=lambda handle, user_id: expired.append((handle, user_id)),
+        )
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 5, 5, 16]):
+            handle = store.create("alice")
+            source = {"rows": [{"row": {"positive_parts": ["A"]}}]}
+            store.set_plan(handle, "expand", source)
+            source["rows"][0]["row"]["positive_parts"].append("changed")
+            cached = store.get_plan(handle, "expand")
+            cached["rows"][0]["row"]["positive_parts"].append("returned")
+            self.assertEqual(store._entries[handle]["plans"]["expand"]["rows"][0]["row"]["positive_parts"], ["A"])
+            with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
+                store.peek(handle)
+        self.assertEqual(expired, [(handle, "alice")])
+        with self.assertRaises(RUNS.SceneRunError):
+            store.peek(handle)
+        self.assertEqual(expired, [(handle, "alice")])
+
+    def test_get_run_user_id_does_not_touch_or_copy_plans(self):
+        store = RUNS.RunContextStore(prepared_ttl_seconds=10)
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 1, 5]):
+            handle = store.create("alice")
+            store.set_plan(handle, "expand", {"rows": [{"row": {"positive_parts": ["A"]}}]})
+            before_access = store._entries[handle]["last_access"]
+            with mock.patch.object(RUNS.copy, "deepcopy", side_effect=AssertionError("must not copy")):
+                self.assertEqual(store.get_user_id(handle), "alice")
+        self.assertEqual(store._entries[handle]["last_access"], before_access)
+
+    def test_internal_plan_reference_is_read_only_for_scene_node_consumers(self):
+        store = RUNS.RunContextStore(prepared_ttl_seconds=999)
+        handle = store.create("alice")
+        stored = store.set_plan_reference(handle, "expand", {"rows": [{"row": {"positive_parts": ["A"]}}]})
+        with mock.patch.object(RUNS.copy, "deepcopy", side_effect=AssertionError("must not copy")):
+            self.assertIs(store.get_plan_reference(handle, "expand"), stored)
+        editable = store.get_plan(handle, "expand")
+        editable["rows"][0]["row"]["positive_parts"].append("changed")
+        self.assertEqual(stored["rows"][0]["row"]["positive_parts"], ["A"])
+
     def test_nodes_do_not_expose_user_id_inputs(self):
         source = "\n".join(
             (ROOT / "scene_prompt_tools" / filename).read_text(encoding="utf-8")

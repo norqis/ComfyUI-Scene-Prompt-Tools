@@ -7,6 +7,7 @@ import threading
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from comfy_stubs import install_comfy_execution_stub, install_torch_stub
 
@@ -695,6 +696,16 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertEqual(len(self.routes._SAVED_PROMPTS_CACHE), self.routes._CACHE_MAX_USERS)
         self.assertNotIn("user-0", self.routes._ITEMS_CACHE)
         self.assertNotIn("user-0", self.routes._SAVED_PROMPTS_CACHE)
+
+    def test_expired_matching_signature_renews_cache_without_rereading(self):
+        path = self.data_dir / "Category" / "prompt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([{"label": "Cached", "prompt": "cached"}]), encoding="utf-8")
+        with mock.patch.object(self.routes.time, "monotonic", return_value=0):
+            self.assertEqual(self.routes._load_items()[0]["label"], "Cached")
+        with mock.patch.object(self.routes, "_read_items", side_effect=AssertionError("must reuse matching cache")):
+            with mock.patch.object(self.routes.time, "monotonic", return_value=999):
+                self.assertEqual(self.routes._load_items()[0]["label"], "Cached")
 
 
 if __name__ == "__main__":

@@ -78,7 +78,6 @@ const SCENE_COMPACT_WIDGET_HEIGHT = 18;
 const SCENE_NODE_AUTO_FIT_MAX_HEIGHT = 720;
 const SCENE_WIDGET_CANVAS_MAX_PIXELS = 2500000;
 const SCENE_SAVE_PREVIEW_LIMIT = 1;
-const CUSTOM_SCRIPTS_AUTOCOMPLETE_URL = "/extensions/ComfyUI-Custom-Scripts/js/common/autocomplete.js";
 const SCENE_QUEUE_GROUP_COLORS = [
     "#c9a4ff",
     "#ff7777",
@@ -156,6 +155,7 @@ let promptItemsRequestGeneration = 0;
 let savedPromptsRequestGeneration = 0;
 let activePopup = null;
 let activePopupContext = null;
+let popupRequestIntent = 0;
 const popupSessionsByNode = new WeakMap();
 const matrixTextAreaAutocompleteInstances = new WeakMap();
 let matrixTextAreaAutocompleteModulePromise = null;
@@ -1764,32 +1764,35 @@ function createButton(text, className = "") {
 }
 
 function beginPopupRequest(node) {
+    popupRequestIntent += 1;
     const requestId = Number(node?.scenePromptPopupRequestId || 0) + 1;
     if (node) {
         node.scenePromptPopupRequestId = requestId;
     }
-    return requestId;
+    return { requestId, intent: popupRequestIntent };
 }
 
-function isCurrentPopupRequest(node, requestId) {
+function isCurrentPopupRequest(node, request) {
     return !!node
-        && node.scenePromptPopupRequestId === requestId
+        && node.scenePromptPopupRequestId === request?.requestId
+        && popupRequestIntent === request?.intent
         && node.graph === app.graph;
 }
 
 function invalidatePopupRequests(node) {
+    popupRequestIntent += 1;
     if (node) {
         node.scenePromptPopupRequestId = Number(node.scenePromptPopupRequestId || 0) + 1;
     }
 }
 
 async function loadPopupRequest(node, loader, failureMessage) {
-    const requestId = beginPopupRequest(node);
+    const request = beginPopupRequest(node);
     try {
         const value = await loader();
-        return isCurrentPopupRequest(node, requestId) ? value : null;
+        return isCurrentPopupRequest(node, request) ? value : null;
     } catch (error) {
-        if (isCurrentPopupRequest(node, requestId)) {
+        if (isCurrentPopupRequest(node, request)) {
             showSceneBatchError(failureMessage, error);
         }
         return null;
@@ -1832,6 +1835,7 @@ function closePopup(options = {}) {
             }
         }
         disposeMatrixTextAreaAutocompleteIn(activePopup);
+        activePopup.scenePopupDragDispose?.();
         activePopup.remove();
         activePopup = parent?.popup || null;
         activePopupContext = parent?.context || null;
@@ -1929,6 +1933,7 @@ function fitPopupToContent(popup) {
 }
 
 function makePopupDraggable(node, popup, handle) {
+    let cleanup = null;
     handle.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) {
             return;
@@ -1948,9 +1953,11 @@ function makePopupDraggable(node, popup, handle) {
             popup.style.top = `${Math.round(top)}px`;
         };
 
-        const up = () => {
+        const finish = () => {
             document.removeEventListener("pointermove", move, true);
-            document.removeEventListener("pointerup", up, true);
+            document.removeEventListener("pointerup", finish, true);
+            document.removeEventListener("pointercancel", finish, true);
+            cleanup = null;
             if (popup.sceneSecondaryPopup) {
                 rememberSecondaryPopupRect(node, popup);
             } else {
@@ -1959,11 +1966,15 @@ function makePopupDraggable(node, popup, handle) {
         };
 
         document.addEventListener("pointermove", move, true);
-        document.addEventListener("pointerup", up, true);
+        document.addEventListener("pointerup", finish, true);
+        document.addEventListener("pointercancel", finish, true);
+        cleanup = finish;
     });
+    return () => cleanup?.();
 }
 
 function openPopupShell(node, titleText, options = {}) {
+    popupRequestIntent += 1;
     const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
     const popupSessionScopeKeyValue = options.popupSessionScopeKey || popupSessionScopeKey(node, stateWidgetName);
     const popupSession = options.popupSession || popupSessionFor(node, stateWidgetName, popupSessionScopeKeyValue);
@@ -2064,7 +2075,7 @@ function openPopupShell(node, titleText, options = {}) {
 
     popup.appendChild(head);
     document.body.appendChild(popup);
-    makePopupDraggable(node, popup, head);
+    popup.scenePopupDragDispose = makePopupDraggable(node, popup, head);
 
     activePopup = popup;
     activePopupContext = {
@@ -5377,7 +5388,6 @@ function clearSceneComputedCaches(node) {
     node.sceneSelectedListNegativeRenderCache = null;
     node.scenePromptQueueDisplayCache = null;
     node.scenePromptQueueRenderCache = null;
-    node.scenePromptQueueRowsCache = null;
     node.scenePromptTotalCache = null;
     node.scenePromptSourceKeyCache = null;
     node.scenePromptPreviewCache = null;
@@ -5863,7 +5873,8 @@ function scenePromptSourceCacheKey(node, seen = new Set()) {
 }
 
 function scenePromptTotalCount(node) {
-    return scenePromptStats(node).total;
+    const stats = scenePromptStats(node);
+    return stats.error ? null : stats.total;
 }
 
 function scenePresetGraphNodes(preset) {
@@ -5920,39 +5931,41 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
         };
         let result = emptyScenePromptStats();
         if (node.class_type === "ScenePresetInput") {
-            result = upstream || { rows: 1, total: 1 };
+            result = upstream || sceneStatsSeed();
         } else if (node.class_type === "ScenePrompter") {
-            result = source("scene_prompt") || { rows: 1, total: 1 };
+            result = source("scene_prompt") || sceneStatsSeed();
         } else if (node.class_type === "SceneMatrix") {
-            const base = source("scene_prompt") || { rows: 1, total: 1 };
+            const base = source("scene_prompt") || sceneStatsSeed();
             const count = apiMatrixEnabledCount(node);
             const configured = apiMatrixConfigured(node);
-            result = count ? { rows: base.rows * count, total: base.total * count } : (configured ? emptyScenePromptStats() : base);
-        } else if (node.class_type === "ScenePath" || node.class_type === "SceneEmptyLatent") {
-            result = source("scene_prompt") || { rows: 1, total: 1 };
+            result = count ? sceneStatsMatrix(base, count) : (configured ? emptyScenePromptStats() : base);
+        } else if (node.class_type === "ScenePath") {
+            result = source("scene_prompt") || sceneStatsSeed();
+        } else if (node.class_type === "SceneEmptyLatent") {
+            result = sceneStatsWithLatent(source("scene_prompt") || sceneStatsSeed(), clampSceneCount(apiInput(node, "batch_size"), 1));
         } else if (node.class_type === "ScenePromptCounter") {
-            const base = source("scene_prompt") || { rows: 1, total: 1 };
+            const base = source("scene_prompt") || sceneStatsSeed();
             const count = clampSceneCount(apiInput(node, "count"), 1);
-            result = { rows: base.rows, total: base.total * count };
+            result = sceneStatsCount(base, count);
         } else if (node.class_type === "ScenePrompterMerge") {
-            const first = source("scene_prompt1") || { rows: 1, total: 1 };
-            const second = source("scene_prompt2") || { rows: 1, total: 1 };
-            result = { rows: first.rows * second.rows, total: first.total * second.total };
+            const first = source("scene_prompt1") || sceneStatsSeed();
+            const second = source("scene_prompt2") || sceneStatsSeed();
+            result = sceneStatsMerge(first, second);
         } else if (node.class_type === "ScenePrompterQueue") {
             result = emptyScenePromptStats();
+            let hasSource = false;
             for (let index = 1; index <= SCENE_PROMPT_QUEUE_INPUT_COUNT; index += 1) {
                 const item = source(`scene_prompt${index}`);
                 if (item) {
-                    result = { rows: result.rows + item.rows, total: result.total + item.total };
+                    hasSource = true;
+                    result = sceneStatsQueue([result, item], true);
                 }
             }
-            if (!result.rows) {
-                result = { rows: 1, total: 1 };
-            }
+            result = sceneStatsQueue([result], hasSource);
         } else if (node.class_type === "ScenePresetReference") {
             result = scenePresetStats(String(apiInput(node, "preset_id") || ""), source("scene_prompt"), nextStack);
         }
-        result = { rows: sceneStatNumber(result.rows), total: sceneStatNumber(result.total) };
+        result = sceneStatsResult(result);
         memo.set(nodeId, result);
         return result;
     };
@@ -5960,12 +5973,102 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
 }
 
 function emptyScenePromptStats() {
-    return { rows: 0, total: 0 };
+    return { rows: 0, total: 0, totalImages: 0, unsetBatches: 0 };
 }
 
 function sceneStatNumber(value) {
-    const number = Number(value || 0);
-    return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+    const number = value ?? 0;
+    if (typeof number !== "number") {
+        return Number.NaN;
+    }
+    return Number.isSafeInteger(number) && number >= 0 ? number : Number.NaN;
+}
+
+function sceneStatProduct(...values) {
+    const result = values.reduce((total, value) => total * sceneStatNumber(value), 1);
+    return Number.isSafeInteger(result) ? result : Number.NaN;
+}
+
+function sceneStatSum(...values) {
+    const result = values.reduce((total, value) => total + sceneStatNumber(value), 0);
+    return Number.isSafeInteger(result) ? result : Number.NaN;
+}
+
+function sceneStatsSeed() {
+    return { rows: 1, total: 1, totalImages: 1, unsetBatches: 1 };
+}
+
+function sceneStatsResult(stats) {
+    if (stats?.error
+        || !Number.isSafeInteger(stats?.rows) || stats.rows < 0
+        || !Number.isSafeInteger(stats?.total) || stats.total < 0
+        || !Number.isSafeInteger(stats?.totalImages ?? stats?.total) || (stats.totalImages ?? stats.total) < 0
+        || !Number.isSafeInteger(stats?.unsetBatches ?? stats?.total) || (stats.unsetBatches ?? stats.total) < 0) {
+        return { ...emptyScenePromptStats(), error: stats?.error || "件数が大きすぎます。" };
+    }
+    return {
+        rows: sceneStatNumber(stats.rows),
+        total: sceneStatNumber(stats.total),
+        totalImages: sceneStatNumber(stats.totalImages ?? stats.total),
+        unsetBatches: sceneStatNumber(stats.unsetBatches ?? stats.total),
+    };
+}
+
+function sceneStatsMatrix(stats, factor) {
+    if (stats?.error) return stats;
+    return {
+        rows: sceneStatProduct(stats.rows, factor),
+        total: sceneStatProduct(stats.total, factor),
+        totalImages: sceneStatProduct(stats.totalImages, factor),
+        unsetBatches: sceneStatProduct(stats.unsetBatches, factor),
+    };
+}
+
+function sceneStatsCount(stats, factor) {
+    if (stats?.error) return stats;
+    return {
+        ...stats,
+        total: sceneStatProduct(stats.total, factor),
+        totalImages: sceneStatProduct(stats.totalImages, factor),
+        unsetBatches: sceneStatProduct(stats.unsetBatches, factor),
+    };
+}
+
+function sceneStatsWithLatent(stats, batchSize) {
+    if (stats?.error) return stats;
+    return {
+        ...stats,
+        totalImages: sceneStatProduct(stats.total, batchSize),
+        unsetBatches: 0,
+    };
+}
+
+function sceneStatsMerge(left, right) {
+    if (left?.error || right?.error) return { ...emptyScenePromptStats(), error: left?.error || right?.error };
+    return {
+        rows: sceneStatProduct(left.rows, right.rows),
+        total: sceneStatProduct(left.total, right.total),
+        totalImages: sceneStatSum(
+            sceneStatProduct(left.total, right.totalImages - right.unsetBatches),
+            sceneStatProduct(left.totalImages, right.unsetBatches),
+        ),
+        unsetBatches: sceneStatProduct(left.unsetBatches, right.unsetBatches),
+    };
+}
+
+function sceneStatsQueue(items, hasConnectedSource) {
+    if (!hasConnectedSource) {
+        return sceneStatsSeed();
+    }
+    return items.reduce((total, item) => {
+        if (total?.error || item?.error) return { ...emptyScenePromptStats(), error: total?.error || item?.error };
+        return {
+        rows: sceneStatSum(total.rows, item.rows),
+        total: sceneStatSum(total.total, item.total),
+        totalImages: sceneStatSum(total.totalImages, item.totalImages),
+        unsetBatches: sceneStatSum(total.unsetBatches, item.unsetBatches),
+        };
+    }, emptyScenePromptStats());
 }
 
 function scenePromptStats(node, seen = new Set(), memo = new Map()) {
@@ -5982,10 +6085,7 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
 
     seen.add(node.id);
     const finish = (stats) => {
-        const result = {
-            rows: sceneStatNumber(stats.rows),
-            total: sceneStatNumber(stats.total),
-        };
+        const result = sceneStatsResult(stats);
         if (cacheKey) {
             memo.set(cacheKey, result);
             node.scenePromptTotalCache = { cacheKey, stats: result };
@@ -6003,52 +6103,47 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
 
     const upstream = scenePromptInputSource(node);
     if (isScenePromptNode(node)) {
-        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 });
+        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     if (isPromptMatrixNode(node)) {
         const matrixCount = matrixLinesForNode(node).length;
         if (!matrixCount) {
             return finish(matrixConfiguredLineCount(node) > 0
                 ? emptyScenePromptStats()
-                : (upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 }));
+                : (upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed()));
         }
-        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 };
-        return finish({ rows: base.rows * matrixCount, total: base.total * matrixCount });
+        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
+        return finish(sceneStatsMatrix(base, matrixCount));
     }
     if (isScenePathNode(node)) {
-        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 });
+        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     if (isScenePromptMergeNode(node)) {
         const sources = connectedScenePromptSourcesForMerge(node).map((entry) => entry.source);
         const firstSource = sources[0] || null;
         const secondSource = sources[1] || null;
-        const first = firstSource ? scenePromptStats(firstSource, new Set(seen), memo) : { rows: 1, total: 1 };
-        const second = secondSource ? scenePromptStats(secondSource, new Set(seen), memo) : { rows: 1, total: 1 };
-        return finish({
-            rows: first.rows * second.rows,
-            total: first.total * second.total,
-        });
+        const first = firstSource ? scenePromptStats(firstSource, new Set(seen), memo) : sceneStatsSeed();
+        const second = secondSource ? scenePromptStats(secondSource, new Set(seen), memo) : sceneStatsSeed();
+        return finish(sceneStatsMerge(first, second));
     }
     if (isScenePromptCounterNode(node)) {
-        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 };
-        return finish({ rows: base.rows, total: base.total * scenePromptCounterCount(node) });
+        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
+        return finish(sceneStatsCount(base, scenePromptCounterCount(node)));
     }
     if (isScenePromptQueueNode(node)) {
-        let rows = 0;
-        let total = 0;
-        for (const { source } of connectedScenePromptSourcesForQueue(node)) {
-            const stats = scenePromptStats(source, new Set(seen), memo);
-            rows += stats.rows;
-            total += stats.total;
-        }
-        return finish(rows ? { rows, total } : { rows: 1, total: 1 });
+        const sources = connectedScenePromptSourcesForQueue(node);
+        return finish(sceneStatsQueue(
+            sources.map(({ source }) => scenePromptStats(source, new Set(seen), memo)),
+            sources.length > 0,
+        ));
     }
     if (isSceneEmptyLatentNode(node)) {
-        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 });
+        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
+        return finish(sceneStatsWithLatent(base, sceneEmptyLatentConfig(node).batch_size));
     }
     if (isScenePresetReferenceNode(node)) {
         const presetId = String(findWidget(node, "preset_id")?.value || "").trim();
-        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 };
+        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
         return finish(scenePresetStats(presetId, base, new Set(), node.scenePresetGraph || null));
     }
     return finish(emptyScenePromptStats());
@@ -6174,11 +6269,8 @@ function mergeScenePromptEntryPair(firstEntry, secondEntry) {
 function mergeScenePromptEntryLists(firstEntries, secondEntries, limit = Infinity) {
     const first = Array.isArray(firstEntries) ? firstEntries : [];
     const second = Array.isArray(secondEntries) ? secondEntries : [];
-    if (!first.length) {
-        return Number.isFinite(limit) ? second.slice(0, limit) : second;
-    }
-    if (!second.length) {
-        return Number.isFinite(limit) ? first.slice(0, limit) : first;
+    if (!first.length || !second.length) {
+        return [];
     }
     const rows = [];
     const maxRows = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : Infinity;
@@ -6282,71 +6374,6 @@ function scenePromptLineageKey(node, limit = 80) {
     return parts.join("|");
 }
 
-function sceneMatrixRowEntries(node, seen = new Set(), memo = new Map()) {
-    if (isSceneNodeMuted(node)) {
-        return [];
-    }
-    if (isSceneNodeBypassed(node)) {
-        const bypassSource = sceneBypassInputSource(node);
-        return bypassSource ? scenePromptRowEntries(bypassSource, new Set(seen), memo) : [];
-    }
-
-    const upstream = scenePromptInputSource(node);
-    const upstreamEntries = upstream ? scenePromptRowEntries(upstream, new Set(seen), memo) : [];
-    const baseEntries = upstreamEntries.length
-        ? upstreamEntries
-        : [{
-            parts: [],
-            count: 1,
-            row: emptyMatrixRow(),
-        }];
-    const matrixRows = matrixLinesForNode(node);
-    const rows = [];
-
-    if (!matrixRows.length) {
-        return matrixConfiguredLineCount(node) > 0 ? [] : (upstream ? upstreamEntries : []);
-    }
-
-    for (const matrixRow of matrixRows) {
-        for (const entry of baseEntries) {
-            const row = entry.row || emptyMatrixRow();
-            const label = matrixLineLabel(matrixRow);
-            const displayLabels = matrixLineDisplayLabels(matrixRow);
-            const merged = mergePositiveNegativeParts(
-                row.positive_parts || [],
-                row.negative_parts || [],
-                matrixRow.positive_parts || [],
-                matrixRow.negative_parts || [],
-            );
-            rows.push({
-                ...entry,
-                parts: [...(entry.parts || []), label],
-                row: {
-                    ...row,
-                    labels: [...(row.labels || []), label],
-                    positive_parts: merged.positiveParts,
-                    negative_parts: merged.negativeParts,
-                    path_parts: [...(row.path_parts || [])],
-                    set_refs: [
-                        ...(row.set_refs || []),
-                        matrixLineRef(matrixRow),
-                    ],
-                    display_labels: [
-                        ...(row.display_labels || []),
-                        ...displayLabels,
-                    ],
-                    display_label_groups: [
-                        ...(row.display_label_groups || []),
-                        displayLabels,
-                    ],
-                },
-            });
-        }
-    }
-
-    return rows;
-}
-
 function sceneQueueDisplayPartsForEntry(entry) {
     return (entry?.parts || [])
         .slice(-2)
@@ -6416,21 +6443,20 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
                 ? []
                 : (upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo) : []));
         }
+        const baseEntries = upstream
+            ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : [{
+                parts: [],
+                count: 1,
+                row: emptyMatrixRow(),
+            }];
+        if (upstream && !baseEntries.length) {
+            return finish([]);
+        }
         const entries = [];
-        for (const matrixRow of matrixRows) {
-            const remaining = maxEntries - entries.length;
-            if (remaining <= 0) {
-                break;
-            }
-            const baseEntries = upstream
-                ? scenePromptPreviewEntries(upstream, remaining, new Set(seen), memo)
-                : [{
-                    parts: [],
-                    count: 1,
-                    row: emptyMatrixRow(),
-                }];
-            const label = matrixLineLabel(matrixRow);
-            for (const entry of baseEntries) {
+        for (const entry of baseEntries) {
+            for (const matrixRow of matrixRows) {
+                const label = matrixLineLabel(matrixRow);
                 const row = entry.row || emptyMatrixRow();
                 entries.push({
                     ...entry,
@@ -6442,7 +6468,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
                     },
                 });
                 if (entries.length >= maxEntries) {
-                    break;
+                    return finish(entries);
                 }
             }
         }
@@ -6479,9 +6505,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
             return finish(scenePromptPreviewEntries(firstSource, maxEntries, new Set(seen), memo));
         }
         const firstEntries = scenePromptPreviewEntries(firstSource, maxEntries, new Set(seen), memo);
-        const firstCount = firstEntries.length || 1;
-        const secondLimit = Math.max(1, Math.ceil(maxEntries / firstCount));
-        const secondEntries = scenePromptPreviewEntries(secondSource, secondLimit, new Set(seen), memo);
+        const secondEntries = scenePromptPreviewEntries(secondSource, maxEntries, new Set(seen), memo);
         return finish(mergeScenePromptEntryLists(firstEntries, secondEntries, maxEntries));
     }
 
@@ -6531,174 +6555,6 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
     return finish([]);
 }
 
-function scenePromptRowEntries(node, seen = new Set(), memo = new Map()) {
-    if (!node || seen.has(node.id)) {
-        return [];
-    }
-    const memoKey = scenePromptSourceCacheKey(node);
-    if (memoKey && memo.has(memoKey)) {
-        return memo.get(memoKey);
-    }
-    const finish = (entries) => {
-        if (memoKey) {
-            memo.set(memoKey, entries);
-        }
-        return entries;
-    };
-
-    seen.add(node.id);
-
-    if (isSceneNodeMuted(node)) {
-        return finish([]);
-    }
-    if (isSceneNodeBypassed(node)) {
-        const bypassSource = sceneBypassInputSource(node);
-        return finish(bypassSource ? scenePromptRowEntries(bypassSource, new Set(seen), memo) : []);
-    }
-
-    if (isScenePromptNode(node)) {
-        const title = scenePromptTitle(node);
-        const order = findWidget(node, "category_order")?.value || "";
-        const positiveParts = promptPartsFromState(
-            findWidget(node, "positive_base")?.value || "",
-            readStateFromWidget(node, "positive_json"),
-            order,
-        );
-        const negativeParts = promptPartsFromState(
-            findWidget(node, "negative_base")?.value || "",
-            readStateFromWidget(node, "negative_json"),
-            order,
-        );
-        const upstream = scenePromptInputSource(node);
-        const upstreamEntries = upstream
-            ? scenePromptRowEntries(upstream, new Set(seen), memo)
-            : [{
-                parts: [],
-                count: 1,
-                row: emptyMatrixRow(),
-            }];
-        return finish(upstreamEntries.map((entry) => {
-            const row = entry.row || emptyMatrixRow();
-            const merged = mergePositiveNegativeParts(
-                row.positive_parts || [],
-                row.negative_parts || [],
-                positiveParts,
-                negativeParts,
-            );
-            return {
-                ...entry,
-                parts: [...(entry.parts || []), title],
-                row: {
-                    ...row,
-                    labels: [...(row.labels || []), title],
-                    positive_parts: merged.positiveParts,
-                    negative_parts: merged.negativeParts,
-                    path_parts: [...(row.path_parts || [])],
-                },
-            };
-        }));
-    }
-
-    if (isPromptMatrixNode(node)) {
-        return finish(sceneMatrixRowEntries(node, seen, memo));
-    }
-
-    if (isScenePathNode(node)) {
-        const title = scenePathTitle(node);
-        const pathMode = normalizePathMode(findWidget(node, "path_mode")?.value);
-        const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
-        return finish(scenePromptRowEntries(upstream, new Set(seen), memo).map((entry) => {
-            const row = entry.row || emptyMatrixRow();
-            return {
-                ...entry,
-                row: {
-                    ...row,
-                    path_parts: appendScenePathPart(row.path_parts || [], title, pathMode),
-                },
-            };
-        }));
-    }
-
-    if (isScenePromptMergeNode(node)) {
-        const sources = connectedScenePromptSourcesForMerge(node).map((entry) => entry.source);
-        const firstSource = sources[0] || null;
-        const secondSource = sources[1] || null;
-        if (!firstSource) {
-            return finish(secondSource ? scenePromptRowEntries(secondSource, new Set(seen), memo) : []);
-        }
-        if (!secondSource) {
-            return finish(scenePromptRowEntries(firstSource, new Set(seen), memo));
-        }
-        const firstEntries = scenePromptRowEntries(firstSource, new Set(seen), memo);
-        const secondEntries = scenePromptRowEntries(secondSource, new Set(seen), memo);
-        return finish(mergeScenePromptEntryLists(firstEntries, secondEntries));
-    }
-
-    if (isScenePromptCounterNode(node)) {
-        const count = scenePromptCounterCount(node);
-        const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
-        return finish(scenePromptRowEntries(upstream, new Set(seen), memo).map((entry) => ({
-            ...multiplyScenePromptEntryCount(entry, count),
-        })));
-    }
-
-    if (isSceneEmptyLatentNode(node)) {
-        const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
-        const latent = sceneEmptyLatentConfig(node);
-        return finish(scenePromptRowEntries(upstream, new Set(seen), memo).map((entry) => ({
-            ...entry,
-            row: { ...(entry.row || emptyMatrixRow()), latent },
-        })));
-    }
-
-    if (isScenePromptQueueNode(node)) {
-        return finish(scenePromptQueueRowEntries(node, seen, memo));
-    }
-
-    return finish([]);
-}
-
-function scenePromptQueueRowEntries(node, seen = new Set(), memo = new Map()) {
-    if (isSceneNodeMuted(node)) {
-        return [];
-    }
-    if (isSceneNodeBypassed(node)) {
-        const bypassSource = sceneBypassInputSource(node);
-        return bypassSource ? scenePromptRowEntries(bypassSource, new Set(seen), memo) : [];
-    }
-
-    const cacheKey = scenePromptQueueRowsCacheKey(node);
-    if (cacheKey && node.scenePromptQueueRowsCache?.cacheKey === cacheKey) {
-        return node.scenePromptQueueRowsCache.entries;
-    }
-    if (cacheKey && memo.has(cacheKey)) {
-        return memo.get(cacheKey);
-    }
-    const entries = [];
-    for (const { source } of connectedScenePromptSourcesForQueue(node)) {
-        for (const entry of scenePromptRowEntries(source, new Set(seen), memo)) {
-            entries.push({
-                ...entry,
-                display_parts: sceneQueueDisplayPartsForEntry(entry),
-            });
-        }
-    }
-    if (cacheKey) {
-        memo.set(cacheKey, entries);
-        node.scenePromptQueueRowsCache = { cacheKey, entries };
-    }
-    return entries;
-}
-
 function sceneNodeRevision(node) {
     return Number(node?.scenePromptRevision || 0);
 }
@@ -6739,11 +6595,7 @@ function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null
         return node.scenePromptQueueDisplayCache;
     }
     const stats = scenePromptStats(node);
-    const rows = scenePromptQueueRowEntries(node);
     const entries = sceneQueueDisplayEntriesFromRows(sceneQueuePreviewRows(node));
-    const totalImages = rows.length
-        ? rows.reduce((total, entry) => total + scenePromptEntryImageCount(entry), 0)
-        : stats.total;
     const cache = {
         cacheKey: finalKey,
         width: drawWidth,
@@ -6754,7 +6606,8 @@ function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null
         rowCount: stats.rows,
         enabledCount: stats.rows,
         totalBatches: stats.total,
-        totalImages,
+        totalImages: stats.totalImages,
+        error: stats.error || "",
         entries,
         naturalHeight: sceneQueueDisplayNaturalHeight(entries, drawWidth),
     };
@@ -6847,13 +6700,19 @@ function sceneExpandCounts(node) {
     }
     const scenePromptSource = sceneExpandScenePromptSourceNode(node);
     if (isScenePromptSourceNode(scenePromptSource)) {
-        return { totalBatches: scenePromptTotalCount(scenePromptSource), totalImages: null };
+        const stats = scenePromptStats(scenePromptSource);
+        return stats.error
+            ? { totalBatches: null, totalImages: null, error: stats.error }
+            : { totalBatches: stats.total, totalImages: null };
     }
     return { totalBatches: 0, totalImages: null };
 }
 
 function sceneExpandCountLabel(node) {
-    const { totalBatches, totalImages } = sceneExpandCounts(node);
+    const { totalBatches, totalImages, error } = sceneExpandCounts(node);
+    if (error) {
+        return error;
+    }
     const totalLabel = totalImages === null ? `${totalBatches}回` : formatSceneExpandCounts(totalBatches, totalImages);
     const run = sceneBatchRunForNode(node);
     const status = sceneBatchRunStatus(run);
@@ -7839,14 +7698,23 @@ function releaseSceneRunsOnPageHide(event) {
         return;
     }
     const handles = new Set(sceneRunReleaseStates.keys());
-    for (const handle of sceneRunHandlesByPromptId.values()) {
-        handles.add(handle);
-    }
     for (const run of sceneBatchRunsById.values()) {
-        if (run?.runHandle) handles.add(run.runHandle);
+        if (run?.runHandle
+            && !run.waiting
+            && !run.queueing
+            && !run.currentPromptId
+            && !run.pendingPromptIds?.size) {
+            handles.add(run.runHandle);
+        }
     }
     for (const run of sceneBatchDetachedRuns.values()) {
-        if (run?.runHandle) handles.add(run.runHandle);
+        if (run?.runHandle
+            && !run.waiting
+            && !run.queueing
+            && !run.currentPromptId
+            && !run.pendingPromptIds?.size) {
+            handles.add(run.runHandle);
+        }
     }
     for (const handle of handles) {
         releaseSceneRunHandle(handle, { keepalive: true });
@@ -8520,7 +8388,11 @@ function startSceneBatchRun(node) {
     syncAllScenePromptNames();
     let run;
     try {
-        run = createSceneBatchRun(node, sceneExpandCounts(node).totalBatches);
+        const counts = sceneExpandCounts(node);
+        if (counts.error) {
+            throw new Error(counts.error);
+        }
+        run = createSceneBatchRun(node, counts.totalBatches);
         run.preparing = true;
     } catch (error) {
         resetSceneExpandRunControls(node, { mark: false });
@@ -8718,10 +8590,15 @@ function drawSceneQueueListContent(ctx, cache, width, y, maxHeight = Infinity) {
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#dfe8f5";
     ctx.fillText(
-        `${cache.title || "生成キュー"}: ${cache.enabledCount}/${cache.rowCount}行 / ${formatSceneExpandCounts(cache.totalBatches, cache.totalImages)}`,
+        cache.error
+            ? `${cache.title || "生成キュー"}: ${cache.error}`
+            : `${cache.title || "生成キュー"}: ${cache.enabledCount}/${cache.rowCount}行 / ${formatSceneExpandCounts(cache.totalBatches, cache.totalImages)}`,
         10,
         y + 12,
     );
+    if (cache.error) {
+        return;
+    }
     if (!cache.hasMatrix) {
         ctx.fillStyle = "#aab3c4";
         ctx.fillText(cache.emptyText || "matrixを接続してください", 10, y + 32);
@@ -8789,11 +8666,9 @@ function refreshScenePromptQueueNode(node, options = {}) {
     const stats = measureDetails ? scenePromptStats(node) : null;
     const list = findSceneWidget(node, "scene_prompt_queue_list");
     if (list) {
-        const rows = measureDetails ? scenePromptQueueRowEntries(node) : [];
-        const totalImages = rows.length
-            ? rows.reduce((total, entry) => total + scenePromptEntryImageCount(entry), 0)
-            : stats?.total;
-        list.value = measureDetails ? `${stats.rows}行 / ${formatSceneExpandCounts(stats.total, totalImages)}` : "";
+        list.value = measureDetails
+            ? (stats.error || `${stats.rows}行 / ${formatSceneExpandCounts(stats.total, stats.totalImages)}`)
+            : "";
         list.computedHeight = SCENE_COMPACT_WIDGET_HEIGHT;
     }
     node.setDirtyCanvas?.(true, true);
@@ -8989,7 +8864,9 @@ function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
 
 function loadMatrixTextAreaAutocomplete() {
     if (!matrixTextAreaAutocompleteModulePromise) {
-        matrixTextAreaAutocompleteModulePromise = import(CUSTOM_SCRIPTS_AUTOCOMPLETE_URL)
+        const route = "/extensions/ComfyUI-Custom-Scripts/js/common/autocomplete.js";
+        const url = typeof api.fileURL === "function" ? api.fileURL(route) : route;
+        matrixTextAreaAutocompleteModulePromise = import(url)
             .then(({ TextAreaAutoComplete }) => (
                 typeof TextAreaAutoComplete === "function" ? TextAreaAutoComplete : null
             ))
@@ -9760,7 +9637,21 @@ function appendSceneSavePreview(detail) {
     node.scenePreviewImages = node.scenePreviewImages || new Map();
     node.imgs = Array.isArray(node.imgs) ? node.imgs : [];
 
-    for (const imageRef of images) {
+    const needed = [];
+    const seenKeys = new Set();
+    for (const imageRef of [...images].reverse()) {
+        const key = imageRefKey(imageRef);
+        if (seenKeys.has(key)) {
+            continue;
+        }
+        seenKeys.add(key);
+        needed.push(imageRef);
+        if (needed.length >= SCENE_SAVE_PREVIEW_LIMIT) {
+            break;
+        }
+    }
+
+    for (const imageRef of needed.reverse()) {
         const key = imageRefKey(imageRef);
         if (node.scenePreviewKeys.has(key) && node.scenePreviewImages.has(key)) {
             const existingImage = node.scenePreviewImages.get(key);
