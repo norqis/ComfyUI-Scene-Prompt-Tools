@@ -193,6 +193,10 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
     return output
 
 
+def _workflow_id(node_id):
+    return int(node_id) if str(node_id).isdigit() else node_id
+
+
 def _workflow_link_parts(link):
     if not isinstance(link, list) or len(link) < 6:
         return None
@@ -282,9 +286,9 @@ def _add_workflow_link(links, by_id, next_link_id, source_id, source_slot, targe
     target_input["link"] = next_link_id
     links.append([
         next_link_id,
-        source.get("id", source_id),
+        _workflow_id(source_id),
         source_slot,
-        target.get("id", target_id),
+        _workflow_id(target_id),
         target_slot,
         link_type or target_input.get("type") or output.get("type") or "*",
     ])

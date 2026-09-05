@@ -168,6 +168,14 @@ class RunContextStore:
 
     def get_plan(self, handle, expand_node_id):
         """Read a cached expand plan, refreshing the active context when present."""
+        return copy.deepcopy(self.get_plan_reference(handle, expand_node_id))
+
+    def get_plan_reference(self, handle, expand_node_id):
+        """Read a cached plan for Scene-node execution without copying it.
+
+        The cached plan is private to this store.  Scene node consumers treat
+        it as read-only; callers that need an editable result use get_plan().
+        """
         key = str(expand_node_id or "").strip()
         if not key:
             raise SceneRunError("Scene Prompt Expand のIDがありません。")
@@ -186,7 +194,7 @@ class RunContextStore:
                 else:
                     expired = []
                     self._touch_locked(entry, now)
-                    result = copy.deepcopy(entry["plans"].get(key))
+                    result = entry["plans"].get(key)
         self._notify_expired(expired)
         if entry is None:
             raise SceneRunError("実行コンテキストが見つかりません。画像生成を開始し直してください。")
@@ -195,6 +203,10 @@ class RunContextStore:
         return result
 
     def set_plan(self, handle, expand_node_id, plan):
+        return copy.deepcopy(self.set_plan_reference(handle, expand_node_id, plan))
+
+    def set_plan_reference(self, handle, expand_node_id, plan):
+        """Cache a plan once and return its private read-only reference."""
         key = str(expand_node_id or "").strip()
         if not key:
             raise SceneRunError("Scene Prompt Expand のIDがありません。")
@@ -215,7 +227,7 @@ class RunContextStore:
                     self._touch_locked(entry, now)
                     if key not in entry["plans"]:
                         entry["plans"][key] = copy.deepcopy(plan)
-                    result = copy.deepcopy(entry["plans"][key])
+                    result = entry["plans"][key]
         self._notify_expired(expired)
         if entry is None:
             raise SceneRunError("実行コンテキストが見つかりません。画像生成を開始し直してください。")
@@ -298,8 +310,16 @@ def get_run_plan(handle, expand_node_id):
     return RUN_CONTEXTS.get_plan(handle, expand_node_id)
 
 
+def get_run_plan_reference(handle, expand_node_id):
+    return RUN_CONTEXTS.get_plan_reference(handle, expand_node_id)
+
+
 def set_run_plan(handle, expand_node_id, plan):
     return RUN_CONTEXTS.set_plan(handle, expand_node_id, plan)
+
+
+def set_run_plan_reference(handle, expand_node_id, plan):
+    return RUN_CONTEXTS.set_plan_reference(handle, expand_node_id, plan)
 
 
 def claim_run_context(handle, user_id, prompt_id):

@@ -198,10 +198,23 @@ class RunContextTests(unittest.TestCase):
 
     def test_get_run_user_id_does_not_touch_or_copy_plans(self):
         store = RUNS.RunContextStore(prepared_ttl_seconds=10)
-        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 1, 5]):
             handle = store.create("alice")
-            with self.assertRaises(RUNS.SceneRunError):
-                store.get_user_id(handle)
+            store.set_plan(handle, "expand", {"rows": [{"row": {"positive_parts": ["A"]}}]})
+            before_access = store._entries[handle]["last_access"]
+            with mock.patch.object(RUNS.copy, "deepcopy", side_effect=AssertionError("must not copy")):
+                self.assertEqual(store.get_user_id(handle), "alice")
+        self.assertEqual(store._entries[handle]["last_access"], before_access)
+
+    def test_internal_plan_reference_is_read_only_for_scene_node_consumers(self):
+        store = RUNS.RunContextStore(prepared_ttl_seconds=999)
+        handle = store.create("alice")
+        stored = store.set_plan_reference(handle, "expand", {"rows": [{"row": {"positive_parts": ["A"]}}]})
+        with mock.patch.object(RUNS.copy, "deepcopy", side_effect=AssertionError("must not copy")):
+            self.assertIs(store.get_plan_reference(handle, "expand"), stored)
+        editable = store.get_plan(handle, "expand")
+        editable["rows"][0]["row"]["positive_parts"].append("changed")
+        self.assertEqual(stored["rows"][0]["row"]["positive_parts"], ["A"])
 
     def test_nodes_do_not_expose_user_id_inputs(self):
         source = "\n".join(

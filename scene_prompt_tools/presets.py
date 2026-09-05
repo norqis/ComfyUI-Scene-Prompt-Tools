@@ -440,7 +440,6 @@ def save_preset(payload, user_id="default"):
         raise ScenePresetError("Presetの実行グラフがありません。")
     if not isinstance(workflow, dict):
         raise ScenePresetError("Presetの編集用ワークフローがありません。")
-    _validate_workflow_nodes(workflow, api_graph["output"])
     connected_nodes = _connected_preset_nodes(api_graph["output"], output_node_id)
     workflow = _connected_preset_workflow(workflow, connected_nodes)
     api_graph = _api_graph_with_titles({**api_graph, "output": connected_nodes}, workflow)
@@ -633,7 +632,6 @@ def _scene_node_value_impl(
     user_id="default",
     run_handle="",
     memo=None,
-    scope=("root",),
     preset_stack=(),
 ):
     node_id = str(node_id)
@@ -642,9 +640,8 @@ def _scene_node_value_impl(
     if node_id in node_stack:
         raise ScenePresetError(f"Sceneグラフが循環しています: #{node_id}")
     memo = {} if memo is None else memo
-    memo_key = (id(nodes), node_id, scope)
-    if memo_key in memo:
-        return memo[memo_key]
+    if node_id in memo:
+        return memo[node_id]
     node = nodes.get(node_id)
     if not isinstance(node, dict):
         raise ScenePresetError(f"Sceneノード #{node_id} が見つかりません。")
@@ -663,7 +660,6 @@ def _scene_node_value_impl(
             user_id,
             run_handle,
             memo,
-            scope,
             preset_stack,
         )
 
@@ -678,13 +674,13 @@ def _scene_node_value_impl(
                 result = str(raw_value).lower() == "true"
             else:
                 result = SAFE_VALUE_NODE_CLASSES[class_type](raw_value)
-            memo[memo_key] = result
+            memo[node_id] = result
             return result
         except (TypeError, ValueError) as exc:
             raise ScenePresetError(f"{_node_label(node_id, node)} の値が不正です。") from exc
     if class_type == BOUNDARY_INPUT:
         result = ScenePresetInput().build()[0]
-        memo[memo_key] = result
+        memo[node_id] = result
         return result
     if class_type == "ScenePresetReference":
         preset_id = _clean_preset_id(_node_inputs(node).get("preset_id"))
@@ -698,11 +694,9 @@ def _scene_node_value_impl(
             upstream,
             user_id,
             run_handle,
-            memo,
-            (*scope, "reference", node_id, preset_id),
             preset_stack,
         )
-        memo[memo_key] = result
+        memo[node_id] = result
         return result
     cls = SAFE_NODE_CLASSES.get(class_type)
     if cls is None:
@@ -711,7 +705,7 @@ def _scene_node_value_impl(
     if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
-    memo[memo_key] = result[0]
+    memo[node_id] = result[0]
     return result[0]
 
 
@@ -724,7 +718,6 @@ def _scene_node_value(
     user_id="default",
     run_handle="",
     memo=None,
-    scope=("root",),
     preset_stack=(),
 ):
     try:
@@ -737,7 +730,6 @@ def _scene_node_value(
             user_id,
             run_handle,
             memo,
-            scope,
             preset_stack,
         )
     except ScenePresetResolutionError:
@@ -757,8 +749,6 @@ def _evaluate_preset_scene(
     upstream,
     user_id="default",
     run_handle="",
-    memo=None,
-    scope=("root",),
     preset_stack=(),
 ):
     preset_id = str(preset["metadata"]["preset_id"])
@@ -778,8 +768,7 @@ def _evaluate_preset_scene(
         input_values,
         user_id,
         run_handle,
-        memo,
-        scope,
+        {},
         (*preset_stack, preset_id),
     )
 

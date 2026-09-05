@@ -48,7 +48,7 @@ from .plan import (
     transform,
     with_source_node,
 )
-from .runs import get_run_plan, require_run_context, set_run_plan
+from .runs import get_run_plan_reference, require_run_context, set_run_plan_reference
 
 
 MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE"
@@ -714,10 +714,10 @@ def _scene_count(value):
 def _scene_run_plan(run_handle, scene_prompt=None, unique_id=None):
     if not str(run_handle or "").strip():
         return normalize_plan(scene_prompt)
-    cached = get_run_plan(run_handle, unique_id)
+    cached = get_run_plan_reference(run_handle, unique_id)
     if cached is not None:
         return cached
-    return set_run_plan(run_handle, unique_id, normalize_plan(scene_prompt))
+    return set_run_plan_reference(run_handle, unique_id, normalize_plan(scene_prompt))
 
 
 def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False):
@@ -784,7 +784,14 @@ def _filename_units(value):
 def _output_filename_prefix(value, extension, padding, counter=None):
     """Keep final PNG and its reservation sidecar within Windows component limits."""
     prefix = _safe_filename_prefix(value)
-    counter_width = max(int(padding), len(str(MAX_SAFE_INTEGER if counter is None else counter)))
+    # SceneSaveImage only accepts file indices up to MAX_SAFE_INTEGER. Reserve
+    # that full width up front so a long prefix does not change while a valid
+    # counter grows during collision handling.
+    counter_width = max(
+        int(padding),
+        len(str(MAX_SAFE_INTEGER)),
+        len(str(counter)) if counter is not None else 0,
+    )
     suffix = f"{'9' * counter_width}.{extension}.scene-save-reservation"
     suffix_utf8, suffix_utf16 = _filename_units(suffix)
     if suffix_utf8 > 255 or suffix_utf16 > 255:
