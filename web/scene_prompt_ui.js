@@ -78,7 +78,6 @@ const SCENE_COMPACT_WIDGET_HEIGHT = 18;
 const SCENE_NODE_AUTO_FIT_MAX_HEIGHT = 720;
 const SCENE_WIDGET_CANVAS_MAX_PIXELS = 2500000;
 const SCENE_SAVE_PREVIEW_LIMIT = 1;
-const CUSTOM_SCRIPTS_AUTOCOMPLETE_URL = "/extensions/ComfyUI-Custom-Scripts/js/common/autocomplete.js";
 const SCENE_QUEUE_GROUP_COLORS = [
     "#c9a4ff",
     "#ff7777",
@@ -156,6 +155,7 @@ let promptItemsRequestGeneration = 0;
 let savedPromptsRequestGeneration = 0;
 let activePopup = null;
 let activePopupContext = null;
+let popupRequestIntent = 0;
 const popupSessionsByNode = new WeakMap();
 const matrixTextAreaAutocompleteInstances = new WeakMap();
 let matrixTextAreaAutocompleteModulePromise = null;
@@ -1764,32 +1764,35 @@ function createButton(text, className = "") {
 }
 
 function beginPopupRequest(node) {
+    popupRequestIntent += 1;
     const requestId = Number(node?.scenePromptPopupRequestId || 0) + 1;
     if (node) {
         node.scenePromptPopupRequestId = requestId;
     }
-    return requestId;
+    return { requestId, intent: popupRequestIntent };
 }
 
-function isCurrentPopupRequest(node, requestId) {
+function isCurrentPopupRequest(node, request) {
     return !!node
-        && node.scenePromptPopupRequestId === requestId
+        && node.scenePromptPopupRequestId === request?.requestId
+        && popupRequestIntent === request?.intent
         && node.graph === app.graph;
 }
 
 function invalidatePopupRequests(node) {
+    popupRequestIntent += 1;
     if (node) {
         node.scenePromptPopupRequestId = Number(node.scenePromptPopupRequestId || 0) + 1;
     }
 }
 
 async function loadPopupRequest(node, loader, failureMessage) {
-    const requestId = beginPopupRequest(node);
+    const request = beginPopupRequest(node);
     try {
         const value = await loader();
-        return isCurrentPopupRequest(node, requestId) ? value : null;
+        return isCurrentPopupRequest(node, request) ? value : null;
     } catch (error) {
-        if (isCurrentPopupRequest(node, requestId)) {
+        if (isCurrentPopupRequest(node, request)) {
             showSceneBatchError(failureMessage, error);
         }
         return null;
@@ -1832,6 +1835,7 @@ function closePopup(options = {}) {
             }
         }
         disposeMatrixTextAreaAutocompleteIn(activePopup);
+        activePopup.scenePopupDragDispose?.();
         activePopup.remove();
         activePopup = parent?.popup || null;
         activePopupContext = parent?.context || null;
@@ -1929,6 +1933,7 @@ function fitPopupToContent(popup) {
 }
 
 function makePopupDraggable(node, popup, handle) {
+    let cleanup = null;
     handle.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) {
             return;
@@ -1948,9 +1953,11 @@ function makePopupDraggable(node, popup, handle) {
             popup.style.top = `${Math.round(top)}px`;
         };
 
-        const up = () => {
+        const finish = () => {
             document.removeEventListener("pointermove", move, true);
-            document.removeEventListener("pointerup", up, true);
+            document.removeEventListener("pointerup", finish, true);
+            document.removeEventListener("pointercancel", finish, true);
+            cleanup = null;
             if (popup.sceneSecondaryPopup) {
                 rememberSecondaryPopupRect(node, popup);
             } else {
@@ -1959,8 +1966,11 @@ function makePopupDraggable(node, popup, handle) {
         };
 
         document.addEventListener("pointermove", move, true);
-        document.addEventListener("pointerup", up, true);
+        document.addEventListener("pointerup", finish, true);
+        document.addEventListener("pointercancel", finish, true);
+        cleanup = finish;
     });
+    return () => cleanup?.();
 }
 
 function openPopupShell(node, titleText, options = {}) {
@@ -2064,7 +2074,7 @@ function openPopupShell(node, titleText, options = {}) {
 
     popup.appendChild(head);
     document.body.appendChild(popup);
-    makePopupDraggable(node, popup, head);
+    popup.scenePopupDragDispose = makePopupDraggable(node, popup, head);
 
     activePopup = popup;
     activePopupContext = {
@@ -5920,39 +5930,41 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
         };
         let result = emptyScenePromptStats();
         if (node.class_type === "ScenePresetInput") {
-            result = upstream || { rows: 1, total: 1 };
+            result = upstream || sceneStatsSeed();
         } else if (node.class_type === "ScenePrompter") {
-            result = source("scene_prompt") || { rows: 1, total: 1 };
+            result = source("scene_prompt") || sceneStatsSeed();
         } else if (node.class_type === "SceneMatrix") {
-            const base = source("scene_prompt") || { rows: 1, total: 1 };
+            const base = source("scene_prompt") || sceneStatsSeed();
             const count = apiMatrixEnabledCount(node);
             const configured = apiMatrixConfigured(node);
-            result = count ? { rows: base.rows * count, total: base.total * count } : (configured ? emptyScenePromptStats() : base);
-        } else if (node.class_type === "ScenePath" || node.class_type === "SceneEmptyLatent") {
-            result = source("scene_prompt") || { rows: 1, total: 1 };
+            result = count ? sceneStatsMatrix(base, count) : (configured ? emptyScenePromptStats() : base);
+        } else if (node.class_type === "ScenePath") {
+            result = source("scene_prompt") || sceneStatsSeed();
+        } else if (node.class_type === "SceneEmptyLatent") {
+            result = sceneStatsWithLatent(source("scene_prompt") || sceneStatsSeed(), clampSceneCount(apiInput(node, "batch_size"), 1));
         } else if (node.class_type === "ScenePromptCounter") {
-            const base = source("scene_prompt") || { rows: 1, total: 1 };
+            const base = source("scene_prompt") || sceneStatsSeed();
             const count = clampSceneCount(apiInput(node, "count"), 1);
-            result = { rows: base.rows, total: base.total * count };
+            result = sceneStatsCount(base, count);
         } else if (node.class_type === "ScenePrompterMerge") {
-            const first = source("scene_prompt1") || { rows: 1, total: 1 };
-            const second = source("scene_prompt2") || { rows: 1, total: 1 };
-            result = { rows: first.rows * second.rows, total: first.total * second.total };
+            const first = source("scene_prompt1") || sceneStatsSeed();
+            const second = source("scene_prompt2") || sceneStatsSeed();
+            result = sceneStatsMerge(first, second);
         } else if (node.class_type === "ScenePrompterQueue") {
             result = emptyScenePromptStats();
+            let hasSource = false;
             for (let index = 1; index <= SCENE_PROMPT_QUEUE_INPUT_COUNT; index += 1) {
                 const item = source(`scene_prompt${index}`);
                 if (item) {
-                    result = { rows: result.rows + item.rows, total: result.total + item.total };
+                    hasSource = true;
+                    result = sceneStatsQueue([result, item], true);
                 }
             }
-            if (!result.rows) {
-                result = { rows: 1, total: 1 };
-            }
+            result = sceneStatsQueue([result], hasSource);
         } else if (node.class_type === "ScenePresetReference") {
             result = scenePresetStats(String(apiInput(node, "preset_id") || ""), source("scene_prompt"), nextStack);
         }
-        result = { rows: sceneStatNumber(result.rows), total: sceneStatNumber(result.total) };
+        result = sceneStatsResult(result);
         memo.set(nodeId, result);
         return result;
     };
@@ -5960,12 +5972,85 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
 }
 
 function emptyScenePromptStats() {
-    return { rows: 0, total: 0 };
+    return { rows: 0, total: 0, totalImages: 0, unsetBatches: 0 };
 }
 
 function sceneStatNumber(value) {
     const number = Number(value || 0);
-    return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+    return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+
+function sceneStatProduct(...values) {
+    const result = values.reduce((total, value) => total * sceneStatNumber(value), 1);
+    return Number.isSafeInteger(result) ? result : 0;
+}
+
+function sceneStatSum(...values) {
+    const result = values.reduce((total, value) => total + sceneStatNumber(value), 0);
+    return Number.isSafeInteger(result) ? result : 0;
+}
+
+function sceneStatsSeed() {
+    return { rows: 1, total: 1, totalImages: 1, unsetBatches: 1 };
+}
+
+function sceneStatsResult(stats) {
+    return {
+        rows: sceneStatNumber(stats.rows),
+        total: sceneStatNumber(stats.total),
+        totalImages: sceneStatNumber(stats.totalImages ?? stats.total),
+        unsetBatches: sceneStatNumber(stats.unsetBatches ?? stats.total),
+    };
+}
+
+function sceneStatsMatrix(stats, factor) {
+    return {
+        rows: sceneStatProduct(stats.rows, factor),
+        total: sceneStatProduct(stats.total, factor),
+        totalImages: sceneStatProduct(stats.totalImages, factor),
+        unsetBatches: sceneStatProduct(stats.unsetBatches, factor),
+    };
+}
+
+function sceneStatsCount(stats, factor) {
+    return {
+        ...stats,
+        total: sceneStatProduct(stats.total, factor),
+        totalImages: sceneStatProduct(stats.totalImages, factor),
+        unsetBatches: sceneStatProduct(stats.unsetBatches, factor),
+    };
+}
+
+function sceneStatsWithLatent(stats, batchSize) {
+    return {
+        ...stats,
+        totalImages: sceneStatProduct(stats.total, batchSize),
+        unsetBatches: 0,
+    };
+}
+
+function sceneStatsMerge(left, right) {
+    return {
+        rows: sceneStatProduct(left.rows, right.rows),
+        total: sceneStatProduct(left.total, right.total),
+        totalImages: sceneStatSum(
+            sceneStatProduct(left.total, right.totalImages - right.unsetBatches),
+            sceneStatProduct(left.totalImages, right.unsetBatches),
+        ),
+        unsetBatches: sceneStatProduct(left.unsetBatches, right.unsetBatches),
+    };
+}
+
+function sceneStatsQueue(items, hasConnectedSource) {
+    if (!hasConnectedSource) {
+        return sceneStatsSeed();
+    }
+    return items.reduce((total, item) => ({
+        rows: sceneStatSum(total.rows, item.rows),
+        total: sceneStatSum(total.total, item.total),
+        totalImages: sceneStatSum(total.totalImages, item.totalImages),
+        unsetBatches: sceneStatSum(total.unsetBatches, item.unsetBatches),
+    }), emptyScenePromptStats());
 }
 
 function scenePromptStats(node, seen = new Set(), memo = new Map()) {
@@ -5982,10 +6067,7 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
 
     seen.add(node.id);
     const finish = (stats) => {
-        const result = {
-            rows: sceneStatNumber(stats.rows),
-            total: sceneStatNumber(stats.total),
-        };
+        const result = sceneStatsResult(stats);
         if (cacheKey) {
             memo.set(cacheKey, result);
             node.scenePromptTotalCache = { cacheKey, stats: result };
@@ -6003,52 +6085,47 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
 
     const upstream = scenePromptInputSource(node);
     if (isScenePromptNode(node)) {
-        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 });
+        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     if (isPromptMatrixNode(node)) {
         const matrixCount = matrixLinesForNode(node).length;
         if (!matrixCount) {
             return finish(matrixConfiguredLineCount(node) > 0
                 ? emptyScenePromptStats()
-                : (upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 }));
+                : (upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed()));
         }
-        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 };
-        return finish({ rows: base.rows * matrixCount, total: base.total * matrixCount });
+        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
+        return finish(sceneStatsMatrix(base, matrixCount));
     }
     if (isScenePathNode(node)) {
-        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 });
+        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     if (isScenePromptMergeNode(node)) {
         const sources = connectedScenePromptSourcesForMerge(node).map((entry) => entry.source);
         const firstSource = sources[0] || null;
         const secondSource = sources[1] || null;
-        const first = firstSource ? scenePromptStats(firstSource, new Set(seen), memo) : { rows: 1, total: 1 };
-        const second = secondSource ? scenePromptStats(secondSource, new Set(seen), memo) : { rows: 1, total: 1 };
-        return finish({
-            rows: first.rows * second.rows,
-            total: first.total * second.total,
-        });
+        const first = firstSource ? scenePromptStats(firstSource, new Set(seen), memo) : sceneStatsSeed();
+        const second = secondSource ? scenePromptStats(secondSource, new Set(seen), memo) : sceneStatsSeed();
+        return finish(sceneStatsMerge(first, second));
     }
     if (isScenePromptCounterNode(node)) {
-        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 };
-        return finish({ rows: base.rows, total: base.total * scenePromptCounterCount(node) });
+        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
+        return finish(sceneStatsCount(base, scenePromptCounterCount(node)));
     }
     if (isScenePromptQueueNode(node)) {
-        let rows = 0;
-        let total = 0;
-        for (const { source } of connectedScenePromptSourcesForQueue(node)) {
-            const stats = scenePromptStats(source, new Set(seen), memo);
-            rows += stats.rows;
-            total += stats.total;
-        }
-        return finish(rows ? { rows, total } : { rows: 1, total: 1 });
+        const sources = connectedScenePromptSourcesForQueue(node);
+        return finish(sceneStatsQueue(
+            sources.map(({ source }) => scenePromptStats(source, new Set(seen), memo)),
+            sources.length > 0,
+        ));
     }
     if (isSceneEmptyLatentNode(node)) {
-        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 });
+        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
+        return finish(sceneStatsWithLatent(base, sceneEmptyLatentConfig(node).batch_size));
     }
     if (isScenePresetReferenceNode(node)) {
         const presetId = String(findWidget(node, "preset_id")?.value || "").trim();
-        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : { rows: 1, total: 1 };
+        const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
         return finish(scenePresetStats(presetId, base, new Set(), node.scenePresetGraph || null));
     }
     return finish(emptyScenePromptStats());
@@ -6174,11 +6251,8 @@ function mergeScenePromptEntryPair(firstEntry, secondEntry) {
 function mergeScenePromptEntryLists(firstEntries, secondEntries, limit = Infinity) {
     const first = Array.isArray(firstEntries) ? firstEntries : [];
     const second = Array.isArray(secondEntries) ? secondEntries : [];
-    if (!first.length) {
-        return Number.isFinite(limit) ? second.slice(0, limit) : second;
-    }
-    if (!second.length) {
-        return Number.isFinite(limit) ? first.slice(0, limit) : first;
+    if (!first.length || !second.length) {
+        return [];
     }
     const rows = [];
     const maxRows = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : Infinity;
@@ -6293,7 +6367,10 @@ function sceneMatrixRowEntries(node, seen = new Set(), memo = new Map()) {
 
     const upstream = scenePromptInputSource(node);
     const upstreamEntries = upstream ? scenePromptRowEntries(upstream, new Set(seen), memo) : [];
-    const baseEntries = upstreamEntries.length
+    if (upstream && !upstreamEntries.length) {
+        return [];
+    }
+    const baseEntries = upstream
         ? upstreamEntries
         : [{
             parts: [],
@@ -6307,8 +6384,8 @@ function sceneMatrixRowEntries(node, seen = new Set(), memo = new Map()) {
         return matrixConfiguredLineCount(node) > 0 ? [] : (upstream ? upstreamEntries : []);
     }
 
-    for (const matrixRow of matrixRows) {
-        for (const entry of baseEntries) {
+    for (const entry of baseEntries) {
+        for (const matrixRow of matrixRows) {
             const row = entry.row || emptyMatrixRow();
             const label = matrixLineLabel(matrixRow);
             const displayLabels = matrixLineDisplayLabels(matrixRow);
@@ -6416,21 +6493,20 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
                 ? []
                 : (upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo) : []));
         }
+        const baseEntries = upstream
+            ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : [{
+                parts: [],
+                count: 1,
+                row: emptyMatrixRow(),
+            }];
+        if (upstream && !baseEntries.length) {
+            return finish([]);
+        }
         const entries = [];
-        for (const matrixRow of matrixRows) {
-            const remaining = maxEntries - entries.length;
-            if (remaining <= 0) {
-                break;
-            }
-            const baseEntries = upstream
-                ? scenePromptPreviewEntries(upstream, remaining, new Set(seen), memo)
-                : [{
-                    parts: [],
-                    count: 1,
-                    row: emptyMatrixRow(),
-                }];
-            const label = matrixLineLabel(matrixRow);
-            for (const entry of baseEntries) {
+        for (const entry of baseEntries) {
+            for (const matrixRow of matrixRows) {
+                const label = matrixLineLabel(matrixRow);
                 const row = entry.row || emptyMatrixRow();
                 entries.push({
                     ...entry,
@@ -6479,9 +6555,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
             return finish(scenePromptPreviewEntries(firstSource, maxEntries, new Set(seen), memo));
         }
         const firstEntries = scenePromptPreviewEntries(firstSource, maxEntries, new Set(seen), memo);
-        const firstCount = firstEntries.length || 1;
-        const secondLimit = Math.max(1, Math.ceil(maxEntries / firstCount));
-        const secondEntries = scenePromptPreviewEntries(secondSource, secondLimit, new Set(seen), memo);
+        const secondEntries = scenePromptPreviewEntries(secondSource, maxEntries, new Set(seen), memo);
         return finish(mergeScenePromptEntryLists(firstEntries, secondEntries, maxEntries));
     }
 
@@ -6739,11 +6813,7 @@ function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null
         return node.scenePromptQueueDisplayCache;
     }
     const stats = scenePromptStats(node);
-    const rows = scenePromptQueueRowEntries(node);
     const entries = sceneQueueDisplayEntriesFromRows(sceneQueuePreviewRows(node));
-    const totalImages = rows.length
-        ? rows.reduce((total, entry) => total + scenePromptEntryImageCount(entry), 0)
-        : stats.total;
     const cache = {
         cacheKey: finalKey,
         width: drawWidth,
@@ -6754,7 +6824,7 @@ function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null
         rowCount: stats.rows,
         enabledCount: stats.rows,
         totalBatches: stats.total,
-        totalImages,
+        totalImages: stats.totalImages,
         entries,
         naturalHeight: sceneQueueDisplayNaturalHeight(entries, drawWidth),
     };
@@ -7839,14 +7909,23 @@ function releaseSceneRunsOnPageHide(event) {
         return;
     }
     const handles = new Set(sceneRunReleaseStates.keys());
-    for (const handle of sceneRunHandlesByPromptId.values()) {
-        handles.add(handle);
-    }
     for (const run of sceneBatchRunsById.values()) {
-        if (run?.runHandle) handles.add(run.runHandle);
+        if (run?.runHandle
+            && !run.waiting
+            && !run.queueing
+            && !run.currentPromptId
+            && !run.pendingPromptIds?.size) {
+            handles.add(run.runHandle);
+        }
     }
     for (const run of sceneBatchDetachedRuns.values()) {
-        if (run?.runHandle) handles.add(run.runHandle);
+        if (run?.runHandle
+            && !run.waiting
+            && !run.queueing
+            && !run.currentPromptId
+            && !run.pendingPromptIds?.size) {
+            handles.add(run.runHandle);
+        }
     }
     for (const handle of handles) {
         releaseSceneRunHandle(handle, { keepalive: true });
@@ -8789,11 +8868,7 @@ function refreshScenePromptQueueNode(node, options = {}) {
     const stats = measureDetails ? scenePromptStats(node) : null;
     const list = findSceneWidget(node, "scene_prompt_queue_list");
     if (list) {
-        const rows = measureDetails ? scenePromptQueueRowEntries(node) : [];
-        const totalImages = rows.length
-            ? rows.reduce((total, entry) => total + scenePromptEntryImageCount(entry), 0)
-            : stats?.total;
-        list.value = measureDetails ? `${stats.rows}行 / ${formatSceneExpandCounts(stats.total, totalImages)}` : "";
+        list.value = measureDetails ? `${stats.rows}行 / ${formatSceneExpandCounts(stats.total, stats.totalImages)}` : "";
         list.computedHeight = SCENE_COMPACT_WIDGET_HEIGHT;
     }
     node.setDirtyCanvas?.(true, true);
@@ -8989,7 +9064,9 @@ function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
 
 function loadMatrixTextAreaAutocomplete() {
     if (!matrixTextAreaAutocompleteModulePromise) {
-        matrixTextAreaAutocompleteModulePromise = import(CUSTOM_SCRIPTS_AUTOCOMPLETE_URL)
+        const route = "/extensions/ComfyUI-Custom-Scripts/js/common/autocomplete.js";
+        const url = typeof api.fileURL === "function" ? api.fileURL(route) : route;
+        matrixTextAreaAutocompleteModulePromise = import(url)
             .then(({ TextAreaAutoComplete }) => (
                 typeof TextAreaAutoComplete === "function" ? TextAreaAutoComplete : null
             ))
@@ -9760,7 +9837,8 @@ function appendSceneSavePreview(detail) {
     node.scenePreviewImages = node.scenePreviewImages || new Map();
     node.imgs = Array.isArray(node.imgs) ? node.imgs : [];
 
-    for (const imageRef of images) {
+    const needed = [];
+    for (const imageRef of [...images].reverse()) {
         const key = imageRefKey(imageRef);
         if (node.scenePreviewKeys.has(key) && node.scenePreviewImages.has(key)) {
             const existingImage = node.scenePreviewImages.get(key);
@@ -9770,6 +9848,14 @@ function appendSceneSavePreview(detail) {
             }
             continue;
         }
+        needed.push(imageRef);
+        if (needed.length >= SCENE_SAVE_PREVIEW_LIMIT) {
+            break;
+        }
+    }
+
+    for (const imageRef of needed.reverse()) {
+        const key = imageRefKey(imageRef);
         node.scenePreviewKeys.add(key);
         const image = new Image();
         image.scenePreviewKey = key;

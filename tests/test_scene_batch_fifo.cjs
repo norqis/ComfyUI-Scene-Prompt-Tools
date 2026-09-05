@@ -374,6 +374,15 @@ async function testScenePresetResolution() {
         "apiMatrixConfigured",
         "emptyScenePromptStats",
         "sceneStatNumber",
+        "sceneStatProduct",
+        "sceneStatSum",
+        "sceneStatsSeed",
+        "sceneStatsResult",
+        "sceneStatsMatrix",
+        "sceneStatsCount",
+        "sceneStatsWithLatent",
+        "sceneStatsMerge",
+        "sceneStatsQueue",
         "scenePresetStats",
     ]) {
         vm.runInContext(functionSource(name), presetContext);

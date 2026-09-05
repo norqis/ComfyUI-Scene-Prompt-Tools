@@ -24,6 +24,9 @@ function functionSource(name) {
     throw new Error(`Unclosed function: ${name}`);
 }
 
+assert.doesNotMatch(functionSource("computeScenePromptQueueDisplayCache"), /scenePromptQueueRowEntries\(/u, "Queue display cache never expands every generated row");
+assert.doesNotMatch(functionSource("refreshScenePromptQueueNode"), /scenePromptQueueRowEntries\(/u, "Queue refresh stays bounded to scalar stats and preview rows");
+
 const context = {
     Number,
     Object,
@@ -39,6 +42,16 @@ for (const name of [
     "scenePromptEntryBatchSize",
     "scenePromptEntryImageCount",
     "mergeScenePromptEntryPair",
+    "emptyScenePromptStats",
+    "sceneStatProduct",
+    "sceneStatSum",
+    "sceneStatsSeed",
+    "sceneStatsResult",
+    "sceneStatsMatrix",
+    "sceneStatsCount",
+    "sceneStatsWithLatent",
+    "sceneStatsMerge",
+    "sceneStatsQueue",
 ]) {
     vm.runInContext(functionSource(name), context);
 }
@@ -55,6 +68,15 @@ assert.equal(merged.count, 8, "Merge multiplies the count from both branches");
 
 const queued = { count: 2, row: { latent: { batch_size: 3 } } };
 assert.equal(context.scenePromptEntryImageCount(queued), 6, "two runs at batch size three produce six images");
+const left = context.sceneStatsWithLatent(context.sceneStatsCount(context.sceneStatsSeed(), 2), 3);
+const right = context.sceneStatsQueue([
+    context.sceneStatsWithLatent(context.sceneStatsSeed(), 4),
+    context.sceneStatsSeed(),
+], true);
+const mergedStats = context.sceneStatsMerge(left, right);
+assert.equal(JSON.stringify(mergedStats), JSON.stringify({ rows: 2, total: 4, totalImages: 14, unsetBatches: 0 }), "Merge uses the right latent batch and preserves mixed unset batches");
+assert.equal(JSON.stringify(context.sceneStatsQueue([context.emptyScenePromptStats()], true)), JSON.stringify(context.emptyScenePromptStats()), "a connected empty Queue remains empty");
+assert.equal(JSON.stringify(context.sceneStatsQueue([], false)), JSON.stringify(context.sceneStatsSeed()), "an unconnected Queue keeps the seed plan");
 assert.match(
     source,
     /formatSceneExpandCounts\(cache\.totalBatches, cache\.totalImages\)/u,

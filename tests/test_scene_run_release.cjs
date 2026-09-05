@@ -96,13 +96,17 @@ function deferred() {
         { ok: true, payload: { released: true } },
     ]);
     pagehide.sceneRunHandlesByPromptId.set("prompt-a", "handle-a");
-    pagehide.sceneBatchRunsById.set("run-b", { runHandle: "handle-b" });
+    pagehide.sceneBatchRunsById.set("run-b", { runHandle: "handle-b", waiting: true, pendingPromptIds: new Set(["prompt-b"]) });
+    pagehide.sceneBatchRunsById.set("run-prepared", { runHandle: "handle-prepared", pendingPromptIds: new Set() });
+    pagehide.sceneBatchRunsById.set("run-queueing", { runHandle: "handle-queueing", queueing: true, pendingPromptIds: new Set() });
+    pagehide.sceneBatchRunsById.set("run-waiting", { runHandle: "handle-waiting", waiting: true, pendingPromptIds: new Set() });
+    pagehide.sceneBatchDetachedRuns.set("run-detached", { runHandle: "handle-detached", currentPromptId: "detached-prompt", pendingPromptIds: new Set(["detached-prompt"]) });
     pagehide.releaseSceneRunsOnPageHide({ persisted: true });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(pagehide.calls.length, 0);
     pagehide.releaseSceneRunsOnPageHide({ persisted: false });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(pagehide.calls.map((call) => call.options.keepalive), [true, true]);
+    assert.deepEqual(pagehide.calls.map((call) => call.options.keepalive), [true], "pagehide releases only clearly unsent prepared runs");
 
     const normalResponse = deferred();
     const keepaliveResponse = deferred();

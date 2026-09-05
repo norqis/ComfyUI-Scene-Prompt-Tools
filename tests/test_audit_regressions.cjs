@@ -578,6 +578,7 @@ async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange()
         showSceneBatchError(message) { context.errors.push(message); },
     };
     vm.createContext(context);
+    vm.runInContext("let popupRequestIntent = 0;", context);
     for (const name of ["beginPopupRequest", "isCurrentPopupRequest", "invalidatePopupRequests", "loadPopupRequest"]) {
         vm.runInContext(functionSource(name), context);
     }
@@ -586,6 +587,33 @@ async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange()
     resolveLoad(["late response"]);
     assert.equal(await request, null);
     assert.deepEqual(context.errors, []);
+}
+
+async function testPopupRequestsUseOneIntentAcrossNodes() {
+    let resolveFirst;
+    let resolveSecond;
+    const firstLoad = new Promise((resolve) => { resolveFirst = resolve; });
+    const secondLoad = new Promise((resolve) => { resolveSecond = resolve; });
+    const graph = {};
+    const context = { Number, app: { graph }, showSceneBatchError() {} };
+    vm.createContext(context);
+    vm.runInContext("let popupRequestIntent = 0;", context);
+    for (const name of ["beginPopupRequest", "isCurrentPopupRequest", "invalidatePopupRequests", "loadPopupRequest"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    const first = context.loadPopupRequest({ graph }, () => firstLoad, "failed");
+    const secondNode = { graph };
+    const second = context.loadPopupRequest(secondNode, () => secondLoad, "failed");
+    resolveSecond("new popup");
+    assert.equal(await second, "new popup", "the newer node may open its popup");
+    resolveFirst("old popup");
+    assert.equal(await first, null, "a slower node cannot replace a newer popup");
+    let resolveClosed;
+    const closedLoad = new Promise((resolve) => { resolveClosed = resolve; });
+    const closed = context.loadPopupRequest(secondNode, () => closedLoad, "failed");
+    context.invalidatePopupRequests(secondNode);
+    resolveClosed("closed popup");
+    assert.equal(await closed, null, "closing a popup invalidates its pending open");
 }
 
 Promise.resolve()
@@ -614,6 +642,7 @@ Promise.resolve()
     .then(testPendingFifoRunPreparesPresetSnapshotImmediately)
     .then(testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure)
     .then(testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange)
+    .then(testPopupRequestsUseOneIntentAcrossNodes)
     .then(() => console.log("Audit regression tests passed."))
     .catch((error) => {
         console.error(error);
