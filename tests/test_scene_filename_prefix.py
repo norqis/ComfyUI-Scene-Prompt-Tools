@@ -184,6 +184,17 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertLessEqual(len(safe.encode("utf-16-le")) // 2, 240)
         self.assertRegex(safe, r"~[0-9a-f]{8}$")
 
+    def test_output_prefix_keeps_png_and_reservation_component_lengths_safe(self):
+        prefix = self.nodes._output_filename_prefix("😀" * 200, "png", 5, 10**20)
+        filename = f"{prefix}{10**20}.png"
+        reservation = f"{filename}.scene-save-reservation"
+        self.assertLessEqual(len(filename.encode("utf-8")), 255)
+        self.assertLessEqual(len(filename.encode("utf-16-le")) // 2, 255)
+        self.assertLessEqual(len(reservation.encode("utf-8")), 255)
+        self.assertLessEqual(len(reservation.encode("utf-16-le")) // 2, 255)
+        with self.assertRaisesRegex(ValueError, "長すぎます"):
+            self.nodes._output_filename_prefix("", "x" * 256, 5)
+
     def test_is_changed_includes_prefix(self):
         scene_prompt = _scene_prompt(self.nodes)
         first = self.nodes.ScenePromptExpand.IS_CHANGED(

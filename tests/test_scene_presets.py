@@ -361,7 +361,7 @@ class ScenePresetTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.ScenePresetError, "出力0"):
             self.save("bad_output", nodes)
 
-    def test_workflow_ignores_disconnected_execution_nodes_and_annotations(self):
+    def test_workflow_rejects_disconnected_execution_nodes_and_preserves_annotations(self):
         workflow = {
             "version": 1,
             "nodes": [
@@ -373,8 +373,10 @@ class ScenePresetTests(unittest.TestCase):
                 {"id": 92, "type": "KSampler"},
             ],
         }
-        saved = self.save("workflow_side_effect", basic_nodes(), workflow=workflow)
-        self.assertEqual([node["id"] for node in saved["workflow"]["nodes"]], [1, 2, 3])
+        with self.assertRaisesRegex(self.module.ScenePresetError, "KSampler"):
+            self.save("workflow_side_effect", basic_nodes(), workflow=workflow)
+        saved = self.save("workflow_annotations", basic_nodes(), workflow={**workflow, "nodes": workflow["nodes"][:-1]})
+        self.assertEqual([node["id"] for node in saved["workflow"]["nodes"]], [1, 2, 3, 90, 91])
 
     def test_node_expansion_keeps_existing_scene_nodes_and_links(self):
         nodes = basic_nodes()

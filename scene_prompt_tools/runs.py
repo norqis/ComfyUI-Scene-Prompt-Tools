@@ -133,21 +133,95 @@ class RunContextStore:
             raise SceneRunError("実行コンテキストがありません。画像生成を開始し直してください。")
         with self._lock:
             entry = self._entries.get(value)
-            if entry is None or self._is_expired_locked(entry, time.monotonic()):
-                raise SceneRunError("実行コンテキストが見つからないか、有効期限が切れました。画像生成を開始し直してください。")
-            return copy.deepcopy(entry)
+            if entry is None:
+                expired = []
+            elif self._is_expired_locked(entry, time.monotonic()):
+                self._entries.pop(value, None)
+                expired = [(value, entry["user_id"])]
+            else:
+                expired = []
+                result = copy.deepcopy(entry)
+        self._notify_expired(expired)
+        if entry is None or expired:
+            raise SceneRunError("実行コンテキストが見つからないか、有効期限が切れました。画像生成を開始し直してください。")
+        return result
+
+    def get_user_id(self, handle):
+        """Read an active context owner without copying plans or extending TTL."""
+        value = str(handle or "").strip()
+        if not value:
+            raise SceneRunError("実行コンテキストがありません。画像生成を開始し直してください。")
+        with self._lock:
+            entry = self._entries.get(value)
+            if entry is None:
+                expired = []
+            elif self._is_expired_locked(entry, time.monotonic()):
+                self._entries.pop(value, None)
+                expired = [(value, entry["user_id"])]
+            else:
+                expired = []
+                user_id = entry["user_id"]
+        self._notify_expired(expired)
+        if entry is None or expired:
+            raise SceneRunError("実行コンテキストが見つからないか、有効期限が切れました。画像生成を開始し直してください。")
+        return user_id
+
+    def get_plan(self, handle, expand_node_id):
+        """Read a cached expand plan, refreshing the active context when present."""
+        key = str(expand_node_id or "").strip()
+        if not key:
+            raise SceneRunError("Scene Prompt Expand のIDがありません。")
+        value = str(handle or "").strip()
+        if not value:
+            raise SceneRunError("実行コンテキストがありません。画像生成を開始し直してください。")
+        with self._lock:
+            entry = self._entries.get(value)
+            if entry is None:
+                expired = []
+            else:
+                now = time.monotonic()
+                if self._is_expired_locked(entry, now):
+                    self._entries.pop(value, None)
+                    expired = [(value, entry["user_id"])]
+                else:
+                    expired = []
+                    self._touch_locked(entry, now)
+                    result = copy.deepcopy(entry["plans"].get(key))
+        self._notify_expired(expired)
+        if entry is None:
+            raise SceneRunError("実行コンテキストが見つかりません。画像生成を開始し直してください。")
+        if expired:
+            raise SceneRunError("実行コンテキストの有効期限が切れました。画像生成を開始し直してください。")
+        return result
 
     def set_plan(self, handle, expand_node_id, plan):
         key = str(expand_node_id or "").strip()
         if not key:
             raise SceneRunError("Scene Prompt Expand のIDがありません。")
-        entry = self.require(handle)
+        value = str(handle or "").strip()
+        if not value:
+            raise SceneRunError("実行コンテキストがありません。画像生成を開始し直してください。")
         with self._lock:
-            if self._entries.get(str(handle)) is not entry:
-                raise SceneRunError("実行コンテキストが見つかりません。画像生成を開始し直してください。")
-            if key not in entry["plans"]:
-                entry["plans"][key] = copy.deepcopy(plan)
-            return copy.deepcopy(entry["plans"][key])
+            entry = self._entries.get(value)
+            if entry is None:
+                expired = []
+            else:
+                now = time.monotonic()
+                if self._is_expired_locked(entry, now):
+                    self._entries.pop(value, None)
+                    expired = [(value, entry["user_id"])]
+                else:
+                    expired = []
+                    self._touch_locked(entry, now)
+                    if key not in entry["plans"]:
+                        entry["plans"][key] = copy.deepcopy(plan)
+                    result = copy.deepcopy(entry["plans"][key])
+        self._notify_expired(expired)
+        if entry is None:
+            raise SceneRunError("実行コンテキストが見つかりません。画像生成を開始し直してください。")
+        if expired:
+            raise SceneRunError("実行コンテキストの有効期限が切れました。画像生成を開始し直してください。")
+        return result
 
     def claim(self, handle, user_id, prompt_id):
         value = str(handle or "").strip()
@@ -214,6 +288,14 @@ def require_run_context(handle):
 
 def peek_run_context(handle):
     return RUN_CONTEXTS.peek(handle)
+
+
+def get_run_user_id(handle):
+    return RUN_CONTEXTS.get_user_id(handle)
+
+
+def get_run_plan(handle, expand_node_id):
+    return RUN_CONTEXTS.get_plan(handle, expand_node_id)
 
 
 def set_run_plan(handle, expand_node_id, plan):

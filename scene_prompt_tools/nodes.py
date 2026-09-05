@@ -8,6 +8,7 @@ import threading
 import time
 import tempfile
 import unicodedata
+from collections import OrderedDict
 from datetime import datetime
 
 import numpy as np
@@ -47,7 +48,7 @@ from .plan import (
     transform,
     with_source_node,
 )
-from .runs import require_run_context, set_run_plan
+from .runs import get_run_plan, require_run_context, set_run_plan
 
 
 MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE"
@@ -647,9 +648,7 @@ def _parse_matrix_data(matrix_json):
     return data
 
 
-def _parse_matrix_sets(matrix_json):
-    data = _parse_matrix_data(matrix_json)
-    raw_sets = data.get("sets", [])
+def _normalize_matrix_sets(raw_sets):
     sets = []
     row_ids = set()
     for raw_set in raw_sets:
@@ -659,6 +658,10 @@ def _parse_matrix_sets(matrix_json):
         row_ids.add(matrix_line["row_id"])
         sets.append(matrix_line)
     return sets
+
+
+def _parse_matrix_sets(matrix_json):
+    return _normalize_matrix_sets(_parse_matrix_data(matrix_json).get("sets", []))
 
 
 def _matrix_has_configured_sets(matrix_json):
@@ -709,8 +712,12 @@ def _scene_count(value):
 
 
 def _scene_run_plan(run_handle, scene_prompt=None, unique_id=None):
-    normalized = normalize_plan(scene_prompt)
-    return set_run_plan(run_handle, unique_id, normalized) if str(run_handle or "").strip() else normalized
+    if not str(run_handle or "").strip():
+        return normalize_plan(scene_prompt)
+    cached = get_run_plan(run_handle, unique_id)
+    if cached is not None:
+        return cached
+    return set_run_plan(run_handle, unique_id, normalize_plan(scene_prompt))
 
 
 def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False):
@@ -769,6 +776,37 @@ def _safe_filename_prefix(value):
     return f"{''.join(kept)}~{digest}"
 
 
+def _filename_units(value):
+    text = str(value)
+    return len(text.encode("utf-8")), len(text.encode("utf-16-le")) // 2
+
+
+def _output_filename_prefix(value, extension, padding, counter=None):
+    """Keep final PNG and its reservation sidecar within Windows component limits."""
+    prefix = _safe_filename_prefix(value)
+    counter_width = max(int(padding), len(str(MAX_SAFE_INTEGER if counter is None else counter)))
+    suffix = f"{'9' * counter_width}.{extension}.scene-save-reservation"
+    suffix_utf8, suffix_utf16 = _filename_units(suffix)
+    if suffix_utf8 > 255 or suffix_utf16 > 255:
+        raise ValueError("画像ファイル名の拡張子または連番が長すぎます。")
+    max_utf8 = 255 - suffix_utf8
+    max_utf16 = 255 - suffix_utf16
+    utf8, utf16 = _filename_units(prefix)
+    if utf8 <= max_utf8 and utf16 <= max_utf16:
+        return prefix
+    digest = hashlib.sha256(prefix.encode("utf-8")).hexdigest()[:8]
+    kept = []
+    used_utf8 = used_utf16 = 0
+    for character in prefix:
+        char_utf8, char_utf16 = _filename_units(character)
+        if used_utf8 + char_utf8 + 9 > max_utf8 or used_utf16 + char_utf16 + 9 > max_utf16:
+            break
+        kept.append(character)
+        used_utf8 += char_utf8
+        used_utf16 += char_utf16
+    return f"{''.join(kept)}~{digest}"
+
+
 def _resolve_run_dir(run_dir):
     value = str(run_dir or "").strip().strip('"')
     if not value or value.lower() == "auto":
@@ -794,7 +832,7 @@ def _subfolder_for_preview(directory, output_dir):
 
 
 def _find_next_index(run_root, extension, padding, filename_prefix=""):
-    prefix = _safe_filename_prefix(filename_prefix)
+    prefix = _output_filename_prefix(filename_prefix, extension, padding)
     pattern = re.compile(
         rf"^{re.escape(prefix)}(\d{{{padding},}})\.{re.escape(extension)}$",
         re.IGNORECASE,
@@ -810,7 +848,8 @@ def _find_next_index(run_root, extension, padding, filename_prefix=""):
 
 
 _RUN_DIR_CACHE = {}
-_NEXT_INDEX_CACHE = {}
+_NEXT_INDEX_CACHE = OrderedDict()
+_NEXT_INDEX_CACHE_LOCK = threading.RLock()
 _FILENAME_RESERVATION_LOCK = threading.Lock()
 
 
@@ -819,33 +858,38 @@ def _next_index_cache_key(run_root, extension, padding, filename_prefix=""):
         os.path.abspath(run_root),
         str(extension).lower(),
         int(padding),
-        _safe_filename_prefix(filename_prefix),
+        _output_filename_prefix(filename_prefix, extension, padding),
     )
 
 
 def _cached_next_index(run_root, extension, padding, filename_prefix=""):
     key = _next_index_cache_key(run_root, extension, padding, filename_prefix)
-    cached = _NEXT_INDEX_CACHE.get(key)
-    if cached is not None:
-        return cached
-    value = _find_next_index(run_root, extension, padding, filename_prefix)
-    _NEXT_INDEX_CACHE[key] = value
-    if len(_NEXT_INDEX_CACHE) > 256:
-        for expired_key in list(_NEXT_INDEX_CACHE)[:128]:
-            _NEXT_INDEX_CACHE.pop(expired_key, None)
-    return value
+    with _NEXT_INDEX_CACHE_LOCK:
+        cached = _NEXT_INDEX_CACHE.get(key)
+        if cached is not None:
+            _NEXT_INDEX_CACHE.move_to_end(key)
+            return cached
+        value = _find_next_index(run_root, extension, padding, filename_prefix)
+        _NEXT_INDEX_CACHE[key] = value
+        if len(_NEXT_INDEX_CACHE) > 256:
+            _NEXT_INDEX_CACHE.popitem(last=False)
+        return value
 
 
 def _remember_next_index(run_root, extension, padding, next_index, filename_prefix=""):
     key = _next_index_cache_key(run_root, extension, padding, filename_prefix)
-    current = _NEXT_INDEX_CACHE.get(key, 0)
-    _NEXT_INDEX_CACHE[key] = max(int(current or 0), int(next_index or 0))
+    with _NEXT_INDEX_CACHE_LOCK:
+        current = _NEXT_INDEX_CACHE.get(key, 0)
+        _NEXT_INDEX_CACHE[key] = max(int(current or 0), int(next_index or 0))
+        _NEXT_INDEX_CACHE.move_to_end(key)
+        if len(_NEXT_INDEX_CACHE) > 256:
+            _NEXT_INDEX_CACHE.popitem(last=False)
 
 
 def _reserve_output_path(directory, extension, padding, counter, filename_prefix=""):
     """Reserve a unique output name without exposing an unfinished PNG."""
-    prefix = _safe_filename_prefix(filename_prefix)
     while True:
+        prefix = _output_filename_prefix(filename_prefix, extension, padding, counter)
         filename = f"{prefix}{counter:0{padding}d}.{extension}"
         path = os.path.join(directory, filename)
         reservation_path = f"{path}.scene-save-reservation"
@@ -995,11 +1039,13 @@ class SceneMatrix:
         **kwargs,
     ):
         del kwargs
+        matrix_data = _parse_matrix_data(matrix_json)
+        matrix_sets = _normalize_matrix_sets(matrix_data["sets"])
         return (
             with_source_node(matrix_product(
                 scene_prompt,
-                _parse_matrix_sets(matrix_json),
-                _matrix_has_configured_sets(matrix_json),
+                matrix_sets,
+                bool(matrix_data["sets"]),
             ), source_node_id or unique_id),
         )
 
@@ -1464,7 +1510,7 @@ class SceneSaveImage:
         extension = "png"
         padding = 5
         info = _normalize_scene_save_info(scene_info)
-        filename_prefix = info.get("filename_prefix", "")
+        filename_prefix = _output_filename_prefix(info.get("filename_prefix", ""), extension, padding)
         base_root = folder_paths.get_output_directory()
         base_path_parts = _safe_relative_parts(path)
         scene_path_parts = _safe_relative_parts(info.get("path"))

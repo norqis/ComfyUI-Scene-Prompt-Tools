@@ -175,6 +175,34 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.set_plan(handle, "22", second), second)
         self.assertEqual(store.set_plan(handle, "11", second), first)
 
+    def test_get_plan_touches_and_copies_while_peek_expires_once(self):
+        expired = []
+        store = RUNS.RunContextStore(
+            prepared_ttl_seconds=10,
+            expiration_callback=lambda handle, user_id: expired.append((handle, user_id)),
+        )
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 5, 5, 16]):
+            handle = store.create("alice")
+            source = {"rows": [{"row": {"positive_parts": ["A"]}}]}
+            store.set_plan(handle, "expand", source)
+            source["rows"][0]["row"]["positive_parts"].append("changed")
+            cached = store.get_plan(handle, "expand")
+            cached["rows"][0]["row"]["positive_parts"].append("returned")
+            self.assertEqual(store._entries[handle]["plans"]["expand"]["rows"][0]["row"]["positive_parts"], ["A"])
+            with self.assertRaisesRegex(RUNS.SceneRunError, "有効期限"):
+                store.peek(handle)
+        self.assertEqual(expired, [(handle, "alice")])
+        with self.assertRaises(RUNS.SceneRunError):
+            store.peek(handle)
+        self.assertEqual(expired, [(handle, "alice")])
+
+    def test_get_run_user_id_does_not_touch_or_copy_plans(self):
+        store = RUNS.RunContextStore(prepared_ttl_seconds=10)
+        with mock.patch.object(RUNS.time, "monotonic", side_effect=[0, 11]):
+            handle = store.create("alice")
+            with self.assertRaises(RUNS.SceneRunError):
+                store.get_user_id(handle)
+
     def test_nodes_do_not_expose_user_id_inputs(self):
         source = "\n".join(
             (ROOT / "scene_prompt_tools" / filename).read_text(encoding="utf-8")
