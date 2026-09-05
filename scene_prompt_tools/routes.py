@@ -116,9 +116,10 @@ def _prompt_file_signature(root):
 
 
 def _cache_get(cache, signature):
-    if cache.get("signature") == signature and cache.get("expires", 0.0) > time.monotonic():
+    if cache.get("signature") == signature:
         value = cache.get("value")
         if value is not None:
+            cache["expires"] = time.monotonic() + _CACHE_TTL_SECONDS
             return value
     return None
 
@@ -210,8 +211,6 @@ def _load_items(user_id="default", force=False, with_errors=False):
             cached = None if force else _cache_get(cache, signature)
             if cached is not None:
                 return _cache_value(cached, "items", with_errors)
-            if not force and cache.get("signature") == signature and cache.get("value") is not None:
-                return _cache_value(_cache_set(cache, signature, cache["value"]), "items", with_errors)
 
         items = []
         errors = []
@@ -525,8 +524,6 @@ def _load_saved_prompts(user_id="default", force=False, with_errors=False):
             cached = None if force else _cache_get(cache, signature)
             if cached is not None:
                 return _cache_value(cached, "saved_prompts", with_errors)
-            if not force and cache.get("signature") == signature and cache.get("value") is not None:
-                return _cache_value(_cache_set(cache, signature, cache["value"]), "saved_prompts", with_errors)
 
         saved = []
         errors = []
