@@ -5388,7 +5388,6 @@ function clearSceneComputedCaches(node) {
     node.sceneSelectedListNegativeRenderCache = null;
     node.scenePromptQueueDisplayCache = null;
     node.scenePromptQueueRenderCache = null;
-    node.scenePromptQueueRowsCache = null;
     node.scenePromptTotalCache = null;
     node.scenePromptSourceKeyCache = null;
     node.scenePromptPreviewCache = null;
@@ -6554,174 +6553,6 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
     }
 
     return finish([]);
-}
-
-function scenePromptRowEntries(node, seen = new Set(), memo = new Map()) {
-    if (!node || seen.has(node.id)) {
-        return [];
-    }
-    const memoKey = scenePromptSourceCacheKey(node);
-    if (memoKey && memo.has(memoKey)) {
-        return memo.get(memoKey);
-    }
-    const finish = (entries) => {
-        if (memoKey) {
-            memo.set(memoKey, entries);
-        }
-        return entries;
-    };
-
-    seen.add(node.id);
-
-    if (isSceneNodeMuted(node)) {
-        return finish([]);
-    }
-    if (isSceneNodeBypassed(node)) {
-        const bypassSource = sceneBypassInputSource(node);
-        return finish(bypassSource ? scenePromptRowEntries(bypassSource, new Set(seen), memo) : []);
-    }
-
-    if (isScenePromptNode(node)) {
-        const title = scenePromptTitle(node);
-        const order = findWidget(node, "category_order")?.value || "";
-        const positiveParts = promptPartsFromState(
-            findWidget(node, "positive_base")?.value || "",
-            readStateFromWidget(node, "positive_json"),
-            order,
-        );
-        const negativeParts = promptPartsFromState(
-            findWidget(node, "negative_base")?.value || "",
-            readStateFromWidget(node, "negative_json"),
-            order,
-        );
-        const upstream = scenePromptInputSource(node);
-        const upstreamEntries = upstream
-            ? scenePromptRowEntries(upstream, new Set(seen), memo)
-            : [{
-                parts: [],
-                count: 1,
-                row: emptyMatrixRow(),
-            }];
-        return finish(upstreamEntries.map((entry) => {
-            const row = entry.row || emptyMatrixRow();
-            const merged = mergePositiveNegativeParts(
-                row.positive_parts || [],
-                row.negative_parts || [],
-                positiveParts,
-                negativeParts,
-            );
-            return {
-                ...entry,
-                parts: [...(entry.parts || []), title],
-                row: {
-                    ...row,
-                    labels: [...(row.labels || []), title],
-                    positive_parts: merged.positiveParts,
-                    negative_parts: merged.negativeParts,
-                    path_parts: [...(row.path_parts || [])],
-                },
-            };
-        }));
-    }
-
-    if (isPromptMatrixNode(node)) {
-        return finish(sceneMatrixRowEntries(node, seen, memo));
-    }
-
-    if (isScenePathNode(node)) {
-        const title = scenePathTitle(node);
-        const pathMode = normalizePathMode(findWidget(node, "path_mode")?.value);
-        const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
-        return finish(scenePromptRowEntries(upstream, new Set(seen), memo).map((entry) => {
-            const row = entry.row || emptyMatrixRow();
-            return {
-                ...entry,
-                row: {
-                    ...row,
-                    path_parts: appendScenePathPart(row.path_parts || [], title, pathMode),
-                },
-            };
-        }));
-    }
-
-    if (isScenePromptMergeNode(node)) {
-        const sources = connectedScenePromptSourcesForMerge(node).map((entry) => entry.source);
-        const firstSource = sources[0] || null;
-        const secondSource = sources[1] || null;
-        if (!firstSource) {
-            return finish(secondSource ? scenePromptRowEntries(secondSource, new Set(seen), memo) : []);
-        }
-        if (!secondSource) {
-            return finish(scenePromptRowEntries(firstSource, new Set(seen), memo));
-        }
-        const firstEntries = scenePromptRowEntries(firstSource, new Set(seen), memo);
-        const secondEntries = scenePromptRowEntries(secondSource, new Set(seen), memo);
-        return finish(mergeScenePromptEntryLists(firstEntries, secondEntries));
-    }
-
-    if (isScenePromptCounterNode(node)) {
-        const count = scenePromptCounterCount(node);
-        const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
-        return finish(scenePromptRowEntries(upstream, new Set(seen), memo).map((entry) => ({
-            ...multiplyScenePromptEntryCount(entry, count),
-        })));
-    }
-
-    if (isSceneEmptyLatentNode(node)) {
-        const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
-        const latent = sceneEmptyLatentConfig(node);
-        return finish(scenePromptRowEntries(upstream, new Set(seen), memo).map((entry) => ({
-            ...entry,
-            row: { ...(entry.row || emptyMatrixRow()), latent },
-        })));
-    }
-
-    if (isScenePromptQueueNode(node)) {
-        return finish(scenePromptQueueRowEntries(node, seen, memo));
-    }
-
-    return finish([]);
-}
-
-function scenePromptQueueRowEntries(node, seen = new Set(), memo = new Map()) {
-    if (isSceneNodeMuted(node)) {
-        return [];
-    }
-    if (isSceneNodeBypassed(node)) {
-        const bypassSource = sceneBypassInputSource(node);
-        return bypassSource ? scenePromptRowEntries(bypassSource, new Set(seen), memo) : [];
-    }
-
-    const cacheKey = scenePromptQueueRowsCacheKey(node);
-    if (cacheKey && node.scenePromptQueueRowsCache?.cacheKey === cacheKey) {
-        return node.scenePromptQueueRowsCache.entries;
-    }
-    if (cacheKey && memo.has(cacheKey)) {
-        return memo.get(cacheKey);
-    }
-    const entries = [];
-    for (const { source } of connectedScenePromptSourcesForQueue(node)) {
-        for (const entry of scenePromptRowEntries(source, new Set(seen), memo)) {
-            entries.push({
-                ...entry,
-                display_parts: sceneQueueDisplayPartsForEntry(entry),
-            });
-        }
-    }
-    if (cacheKey) {
-        memo.set(cacheKey, entries);
-        node.scenePromptQueueRowsCache = { cacheKey, entries };
-    }
-    return entries;
 }
 
 function sceneNodeRevision(node) {
@@ -8557,7 +8388,11 @@ function startSceneBatchRun(node) {
     syncAllScenePromptNames();
     let run;
     try {
-        run = createSceneBatchRun(node, sceneExpandCounts(node).totalBatches);
+        const counts = sceneExpandCounts(node);
+        if (counts.error) {
+            throw new Error(counts.error);
+        }
+        run = createSceneBatchRun(node, counts.totalBatches);
         run.preparing = true;
     } catch (error) {
         resetSceneExpandRunControls(node, { mark: false });

@@ -589,6 +589,28 @@ async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange()
     assert.deepEqual(context.errors, []);
 }
 
+function testOverflowCountsDoNotStartABatchRun() {
+    const errors = [];
+    const context = {
+        Map,
+        sceneBatchRun: null,
+        sceneBatchDetachedRuns: new Map(),
+        sceneBatchPendingRuns: [],
+        sceneBatchRunForNode() { return null; },
+        sceneBatchRunStatus() { return "idle"; },
+        syncSceneNodeModes() {}, syncAllScenePromptNames() {},
+        sceneExpandCounts() { return { totalBatches: null, error: "件数が大きすぎます。" }; },
+        createSceneBatchRun() { throw new Error("must not create"); },
+        prepareSceneBatchRunSnapshot() { throw new Error("must not prepare"); },
+        updateSceneExpandButton() {}, resetSceneExpandRunControls() {},
+        showSceneBatchError(message, error) { errors.push([message, error.message]); },
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("startSceneBatchRun"), context);
+    context.startSceneBatchRun({ id: 1 });
+    assert.deepEqual(errors, [["連続生成を開始できませんでした。", "件数が大きすぎます。"]]);
+}
+
 async function testPopupRequestsUseOneIntentAcrossNodes() {
     let resolveFirst;
     let resolveSecond;
@@ -640,6 +662,7 @@ Promise.resolve()
     .then(testMatrixEmptyNameFailsBeforePersisting)
     .then(testWorkflowLoadGuardMarksOnlyLoadWindow)
     .then(testPendingFifoRunPreparesPresetSnapshotImmediately)
+    .then(testOverflowCountsDoNotStartABatchRun)
     .then(testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure)
     .then(testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange)
     .then(testPopupRequestsUseOneIntentAcrossNodes)
