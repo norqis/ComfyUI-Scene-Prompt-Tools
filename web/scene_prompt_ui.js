@@ -5978,7 +5978,10 @@ function emptyScenePromptStats() {
 }
 
 function sceneStatNumber(value) {
-    const number = Number(value || 0);
+    const number = value ?? 0;
+    if (typeof number !== "number") {
+        return Number.NaN;
+    }
     return Number.isSafeInteger(number) && number >= 0 ? number : Number.NaN;
 }
 

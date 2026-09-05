@@ -80,6 +80,15 @@ assert.equal(JSON.stringify(context.sceneStatsQueue([], false)), JSON.stringify(
 const overflow = context.sceneStatsResult(context.sceneStatsCount(context.sceneStatsCount(context.sceneStatsSeed(), Number.MAX_SAFE_INTEGER), 2));
 assert.match(overflow.error, /大きすぎ/u, "unsafe totals carry an error instead of becoming a plausible zero");
 assert.match(context.sceneStatsQueue([overflow, context.sceneStatsSeed()], true).error, /大きすぎ/u, "Queue propagates an overflowing branch error");
+assert.match(context.sceneStatsResult(context.sceneStatsQueue([
+    { rows: 1, total: Number.MAX_SAFE_INTEGER, totalImages: Number.MAX_SAFE_INTEGER, unsetBatches: Number.MAX_SAFE_INTEGER },
+    context.sceneStatsSeed(),
+    context.sceneStatsSeed(),
+], true)).error, /大きすぎ/u, "a three-source Queue never recovers from an overflow into a smaller total");
+assert.match(context.sceneStatsResult(context.sceneStatsMerge(
+    { rows: 1, total: Number.MAX_SAFE_INTEGER, totalImages: Number.MAX_SAFE_INTEGER, unsetBatches: 0 },
+    { rows: 1, total: 2, totalImages: 2, unsetBatches: 0 },
+)).error, /大きすぎ/u, "Merge image arithmetic keeps overflow as an error");
 assert.match(
     source,
     /formatSceneExpandCounts\(cache\.totalBatches, cache\.totalImages\)/u,

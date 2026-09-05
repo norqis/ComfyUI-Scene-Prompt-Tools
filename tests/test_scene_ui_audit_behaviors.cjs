@@ -56,6 +56,10 @@ const merge = { id: "merge", kind: "merge", left: base, right: { id: "right", ki
 assert.deepEqual(JSON.parse(JSON.stringify(previewContext.scenePromptPreviewEntries(merge, 10))).map((entry) => entry.parts.join("")), ["AM1", "AM2", "AM3", "AM4", "AM5", "AM6", "AM7", "AM8", "AM9", "AM10"], "Merge preview fetches enough right-hand rows for its backend prefix");
 const empty = { id: "empty", kind: "matrix", upstream: base, rows: [], configured: 1 };
 assert.equal(previewContext.scenePromptPreviewEntries({ id: "downstream", kind: "matrix", upstream: empty, rows: [{ label: "X" }] }, 160).length, 0, "connected empty Matrix stays empty");
+const mergeContext = { Array, Number, Math, sceneStatNumber(value) { return Number(value || 0); }, mergeScenePromptRows() { return {}; } };
+vm.createContext(mergeContext);
+for (const name of ["mergeScenePromptEntryPair", "mergeScenePromptEntryLists"]) vm.runInContext(functionSource(name), mergeContext);
+assert.deepEqual(JSON.parse(JSON.stringify(mergeContext.mergeScenePromptEntryLists([{ count: 1 }], []))), [], "the real Merge helper treats a connected empty input as empty");
 
 const displayContext = {
     Math, JSON,
