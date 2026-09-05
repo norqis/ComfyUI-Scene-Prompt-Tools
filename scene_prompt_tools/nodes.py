@@ -32,9 +32,7 @@ from .prompt import (
 )
 from .plan import (
     MAX_BATCH_SIZE,
-    MAX_DERIVED_COUNT,
-    MAX_INPUT_COUNT,
-    MAX_TOTAL_IMAGES,
+    MAX_SAFE_INTEGER,
     MAX_DIMENSION,
     MIN_BATCH_SIZE,
     MIN_DIMENSION,
@@ -73,6 +71,9 @@ MAX_RESOLUTION = MAX_DIMENSION
 
 PATH_DIRECTORY = "フォルダに分ける"
 PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
+MODEL_MODE_ILLUSTRIOUS = "Illustrious"
+MODEL_MODE_ANIMA = "Anima"
+MODEL_MODE_CHOICES = (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
 
 DEFAULT_MATRIX_JSON = "{\"version\":1,\"sets\":[]}"
 SCENE_PROMPT_INPUT_NAMES = tuple(f"scene_prompt{index}" for index in range(1, 11))
@@ -108,6 +109,10 @@ def _normalize_path_mode(value):
     if text == PATH_APPEND_TO_PREVIOUS:
         return PATH_APPEND_TO_PREVIOUS
     return PATH_DIRECTORY
+
+
+def _normalize_model_mode(value):
+    return MODEL_MODE_ANIMA if str(value or "").strip() == MODEL_MODE_ANIMA else MODEL_MODE_ILLUSTRIOUS
 
 
 def _scene_bool(value, default=True):
@@ -698,8 +703,8 @@ def _metadata_count(value, label, maximum, default=0):
 
 
 def _scene_count(value):
-    if type(value) is not int or not 0 <= value <= MAX_INPUT_COUNT:
-        raise ScenePlanError(f"Scene Prompt count must be an integer between 0 and {MAX_INPUT_COUNT}.")
+    if type(value) is not int or not 0 <= value <= MAX_SAFE_INTEGER:
+        raise ScenePlanError("Scene Prompt count must be a nonnegative JavaScript-safe integer.")
     return value
 
 
@@ -923,15 +928,15 @@ def _normalize_scene_save_info(value):
         "use_run_dir": _scene_bool(use_run_dir),
         "path": str(value.get("path") or "").strip(),
         "filename_prefix": _safe_filename_prefix(value.get("filename_prefix")),
-        "file_index": _metadata_count(value.get("file_index"), "file_index", MAX_DERIVED_COUNT, 0),
+        "file_index": _metadata_count(value.get("file_index"), "file_index", MAX_SAFE_INTEGER, 0),
         "positive": str(value.get("positive") or ""),
         "negative": str(value.get("negative") or ""),
         "seed": int(value.get("seed") or 0),
         "label": str(value.get("label") or ""),
-        "row_index": _metadata_count(value.get("row_index"), "row_index", MAX_DERIVED_COUNT, 0),
-        "repeat_index": _metadata_count(value.get("repeat_index"), "repeat_index", MAX_DERIVED_COUNT, 0),
-        "repeat_count": _metadata_count(value.get("repeat_count"), "repeat_count", MAX_DERIVED_COUNT, 0),
-        "total_count": _metadata_count(value.get("total_count"), "total_count", MAX_TOTAL_IMAGES, 0),
+        "row_index": _metadata_count(value.get("row_index"), "row_index", MAX_SAFE_INTEGER, 0),
+        "repeat_index": _metadata_count(value.get("repeat_index"), "repeat_index", MAX_SAFE_INTEGER, 0),
+        "repeat_count": _metadata_count(value.get("repeat_count"), "repeat_count", MAX_SAFE_INTEGER, 0),
+        "total_count": _metadata_count(value.get("total_count"), "total_count", MAX_SAFE_INTEGER, 0),
         "source_node_ids": [str(node_id) for node_id in value.get("source_node_ids", []) if str(node_id).strip()] if isinstance(value.get("source_node_ids"), list) else [],
         "run_handle": str(value.get("run_handle") or "").strip(),
     }
@@ -1138,7 +1143,7 @@ class ScenePromptCounter:
                     {
                         "default": 1,
                         "min": 0,
-                        "max": 10000,
+                        "max": MAX_SAFE_INTEGER,
                         "display_name": "生成回数",
                         "label": "生成回数",
                     },
@@ -1251,7 +1256,7 @@ class ScenePromptExpand:
                     {
                         "default": 0,
                         "min": 0,
-                        "max": 1000000000,
+                        "max": MAX_SAFE_INTEGER,
                         "display_name": "生成番号",
                         "label": "生成番号",
                     },
@@ -1298,6 +1303,14 @@ class ScenePromptExpand:
                     SCENE_PROMPT_TYPE,
                     {"display_name": "scene_prompt", "label": "scene_prompt"},
                 ),
+                "model_mode": (
+                    list(MODEL_MODE_CHOICES),
+                    {
+                        "default": MODEL_MODE_ILLUSTRIOUS,
+                        "display_name": "モデル",
+                        "label": "モデル",
+                    },
+                ),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
@@ -1314,6 +1327,7 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
+        model_mode=MODEL_MODE_ILLUSTRIOUS,
         run_handle="",
         unique_id=None,
     ):
@@ -1325,6 +1339,7 @@ class ScenePromptExpand:
                 _seed_change_key(seed_base),
                 str(_scene_bool(timestamp_dir)),
                 _safe_filename_prefix(prefix),
+                _normalize_model_mode(model_mode),
             ]
         )
 
@@ -1336,6 +1351,7 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
+        model_mode=MODEL_MODE_ILLUSTRIOUS,
         run_handle="",
         unique_id=None,
     ):
@@ -1355,12 +1371,15 @@ class ScenePromptExpand:
         )
         positive = _join_unique(positive_parts, separator)
         negative = _join_unique(negative_parts, separator)
+        if _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA:
+            positive = positive.replace("_", " ")
+            negative = negative.replace("_", " ")
         latent_config = _row_latent(row)
         latent = _empty_latent(latent_config)
         use_run_dir = _scene_bool(timestamp_dir)
         directory_run_id = str(run_id or "auto").split("__", 1)[0]
         run_dir = "/".join(_resolve_run_dir(directory_run_id)) if use_run_dir else ""
-        repeat_count = _metadata_count(item["count"], "repeat_count", MAX_DERIVED_COUNT)
+        repeat_count = _metadata_count(item["count"], "repeat_count", MAX_SAFE_INTEGER)
 
         save_info = {
             "type": SCENE_SAVE_INFO_TYPE,
@@ -1374,10 +1393,10 @@ class ScenePromptExpand:
             "negative": negative,
             "seed": seed,
             "label": item["label"],
-            "row_index": _metadata_count(item["row_index"], "row_index", MAX_DERIVED_COUNT),
-            "repeat_index": _metadata_count(item["repeat_index"], "repeat_index", MAX_DERIVED_COUNT),
+            "row_index": _metadata_count(item["row_index"], "row_index", MAX_SAFE_INTEGER),
+            "repeat_index": _metadata_count(item["repeat_index"], "repeat_index", MAX_SAFE_INTEGER),
             "repeat_count": repeat_count,
-            "total_count": _metadata_count(item["total_images"], "total_count", MAX_TOTAL_IMAGES),
+            "total_count": _metadata_count(item["total_images"], "total_count", MAX_SAFE_INTEGER),
             "latent": latent_config,
             "source_node_ids": [*row.get("source_node_ids", []), str(unique_id)] if unique_id is not None else list(row.get("source_node_ids", [])),
             "run_handle": str(run_handle or ""),

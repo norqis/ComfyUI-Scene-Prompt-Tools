@@ -78,6 +78,7 @@ const SCENE_COMPACT_WIDGET_HEIGHT = 18;
 const SCENE_NODE_AUTO_FIT_MAX_HEIGHT = 720;
 const SCENE_WIDGET_CANVAS_MAX_PIXELS = 2500000;
 const SCENE_SAVE_PREVIEW_LIMIT = 1;
+const CUSTOM_SCRIPTS_AUTOCOMPLETE_URL = "/extensions/ComfyUI-Custom-Scripts/js/common/autocomplete.js";
 const SCENE_QUEUE_GROUP_COLORS = [
     "#c9a4ff",
     "#ff7777",
@@ -88,7 +89,7 @@ const SCENE_QUEUE_GROUP_COLORS = [
     "#64b7ff",
     "#4269ff",
 ];
-const SCENE_COUNT_MAX = 10000;
+const SCENE_COUNT_MAX = Number.MAX_SAFE_INTEGER;
 const SCENE_PROMPT_V030_WIDGET_VALUE_COUNT = 10;
 const SCENE_PROMPT_SERIALIZED_WIDGET_NAMES = [
     "prompt_name",
@@ -156,6 +157,8 @@ let savedPromptsRequestGeneration = 0;
 let activePopup = null;
 let activePopupContext = null;
 const popupSessionsByNode = new WeakMap();
+const matrixTextAreaAutocompleteInstances = new WeakMap();
+let matrixTextAreaAutocompleteModulePromise = null;
 let sceneBatchRun = null;
 const sceneBatchRunsById = new Map();
 const sceneBatchPendingRuns = [];
@@ -1828,6 +1831,7 @@ function closePopup(options = {}) {
                 discardPopupSession(closingContext.node, closingContext.popupSessionScopeKey);
             }
         }
+        disposeMatrixTextAreaAutocompleteIn(activePopup);
         activePopup.remove();
         activePopup = parent?.popup || null;
         activePopupContext = parent?.context || null;
@@ -2168,13 +2172,49 @@ function appendSearchHeading(container, text) {
     return heading;
 }
 
+function searchNavigationOptions(options, stateWidgetName, popupSession) {
+    const searchEntryPath = Array.isArray(options.searchEntryPath)
+        ? [...options.searchEntryPath]
+        : null;
+    return {
+        stateWidgetName,
+        popupSession,
+        ...(searchEntryPath ? { searchEntryPath } : {}),
+    };
+}
+
+function isSearchNavigation(options = {}) {
+    return Array.isArray(options.searchEntryPath);
+}
+
+function searchNavigationTab(options = {}) {
+    return isSearchNavigation(options) ? "search" : "list";
+}
+
+function openSearchNavigationBack(node, path, options = {}) {
+    const stateWidgetName = popupStateWidgetName(node, options);
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
+    if (isSearchNavigation(options) && pathKey(path) === pathKey(options.searchEntryPath)) {
+        openSearchPopup(node, { stateWidgetName, popupSession: session });
+        return;
+    }
+    openCategoryLevelPicker(node, path.slice(0, -1), searchNavigationOptions(options, stateWidgetName, session));
+}
+
 function openPathFromSearch(node, items, path, options = {}) {
+    const stateWidgetName = popupStateWidgetName(node, options);
+    const session = options.popupSession || popupSessionFor(node, stateWidgetName);
+    const searchOptions = searchNavigationOptions(
+        { ...options, searchEntryPath: path },
+        stateWidgetName,
+        session,
+    );
     const children = getChildSegments(items, path);
     const directItems = itemsForPath(items, path);
     if (!children.length && directItems.length) {
-        openPromptCandidatePopup(node, path, options);
+        openPromptCandidatePopup(node, path, searchOptions);
     } else {
-        openCategoryLevelPicker(node, path, options);
+        openCategoryLevelPicker(node, path, searchOptions);
     }
 }
 
@@ -2197,7 +2237,7 @@ function appendSearchPathRow(container, node, items, state, path, options = {}) 
     meta.textContent = displayPathLabel(path);
     row.appendChild(meta);
 
-    row.addEventListener("click", () => openPathFromSearch(node, items, path, { stateWidgetName }));
+    row.addEventListener("click", () => openPathFromSearch(node, items, path, options));
     container.appendChild(row);
     return row;
 }
@@ -2428,6 +2468,9 @@ function appendCandidateRow(container, node, item, selected, onUpdate, options =
 
     const actions = document.createElement("div");
     actions.className = "pc-candidate-actions";
+    const returnToCandidate = options.returnToCandidate || (() => {
+        openPromptCandidatePopup(node, itemPath(item), { stateWidgetName });
+    });
 
     const weightControl = createWeightControl(node, item, selectedItem, onUpdate, {
         disabled: !selectedItem || itemHasPartSelection(selectedItem),
@@ -2440,7 +2483,7 @@ function appendCandidateRow(container, node, item, selected, onUpdate, options =
         partsButton.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
-            openItemPartPopup(node, item, () => openPromptCandidatePopup(node, itemPath(item), { stateWidgetName }), { stateWidgetName });
+            openItemPartPopup(node, item, returnToCandidate, { stateWidgetName });
         });
         actions.appendChild(partsButton);
     }
@@ -2449,14 +2492,7 @@ function appendCandidateRow(container, node, item, selected, onUpdate, options =
         editButton.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
-            const back = () => {
-                if (options.backToSearch) {
-                    openSearchPopup(node, { stateWidgetName });
-                } else {
-                    openPromptCandidatePopup(node, itemPath(item), { stateWidgetName });
-                }
-            };
-            openEditPromptItemPopup(node, item, back, { stateWidgetName });
+            openEditPromptItemPopup(node, item, returnToCandidate, { stateWidgetName });
         });
         actions.appendChild(editButton);
     }
@@ -2963,6 +2999,7 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
 async function openCategoryLevelPicker(node, path = [], options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
     const session = options.popupSession || popupSessionFor(node, stateWidgetName);
+    const navigationOptions = searchNavigationOptions(options, stateWidgetName, session);
     const loaded = await loadPopupRequest(
         node,
         () => Promise.all([loadPromptItems(), loadSavedPrompts()]),
@@ -2981,20 +3018,22 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
     const directItems = itemsForPath(data, path);
 
     if (!children.length && directItems.length) {
-        openPromptCandidatePopup(node, path, { stateWidgetName, popupSession: session });
+        openPromptCandidatePopup(node, path, navigationOptions);
         return;
     }
 
-    setPopupListLocation(session, "categories", path);
+    if (!isSearchNavigation(options)) {
+        setPopupListLocation(session, "categories", path);
+    }
     const popup = openPopupShell(node, path.length ? displayPathLabel(path) : "カテゴリ", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openCategoryLevelPicker(node, path, { stateWidgetName, popupSession: session });
+        activePopupContext.reopen = () => openCategoryLevelPicker(node, path, navigationOptions);
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
     const toolbar = document.createElement("div");
     toolbar.className = "pc-toolbar";
-    appendPopupNavButtons(toolbar, node, "list", { stateWidgetName });
+    appendPopupNavButtons(toolbar, node, searchNavigationTab(options), { stateWidgetName });
     popup.appendChild(toolbar);
 
     appendMatrixLineBasePromptInput(popup, node, { stateWidgetName });
@@ -3004,7 +3043,7 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
     rememberPopupScroll(session, popupListScrollKey("categories", path), list);
 
     if (path.length) {
-        appendBackButton(list, "←戻る", () => openCategoryLevelPicker(node, path.slice(0, -1), { stateWidgetName, popupSession: session }));
+        appendBackButton(list, "←戻る", () => openSearchNavigationBack(node, path, navigationOptions));
     }
 
     if (directItems.length && children.length) {
@@ -3012,7 +3051,7 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
         const directCount = formatCategoryCount(directCounts);
         const direct = createButton(`この階層の候補 (${directCount})`);
         direct.classList.toggle("pc-on", !!directCounts.selected);
-        direct.addEventListener("click", () => openPromptCandidatePopup(node, path, { stateWidgetName, popupSession: session }));
+        direct.addEventListener("click", () => openPromptCandidatePopup(node, path, navigationOptions));
         list.appendChild(direct);
     }
 
@@ -3046,11 +3085,11 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
             const hasChildren = getChildSegments(data, nextPath).length > 0;
             const hasDirectItems = itemsForPath(data, nextPath).length > 0;
             if (hasChildren) {
-                openCategoryLevelPicker(node, nextPath, { stateWidgetName, popupSession: session });
+                openCategoryLevelPicker(node, nextPath, navigationOptions);
             } else if (hasDirectItems) {
-                openPromptCandidatePopup(node, nextPath, { stateWidgetName, popupSession: session });
+                openPromptCandidatePopup(node, nextPath, navigationOptions);
             } else {
-                openCategoryLevelPicker(node, nextPath, { stateWidgetName, popupSession: session });
+                openCategoryLevelPicker(node, nextPath, navigationOptions);
             }
         });
         list.appendChild(option);
@@ -3146,21 +3185,24 @@ async function openSavedPromptLevelPicker(node, path = [], options = {}) {
 async function openPromptCandidatePopup(node, path, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
     const session = options.popupSession || popupSessionFor(node, stateWidgetName);
+    const navigationOptions = searchNavigationOptions(options, stateWidgetName, session);
     const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
     if (!data) {
         return;
     }
     setActiveStateWidget(node, stateWidgetName);
-    setPopupListLocation(session, "candidates", path);
+    if (!isSearchNavigation(options)) {
+        setPopupListLocation(session, "candidates", path);
+    }
     const popup = openPopupShell(node, displayPathLabel(path), { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openPromptCandidatePopup(node, path, { stateWidgetName, popupSession: session });
+        activePopupContext.reopen = () => openPromptCandidatePopup(node, path, navigationOptions);
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
     const toolbar = document.createElement("div");
     toolbar.className = "pc-toolbar";
-    appendPopupNavButtons(toolbar, node, "list", { stateWidgetName });
+    appendPopupNavButtons(toolbar, node, searchNavigationTab(options), { stateWidgetName });
     popup.appendChild(toolbar);
 
     appendMatrixLineBasePromptInput(popup, node, { stateWidgetName });
@@ -3189,7 +3231,7 @@ async function openPromptCandidatePopup(node, path, options = {}) {
 
         list.innerHTML = "";
         if (path.length) {
-            appendBackButton(list, "←戻る", () => openCategoryLevelPicker(node, path.slice(0, -1), { stateWidgetName, popupSession: session }));
+            appendBackButton(list, "←戻る", () => openSearchNavigationBack(node, path, navigationOptions));
         }
         if (!candidates.length) {
             const empty = document.createElement("div");
@@ -3201,7 +3243,11 @@ async function openPromptCandidatePopup(node, path, options = {}) {
         }
 
         for (const item of candidates) {
-            appendCandidateRow(list, node, item, selected, null, { stateWidgetName, state });
+            appendCandidateRow(list, node, item, selected, null, {
+                stateWidgetName,
+                state,
+                returnToCandidate: () => openPromptCandidatePopup(node, path, navigationOptions),
+            });
         }
         fitPopupToContent(popup);
     };
@@ -3423,20 +3469,25 @@ async function openSearchPopup(node, options = {}) {
         if (matchedCategories.length) {
             appendSearchHeading(list, "カテゴリ");
         for (const path of matchedCategories) {
-            appendSearchPathRow(list, node, data, state, path, { stateWidgetName });
+            appendSearchPathRow(list, node, data, state, path, { stateWidgetName, popupSession: session });
         }
         }
         if (matchedSubcategories.length) {
             appendSearchHeading(list, "サブカテゴリ");
         for (const path of matchedSubcategories) {
-            appendSearchPathRow(list, node, data, state, path, { stateWidgetName });
+            appendSearchPathRow(list, node, data, state, path, { stateWidgetName, popupSession: session });
         }
         }
         if (matchedItems.length) {
             appendSearchHeading(list, "候補");
         }
         for (const item of matchedItems) {
-            appendCandidateRow(list, node, item, selected, null, { backToSearch: true, showPath: true, stateWidgetName, state });
+            appendCandidateRow(list, node, item, selected, null, {
+                showPath: true,
+                stateWidgetName,
+                state,
+                returnToCandidate: () => openSearchPopup(node, { stateWidgetName, popupSession: session }),
+            });
         }
         fitPopupToContent(popup);
     };
@@ -3593,7 +3644,7 @@ function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : isSceneExpandNodeName(nodeName)
-            ? new Set(["timestamp_dir", "prefix"])
+            ? new Set(["timestamp_dir", "prefix", "model_mode"])
             : SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
                 ? new Set(["width", "height", "batch_size"])
                 : new Set();
@@ -5493,11 +5544,11 @@ function scheduleLoadedSceneNodeRefresh(node) {
 }
 
 function clampSceneCount(value, defaultValue = 0) {
-    const number = Number.parseInt(String(value ?? "").trim(), 10);
-    if (!Number.isFinite(number)) {
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 0) {
         return clamp(defaultValue, 0, SCENE_COUNT_MAX);
     }
-    return clamp(number, 0, SCENE_COUNT_MAX);
+    return number;
 }
 
 function sceneQueueLeafDisplayLabel(entry) {
@@ -8936,6 +8987,56 @@ function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
     openCategoryLevelPicker(node, [], { stateWidgetName });
 }
 
+function loadMatrixTextAreaAutocomplete() {
+    if (!matrixTextAreaAutocompleteModulePromise) {
+        matrixTextAreaAutocompleteModulePromise = import(CUSTOM_SCRIPTS_AUTOCOMPLETE_URL)
+            .then(({ TextAreaAutoComplete }) => (
+                typeof TextAreaAutoComplete === "function" ? TextAreaAutoComplete : null
+            ))
+            .catch(() => null);
+    }
+    return matrixTextAreaAutocompleteModulePromise;
+}
+
+function disposeMatrixTextAreaAutocomplete(input) {
+    const instance = matrixTextAreaAutocompleteInstances.get(input);
+    instance?.dropdown?.remove?.();
+    input?.blur?.();
+    matrixTextAreaAutocompleteInstances.delete(input);
+}
+
+function disposeMatrixTextAreaAutocompleteIn(container) {
+    for (const input of container?.querySelectorAll?.("textarea[data-scene-prompt-matrix-autocomplete]") || []) {
+        disposeMatrixTextAreaAutocomplete(input);
+    }
+}
+
+function attachMatrixTextAreaAutocomplete(input) {
+    if (!input || matrixTextAreaAutocompleteInstances.has(input) || input.dataset.scenePromptMatrixAutocomplete) {
+        return;
+    }
+    input.dataset.scenePromptMatrixAutocomplete = "loading";
+    void loadMatrixTextAreaAutocomplete().then((TextAreaAutoComplete) => {
+        if (!input.isConnected || input.dataset.scenePromptMatrixAutocomplete !== "loading") {
+            return;
+        }
+        if (!TextAreaAutoComplete) {
+            input.dataset.scenePromptMatrixAutocomplete = "unavailable";
+            return;
+        }
+        try {
+            const instance = new TextAreaAutoComplete(input);
+            if (instance?.helper && typeof instance.helper === "object") {
+                instance.helper.getScale = () => 1;
+            }
+            matrixTextAreaAutocompleteInstances.set(input, instance);
+            input.dataset.scenePromptMatrixAutocomplete = "ready";
+        } catch {
+            input.dataset.scenePromptMatrixAutocomplete = "unavailable";
+        }
+    });
+}
+
 function createMatrixLineBaseInput(draft, side) {
     const key = side === "negative" ? "negative_base" : "positive_base";
     const input = document.createElement("textarea");
@@ -8950,6 +9051,7 @@ function createMatrixLineBaseInput(draft, side) {
         draft[key] = input.value;
         refreshMatrixLineDraftComputedFields(draft);
     });
+    attachMatrixTextAreaAutocomplete(input);
     return input;
 }
 

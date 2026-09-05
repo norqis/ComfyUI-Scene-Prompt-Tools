@@ -489,6 +489,39 @@ class ScenePresetTests(unittest.TestCase):
         prompt = next(value for value in fresh["expand"].values() if value["class_type"] == "ScenePrompter")
         self.assertEqual(prompt["inputs"]["positive_base"], "second")
 
+    def test_expand_anima_mode_converts_preset_prompt_without_mutating_the_snapshot(self):
+        preset_nodes = basic_nodes("preset_hair")
+        preset_nodes["2"]["inputs"]["negative_base"] = "preset_hands"
+        self.save("model-mode", preset_nodes)
+        api_graph = graph({
+            "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "model-mode"}},
+            "21": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["20", 0]}},
+        })
+        run_handle = "model-mode-run"
+        self.module.snapshot_presets_for_run(run_handle, api_graph, "21")
+        expanded_reference = self.module.expand_preset_reference(
+            "model-mode", run_handle=run_handle, source_node_id="20"
+        )["expand"]
+        plan = self.module._scene_node_value(
+            expanded_reference, "__scene_preset_source", {}, set(), run_handle=run_handle
+        )
+
+        expanded = self.nodes.ScenePromptExpand().expand(
+            current_index=0,
+            seed_base=7,
+            timestamp_dir=False,
+            scene_prompt=plan,
+            model_mode="Anima",
+        )
+
+        self.assertEqual(expanded[0], "preset hair")
+        self.assertEqual(expanded[1], "preset hands")
+        self.assertEqual(expanded[2]["positive"], "preset hair")
+        self.assertEqual(expanded[2]["negative"], "preset hands")
+        self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["preset_hair"])
+        self.assertEqual(plan["rows"][0]["row"]["negative_parts"], ["preset_hands"])
+        self.module.release_scene_preset_snapshot(run_handle)
+
     def test_run_snapshot_never_falls_back_to_latest_preset(self):
         self.save("fixed", basic_nodes("first"))
         with self.assertRaisesRegex(self.module.ScenePresetError, "スナップショットがありません"):

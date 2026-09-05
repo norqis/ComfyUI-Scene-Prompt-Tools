@@ -85,6 +85,70 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         result = self.nodes.ScenePromptExpand().expand(current_index=0, timestamp_dir=False, scene_prompt=plan)
         self.assertEqual(result[0], "alpha")
 
+    def test_expand_model_mode_only_changes_final_prompt_text(self):
+        plan = self.prompt.ScenePrompt().build(
+            "A", "blue_hair, score_7", '{"version":1,"categories":{}}', "bad_hands", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        expander = self.nodes.ScenePromptExpand()
+
+        illustrious = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=plan)
+        anima = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=plan, model_mode="Anima")
+
+        self.assertEqual(illustrious[0], "blue_hair, score_7")
+        self.assertEqual(illustrious[1], "bad_hands")
+        self.assertEqual(anima[0], "blue hair, score 7")
+        self.assertEqual(anima[1], "bad hands")
+        self.assertEqual(anima[2]["positive"], anima[0])
+        self.assertEqual(anima[2]["negative"], anima[1])
+        self.assertEqual(anima[2]["filename_prefix"], illustrious[2]["filename_prefix"])
+        self.assertEqual(anima[3], illustrious[3])
+        self.assertEqual(anima[4]["samples"].shape, illustrious[4]["samples"].shape)
+        self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["blue_hair", "score_7"])
+        self.assertEqual(plan["rows"][0]["row"]["negative_parts"], ["bad_hands"])
+
+    def test_expand_model_mode_is_an_optional_trailing_widget_and_changes_cache_key(self):
+        input_types = self.nodes.ScenePromptExpand.INPUT_TYPES()
+        self.assertEqual(input_types["optional"]["model_mode"][0], ["Illustrious", "Anima"])
+        self.assertEqual(input_types["optional"]["model_mode"][1]["default"], "Illustrious")
+        self.assertEqual(input_types["optional"]["model_mode"][1]["label"], "モデル")
+        plan = self.prompt.ScenePrompt().build(
+            "A", "blue_hair", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        self.assertNotEqual(
+            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, model_mode="Illustrious"),
+            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, model_mode="Anima"),
+        )
+
+    def test_expand_anima_mode_converts_matrix_parts_without_mutating_the_plan(self):
+        source = self.prompt.ScenePrompt().build(
+            "Source", "source_hair", '{"version":1,"categories":{}}', "source_hands", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        matrix = self.nodes.SceneMatrix().build(json.dumps({
+            "version": 1,
+            "sets": [{
+                "row_id": "matrix-row",
+                "name": "Matrix",
+                "path_label": "Matrix",
+                "positive_parts": ["matrix_hair"],
+                "negative_parts": ["matrix_hands"],
+            }],
+        }), scene_prompt=source)[0]
+
+        expanded = self.nodes.ScenePromptExpand().expand(
+            current_index=0,
+            seed_base=7,
+            timestamp_dir=False,
+            scene_prompt=matrix,
+            model_mode="Anima",
+        )
+
+        self.assertEqual(expanded[0], "source hair, matrix hair")
+        self.assertEqual(expanded[1], "source hands, matrix hands")
+        self.assertEqual(expanded[2]["positive"], expanded[0])
+        self.assertEqual(expanded[2]["negative"], expanded[1])
+        self.assertEqual(matrix["rows"][0]["row"]["positive_parts"], ["source_hair", "matrix_hair"])
+        self.assertEqual(matrix["rows"][0]["row"]["negative_parts"], ["source_hands", "matrix_hands"])
+
     def test_randomize_false_choices_expand_with_consecutive_seeds(self):
         plan = self.prompt.ScenePrompt().build(
             "A", "{A|B}", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, False,
@@ -150,12 +214,13 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
 
     def test_counter_rejects_non_integer_or_out_of_range_counts(self):
         counter = self.nodes.ScenePromptCounter()
-        for invalid in ("2", True, -1, self.nodes.MAX_INPUT_COUNT + 1):
+        for invalid in ("2", True, -1, self.nodes.MAX_SAFE_INTEGER + 1):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(self.nodes.ScenePlanError):
                     counter.count(count=invalid)
                 with self.assertRaises(self.nodes.ScenePlanError):
                     counter.IS_CHANGED(count=invalid)
+        self.assertEqual(counter.count(count=1_000_000_001)[0]["total_batches"], 1_000_000_001)
 
     def test_expand_uses_batches_but_reports_final_image_count(self):
         plan = self.nodes.SceneEmptyLatent().apply_latent(width=512, height=512, batch_size=3)[0]
@@ -180,18 +245,16 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(expanded[2]["repeat_count"], 100_000_000)
         self.assertEqual(expanded[2]["total_count"], 100_000_000)
 
-    def test_maximum_total_images_are_preserved_in_expand_metadata(self):
+    def test_javascript_safe_totals_are_preserved_in_expand_metadata(self):
         plan = self.nodes.SceneEmptyLatent().apply_latent(
             width=16,
             height=16,
-            batch_size=self.nodes.MAX_BATCH_SIZE,
+            batch_size=1,
         )[0]
         counter = self.nodes.ScenePromptCounter()
-        plan = counter.count(plan, 10_000)[0]
-        plan = counter.count(plan, 10_000)[0]
-        plan = counter.count(plan, 10)[0]
-        self.assertEqual(plan["total_batches"], self.nodes.MAX_DERIVED_COUNT)
-        self.assertEqual(plan["total_images"], self.nodes.MAX_TOTAL_IMAGES)
+        plan = counter.count(plan, self.nodes.MAX_SAFE_INTEGER)[0]
+        self.assertEqual(plan["total_batches"], self.nodes.MAX_SAFE_INTEGER)
+        self.assertEqual(plan["total_images"], self.nodes.MAX_SAFE_INTEGER)
 
         original_empty_latent = self.nodes._empty_latent
         self.nodes._empty_latent = lambda _config: {"samples": None}
@@ -204,10 +267,10 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         finally:
             self.nodes._empty_latent = original_empty_latent
 
-        self.assertEqual(info["repeat_count"], self.nodes.MAX_DERIVED_COUNT)
-        self.assertEqual(info["total_count"], self.nodes.MAX_TOTAL_IMAGES)
+        self.assertEqual(info["repeat_count"], self.nodes.MAX_SAFE_INTEGER)
+        self.assertEqual(info["total_count"], self.nodes.MAX_SAFE_INTEGER)
         with self.assertRaises(self.nodes.ScenePlanError):
-            self.nodes._normalize_scene_save_info({"total_count": self.nodes.MAX_TOTAL_IMAGES + 1})
+            self.nodes._normalize_scene_save_info({"total_count": self.nodes.MAX_SAFE_INTEGER + 1})
 
 
 if __name__ == "__main__":

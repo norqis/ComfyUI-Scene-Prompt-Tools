@@ -43,7 +43,16 @@ const baseItem = {
   category_key: "Outfit",
   category_label: "Outfit",
 };
-const promptItems = [baseItem, ...Array.from({ length: 60 }, (_value, index) => ({
+const nestedItem = {
+  id: "search-detail",
+  label: "Search Detail",
+  prompt: "blue_hair, white_shirt",
+  description: "Nested search test item",
+  category_path: ["Search", "Nested"],
+  category_key: "Search/Nested",
+  category_label: "Search > Nested",
+};
+const promptItems = [baseItem, nestedItem, ...Array.from({ length: 60 }, (_value, index) => ({
   ...baseItem,
   id: "summer-" + index,
   label: "Summer " + index,
@@ -95,6 +104,23 @@ window.__delayScenePromptItems = () => { window.__delayNextScenePromptItems = tr
 window.__releaseScenePromptItems = () => releaseDelayedItems?.();
 window.__scenePromptItemsDelayed = () => !!releaseDelayedItems;
 `;
+const customScriptsAutocompleteModule = `
+export class TextAreaAutoComplete {
+  constructor(element) {
+    this.element = element;
+    this.helper = { getScale: () => 2 };
+    this.dropdown = document.createElement("div");
+    window.__customScriptsAutocompleteInstances ||= [];
+    window.__customScriptsAutocompleteInstances.push(this);
+  }
+  insert(value) {
+    document.body.append(this.dropdown);
+    this.element.value += value;
+    this.element.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+`;
+let customScriptsAutocompleteAvailable = true;
 const index = `<!doctype html><script type="module">
   import { injectStyle } from "/extensions/scene-prompt/web/scene_prompt_style.js";
   import "/extensions/scene-prompt/web/scene_prompt_ui.js";
@@ -114,6 +140,16 @@ const server = http.createServer(async (request, response) => {
         response.end(request.url.endsWith("app.js") ? appModule : apiModule);
         return;
     }
+    if (request.url === "/extensions/ComfyUI-Custom-Scripts/js/common/autocomplete.js") {
+        if (!customScriptsAutocompleteAvailable) {
+            response.writeHead(404);
+            response.end();
+            return;
+        }
+        response.writeHead(200, { "content-type": "text/javascript" });
+        response.end(customScriptsAutocompleteModule);
+        return;
+    }
     const asset = assets.get(request.url);
     if (asset) {
         response.writeHead(200, { "content-type": "text/javascript" });
@@ -122,6 +158,7 @@ const server = http.createServer(async (request, response) => {
             source += `\nwindow.__scenePromptPopupTestHooks = {\n`
                 + `  openSavePromptPopup,\n`
                 + `  openCreatePromptPopup,\n`
+                + `  attachMatrixTextAreaAutocomplete,\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
                 + `};\n`;
         }
@@ -357,6 +394,36 @@ try {
     await page.getByRole("button", { name: "←戻る", exact: true }).click();
     assert.equal(await page.locator(".pc-popup-title").textContent(), "Browser Set", "save back restores selected detail");
 
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    const searchInput = page.locator(".pc-popup .pc-searchbox");
+    await searchInput.fill("Search");
+    await page.locator('button.pc-search-path[title="Search"]').click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Search");
+    assert.equal(await page.getByRole("button", { name: "検索", exact: true }).evaluate((element) => element.classList.contains("pc-on")), true);
+    await page.getByRole("button", { name: /^Nested \(/ }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Search > Nested");
+    assert.equal(await page.getByRole("button", { name: "検索", exact: true }).evaluate((element) => element.classList.contains("pc-on")), true);
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Search");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補検索");
+    assert.equal(await searchInput.inputValue(), "Search");
+    await page.getByRole("button", { name: "一覧", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Outfit", "search navigation does not overwrite the list location");
+
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    await searchInput.fill("Search Detail");
+    await page.getByRole("button", { name: "個別選択", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "Search Detail 個別選択");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補検索");
+    assert.equal(await searchInput.inputValue(), "Search Detail");
+    await page.getByRole("button", { name: "編集", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補を編集");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    assert.equal(await page.locator(".pc-popup-title").textContent(), "候補検索");
+    assert.equal(await searchInput.inputValue(), "Search Detail");
+
     await page.getByRole("button", { name: "閉じる", exact: true }).click();
     await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
     await page.getByRole("button", { name: "検索", exact: true }).click();
@@ -454,6 +521,51 @@ try {
         window.__sceneMatrixTestNode = node;
         node.widgets.find((widget) => widget.sceneRole === "matrix_rows").callback();
     });
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
+    const positiveBaseInput = page.getByPlaceholder("ポジティブ基本文");
+    await positiveBaseInput.fill("blue");
+    await page.waitForFunction(() => window.__customScriptsAutocompleteInstances?.length === 1);
+    const positiveAutocomplete = await page.evaluate(() => {
+        const input = document.querySelector("textarea[placeholder='ポジティブ基本文']");
+        const before = window.__customScriptsAutocompleteInstances.length;
+        window.__scenePromptPopupTestHooks.attachMatrixTextAreaAutocomplete(input);
+        window.__scenePromptPopupTestHooks.attachMatrixTextAreaAutocomplete(input);
+        const instance = window.__customScriptsAutocompleteInstances.at(-1);
+        instance.insert("_hair");
+        return {
+            count: window.__customScriptsAutocompleteInstances.length,
+            before,
+            scale: instance.helper.getScale(),
+            draft: window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.positive_base,
+        };
+    });
+    assert.equal(positiveAutocomplete.count, positiveAutocomplete.before, "a Matrix textarea is connected once");
+    assert.equal(positiveAutocomplete.scale, 1, "Matrix autocomplete ignores canvas zoom");
+    assert.equal(positiveAutocomplete.draft, "blue_hair", "autocomplete insertion updates the Matrix positive draft");
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    assert.equal(await page.locator(".pysssss-autocomplete").count(), 0, "closing a Matrix picker removes its autocomplete dropdown");
+
+    await page.getByRole("button", { name: "ネガティブ候補" }).nth(0).click();
+    const negativeBaseInput = page.getByPlaceholder("ネガティブ基本文");
+    await negativeBaseInput.fill("bad");
+    await page.waitForFunction(() => window.__customScriptsAutocompleteInstances?.length === 2);
+    const negativeDraft = await page.evaluate(() => {
+        window.__customScriptsAutocompleteInstances.at(-1).insert("_hands");
+        return window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.negative_base;
+    });
+    assert.equal(negativeDraft, "bad_hands", "autocomplete insertion updates the Matrix negative draft");
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+
+    const disconnectedAutocomplete = await page.evaluate(async () => {
+        const input = document.createElement("textarea");
+        document.body.append(input);
+        window.__scenePromptPopupTestHooks.attachMatrixTextAreaAutocomplete(input);
+        input.remove();
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+        return window.__customScriptsAutocompleteInstances.some((instance) => instance.element === input);
+    });
+    assert.equal(disconnectedAutocomplete, false, "a detached Matrix textarea is not connected after async import");
+
     await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
     await page.getByText("Outfit", { exact: false }).click();
     await page.getByPlaceholder("この階層内を検索").fill("Summer 1");
@@ -592,6 +704,30 @@ try {
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
     await page.waitForTimeout(50);
     assert.equal((await releaseCalls(page)).length, 0);
+
+    customScriptsAutocompleteAvailable = false;
+    const unavailablePage = await browser.newPage();
+    await unavailablePage.goto(`http://127.0.0.1:${address.port}/`);
+    await unavailablePage.waitForFunction(() => window.__scenePromptBrowserReady === true, null, { timeout: 5_000 });
+    const unavailableAutocomplete = await unavailablePage.evaluate(async () => {
+        const input = document.createElement("textarea");
+        input.value = "plain text";
+        document.body.append(input);
+        window.__scenePromptPopupTestHooks.attachMatrixTextAreaAutocomplete(input);
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+        return {
+            value: input.value,
+            state: input.dataset.scenePromptMatrixAutocomplete,
+            instances: window.__customScriptsAutocompleteInstances?.length || 0,
+        };
+    });
+    assert.deepEqual(unavailableAutocomplete, {
+        value: "plain text",
+        state: "unavailable",
+        instances: 0,
+    }, "a missing Custom-Scripts autocomplete leaves Matrix textareas usable");
+    await unavailablePage.close();
+    customScriptsAutocompleteAvailable = true;
 
     const closingPage = await browser.newPage();
     await closingPage.goto(`http://127.0.0.1:${address.port}/`);

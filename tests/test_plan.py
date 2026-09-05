@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import scene_prompt_tools.plan as plan_module
 
 from scene_prompt_tools.plan import (
-    MAX_PLAN_ROWS,
+    MAX_SAFE_INTEGER,
     SCENE_PROMPT_TYPE,
     ScenePlanError,
     empty_row,
@@ -56,7 +56,7 @@ class ScenePlanTests(unittest.TestCase):
             [{"row": {**empty_row(), "positive_parts": ["bad-count"]}, "count": "bad"}],
             [{"row": {**empty_row(), "positive_parts": ["boolean-count"]}, "count": True}],
             [{"row": {**empty_row(), "positive_parts": ["negative-count"]}, "count": -1}],
-            [{"row": {**empty_row(), "positive_parts": ["large-count"]}, "count": 1_000_000_001}],
+            [{"row": {**empty_row(), "positive_parts": ["large-count"]}, "count": MAX_SAFE_INTEGER + 1}],
         )
         for rows in invalid_rows:
             with self.subTest(rows=rows):
@@ -166,25 +166,8 @@ class ScenePlanTests(unittest.TestCase):
         with self.assertRaises(ScenePlanError):
             normalize_plan(broken)
 
-    def test_row_cap_rejects_merge_before_materializing_rows(self):
-        with mock.patch.object(plan_module, "MAX_PLAN_ROWS", 4), mock.patch.object(plan_module, "merge_rows") as merge_rows:
-            with self.assertRaisesRegex(ScenePlanError, "more than 4 rows"):
-                merge(make_plan([{"row": prompt_row("a"), "count": 1}] * 3), make_plan([{"row": prompt_row("b"), "count": 1}] * 2))
-        merge_rows.assert_not_called()
-
-    def test_row_cap_rejects_queue_and_matrix_before_materializing_rows(self):
-        with mock.patch.object(plan_module, "MAX_PLAN_ROWS", 2):
-            with self.assertRaisesRegex(ScenePlanError, "cannot contain more than 2 rows"):
-                queue([make_plan([{"row": prompt_row("a"), "count": 1}] * 2), prompt_plan("b")])
-            with self.assertRaisesRegex(ScenePlanError, "would create more than 2 rows"):
-                matrix_product(
-                    make_plan([{"row": prompt_row("a"), "count": 1}] * 2),
-                    [{**prompt_row("b"), "name": "b", "enabled": True}, {**prompt_row("c"), "name": "c", "enabled": True}],
-                    True,
-                )
-
     def test_normalize_uses_one_running_cursor_per_row(self):
-        row_count = min(MAX_PLAN_ROWS, 2_000)
+        row_count = 2_000
         plan = make_plan([{"row": prompt_row(str(index)), "count": 1} for index in range(row_count)])
         expected = list(range(row_count))
         with mock.patch.object(plan_module, "_build_plan", wraps=plan_module._build_plan) as build_plan:

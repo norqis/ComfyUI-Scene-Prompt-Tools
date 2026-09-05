@@ -377,7 +377,7 @@ class PromptDataRouteTests(unittest.TestCase):
                 return self.payload
 
         runs = sys.modules[f"{self.routes.__package__}.runs"]
-        runs.RUN_CONTEXTS = runs.RunContextStore(active_limit=3, prepared_limit=3)
+        runs.RUN_CONTEXTS = runs.RunContextStore()
         stale = runs.create_run_context("alice")
         running = runs.create_run_context("alice")
         continuous = runs.create_run_context("alice", continuous=True)
@@ -620,13 +620,7 @@ class PromptDataRouteTests(unittest.TestCase):
         runs = sys.modules[f"{self.routes.__package__}.runs"]
         presets = sys.modules[f"{self.routes.__package__}.presets"]
         store = runs.RUN_CONTEXTS
-        original = (
-            store.maximum,
-            store.prepared_limit,
-            store.active_limit,
-            store.prepared_ttl_seconds,
-            store._expiration_callback,
-        )
+        original = (store.prepared_ttl_seconds, store._expiration_callback)
         released = []
 
         def release_snapshot(handle, user_id):
@@ -636,9 +630,6 @@ class PromptDataRouteTests(unittest.TestCase):
         graph = {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}
         handles = []
         try:
-            store.maximum = 300
-            store.prepared_limit = 300
-            store.active_limit = 300
             store.prepared_ttl_seconds = 999
             runs.set_run_expiration_callback(release_snapshot)
             for index in range(300):
@@ -664,13 +655,7 @@ class PromptDataRouteTests(unittest.TestCase):
             store.clear()
             presets._RUN_SNAPSHOTS.clear()
             presets._CANCELLED_RUNS.clear()
-            (
-                store.maximum,
-                store.prepared_limit,
-                store.active_limit,
-                store.prepared_ttl_seconds,
-                callback,
-            ) = original
+            store.prepared_ttl_seconds, callback = original
             runs.set_run_expiration_callback(callback)
 
     def test_stale_threaded_read_cannot_restore_a_cleared_cache(self):
