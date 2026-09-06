@@ -285,46 +285,40 @@ function testNodeRemovalCancelsItsRun() {
     assert.deepEqual(context.cancelled, ["pending"]);
 }
 
-function testMatrixToggleSavesOnlyEnabledState() {
+function testMatrixCommitWritesWholeDraftOnlyWhenChanged() {
     const original = { row_id: "row-a", name: "Saved name", enabled: true, positive_base: "saved" };
     const context = {
-        String,
-        readMatrixState: () => ({ version: 1, sets: [original] }),
-        written: null,
-        writeMatrixState(_node, value) { context.written = value; },
+        matrixLineDraftState: (drafts) => ({ version: 1, sets: drafts }),
+        serializeMatrixState: JSON.stringify,
+        current: { version: 1, sets: [original] },
+        writes: 0,
+        readMatrixState: () => context.current,
+        writeMatrixState(_node, value) {
+            context.writes += 1;
+            context.current = value;
+        },
     };
     vm.createContext(context);
-    vm.runInContext(functionSource("saveMatrixLineEnabled"), context);
-    context.saveMatrixLineEnabled({}, {
-        row_id: "row-a",
-        name: "Unsaved name",
-        enabled: false,
-        positive_base: "unsaved",
-    });
-    assert.equal(context.written.sets[0].enabled, false);
-    assert.equal(context.written.sets[0].name, "Saved name");
-    assert.equal(context.written.sets[0].positive_base, "saved");
+    vm.runInContext(functionSource("commitMatrixLineDrafts"), context);
+    assert.equal(context.commitMatrixLineDrafts({}, [original]), false);
+    assert.equal(context.writes, 0);
+    assert.equal(context.commitMatrixLineDrafts({}, [{ ...original, name: "Changed", enabled: false }]), true);
+    assert.equal(context.writes, 1);
+    assert.equal(context.current.sets[0].name, "Changed");
+    assert.equal(context.current.sets[0].enabled, false);
 }
 
-function testMatrixFilenameToggleSavesOnlyItsState() {
-    const original = { row_id: "row-a", name: "Saved name", filename_enabled: false, negative_base: "saved" };
+function testMatrixEmptyNameUsesDefaultOnCommit() {
     const context = {
         String,
-        readMatrixState: () => ({ version: 1, sets: [original] }),
-        written: null,
-        writeMatrixState(_node, value) { context.written = value; },
+        refreshMatrixLineDraftComputedFields() {},
+        normalizeMatrixLine: (draft) => draft,
     };
     vm.createContext(context);
-    vm.runInContext(functionSource("saveMatrixLineFilenameEnabled"), context);
-    context.saveMatrixLineFilenameEnabled({}, {
-        row_id: "row-a",
-        name: "Unsaved name",
-        filename_enabled: true,
-        negative_base: "unsaved",
-    });
-    assert.equal(context.written.sets[0].filename_enabled, true);
-    assert.equal(context.written.sets[0].name, "Saved name");
-    assert.equal(context.written.sets[0].negative_base, "saved");
+    vm.runInContext(functionSource("matrixLineDraftState"), context);
+    const state = context.matrixLineDraftState([{ row_id: "row-a", name: "   ", path_label: "old" }]);
+    assert.equal(state.sets[0].name, "行 1");
+    assert.equal(state.sets[0].path_label, "行 1");
 }
 
 function testMatrixStateUsesFirstValidStoredValue() {
@@ -365,8 +359,9 @@ function testSourceOwnershipBoundaries() {
     const toggleEnd = matrixEditor.indexOf("actions.appendChild(toggle)", toggleStart);
     assert.notEqual(toggleStart, -1);
     const toggleSource = matrixEditor.slice(toggleStart, toggleEnd);
-    assert.doesNotMatch(toggleSource, /saveMatrixLineDrafts/);
-    assert.match(toggleSource, /saveMatrixLineEnabled/);
+    assert.doesNotMatch(matrixEditor, /createButton\("保存"/);
+    assert.match(toggleSource, /commitStructuralChange/);
+    assert.match(matrixEditor, /onClose: commitDrafts/);
 
     const negativeIndex = matrixEditor.indexOf('createButton("ネガティブ候補")');
     const filenameIndex = matrixEditor.indexOf('createButton(draft.filename_enabled');
@@ -465,16 +460,6 @@ function testLiveWidgetStateWinsOverStaleSerializedValue() {
     assert.match(context.serializedSelectionStateValue(node, widget, widget.name), /Live/);
     widget.value = "";
     assert.match(context.serializedSelectionStateValue(node, widget, widget.name), /Stale/);
-}
-
-function testMatrixEmptyNameFailsBeforePersisting() {
-    const context = { String };
-    vm.createContext(context);
-    vm.runInContext(functionSource("saveMatrixLineDrafts"), context);
-    assert.throws(
-        () => context.saveMatrixLineDrafts({}, [{ name: "", row_id: "row-a" }]),
-        /Matrix 行 1 の名前/,
-    );
 }
 
 async function testWorkflowLoadGuardMarksOnlyLoadWindow() {
@@ -651,15 +636,14 @@ Promise.resolve()
     .then(testStalePresetListParseFailureAdoptsLatestSuccessInReverseResponseOrder)
     .then(testPresetListRetriesAfterLatestFailure)
     .then(testNodeRemovalCancelsItsRun)
-    .then(testMatrixToggleSavesOnlyEnabledState)
-    .then(testMatrixFilenameToggleSavesOnlyItsState)
+    .then(testMatrixCommitWritesWholeDraftOnlyWhenChanged)
+    .then(testMatrixEmptyNameUsesDefaultOnCommit)
     .then(testMatrixStateUsesFirstValidStoredValue)
     .then(testSourceOwnershipBoundaries)
     .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)
     .then(testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost)
     .then(testSavedPromptNormalLoadsShareOneInFlightRequest)
     .then(testLiveWidgetStateWinsOverStaleSerializedValue)
-    .then(testMatrixEmptyNameFailsBeforePersisting)
     .then(testWorkflowLoadGuardMarksOnlyLoadWindow)
     .then(testPendingFifoRunPreparesPresetSnapshotImmediately)
     .then(testOverflowCountsDoNotStartABatchRun)
