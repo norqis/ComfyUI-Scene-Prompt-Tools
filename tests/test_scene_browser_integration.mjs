@@ -588,10 +588,17 @@ try {
     await page.locator(".pysssss-autocomplete-item").click();
     assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.positive_base), "blue_hair", "clicking a positive autocomplete candidate updates the Matrix draft");
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("fileURL:/extensions/ComfyUI-Custom-Scripts/"))), true, "Matrix autocomplete resolves its static extension with ComfyUI's base-aware file URL");
-    await positiveBaseInput.fill("blue_hair,");
+    await positiveBaseInput.press("End");
+    await positiveBaseInput.press("Space");
+    await positiveBaseInput.press("Backspace");
     await page.locator(".pysssss-autocomplete").waitFor({ state: "visible" });
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     assert.equal(await page.locator(".pysssss-autocomplete").count(), 0, "closing a Matrix picker removes its autocomplete dropdown");
+    assert.deepEqual(
+        await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
+        ["blue_hair"],
+        "closing a positive editor shows its base prompt without selected candidates",
+    );
 
     await page.getByRole("button", { name: "ネガティブ候補" }).nth(0).click();
     const negativeBaseInput = page.getByPlaceholder("ネガティブ基本文");
@@ -615,10 +622,26 @@ try {
     assert.equal(negativeLayer.abovePopup, true, "the negative candidate remains clickable above the Matrix popup");
     await page.locator(".pysssss-autocomplete-item").click();
     assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.negative_base), "bad_hands", "clicking a negative autocomplete candidate updates the Matrix draft");
-    await negativeBaseInput.fill("bad_hands,");
+    await negativeBaseInput.press("End");
+    await negativeBaseInput.press("Space");
+    await negativeBaseInput.press("Backspace");
     await page.locator(".pysssss-autocomplete").waitFor({ state: "visible" });
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     assert.equal(await page.locator(".pysssss-autocomplete").count(), 0, "closing a negative Matrix picker removes its autocomplete dropdown");
+    assert.deepEqual(
+        await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
+        ["blue_hair", "bad_hands"],
+        "closing a negative editor keeps both base prompts in the parent row",
+    );
+
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(1).click();
+    await page.getByPlaceholder("ポジティブ基本文").fill(" \t ");
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    assert.equal(
+        await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(1).locator(".pc-candidate-desc").count(),
+        0,
+        "a whitespace-only Matrix base prompt does not create an empty summary",
+    );
 
     const disconnectedAutocomplete = await page.evaluate(async () => {
         const input = document.createElement("textarea");
@@ -653,8 +676,11 @@ try {
     await page.getByText("Outfit", { exact: false }).click();
     await page.getByTitle("summer dress", { exact: true }).click();
     await page.getByRole("button", { name: "行編集へ戻る" }).click();
-    await assert.doesNotReject(async () => page.getByText("Summer", { exact: true }).waitFor({ state: "visible" }));
-
+    assert.deepEqual(
+        await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
+        ["blue_hair / Summer", "bad_hands"],
+        "a selected positive candidate follows its Matrix base prompt",
+    );
     await page.getByRole("button", { name: "ネガティブ候補" }).nth(1).click();
     await page.getByText("Outfit", { exact: false }).click();
     await page.getByTitle("summer dress", { exact: true }).click();
@@ -677,6 +703,19 @@ try {
     assert.deepEqual(matrixState.stored, matrixState.state);
     assert.deepEqual(matrixState.property, matrixState.state);
     assert.equal(matrixState.state.sets.every((line) => !Object.hasOwn(line, "sceneScheduleRenderSummaries")), true);
+
+    await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.sceneRole === "matrix_rows").callback());
+    assert.deepEqual(
+        await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
+        ["blue_hair / Summer", "bad_hands"],
+        "saved Matrix base and candidate summaries reappear after reopening",
+    );
+    assert.deepEqual(
+        await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(1).locator(".pc-candidate-desc").allTextContents(),
+        ["Summer"],
+        "a saved whitespace-only base prompt remains hidden from the row summary",
+    );
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
 
     await page.evaluate(async () => {
         class ScenePresetReferenceNode {
