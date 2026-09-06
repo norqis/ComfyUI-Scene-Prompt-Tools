@@ -475,9 +475,9 @@ function matrixLineStateWidgetName(side) {
     return `matrix_line_${side}_json`;
 }
 
-function setMatrixLineDraftContext(node, index, draft, side, renderRows) {
+function setMatrixLineDraftContext(node, index, draft, side, renderRows, commitDrafts) {
     const stateWidgetName = matrixLineStateWidgetName(side);
-    node.sceneMatrixLineDraftContext = { index, draft, side, stateWidgetName, renderRows };
+    node.sceneMatrixLineDraftContext = { index, draft, side, stateWidgetName, renderRows, commitDrafts };
     return stateWidgetName;
 }
 
@@ -1812,6 +1812,9 @@ function closePopup(options = {}) {
     if (activePopup) {
         const closingContext = activePopupContext;
         const parent = activePopupContext?.parent || null;
+        if (closingContext?.onClose && (!closingContext.secondary || options.discardPopupSession !== false)) {
+            closingContext.onClose();
+        }
         if (options.invalidateRequests !== false) {
             invalidatePopupRequests(closingContext?.node);
         }
@@ -1977,12 +1980,13 @@ function makePopupDraggable(node, popup, handle) {
 function openPopupShell(node, titleText, options = {}) {
     popupRequestIntent += 1;
     const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
+    const matrixLineContext = matrixLineDraftContextFor(node, stateWidgetName);
     const popupSessionScopeKeyValue = options.popupSessionScopeKey || popupSessionScopeKey(node, stateWidgetName);
     const popupSession = options.popupSession || popupSessionFor(node, stateWidgetName, popupSessionScopeKeyValue);
     const isSecondary = !!options.secondary
-        || !!matrixLineDraftContextFor(node, stateWidgetName)
-        || (!!node?.sceneMatrixLinePopupSecondary && !!matrixLineDraftContextFor(node, stateWidgetName))
-        || (!!activePopupContext?.secondary && !!matrixLineDraftContextFor(node, stateWidgetName));
+        || !!matrixLineContext
+        || (!!node?.sceneMatrixLinePopupSecondary && !!matrixLineContext)
+        || (!!activePopupContext?.secondary && !!matrixLineContext);
     let parent = null;
     if (isSecondary) {
         if (activePopupContext?.secondary) {
@@ -2088,6 +2092,7 @@ function openPopupShell(node, titleText, options = {}) {
         popupSessionScopeKey: popupSessionScopeKeyValue,
         secondary: isSecondary,
         parent,
+        onClose: options.onClose || matrixLineContext?.commitDrafts || null,
     };
     return popup;
 }
@@ -8770,34 +8775,28 @@ function matrixLineDraftsForNode(node) {
     return (readMatrixState(node).sets || []).map((line, index) => createMatrixLineDraft(line, index));
 }
 
-function saveMatrixLineDrafts(node, drafts) {
+function matrixLineDraftState(drafts) {
     const sets = drafts.map((draft, index) => {
         const name = String(draft?.name || "").trim();
-        if (!name) {
-            throw new Error(`Matrix 行 ${index + 1} の名前を入力してください。`);
-        }
+        const fallbackName = `行 ${index + 1}`;
         const namedDraft = {
             ...draft,
-            name,
+            name: name || fallbackName,
         };
         namedDraft.path_label = namedDraft.name;
         refreshMatrixLineDraftComputedFields(namedDraft);
         return normalizeMatrixLine(namedDraft);
     });
-    writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
+    return { version: 1, sets };
 }
 
-function saveMatrixLineEnabled(node, draft) {
-    const state = readMatrixState(node);
-    const rowId = String(draft?.row_id || "");
-    const index = (state.sets || []).findIndex((line) => String(line?.row_id || "") === rowId);
-    if (index < 0) {
-        return;
+function commitMatrixLineDrafts(node, drafts) {
+    const nextState = matrixLineDraftState(drafts);
+    if (serializeMatrixState(readMatrixState(node)) === serializeMatrixState(nextState)) {
+        return false;
     }
-    const sets = state.sets.map((line, lineIndex) => (
-        lineIndex === index ? { ...line, enabled: draft.enabled !== false } : line
-    ));
-    writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
+    writeMatrixState(node, nextState, { fitHeight: true });
+    return true;
 }
 
 function ensureSceneFilenameToggle(node) {
@@ -8842,25 +8841,12 @@ function scenePromptConfigureValues(config) {
     return { ...config, widgets_values: [stored[stored.length - 1], ...stored.slice(0, -1)] };
 }
 
-function saveMatrixLineFilenameEnabled(node, draft) {
-    const state = readMatrixState(node);
-    const rowId = String(draft?.row_id || "");
-    const index = (state.sets || []).findIndex((line) => String(line?.row_id || "") === rowId);
-    if (index < 0) {
-        return;
-    }
-    const sets = state.sets.map((line, lineIndex) => (
-        lineIndex === index ? { ...line, filename_enabled: draft.filename_enabled === true } : line
-    ));
-    writeMatrixState(node, { version: 1, sets }, { fitHeight: true });
-}
-
-function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows) {
+function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows, commitDrafts) {
     const draft = drafts[index];
     if (!draft) {
         return;
     }
-    const stateWidgetName = setMatrixLineDraftContext(node, index, draft, side, renderRows);
+    const stateWidgetName = setMatrixLineDraftContext(node, index, draft, side, renderRows, commitDrafts);
     openCategoryLevelPicker(node, [], { stateWidgetName });
 }
 
@@ -8936,8 +8922,20 @@ function createMatrixLineBaseInput(draft, side) {
 }
 
 function openSceneMatrixLinesPopup(node) {
+    closeAllPopups();
     const drafts = matrixLineDraftsForNode(node);
-    const popup = openPopupShell(node, "Matrix 行を編集", { hideReload: true, hideClear: true });
+    const commitDrafts = () => commitMatrixLineDrafts(node, drafts);
+    const popup = openPopupShell(node, "Matrix 行を編集", {
+        hideReload: true,
+        hideClear: true,
+        onClose: commitDrafts,
+    });
+    const commitStructuralChange = () => {
+        if (activePopupContext?.node === node && activePopupContext.secondary) {
+            closePopup();
+        }
+        commitDrafts();
+    };
     if (activePopupContext?.popup === popup) {
         activePopupContext.reopen = () => openSceneMatrixLinesPopup(node);
     }
@@ -8946,10 +8944,6 @@ function openSceneMatrixLinesPopup(node) {
     toolbar.className = "pc-toolbar";
     popup.appendChild(toolbar);
 
-    const error = document.createElement("div");
-    error.className = "pc-error";
-    popup.appendChild(error);
-
     const list = document.createElement("div");
     list.className = "pc-popup-list";
     popup.appendChild(list);
@@ -8957,22 +8951,10 @@ function openSceneMatrixLinesPopup(node) {
     const add = createButton("行を追加");
     add.addEventListener("click", () => {
         drafts.push(createMatrixLineDraft(null, drafts.length));
+        commitStructuralChange();
         renderRows();
     });
     toolbar.appendChild(add);
-
-    const save = createButton("保存", "pc-on");
-    save.addEventListener("click", () => {
-        try {
-            error.textContent = "";
-            saveMatrixLineDrafts(node, drafts);
-            closeAllPopups();
-        } catch (saveError) {
-            error.textContent = saveError?.message || "Matrix 行を保存できませんでした。";
-            fitPopupToContent(popup);
-        }
-    });
-    toolbar.appendChild(save);
 
     const renderRows = () => {
         list.textContent = "";
@@ -8989,9 +8971,12 @@ function openSceneMatrixLinesPopup(node) {
             name.placeholder = "名前";
             name.value = matrixLineDraftLabel(draft);
             name.addEventListener("input", () => {
-                draft.name = name.value.trim();
-                draft.path_label = draft.name;
-                refreshMatrixLineDraftComputedFields(draft);
+                const nextName = name.value.trim();
+                if (nextName) {
+                    draft.name = nextName;
+                    draft.path_label = nextName;
+                    refreshMatrixLineDraftComputedFields(draft);
+                }
             });
             row.appendChild(name);
 
@@ -9001,7 +8986,7 @@ function openSceneMatrixLinesPopup(node) {
             toggle.title = draft.enabled === false ? "この行は生成されません" : "この行は生成対象です";
             toggle.addEventListener("click", () => {
                 draft.enabled = draft.enabled === false;
-                saveMatrixLineEnabled(node, draft);
+                commitStructuralChange();
                 renderRows();
             });
             actions.appendChild(toggle);
@@ -9015,22 +9000,23 @@ function openSceneMatrixLinesPopup(node) {
                 }
                 const [moved] = drafts.splice(index, 1);
                 drafts.splice(index - 1, 0, moved);
+                commitStructuralChange();
                 renderRows();
             });
             actions.appendChild(moveUp);
 
             const positive = createButton("ポジティブ候補");
-            positive.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "positive", renderRows));
+            positive.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "positive", renderRows, commitDrafts));
             actions.appendChild(positive);
 
             const negative = createButton("ネガティブ候補");
-            negative.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "negative", renderRows));
+            negative.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "negative", renderRows, commitDrafts));
             actions.appendChild(negative);
 
             const filename = createButton(draft.filename_enabled === true ? "ファイル名付与: ON" : "ファイル名付与: OFF", draft.filename_enabled === true ? "pc-on" : "");
             filename.addEventListener("click", () => {
                 draft.filename_enabled = draft.filename_enabled !== true;
-                saveMatrixLineFilenameEnabled(node, draft);
+                commitStructuralChange();
                 renderRows();
             });
             actions.appendChild(filename);
@@ -9038,6 +9024,7 @@ function openSceneMatrixLinesPopup(node) {
             const remove = createButton("削除");
             remove.addEventListener("click", () => {
                 drafts.splice(index, 1);
+                commitStructuralChange();
                 renderRows();
             });
             actions.appendChild(remove);

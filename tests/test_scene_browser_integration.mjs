@@ -526,6 +526,7 @@ try {
                     options: {},
                 }];
                 this.widgets_values = this.widgets.map((widget) => widget.value);
+                this.matrixWriteCount = 0;
             }
             addWidget(type, name, value, callback, options = {}) {
                 const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
@@ -541,6 +542,9 @@ try {
             addOutput(name, type) { this.outputs.push({ name, type, links: [] }); }
             setDirtyCanvas() {}
             setSize(size) { this.size = [...size]; }
+            onWidgetChanged(name) {
+                if (name === "matrix_json") this.matrixWriteCount += 1;
+            }
         }
         await window.__scenePromptExtension.beforeRegisterNodeDef(SceneMatrixNode, { name: "SceneMatrix" });
         const node = new SceneMatrixNode();
@@ -549,6 +553,8 @@ try {
         window.__sceneMatrixTestNode = node;
         node.widgets.find((widget) => widget.sceneRole === "matrix_rows").callback();
     });
+    const initialMatrixJson = await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value);
+    assert.equal(await page.locator(".pc-popup").last().getByRole("button", { name: "保存", exact: true }).count(), 0, "the Matrix editor has no Save button");
     await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
     const positiveBaseInput = page.getByPlaceholder("ポジティブ基本文");
     await positiveBaseInput.fill("blue");
@@ -587,6 +593,7 @@ try {
     assert.equal(positiveLayer.abovePopup, true, "the positive candidate remains clickable above the Matrix popup");
     await page.locator(".pysssss-autocomplete-item").click();
     assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.positive_base), "blue_hair", "clicking a positive autocomplete candidate updates the Matrix draft");
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value), initialMatrixJson, "typing in a Matrix candidate editor does not write the Matrix state");
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("fileURL:/extensions/ComfyUI-Custom-Scripts/"))), true, "Matrix autocomplete resolves its static extension with ComfyUI's base-aware file URL");
     await positiveBaseInput.press("End");
     await positiveBaseInput.press("Space");
@@ -594,6 +601,12 @@ try {
     await page.locator(".pysssss-autocomplete").waitFor({ state: "visible" });
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     assert.equal(await page.locator(".pysssss-autocomplete").count(), 0, "closing a Matrix picker removes its autocomplete dropdown");
+    const positiveCommitted = await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode;
+        return { state: JSON.parse(node.widgets.find((widget) => widget.name === "matrix_json").value), writes: node.matrixWriteCount };
+    });
+    assert.equal(positiveCommitted.state.sets[0].positive_base, "blue_hair", "closing a positive Matrix editor commits its manual prompt");
+    assert.equal(positiveCommitted.writes, 1, "the final positive editor close writes once");
     assert.deepEqual(
         await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
         ["blue_hair"],
@@ -622,12 +635,17 @@ try {
     assert.equal(negativeLayer.abovePopup, true, "the negative candidate remains clickable above the Matrix popup");
     await page.locator(".pysssss-autocomplete-item").click();
     assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.negative_base), "bad_hands", "clicking a negative autocomplete candidate updates the Matrix draft");
+    assert.deepEqual(await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode;
+        return { state: JSON.parse(node.widgets.find((widget) => widget.name === "matrix_json").value), writes: node.matrixWriteCount };
+    }), positiveCommitted, "a Matrix candidate editor keeps changes in its draft until it closes");
     await negativeBaseInput.press("End");
     await negativeBaseInput.press("Space");
     await negativeBaseInput.press("Backspace");
     await page.locator(".pysssss-autocomplete").waitFor({ state: "visible" });
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     assert.equal(await page.locator(".pysssss-autocomplete").count(), 0, "closing a negative Matrix picker removes its autocomplete dropdown");
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), 2, "the final negative editor close writes once");
     assert.deepEqual(
         await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
         ["blue_hair", "bad_hands"],
@@ -672,10 +690,31 @@ try {
     assert.equal(await page.getByPlaceholder("カテゴリ / サブカテゴリ / ラベル / 説明 / prompt を検索").inputValue(), "", "explicit Matrix picker close resets that row session");
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
 
+    await page.getByPlaceholder("名前").nth(0).fill("Reopen Name");
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
+    await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode;
+        node.widgets.find((widget) => widget.sceneRole === "matrix_rows").callback();
+    });
+    assert.equal(await page.locator(".pc-popup").count(), 1, "reopening Matrix rows while a picker is open leaves one root editor");
+    assert.equal(await page.getByPlaceholder("名前").nth(0).inputValue(), "Reopen Name", "reopening Matrix rows preserves the root row-name draft");
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[0].name), "Reopen Name", "reopening commits the prior root editor before reading new drafts");
+
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
+    await page.evaluate(() => {
+        const root = [...document.querySelectorAll(".pc-popup")].find((popup) => !popup.sceneSecondaryPopup);
+        [...root.querySelectorAll("button")].find((button) => button.textContent === "行を追加").click();
+    });
+    assert.equal(await page.locator(".pc-popup").count(), 1, "a structural action closes its Matrix picker before committing");
+    assert.deepEqual(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets.map((line) => line.name)), ["Reopen Name", "Line Two", "行 3"], "the structural action preserves root drafts and commits the new row");
+    await page.getByRole("button", { name: "削除", exact: true }).nth(2).click();
+
     await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
     await page.getByText("Outfit", { exact: false }).click();
     await page.getByTitle("summer dress", { exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value.includes("summer")), false, "selecting a candidate does not write Matrix state during picker navigation");
     await page.getByRole("button", { name: "行編集へ戻る" }).click();
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value.includes("summer")), true, "行編集へ戻る commits the positive Matrix candidate");
     assert.deepEqual(
         await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
         ["blue_hair / Summer", "bad_hands"],
@@ -684,8 +723,26 @@ try {
     await page.getByRole("button", { name: "ネガティブ候補" }).nth(1).click();
     await page.getByText("Outfit", { exact: false }).click();
     await page.getByTitle("summer dress", { exact: true }).click();
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[1].negative_json.includes("summer")), false, "the negative candidate remains a draft before the picker closes");
     await page.getByRole("button", { name: "行編集へ戻る" }).click();
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[1].negative_json.includes("summer")), true, "行編集へ戻る commits the negative Matrix candidate");
+
+    await page.getByRole("button", { name: "↑", exact: true }).nth(1).click();
+    assert.deepEqual(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets.map((line) => line.name)), ["Line Two", "Reopen Name"], "reordering Matrix rows commits without a Save button");
+    await page.getByRole("button", { name: "↑", exact: true }).nth(1).click();
+    await page.getByRole("button", { name: "有効", exact: true }).nth(0).click();
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[0].enabled), false, "toggling a Matrix row commits without a Save button");
+    await page.getByRole("button", { name: "ファイル名付与: OFF", exact: true }).nth(0).click();
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[0].filename_enabled), true, "filename toggles commit without a Save button");
+    await page.getByRole("button", { name: "行を追加", exact: true }).click();
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets.length), 3, "adding a Matrix row commits without a Save button");
+    await page.getByRole("button", { name: "削除", exact: true }).nth(2).click();
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets.length), 2, "deleting a Matrix row commits without a Save button");
+
+    const writesBeforeNameClose = await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount);
+    await page.getByPlaceholder("名前").nth(0).fill("Renamed One");
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[0].name), "Reopen Name", "typing a Matrix row name remains a draft until the editor closes");
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     const matrixState = await page.evaluate(() => {
         const node = window.__sceneMatrixTestNode;
         const widget = node.widgets.find((candidateWidget) => candidateWidget.name === "matrix_json");
@@ -693,6 +750,7 @@ try {
             state: JSON.parse(widget.value),
             stored: JSON.parse(node.widgets_values[node.widgets.indexOf(widget)]),
             property: JSON.parse(node.properties.scene_matrix_json),
+            writes: node.matrixWriteCount,
         };
     });
     assert.equal(matrixState.state.sets.length, 2);
@@ -700,11 +758,14 @@ try {
     assert.equal(matrixState.state.sets[1].negative_json.includes("summer"), true);
     assert.equal(matrixState.state.sets[0].display_labels.includes("Summer"), true);
     assert.equal(matrixState.state.sets[1].display_labels.includes("Summer"), true);
+    assert.equal(matrixState.state.sets[0].name, "Renamed One");
     assert.deepEqual(matrixState.stored, matrixState.state);
     assert.deepEqual(matrixState.property, matrixState.state);
     assert.equal(matrixState.state.sets.every((line) => !Object.hasOwn(line, "sceneScheduleRenderSummaries")), true);
+    assert.equal(matrixState.writes, writesBeforeNameClose + 1, "closing the Matrix editor commits the row name once");
 
     await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.sceneRole === "matrix_rows").callback());
+    assert.equal(await page.getByPlaceholder("名前").nth(0).inputValue(), "Renamed One", "reopened Matrix rows show the saved row name");
     assert.deepEqual(
         await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
         ["blue_hair / Summer", "bad_hands"],
@@ -716,6 +777,7 @@ try {
         "a saved whitespace-only base prompt remains hidden from the row summary",
     );
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), matrixState.writes, "closing an unchanged Matrix editor does not write again");
 
     await page.evaluate(async () => {
         class ScenePresetReferenceNode {
