@@ -23,6 +23,9 @@ export function injectStyle() {
             box-shadow: 0 14px 36px rgba(0, 0, 0, .55);
             font: 12px/1.38 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
+        .pysssss-autocomplete.pc-matrix-autocomplete {
+            z-index: 100001;
+        }
         .pc-popup-head {
             display: grid;
             grid-template-columns: auto minmax(0, 1fr) auto;

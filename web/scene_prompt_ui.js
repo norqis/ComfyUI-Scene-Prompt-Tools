@@ -8906,6 +8906,7 @@ function attachMatrixTextAreaAutocomplete(input) {
             if (instance?.helper && typeof instance.helper === "object") {
                 instance.helper.getScale = () => 1;
             }
+            instance?.dropdown?.classList?.add("pc-matrix-autocomplete");
             matrixTextAreaAutocompleteInstances.set(input, instance);
             input.dataset.scenePromptMatrixAutocomplete = "ready";
         } catch {

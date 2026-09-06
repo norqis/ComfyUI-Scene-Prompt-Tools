@@ -109,16 +109,40 @@ window.__releaseScenePromptItems = () => releaseDelayedItems?.();
 window.__scenePromptItemsDelayed = () => !!releaseDelayedItems;
 `;
 const customScriptsAutocompleteModule = `
+const upstreamStyle = document.createElement("style");
+upstreamStyle.textContent = ".pysssss-autocomplete { position: absolute; z-index: 9999; min-width: 120px; padding: 4px; background: white; color: black; } .pysssss-autocomplete-item { cursor: pointer; padding: 4px; }";
+document.head.append(upstreamStyle);
 export class TextAreaAutoComplete {
   constructor(element) {
     this.element = element;
     this.helper = { getScale: () => 2 };
     this.dropdown = document.createElement("div");
+    this.dropdown.className = "pysssss-autocomplete";
+    this.suffix = element.placeholder.includes("ネガティブ") ? "_hands" : "_hair";
+    this.element.addEventListener("input", () => {
+      if (this.skipNextInput) {
+        this.skipNextInput = false;
+        return;
+      }
+      this.show();
+    });
     window.__customScriptsAutocompleteInstances ||= [];
     window.__customScriptsAutocompleteInstances.push(this);
   }
-  insert(value) {
+  show() {
+    const item = document.createElement("div");
+    item.className = "pysssss-autocomplete-item";
+    item.textContent = this.suffix;
+    item.addEventListener("click", () => this.insert(this.suffix));
+    this.dropdown.replaceChildren(item);
     document.body.append(this.dropdown);
+    const rect = this.element.getBoundingClientRect();
+    this.dropdown.style.left = (rect.left + 4) + "px";
+    this.dropdown.style.top = (rect.top + 4) + "px";
+  }
+  insert(value) {
+    this.dropdown.remove();
+    this.skipNextInput = true;
     this.element.value += value;
     this.element.dispatchEvent(new Event("input", { bubbles: true }));
   }
@@ -529,24 +553,43 @@ try {
     const positiveBaseInput = page.getByPlaceholder("ポジティブ基本文");
     await positiveBaseInput.fill("blue");
     await page.waitForFunction(() => window.__customScriptsAutocompleteInstances?.length === 1);
+    await positiveBaseInput.press("End");
+    await positiveBaseInput.press("Space");
+    await positiveBaseInput.press("Backspace");
     const positiveAutocomplete = await page.evaluate(() => {
         const input = document.querySelector("textarea[placeholder='ポジティブ基本文']");
         const before = window.__customScriptsAutocompleteInstances.length;
         window.__scenePromptPopupTestHooks.attachMatrixTextAreaAutocomplete(input);
         window.__scenePromptPopupTestHooks.attachMatrixTextAreaAutocomplete(input);
         const instance = window.__customScriptsAutocompleteInstances.at(-1);
-        instance.insert("_hair");
         return {
             count: window.__customScriptsAutocompleteInstances.length,
             before,
             scale: instance.helper.getScale(),
-            draft: window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.positive_base,
         };
     });
     assert.equal(positiveAutocomplete.count, positiveAutocomplete.before, "a Matrix textarea is connected once");
     assert.equal(positiveAutocomplete.scale, 1, "Matrix autocomplete ignores canvas zoom");
-    assert.equal(positiveAutocomplete.draft, "blue_hair", "autocomplete insertion updates the Matrix positive draft");
+    const positiveLayer = await page.evaluate(() => {
+        const dropdown = document.querySelector(".pysssss-autocomplete");
+        const popup = document.querySelector(".pc-popup");
+        const rect = dropdown.getBoundingClientRect();
+        const point = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        const popupRect = popup.getBoundingClientRect();
+        return {
+            matrixClass: dropdown.classList.contains("pc-matrix-autocomplete"),
+            abovePopup: point?.closest(".pysssss-autocomplete") === dropdown,
+            overlapsPopup: rect.left < popupRect.right && rect.right > popupRect.left && rect.top < popupRect.bottom && rect.bottom > popupRect.top,
+        };
+    });
+    assert.equal(positiveLayer.matrixClass, true, "a Matrix dropdown has its scoped layer class");
+    assert.equal(positiveLayer.overlapsPopup, true, "the positive candidate overlaps the Matrix popup");
+    assert.equal(positiveLayer.abovePopup, true, "the positive candidate remains clickable above the Matrix popup");
+    await page.locator(".pysssss-autocomplete-item").click();
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.positive_base), "blue_hair", "clicking a positive autocomplete candidate updates the Matrix draft");
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("fileURL:/extensions/ComfyUI-Custom-Scripts/"))), true, "Matrix autocomplete resolves its static extension with ComfyUI's base-aware file URL");
+    await positiveBaseInput.fill("blue_hair,");
+    await page.locator(".pysssss-autocomplete").waitFor({ state: "visible" });
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     assert.equal(await page.locator(".pysssss-autocomplete").count(), 0, "closing a Matrix picker removes its autocomplete dropdown");
 
@@ -554,12 +597,28 @@ try {
     const negativeBaseInput = page.getByPlaceholder("ネガティブ基本文");
     await negativeBaseInput.fill("bad");
     await page.waitForFunction(() => window.__customScriptsAutocompleteInstances?.length === 2);
-    const negativeDraft = await page.evaluate(() => {
-        window.__customScriptsAutocompleteInstances.at(-1).insert("_hands");
-        return window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.negative_base;
+    await negativeBaseInput.press("End");
+    await negativeBaseInput.press("Space");
+    await negativeBaseInput.press("Backspace");
+    const negativeLayer = await page.evaluate(() => {
+        const dropdown = document.querySelector(".pysssss-autocomplete");
+        const popup = document.querySelector(".pc-popup");
+        const rect = dropdown.getBoundingClientRect();
+        const point = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        const popupRect = popup.getBoundingClientRect();
+        return {
+            abovePopup: point?.closest(".pysssss-autocomplete") === dropdown,
+            overlapsPopup: rect.left < popupRect.right && rect.right > popupRect.left && rect.top < popupRect.bottom && rect.bottom > popupRect.top,
+        };
     });
-    assert.equal(negativeDraft, "bad_hands", "autocomplete insertion updates the Matrix negative draft");
+    assert.equal(negativeLayer.overlapsPopup, true, "the negative candidate overlaps the Matrix popup");
+    assert.equal(negativeLayer.abovePopup, true, "the negative candidate remains clickable above the Matrix popup");
+    await page.locator(".pysssss-autocomplete-item").click();
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.negative_base), "bad_hands", "clicking a negative autocomplete candidate updates the Matrix draft");
+    await negativeBaseInput.fill("bad_hands,");
+    await page.locator(".pysssss-autocomplete").waitFor({ state: "visible" });
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    assert.equal(await page.locator(".pysssss-autocomplete").count(), 0, "closing a negative Matrix picker removes its autocomplete dropdown");
 
     const disconnectedAutocomplete = await page.evaluate(async () => {
         const input = document.createElement("textarea");
