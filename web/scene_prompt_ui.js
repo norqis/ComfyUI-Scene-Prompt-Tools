@@ -1824,6 +1824,7 @@ function closePopup(options = {}) {
                 setActiveStateWidget(closingContext.node, parent.context.stateWidgetName);
             }
             if (options.discardPopupSession !== false) {
+                matrixLineDraftContextFor(closingContext.node, closingContext.stateWidgetName)?.renderRows?.();
                 clearMatrixLineDraftContext(closingContext.node);
             }
         }
@@ -2150,7 +2151,6 @@ function appendMatrixLineEditReturn(popup, node, options = {}) {
     row.style.flex = "0 0 auto";
     const edit = createButton("行編集へ戻る");
     edit.addEventListener("click", () => {
-        matrixLineContext.renderRows?.();
         closePopup();
     });
     row.appendChild(edit);
@@ -8747,11 +8747,13 @@ function matrixLineDraftLabel(draft) {
 }
 
 function matrixLineDraftSummary(draft, side) {
+    const baseKey = side === "negative" ? "negative_base" : "positive_base";
+    const base = String(draft?.[baseKey] || "").trim();
     const state = matrixLineDraftSelectionState(draft, side);
-    return selectedItems(state)
+    const labels = selectedItems(state)
         .map((item) => itemBaseLabel(item))
-        .filter(Boolean)
-        .join(" / ");
+        .filter(Boolean);
+    return [base, ...labels].filter(Boolean).join(" / ");
 }
 
 function createMatrixLineDraft(value, index) {
@@ -8906,6 +8908,7 @@ function attachMatrixTextAreaAutocomplete(input) {
             if (instance?.helper && typeof instance.helper === "object") {
                 instance.helper.getScale = () => 1;
             }
+            instance?.dropdown?.classList?.add("pc-matrix-autocomplete");
             matrixTextAreaAutocompleteInstances.set(input, instance);
             input.dataset.scenePromptMatrixAutocomplete = "ready";
         } catch {
