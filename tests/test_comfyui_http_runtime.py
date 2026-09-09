@@ -295,7 +295,12 @@ def _callback_graph(receiver_url, path="callbacks", *, batch_size=2, count=2, ex
         },
         "15": {
             "class_type": "ScenePromptCallback",
-            "inputs": {"scene_prompt": ["9", 0]},
+            "inputs": {
+                "scene_prompt": ["9", 0],
+                "frequency": "毎回",
+                "timeout_seconds": 10,
+                "failure_mode": "停止",
+            },
         },
         "16": {
             "class_type": "ScenePrompter",
@@ -610,8 +615,8 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             payload["extra_data"] = extra_data
         return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
 
-    def _prepare_callback_run(self, graph, expand_node_id="10"):
-        workflow = _workflow_for_graph(graph)
+    def _prepare_callback_run(self, graph, expand_node_id="10", workflow=None):
+        workflow = workflow or _workflow_for_graph(graph)
         prepared = self._request("/scene_prompt/runs/prepare", {
             "api_graph": {"output": graph},
             "expand_node_id": expand_node_id,
@@ -661,7 +666,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                     first_files[0].stat().st_mtime + 0.02,
                 )
 
-                cached = copy.deepcopy({node_id: graph[node_id] for node_id in ("10", "12", "13")})
+                cached = copy.deepcopy({node_id: graph[node_id] for node_id in ("2", "3", "10", "11", "12", "13")})
                 del cached["10"]["inputs"]["scene_prompt"]
                 cached["10"]["inputs"]["current_index"] = 1
                 second_prompt_id, _second = self._queue_lifecycle_graph(cached, handle, workflow)
@@ -846,26 +851,54 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             finally:
                 self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
 
-            received_before_reset = list(received)
+            original_received = list(received)
+            from PIL import Image
+            with Image.open(new_files[0]) as image:
+                replay_prompt = json.loads(image.text["prompt"])
+                replay_png_workflow = json.loads(image.text["workflow"])
+            self.assertEqual(replay_prompt["10"]["inputs"]["current_index"], 0)
+            self.assertEqual(replay_prompt["10"]["inputs"]["seed_base"], 42)
+
+            replay_handle, replay_workflow = self._prepare_callback_run(
+                replay_prompt, "10", replay_png_workflow
+            )
+            try:
+                self._queue_callback_graph(replay_prompt, replay_handle, replay_workflow, claim_run=True)
+                replay_received = receiver.wait_for(5)
+                self.assertEqual(len(replay_received), 5)
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})["released"])
+
             reset_graph = _callback_graph(receiver.url, "callback-reset", batch_size=1, count=1)
             reset_handle, reset_workflow = self._prepare_callback_run(reset_graph)
             try:
                 self._queue_callback_graph(reset_graph, reset_handle, reset_workflow, claim_run=True)
-                reset_received = receiver.wait_for(5)
-                self.assertEqual(len(reset_received), 5)
+                reset_received = receiver.wait_for(7)
+                self.assertEqual(len(reset_received), 7)
             finally:
                 self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": reset_handle})["released"])
 
-        payloads = [json.loads(request["body"].decode("utf-8")) for request in received_before_reset]
+        payloads = [json.loads(request["body"].decode("utf-8")) for request in original_received]
+        replay_payloads = [json.loads(request["body"].decode("utf-8")) for request in replay_received[-2:]]
         reset_payloads = [json.loads(request["body"].decode("utf-8")) for request in reset_received[-2:]]
         self.assertEqual({payload["marker"] for payload in reset_payloads}, {"every", "first"})
         self.assertEqual([payload["marker"] for payload in payloads], ["every", "first", "every"])
+        self.assertEqual([payload["marker"] for payload in replay_payloads], ["every", "first"])
         every = [payload for payload in payloads if payload["marker"] == "every"]
         first_only = [payload for payload in payloads if payload["marker"] == "first"]
         self.assertEqual(len(every), 2)
         self.assertEqual(len(first_only), 1)
         self.assertEqual([payload["exec_current_count"] for payload in every], ["1", "2"])
         self.assertEqual([payload["exec_seed"] for payload in every], ["41", "42"])
+        original_second = payloads[-1]
+        for payload in replay_payloads:
+            self.assertEqual(payload["current_positive"], original_second["current_positive"])
+            self.assertEqual(payload["all_positive"], original_second["all_positive"])
+            self.assertEqual(payload["current_negative"], original_second["current_negative"])
+            self.assertEqual(payload["all_negative"], original_second["all_negative"])
+            self.assertEqual(payload["exec_seed"], original_second["exec_seed"])
+            self.assertEqual(payload["exec_current_count"], "1")
+            self.assertEqual(payload["exec_total_count"], "1")
         for payload in payloads:
             self.assertEqual(payload["current_positive"], "before")
             self.assertEqual(payload["current_negative"], "before-negative")
@@ -882,7 +915,6 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         self.assertEqual(received[0]["headers"]["X-Callback-Test"], "1")
         files = sorted((self.base / "output" / "callback-runtime").glob("*.png"))
         self.assertEqual(len(files), 4, "Two batches with batch_size=2 must save four images.")
-        from PIL import Image
         for file_path in files:
             with Image.open(file_path) as image:
                 saved_prompt = json.loads(image.text["prompt"])
@@ -890,6 +922,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             self.assertIn("3", saved_prompt)
             self.assertIn("4", saved_prompt)
             self.assertIn("5", saved_prompt)
+            self.assertIn("15", saved_prompt)
             self.assertNotIn("13", saved_prompt)
             self.assertNotIn("14", saved_prompt)
             self.assertNotIn("16", saved_prompt)
@@ -1044,16 +1077,17 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             on_pngs = sorted((self.base / "output" / "preset-callback-on").glob("*.png"))
             self.assertEqual(len(off_pngs), 2)
             self.assertEqual(len(on_pngs), 2)
-            on_prompts = []
+            saved_replays = {}
             for file_path in off_pngs:
                 with Image.open(file_path) as image:
                     off_prompt = json.loads(image.text["prompt"])
+                    off_workflow = json.loads(image.text["workflow"])
                 self.assertIn("ScenePresetReference", {node["class_type"] for node in off_prompt.values()})
+                saved_replays.setdefault("off", []).append((off_prompt, off_workflow))
             for file_path in on_pngs:
                 with Image.open(file_path) as image:
                     on_prompt = json.loads(image.text["prompt"])
                     on_workflow = json.loads(image.text["workflow"])
-                on_prompts.append(on_prompt)
                 self.assertNotIn("ScenePresetReference", {node["class_type"] for node in on_prompt.values()})
                 self.assertIn("ScenePromptCallback", {node["class_type"] for node in on_prompt.values()})
                 self.assertIn("ScenePromptCallbackRequest", {node["class_type"] for node in on_prompt.values()})
@@ -1062,19 +1096,37 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                 self.assertIsInstance(callback_source, list)
                 self.assertEqual(on_prompt[str(callback_source[0])]["class_type"], "ScenePromptCallbackRequest")
                 self.assertIn("ScenePromptCallback", {node["type"] for node in on_workflow["nodes"]})
+                saved_replays.setdefault("on", []).append((on_prompt, on_workflow))
 
-            replay_handle, replay_workflow = self._prepare_callback_run(on_prompts[0], "6")
-            try:
-                self._queue_callback_graph(on_prompts[0], replay_handle, replay_workflow, claim_run=True)
-                replay_received = receiver.wait_for(3)
-                self.assertEqual(len(replay_received), 3)
-            finally:
-                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})["released"])
+            original_second = json.loads(received[1]["body"].decode("utf-8"))
+            replay_payloads = []
+            for mode in ("off", "on"):
+                replay_prompt, replay_png_workflow = saved_replays[mode][1]
+                self.assertEqual(replay_prompt["6"]["inputs"]["current_index"], 0)
+                self.assertEqual(replay_prompt["6"]["inputs"]["seed_base"], int(original_second["exec_seed"]))
+                replay_handle, replay_workflow = self._prepare_callback_run(
+                    replay_prompt, "6", replay_png_workflow
+                )
+                try:
+                    self._queue_callback_graph(replay_prompt, replay_handle, replay_workflow, claim_run=True)
+                    replay_received = receiver.wait_for(3 + len(replay_payloads))
+                    self.assertEqual(len(replay_received), 3 + len(replay_payloads))
+                    replay_payloads.append(json.loads(replay_received[-1]["body"].decode("utf-8")))
+                finally:
+                    self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})["released"])
 
         self.assertEqual(
-            [json.loads(request["body"].decode("utf-8"))["marker"] for request in replay_received],
-            ["preset", "preset", "preset"],
+            [payload["marker"] for payload in replay_payloads],
+            ["preset", "preset"],
         )
+        for payload in replay_payloads:
+            self.assertEqual(payload["current_positive"], original_second["current_positive"])
+            self.assertEqual(payload["all_positive"], original_second["all_positive"])
+            self.assertEqual(payload["current_negative"], original_second["current_negative"])
+            self.assertEqual(payload["all_negative"], original_second["all_negative"])
+            self.assertEqual(payload["exec_seed"], original_second["exec_seed"])
+            self.assertEqual(payload["exec_current_count"], "1")
+            self.assertEqual(payload["exec_total_count"], "1")
 
     def test_http_prompt_history_two_outputs_and_metadata_modes(self):
         for index, mode in enumerate(("ワークフロー全体", "生成経路ノードのみ", "プロンプトのみ"), start=1):
