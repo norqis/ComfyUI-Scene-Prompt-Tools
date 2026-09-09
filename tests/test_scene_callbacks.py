@@ -4,6 +4,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -32,7 +33,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         size = int(self.headers.get("Content-Length", 0))
         type(self).received.append(("POST", self.path, dict(self.headers), self.rfile.read(size)))
-        self.send_response(204)
+        self.send_response(500 if self.path == "/failed" else 204)
         self.end_headers()
 
 
@@ -84,6 +85,16 @@ class SceneCallbackTests(unittest.TestCase):
         config = request_callback("POST", "", "x", "text")[0]
         with self.assertRaises(SceneCallbackError):
             dispatch_callback(config, {}, 3)
+
+    def test_http_failure_and_timeout_are_callback_errors(self):
+        config = request_callback("POST", self.base_url + "/failed", "x")[0]
+        with self.assertRaises(SceneCallbackError):
+            dispatch_callback(config, {}, 3)
+        config = request_callback("GET", self.base_url + "/timeout")[0]
+        with mock.patch("scene_prompt_tools.callbacks.urlopen", side_effect=OSError("timeout")) as open_request:
+            with self.assertRaises(SceneCallbackError):
+                dispatch_callback(config, {}, 7)
+        self.assertEqual(open_request.call_args.kwargs["timeout"], 7)
 
     def test_callback_snapshot_and_merge_deduplicate_shared_node(self):
         row = {**empty_row(), "positive_parts": ["first"]}
