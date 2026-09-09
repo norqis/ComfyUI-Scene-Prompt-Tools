@@ -341,6 +341,98 @@ def _scene_source_ids(scene_info):
     return {str(value) for value in values if str(value).strip()} if isinstance(values, list) else set()
 
 
+_EXPAND_WORKFLOW_WIDGET_INDEX = {
+    "current_index": 0,
+    "seed_base": 2,
+    # ``seed_base_literal`` is an internal optional widget, appended after the
+    # existing Expand widgets so old workflow positions stay stable.
+    "seed_base_literal": 8,
+}
+
+
+def _visible_scene_source_ids(prompt, source_aliases=None):
+    """Return source ids represented by the complete prompt before slicing."""
+    if not isinstance(prompt, dict):
+        return set()
+    aliases = source_aliases if isinstance(source_aliases, dict) else {}
+    return {
+        str(aliases.get(str(node_id), node_id))
+        for node_id, node in prompt.items()
+        if isinstance(node, dict) and node.get("class_type") in SCENE_NODE_TYPES
+    }
+
+
+def _replay_expand_values(scene_info, full_prompt, source_aliases=None):
+    """Rebase an execution-path replay onto just the rows saved in the PNG."""
+    if not isinstance(scene_info, dict):
+        return None
+    plan = scene_info.get("_plan_ref")
+    rows = plan.get("rows") if isinstance(plan, dict) else None
+    if not isinstance(rows, list):
+        return None
+    row_index = scene_info.get("row_index")
+    repeat_index = scene_info.get("repeat_index")
+    if type(row_index) is not int or type(repeat_index) is not int or row_index < 0 or repeat_index < 1:
+        return None
+    selected_sources = _scene_source_ids(scene_info)
+    visible_sources = _visible_scene_source_ids(full_prompt, source_aliases)
+
+    def is_retained(item):
+        row = item.get("row") if isinstance(item, dict) else None
+        source_ids = row.get("source_node_ids", []) if isinstance(row, dict) else []
+        row_visible = {str(source_id) for source_id in source_ids if str(source_id) in visible_sources}
+        return row_visible.issubset(selected_sources)
+
+    if row_index >= len(rows) or not is_retained(rows[row_index]):
+        return None
+    new_index = repeat_index - 1
+    for index, item in enumerate(rows):
+        if index >= row_index:
+            break
+        if isinstance(item, dict) and is_retained(item):
+            new_index += int(item.get("count", 0))
+    seed_base = (int(scene_info.get("seed", 0)) - new_index) % SEED_MODULO
+    return {
+        "current_index": new_index,
+        "seed_base": seed_base,
+        "seed_base_literal": seed_base == 0,
+    }
+
+
+def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_aliases=None):
+    """Apply replay widgets only to the Expand that produced this image."""
+    if not values or not isinstance(prompt, dict):
+        return prompt, workflow
+    aliases = source_aliases if isinstance(source_aliases, dict) else {}
+    selected_sources = _scene_source_ids(scene_info)
+    expand_ids = {
+        str(node_id)
+        for node_id, node in prompt.items()
+        if isinstance(node, dict)
+        and node.get("class_type") == "ScenePrompterExpand"
+        and str(aliases.get(str(node_id), node_id)) in selected_sources
+    }
+    if not expand_ids:
+        return prompt, workflow
+    for node_id in expand_ids:
+        inputs = prompt[node_id].setdefault("inputs", {})
+        inputs.update(values)
+    if not isinstance(workflow, dict):
+        return prompt, workflow
+    for node in workflow.get("nodes", []):
+        if not isinstance(node, dict) or str(node.get("id")) not in expand_ids:
+            continue
+        if node.get("type") != "ScenePrompterExpand":
+            continue
+        widgets = node.get("widgets_values")
+        if not isinstance(widgets, list):
+            continue
+        for name, index in _EXPAND_WORKFLOW_WIDGET_INDEX.items():
+            if index < len(widgets):
+                widgets[index] = values[name]
+    return prompt, workflow
+
+
 def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=None):
     """Keep ordinary image ancestors, but only selected Scene-plan branches."""
     selected_scene_ids = _scene_source_ids(scene_info) if selected_scene_ids is None else selected_scene_ids
@@ -395,9 +487,6 @@ def _metadata_for_save_mode(
                 prompt = _merge_cached_prompt(cached_prompt, prompt)
                 break
 
-    if metadata_mode == SAVE_METADATA_WORKFLOW and not expand_preset_contents:
-        return prompt, extra_pnginfo
-
     if metadata_mode == SAVE_METADATA_PROMPT_ONLY:
         saved_prompt = None
         saved_extra = (
@@ -410,6 +499,9 @@ def _metadata_for_save_mode(
             }
         )
         return saved_prompt, saved_extra
+
+    if metadata_mode == SAVE_METADATA_WORKFLOW and not expand_preset_contents:
+        return prompt, extra_pnginfo
 
     if expand_preset_contents and isinstance(prompt, dict):
         has_prompt_reference = any(
@@ -453,6 +545,7 @@ def _metadata_for_save_mode(
         if metadata_mode == SAVE_METADATA_WORKFLOW:
             return expanded_prompt, expanded_extra
         selected_sources = _scene_source_ids(scene_info)
+        replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases)
         selected_ids = {
             node_id
             for node_id, source_id in source_aliases.items()
@@ -468,6 +561,9 @@ def _metadata_for_save_mode(
             if key not in {"prompt", "workflow"}
         }
         saved_extra["workflow"] = _slice_workflow_for_output(expanded_workflow, ancestor_ids)
+        _apply_replay_expand_values(
+            saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
+        )
         return saved_prompt, saved_extra
 
     if metadata_mode == SAVE_METADATA_WORKFLOW:
@@ -475,6 +571,7 @@ def _metadata_for_save_mode(
 
     ancestor_ids = _selected_ancestor_ids(prompt, unique_id, scene_info)
     saved_prompt = _slice_prompt_to_ids(prompt, ancestor_ids)
+    replay_values = _replay_expand_values(scene_info, prompt)
     saved_extra = None
     if extra_pnginfo is not None:
         saved_extra = {
@@ -486,6 +583,12 @@ def _metadata_for_save_mode(
             saved_extra["workflow"] = _slice_workflow_for_output(
                 extra_pnginfo["workflow"], ancestor_ids
             )
+    _apply_replay_expand_values(
+        saved_prompt,
+        saved_extra.get("workflow") if isinstance(saved_extra, dict) else None,
+        scene_info,
+        replay_values,
+    )
     return saved_prompt, saved_extra
 
 
@@ -1023,7 +1126,7 @@ def _normalize_scene_save_info(value):
     if not isinstance(value, dict):
         return {}
     use_run_dir = value.get("use_run_dir", True)
-    return {
+    info = {
         "run_dir": str(value.get("run_dir") or "").strip(),
         "use_run_dir": _scene_bool(use_run_dir),
         "path": str(value.get("path") or "").strip(),
@@ -1040,6 +1143,11 @@ def _normalize_scene_save_info(value):
         "source_node_ids": [str(node_id) for node_id in value.get("source_node_ids", []) if str(node_id).strip()] if isinstance(value.get("source_node_ids"), list) else [],
         "run_handle": str(value.get("run_handle") or "").strip(),
     }
+    # The plan reference is process-local provenance for metadata slicing. It
+    # must stay by reference here and is intentionally absent from PNG JSON.
+    if isinstance(value.get("_plan_ref"), dict):
+        info["_plan_ref"] = value["_plan_ref"]
+    return info
 
 class SceneMatrix:
     DESCRIPTION = """複数のプロンプト行を作り、入力された scene_prompt と組み合わせて生成計画を展開します。\n有効なMatrix行ごとにポジティブ・ネガティブ候補が追加され、入力行との全組み合わせが出力されます。\nMatrix行が未設定なら入力をそのまま通し、設定済みの行がすべて無効なら生成対象は0件になります。"""
@@ -1602,6 +1710,7 @@ class ScenePromptExpand:
                 "callback_last": (SCENE_CALLBACK_TYPE, {"display_name": "callback_last"}),
                 "callback_timeout_seconds": ("INT", {"default": 10, "min": 1, "max": 120, "display_name": "callback_timeout_seconds"}),
                 "callback_failure_mode": ([CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP], {"default": CALLBACK_FAILURE_CONTINUE, "display_name": "callback_failure_mode"}),
+                "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
@@ -1628,6 +1737,7 @@ class ScenePromptExpand:
         callback_last=None,
         callback_timeout_seconds=10,
         callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
+        seed_base_literal=False,
     ):
         return "|".join(
             [
@@ -1635,6 +1745,7 @@ class ScenePromptExpand:
                 str(current_index),
                 str(run_id or ""),
                 _seed_change_key(seed_base),
+                str(_scene_bool(seed_base_literal)),
                 str(_scene_bool(timestamp_dir)),
                 _safe_filename_prefix(prefix),
                 _normalize_model_mode(model_mode),
@@ -1658,6 +1769,7 @@ class ScenePromptExpand:
         callback_last=None,
         callback_timeout_seconds=10,
         callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
+        seed_base_literal=False,
     ):
         separator = ", "
         if run_handle and unique_id is not None and isinstance(prompt, dict):
@@ -1666,7 +1778,8 @@ class ScenePromptExpand:
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
         global_index = int(item.get("global_index", 0) or 0)
-        seed = (_auto_seed_base(seed_base) + global_index) % SEED_MODULO
+        base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
+        seed = (base_seed + global_index) % SEED_MODULO
         positive_parts = _expand_prompt_parts(row.get("positive_parts", []), seed, "positive")
         negative_parts = _expand_prompt_parts(row.get("negative_parts", []), seed, "negative")
         positive_parts, negative_parts = _merge_positive_negative_parts(
@@ -1722,6 +1835,7 @@ class ScenePromptExpand:
             "latent": latent_config,
             "source_node_ids": [*row.get("source_node_ids", []), str(unique_id)] if unique_id is not None else list(row.get("source_node_ids", [])),
             "run_handle": str(run_handle or ""),
+            "_plan_ref": plan,
         }
 
         return (positive, negative, save_info, seed, latent)

@@ -76,9 +76,14 @@ def _completed_prompt_status(prompt_id):
     history = prompt_queue.get_history(prompt_id=str(prompt_id)) if prompt_queue is not None else {}
     entry = history.get(str(prompt_id)) if isinstance(history, dict) else None
     status = entry.get("status") if isinstance(entry, dict) else None
-    if not isinstance(status, dict) or not status.get("completed"):
+    if not isinstance(status, dict):
         return "pending"
-    return "success" if status.get("status_str") == "success" else "failed"
+    status_str = status.get("status_str")
+    if status_str == "error":
+        return "failed"
+    if not status.get("completed"):
+        return "pending"
+    return "success" if status_str == "success" else "failed"
 
 
 def _is_continuous_scene_run(api_graph, expand_node_id):
