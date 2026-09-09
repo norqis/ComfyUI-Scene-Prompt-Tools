@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from scene_prompt_tools.callbacks import (
     SceneCallbackError,
+    acknowledge_desktop_callback,
+    desktop_callback,
     dispatch_callback,
     discord_callback,
     request_callback,
@@ -80,6 +82,104 @@ class SceneCallbackTests(unittest.TestCase):
     def test_producers_only_return_settings(self):
         self.assertEqual(discord_callback("https://example.invalid", "hello")[0]["kind"], "discord")
         self.assertEqual(request_callback("POST", "https://example.invalid", "x", "text")[0]["kind"], "request")
+        self.assertEqual(desktop_callback("Title", "hello")[0], {"kind": "desktop", "title": "Title", "text": "hello"})
+
+    def test_desktop_callback_targets_only_its_prepared_client_and_accepts_early_ack(self):
+        sent = []
+
+        class Prompt:
+            def send_sync(self, event, payload, *, sid=None):
+                sent.append((event, payload, sid))
+                acknowledge_desktop_callback(payload["request_id"], "alice", True)
+
+        server = types.ModuleType("server")
+        server.PromptServer = types.SimpleNamespace(instance=Prompt())
+        previous = sys.modules.get("server")
+        sys.modules["server"] = server
+        try:
+            dispatch_callback(
+                desktop_callback("Run {exec_current_count}", "{all_positive}")[0],
+                {"exec_current_count": 2, "all_positive": "ready"},
+                3,
+                desktop_context={"client_id": "only-this-client", "user_id": "alice"},
+            )
+        finally:
+            if previous is None:
+                sys.modules.pop("server", None)
+            else:
+                sys.modules["server"] = previous
+        self.assertEqual(sent[0][0], "scene_prompt_desktop_notification")
+        self.assertEqual(sent[0][2], "only-this-client")
+        self.assertEqual({key: value for key, value in sent[0][1].items() if key != "request_id"}, {"title": "Run 2", "text": "ready", "timeout_seconds": 3})
+
+    def test_desktop_ack_rejects_wrong_user_duplicate_and_failure(self):
+        sent = []
+        delivered = threading.Event()
+
+        class Prompt:
+            def send_sync(self, _event, payload, *, sid=None):
+                sent.append((payload, sid))
+                delivered.set()
+
+        server = types.ModuleType("server")
+        server.PromptServer = types.SimpleNamespace(instance=Prompt())
+        previous = sys.modules.get("server")
+        sys.modules["server"] = server
+        failures = []
+        worker = threading.Thread(
+            target=lambda: failures.append(self._desktop_dispatch_failure()), daemon=True
+        )
+        try:
+            worker.start()
+            self.assertTrue(delivered.wait(1))
+            request_id = sent[0][0]["request_id"]
+            self.assertEqual(acknowledge_desktop_callback(request_id, "bob", False, "permission_denied"), "forbidden")
+            self.assertEqual(acknowledge_desktop_callback(request_id, "alice", False, "permission_denied"), "acknowledged")
+            self.assertEqual(acknowledge_desktop_callback(request_id, "alice", False, "permission_denied"), "missing")
+            worker.join(3)
+        finally:
+            if previous is None:
+                sys.modules.pop("server", None)
+            else:
+                sys.modules["server"] = previous
+        self.assertEqual(failures, ["Desktop callback failed: permission_denied."])
+
+    @staticmethod
+    def _desktop_dispatch_failure():
+        try:
+            dispatch_callback(
+                desktop_callback("", "")[0], {}, 3,
+                desktop_context={"client_id": "client", "user_id": "alice"},
+            )
+        except SceneCallbackError as exc:
+            return str(exc)
+        return "unexpected success"
+
+    def test_desktop_timeout_cleans_pending_request(self):
+        sent = []
+
+        class Prompt:
+            def send_sync(self, _event, payload, *, sid=None):
+                sent.append((payload, sid))
+
+        server = types.ModuleType("server")
+        server.PromptServer = types.SimpleNamespace(instance=Prompt())
+        previous = sys.modules.get("server")
+        sys.modules["server"] = server
+        try:
+            with self.assertRaisesRegex(SceneCallbackError, "timeout"):
+                dispatch_callback(desktop_callback("", "")[0], {}, 1, desktop_context={"client_id": "client", "user_id": "alice"})
+        finally:
+            if previous is None:
+                sys.modules.pop("server", None)
+            else:
+                sys.modules["server"] = previous
+        self.assertEqual(acknowledge_desktop_callback(sent[0][0]["request_id"], "alice", True), "missing")
+
+    def test_desktop_missing_client_fails_only_when_dispatched(self):
+        config = desktop_callback("", "")[0]
+        with self.assertRaisesRegex(SceneCallbackError, "unavailable"):
+            dispatch_callback(config, {}, 3)
 
     def test_get_keeps_fixed_query_and_has_no_body(self):
         config = request_callback("GET", self.base_url + "/check?fixed=yes&name={exec_model}", headers_json='{"X-Scene":"{exec_seed}"}')[0]
@@ -168,7 +268,7 @@ class SceneCallbackTests(unittest.TestCase):
         )
         plan = merge(first, second)
         calls = []
-        with mock.patch.object(nodes, "claim_callback_attempt", side_effect=lambda _handle, callback_id: store.claim_callback_attempt(handle, callback_id)), mock.patch.object(nodes, "dispatch_callback", side_effect=lambda _config, values, _timeout: calls.append(values)):
+        with mock.patch.object(nodes, "claim_callback_attempt", side_effect=lambda _handle, callback_id: store.claim_callback_attempt(handle, callback_id)), mock.patch.object(nodes, "dispatch_callback", side_effect=lambda _config, values, _timeout, **_kwargs: calls.append(values)):
             nodes._dispatch_row_callbacks(plan["rows"][0]["row"], {"global_index": 1, "total_batches": 2}, 17, "Illustrious", handle, "before", "no")
             nodes._dispatch_row_callbacks(plan["rows"][0]["row"], {"global_index": 1, "total_batches": 2}, 17, "Illustrious", handle, "before", "no")
         self.assertEqual(len(calls), 1)

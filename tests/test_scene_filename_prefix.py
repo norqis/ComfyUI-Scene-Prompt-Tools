@@ -93,6 +93,7 @@ def _load_node_package(output_dir):
         "ScenePromptCallback",
         "ScenePromptCallbackDiscord",
         "ScenePromptCallbackRequest",
+        "ScenePromptCallbackDesktop",
         "SceneSaveImage",
     ):
         setattr(internal_package, name, getattr(internal_package.nodes, name))
@@ -1039,6 +1040,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             "ScenePromptCallback",
             "ScenePromptCallbackDiscord",
             "ScenePromptCallbackRequest",
+            "ScenePromptCallbackDesktop",
             "SceneEmptyLatent",
             "ScenePrompterExpand",
             "SceneSaveImage",
@@ -1059,6 +1061,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 "ScenePromptCallback": "Scene Prompt Callback",
                 "ScenePromptCallbackDiscord": "Scene Prompt Callback (Discord)",
                 "ScenePromptCallbackRequest": "Scene Prompt Callback (Request)",
+                "ScenePromptCallbackDesktop": "Scene Prompt Callback (Desktop)",
                 "SceneEmptyLatent": "Scene Empty Latent",
                 "ScenePrompterExpand": "Scene Prompt Expand",
                 "SceneSaveImage": "Scene Save Image",

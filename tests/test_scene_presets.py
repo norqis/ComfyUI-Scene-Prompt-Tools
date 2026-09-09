@@ -116,6 +116,18 @@ class ScenePresetTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_desktop_callback_producer_is_preset_safe_and_pure(self):
+        nodes = basic_nodes()
+        nodes["4"] = {"class_type": "ScenePromptCallbackDesktop", "inputs": {"title": "Ready", "text": "{all_positive}"}}
+        nodes["5"] = {"class_type": "ScenePromptCallback", "inputs": {"callback": ["4", 0], "scene_prompt": ["2", 0]}}
+        nodes["3"]["inputs"]["scene_prompt"] = ["5", 0]
+        self.assertIs(self.module.SAFE_NODE_CLASSES["ScenePromptCallbackDesktop"], self.nodes.ScenePromptCallbackDesktop)
+        saved = self.save("desktop", nodes)
+        self.assertEqual(saved["metadata"]["preset_id"], "desktop")
+        self.assertEqual(self.nodes.ScenePromptCallbackDesktop().build("Ready", "{all_positive}")[0], {
+            "kind": "desktop", "title": "Ready", "text": "{all_positive}",
+        })
+
     def save(self, preset_id, nodes, name=None, workflow=None, user_id="default", output_node_id=None, expected_revision=None):
         if output_node_id is None:
             output_node_id = next((

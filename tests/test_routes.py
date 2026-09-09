@@ -94,6 +94,40 @@ class PromptDataRouteTests(unittest.TestCase):
         )
         self.assertEqual(self.routes._completed_prompt_status("pending"), "pending")
 
+    def test_desktop_ack_route_is_owner_bound_and_one_shot(self):
+        class Request:
+            def __init__(self, user_id, payload):
+                self.user_id = user_id
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        callbacks = importlib.import_module(f"{self.routes.__package__}.callbacks")
+        callbacks._DESKTOP_PENDING["request"] = {
+            "event": threading.Event(), "user_id": "alice", "result": None,
+        }
+        try:
+            ack = self.routes._test_routes[("POST", "/scene_prompt/callbacks/desktop/ack")]
+            self.assertEqual(asyncio.run(ack(Request("bob", {"request_id": "request", "success": True})))["status"], 403)
+            self.assertEqual(asyncio.run(ack(Request("alice", {"request_id": "request", "success": True}))), {"payload": {"acknowledged": True}, "status": 200})
+            self.assertEqual(asyncio.run(ack(Request("alice", {"request_id": "request", "success": True})))["status"], 404)
+        finally:
+            callbacks._DESKTOP_PENDING.pop("request", None)
+
+    def test_prepare_stores_client_id_only_in_private_delivery_context(self):
+        class Request:
+            user_id = "alice"
+
+            async def json(self):
+                return {"api_graph": {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}, "client_id": "desktop-client"}
+
+        prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        response = asyncio.run(prepare(Request()))
+        self.assertNotIn("client_id", response["payload"])
+        runs = sys.modules[f"{self.routes.__package__}.runs"]
+        self.assertEqual(runs.get_run_delivery_context(response["payload"]["run_handle"]), {"client_id": "desktop-client", "user_id": "alice"})
+
     def test_corrupt_prompt_data_is_reported_with_filename(self):
         path = self.data_dir / "Category" / "prompt.json"
         path.parent.mkdir(parents=True)

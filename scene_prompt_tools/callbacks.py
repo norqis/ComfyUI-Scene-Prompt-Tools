@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
+import threading
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -17,6 +19,9 @@ CALLBACK_FAILURE_CONTINUE = "続行"
 CALLBACK_FAILURE_STOP = "停止"
 _PLACEHOLDER = re.compile(r"\{\{?([a-z_]+)\}?\}")
 _MAX_RESPONSE_BYTES = 65_536
+_DESKTOP_ACK_ERRORS = {"unavailable", "permission_denied", "display_failed", "timeout"}
+_DESKTOP_PENDING = {}
+_DESKTOP_PENDING_LOCK = threading.RLock()
 
 
 class SceneCallbackError(RuntimeError):
@@ -44,6 +49,10 @@ def request_callback(method, url, text="", body_type="text", headers_json=""):
         "text": str(text or ""), "body_type": body_type,
         "headers_json": str(headers_json or ""),
     },)
+
+
+def desktop_callback(title, text):
+    return ({"kind": "desktop", "title": str(title or ""), "text": str(text or "")},)
 
 
 def _replace_text(value, values, *, url=False):
@@ -88,16 +97,71 @@ def _open(request, timeout_seconds):
         raise SceneCallbackError(f"Callback request failed: {type(exc).__name__}.") from exc
 
 
-def dispatch_callback(config, values, timeout_seconds):
+def dispatch_callback(config, values, timeout_seconds, *, desktop_context=None):
     try:
-        return _dispatch_callback(config, values, timeout_seconds)
+        return _dispatch_callback(config, values, timeout_seconds, desktop_context=desktop_context)
     except SceneCallbackError:
         raise
     except (TypeError, ValueError) as exc:
         raise SceneCallbackError(f"Callback request is invalid: {type(exc).__name__}.") from exc
 
 
-def _dispatch_callback(config, values, timeout_seconds):
+def acknowledge_desktop_callback(request_id, user_id, success, error=""):
+    """Resolve one browser notification acknowledgement without broadcasting."""
+    key = str(request_id or "").strip()
+    with _DESKTOP_PENDING_LOCK:
+        pending = _DESKTOP_PENDING.get(key)
+        if pending is None or pending.get("result") is not None:
+            return "missing"
+        if pending["user_id"] != str(user_id):
+            return "forbidden"
+        if type(success) is not bool:
+            return "invalid"
+        reason = str(error or "").strip()
+        if not success:
+            reason = reason if reason in _DESKTOP_ACK_ERRORS else "display_failed"
+        pending["result"] = {"success": success, "error": reason}
+        pending["event"].set()
+    return "acknowledged"
+
+
+def _dispatch_desktop(config, values, timeout, desktop_context):
+    context = desktop_context if isinstance(desktop_context, dict) else {}
+    client_id = str(context.get("client_id") or "").strip()
+    user_id = str(context.get("user_id") or "").strip()
+    if not client_id or not user_id:
+        raise SceneCallbackError("Desktop callback failed: unavailable.")
+    request_id = secrets.token_urlsafe(32)
+    pending = {"event": threading.Event(), "user_id": user_id, "result": None}
+    with _DESKTOP_PENDING_LOCK:
+        _DESKTOP_PENDING[request_id] = pending
+    try:
+        try:
+            from server import PromptServer
+            PromptServer.instance.send_sync(
+                "scene_prompt_desktop_notification",
+                {
+                    "request_id": request_id,
+                    "title": _replace_text(config.get("title", ""), values),
+                    "text": _replace_text(config.get("text", ""), values),
+                    "timeout_seconds": timeout,
+                },
+                sid=client_id,
+            )
+        except Exception as exc:
+            raise SceneCallbackError("Desktop callback failed: unavailable.") from exc
+        if not pending["event"].wait(timeout):
+            raise SceneCallbackError("Desktop callback failed: timeout.")
+        result = pending["result"]
+        if not result or not result["success"]:
+            raise SceneCallbackError(f"Desktop callback failed: {result.get('error', 'display_failed') if result else 'display_failed'}.")
+    finally:
+        with _DESKTOP_PENDING_LOCK:
+            if _DESKTOP_PENDING.get(request_id) is pending:
+                _DESKTOP_PENDING.pop(request_id, None)
+
+
+def _dispatch_callback(config, values, timeout_seconds, *, desktop_context=None):
     """Render one descriptor and send it.  Callers decide failure policy."""
     if not isinstance(config, dict):
         raise SceneCallbackError("Callback configuration is invalid.")
@@ -146,5 +210,8 @@ def _dispatch_callback(config, values, timeout_seconds):
             else:
                 raise SceneCallbackError("Callback body_type is invalid.")
         _open(Request(url, data=data, headers=headers, method=method), timeout)
+        return
+    if kind == "desktop":
+        _dispatch_desktop(config, values, timeout, desktop_context)
         return
     raise SceneCallbackError("Callback kind is invalid.")

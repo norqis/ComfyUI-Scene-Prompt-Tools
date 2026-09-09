@@ -234,6 +234,20 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.begin_last_callback(handle, "alice", "expand-b", "final-b")[0], "dispatch")
         self.assertEqual(store.require(handle)["state"], "active")
 
+    def test_delivery_context_is_private_to_run_and_copied_for_last_callback(self):
+        store = RUNS.RunContextStore()
+        handle = store.create("alice", client_id="desktop-client")
+        context = store.get_delivery_context(handle)
+        self.assertEqual(context, {"client_id": "desktop-client", "user_id": "alice"})
+        context["client_id"] = "changed"
+        self.assertEqual(store.get_delivery_context(handle)["client_id"], "desktop-client")
+        self.assertTrue(store.register_last_callback(
+            handle, "expand", {"kind": "desktop"}, {}, 10, "続行", "prompt", store.get_delivery_context(handle)
+        ))
+        state, callback = store.begin_last_callback(handle, "alice", "expand", "prompt")
+        self.assertEqual(state, "dispatch")
+        self.assertEqual(callback["delivery_context"], {"client_id": "desktop-client", "user_id": "alice"})
+
     def test_nodes_do_not_expose_user_id_inputs(self):
         source = "\n".join(
             (ROOT / "scene_prompt_tools" / filename).read_text(encoding="utf-8")

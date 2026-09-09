@@ -52,6 +52,7 @@ from .plan import (
 from .runs import (
     claim_callback_attempt,
     get_run_plan_reference,
+    get_run_delivery_context,
     get_run_prompt_reference,
     register_last_callback,
     require_run_context,
@@ -66,6 +67,7 @@ from .callbacks import (
     SCENE_CALLBACK_TYPE,
     SceneCallbackError,
     discord_callback,
+    desktop_callback,
     dispatch_callback,
     request_callback,
 )
@@ -1459,7 +1461,7 @@ class SceneEmptyLatent:
 
 class ScenePromptCallbackDiscord:
     """Discord通知の設定を作ります。このノード単体では送信しません。"""
-    DESCRIPTION = """Discord Webhook用の通知設定です。このノードは送信せず、Scene Prompt Callbackへ接続した場合だけ生成開始時に通知されます。"""
+    DESCRIPTION = """Discord Webhook用の通知設定です。このノードは送信せず、Scene Prompt CallbackまたはScene Prompt Expandのcallback_*へ接続した実行時だけ通知されます。"""
     CATEGORY = "Scene/callback"
     RETURN_TYPES = (SCENE_CALLBACK_TYPE,)
     RETURN_NAMES = ("callback",)
@@ -1480,7 +1482,7 @@ class ScenePromptCallbackDiscord:
 
 class ScenePromptCallbackRequest:
     """HTTP通知の設定を作ります。このノード単体では送信しません。"""
-    DESCRIPTION = """GETまたはPOSTのHTTP通知設定です。このノードは送信せず、Scene Prompt Callbackへ接続した場合だけ生成開始時に通知されます。"""
+    DESCRIPTION = """GETまたはPOSTのHTTP通知設定です。このノードは送信せず、Scene Prompt CallbackまたはScene Prompt Expandのcallback_*へ接続した実行時だけ通知されます。"""
     CATEGORY = "Scene/callback"
     RETURN_TYPES = (SCENE_CALLBACK_TYPE,)
     RETURN_NAMES = ("callback",)
@@ -1498,6 +1500,25 @@ class ScenePromptCallbackRequest:
 
     def build(self, method="GET", url="", text="", body_type="text", headers_json=""):
         return request_callback(method, url, text, body_type, headers_json)
+
+
+class ScenePromptCallbackDesktop:
+    """デスクトップ通知の設定を作ります。このノード単体では表示しません。"""
+    DESCRIPTION = """ComfyUIを開いているデスクトップへ通知する設定です。このノードは表示せず、Scene Prompt CallbackまたはScene Prompt Expandのcallback_*へ接続した実行時だけ通知を待ちます。"""
+    CATEGORY = "Scene/callback"
+    RETURN_TYPES = (SCENE_CALLBACK_TYPE,)
+    RETURN_NAMES = ("callback",)
+    FUNCTION = "build"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "title": ("STRING", {"default": "", "multiline": False, "display_name": "タイトル"}),
+            "text": ("STRING", {"default": "", "multiline": True, "display_name": "本文"}),
+        }}
+
+    def build(self, title="", text=""):
+        return desktop_callback(title, text)
 
 
 class ScenePromptCallback:
@@ -1571,7 +1592,7 @@ def _callback_names(row, source_ids):
     return "_".join(str(names.get(str(node_id), "")).strip() for node_id in source_ids if str(names.get(str(node_id), "")).strip())
 
 
-def _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, all_positive, all_negative):
+def _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, all_positive, all_negative, desktop_context=None):
     callbacks = row.get("callbacks", [])
     seen = set()
     for descriptor in callbacks if isinstance(callbacks, list) else []:
@@ -1604,14 +1625,14 @@ def _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, all_positiv
             "exec_seed": seed,
         }
         try:
-            dispatch_callback(descriptor.get("config"), values, descriptor.get("timeout_seconds", 10))
+            dispatch_callback(descriptor.get("config"), values, descriptor.get("timeout_seconds", 10), desktop_context=desktop_context)
         except SceneCallbackError as exc:
             if descriptor.get("failure_mode") == CALLBACK_FAILURE_STOP:
                 raise RuntimeError(f"Scene Callback failed: {exc}") from exc
             print(f"Scene Callback warning: {exc}")
 
 
-def _dispatch_expand_callback(config, callback_id, timeout_seconds, failure_mode, values, run_handle, once=False):
+def _dispatch_expand_callback(config, callback_id, timeout_seconds, failure_mode, values, run_handle, once=False, desktop_context=None):
     if config is None:
         return
     if not isinstance(config, dict):
@@ -1619,7 +1640,7 @@ def _dispatch_expand_callback(config, callback_id, timeout_seconds, failure_mode
     if once and not claim_callback_attempt(run_handle, callback_id):
         return
     try:
-        dispatch_callback(config, values, timeout_seconds)
+        dispatch_callback(config, values, timeout_seconds, desktop_context=desktop_context)
     except SceneCallbackError as exc:
         if failure_mode == CALLBACK_FAILURE_STOP:
             raise RuntimeError(f"Scene Callback failed: {exc}") from exc
@@ -1803,12 +1824,13 @@ class ScenePromptExpand:
             "exec_model": _normalize_model_mode(model_mode), "exec_seed": seed,
         }
         callback_id = str(unique_id or "")
-        _dispatch_expand_callback(callback_first, f"{callback_id}:first", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, once=True)
-        _dispatch_expand_callback(callback_each, f"{callback_id}:each", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle)
-        _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, positive, negative)
+        desktop_context = get_run_delivery_context(run_handle)
+        _dispatch_expand_callback(callback_first, f"{callback_id}:first", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, once=True, desktop_context=desktop_context)
+        _dispatch_expand_callback(callback_each, f"{callback_id}:each", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, desktop_context=desktop_context)
+        _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, positive, negative, desktop_context=desktop_context)
         if callback_last is not None and run_handle and global_index + 1 == int(item.get("total_batches", 0)):
             prompt_id = _current_prompt_id()
-            register_last_callback(run_handle, callback_id, callback_last, callback_values, callback_timeout_seconds, callback_failure_mode, prompt_id)
+            register_last_callback(run_handle, callback_id, callback_last, callback_values, callback_timeout_seconds, callback_failure_mode, prompt_id, desktop_context)
         latent_config = _row_latent(row)
         latent = _empty_latent(latent_config)
         use_run_dir = _scene_bool(timestamp_dir)
