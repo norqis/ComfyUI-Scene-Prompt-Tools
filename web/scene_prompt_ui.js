@@ -9751,16 +9751,16 @@ function attachScenePromptCallback(node) {
 
 function sceneDesktopNotificationStatus() {
     if (typeof Notification === "undefined") {
-        return { state: "unsupported", label: "デスクトップ通知はこのブラウザで利用できません" };
+        return { state: "unsupported", label: "通知：非対応" };
     }
     if (typeof window !== "undefined" && window.isSecureContext === false) {
-        return { state: "unsupported", label: "デスクトップ通知はHTTPSまたはlocalhostで利用できます" };
+        return { state: "unsupported", label: "通知：HTTPSまたはlocalhostが必要" };
     }
     if (Notification.permission === "granted") {
-        return { state: "granted", label: "デスクトップ通知: 許可済み" };
+        return { state: "granted", label: "通知：許可済み" };
     }
     if (Notification.permission === "denied") {
-        return { state: "denied", label: "通知がブロックされています（ブラウザ設定で許可）" };
+        return { state: "denied", label: "通知：ブラウザ設定で許可" };
     }
     return { state: "default", label: "デスクトップ通知を許可" };
 }

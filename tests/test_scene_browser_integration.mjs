@@ -13,7 +13,7 @@ const assets = new Map([
 ]);
 
 const appModule = `
-const desktopNotificationMock = { permission: "default", requestedPermission: "granted", requestCalls: 0, mode: "manual", notifications: [] };
+const desktopNotificationMock = { available: true, permission: "default", requestedPermission: "granted", requestCalls: 0, mode: "manual", notifications: [] };
 class MockNotification {
   static get permission() { return desktopNotificationMock.permission; }
   static requestPermission() {
@@ -33,12 +33,17 @@ class MockNotification {
     }
   }
 }
-Object.defineProperty(window, "Notification", { value: MockNotification, configurable: true });
+function installDesktopNotificationMock() {
+  Object.defineProperty(window, "Notification", { value: desktopNotificationMock.available ? MockNotification : undefined, configurable: true });
+}
+installDesktopNotificationMock();
 window.__sceneDesktopNotificationMock = {
-  configure({ permission, requestedPermission, mode } = {}) {
+  configure({ available, permission, requestedPermission, mode } = {}) {
+    if (available !== undefined) desktopNotificationMock.available = available;
     if (permission !== undefined) desktopNotificationMock.permission = permission;
     if (requestedPermission !== undefined) desktopNotificationMock.requestedPermission = requestedPermission;
     if (mode !== undefined) desktopNotificationMock.mode = mode;
+    installDesktopNotificationMock();
   },
   emit(event) { desktopNotificationMock.notifications.at(-1)?.[event === "show" ? "onshow" : "onerror"]?.(); },
   snapshot() { return { ...desktopNotificationMock, notifications: desktopNotificationMock.notifications.map(({ title, options }) => ({ title, options })) }; },
@@ -1041,7 +1046,7 @@ try {
     assert.deepEqual(callbackUi.desktopVisible, ["title", "text", "デスクトップ通知を許可"]);
     assert.equal(callbackUi.desktopPermissionRequestsBeforeClick, 0, "Desktop permission is never requested while a node is attached");
     assert.equal(callbackUi.desktopPermissionRequestsAfterClick, 1, "Desktop permission is requested only by the node button");
-    assert.equal(callbackUi.desktopPermissionAfterClick, "デスクトップ通知: 許可済み");
+    assert.equal(callbackUi.desktopPermissionAfterClick, "通知：許可済み");
     assert.equal(callbackUi.postVisibleText, true, "POST restores the request body input");
     assert.deepEqual(callbackUi.requestWidgets, ["method", "url", "text", "body_type", "headers_json"]);
     assert.deepEqual(callbackUi.expandCallbackInputs, [
@@ -1098,11 +1103,14 @@ try {
         listener({ detail: { request_id: "desktop-denied", title: "Denied", text: "", timeout_seconds: 1 } });
         window.__sceneDesktopNotificationMock.configure({ permission: "granted", mode: "manual" });
         listener({ detail: { request_id: "desktop-timeout", title: "Timeout", text: "", timeout_seconds: 0.001 } });
+        window.__sceneDesktopNotificationMock.configure({ available: false });
+        listener({ detail: { request_id: "desktop-unavailable", title: "Unavailable", text: "", timeout_seconds: 1 } });
+        window.__sceneDesktopNotificationMock.configure({ available: true, permission: "granted", mode: "manual" });
     });
     await page.waitForFunction(() => window.__scenePromptCalls.filter((call) => (
         call.url === "/scene_prompt/callbacks/desktop/ack"
-        && ["desktop-throw", "desktop-denied", "desktop-timeout"].includes(JSON.parse(call.options.body).request_id)
-    )).length === 3);
+        && ["desktop-throw", "desktop-denied", "desktop-timeout", "desktop-unavailable"].includes(JSON.parse(call.options.body).request_id)
+    )).length === 4);
     const desktopFailures = await page.evaluate(() => ({
         acknowledgements: window.__scenePromptCalls
             .filter((call) => call.url === "/scene_prompt/callbacks/desktop/ack")
@@ -1114,8 +1122,9 @@ try {
         { request_id: "desktop-error", success: false, error: "display_failed" },
         { request_id: "desktop-throw", success: false, error: "display_failed" },
         { request_id: "desktop-denied", success: false, error: "permission_denied" },
+        { request_id: "desktop-unavailable", success: false, error: "unavailable" },
         { request_id: "desktop-timeout", success: false, error: "timeout" },
-    ], "error, throw, denied permission, and timeout each send one fixed failure acknowledgement");
+    ], "error, throw, denied permission, timeout, and unavailable browser each send one fixed failure acknowledgement");
     assert.equal(desktopFailures.pending, 0, "all failed desktop requests clear listeners and pending state");
 
     await page.evaluate(async () => {
