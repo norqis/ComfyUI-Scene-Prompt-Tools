@@ -736,9 +736,10 @@ def define_routes():
             try:
                 await asyncio.to_thread(dispatch_callback, callback["config"], callback["values"], callback["timeout_seconds"])
             except SceneCallbackError as exc:
-                finish_last_callback(run_handle, expand_node_id, False)
                 if callback["failure_mode"] == CALLBACK_FAILURE_STOP:
+                    finish_last_callback(run_handle, expand_node_id, False)
                     return web.json_response({"state": "error", "error": str(exc)}, status=502)
+                finish_last_callback(run_handle, expand_node_id, True)
                 return web.json_response({"state": "finalized", "warning": str(exc)})
             finish_last_callback(run_handle, expand_node_id, True)
             return web.json_response({"state": "finalized"})

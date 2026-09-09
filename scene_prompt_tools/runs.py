@@ -292,6 +292,8 @@ class RunContextStore:
             stored = self._entries.get(str(handle or "").strip())
             if stored is None:
                 return False
+            if key in stored["last_callbacks"]:
+                return False
             stored["last_callbacks"][key] = {
                 "config": copy.deepcopy(config), "values": copy.deepcopy(values), "timeout_seconds": int(timeout_seconds),
                 "failure_mode": str(failure_mode), "prompt_id": str(prompt_id or stored.get("prompt_id") or ""),

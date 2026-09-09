@@ -222,6 +222,7 @@ class RunContextTests(unittest.TestCase):
         self.assertTrue(store.claim(handle, "alice", "initial"))
         self.assertTrue(store.register_last_callback(handle, "expand-a", {"kind": "request"}, {"exec_seed": 2}, 10, "続行", "final-a"))
         self.assertTrue(store.register_last_callback(handle, "expand-b", {"kind": "request"}, {"exec_seed": 3}, 10, "続行", "final-b"))
+        self.assertFalse(store.register_last_callback(handle, "expand-a", {"kind": "request"}, {"exec_seed": 99}, 10, "続行", "final-a"))
         self.assertEqual(store.begin_last_callback(handle, "alice", "expand-a", "wrong")[0], "wrong_prompt")
         state, callback = store.begin_last_callback(handle, "alice", "expand-a", "final-a")
         self.assertEqual(state, "dispatch")
@@ -229,6 +230,7 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(store.begin_last_callback(handle, "alice", "expand-a", "final-a")[0], "in_progress")
         self.assertTrue(store.finish_last_callback(handle, "expand-a", True))
         self.assertEqual(store.begin_last_callback(handle, "alice", "expand-a", "final-a")[0], "finalized")
+        self.assertFalse(store.register_last_callback(handle, "expand-a", {"kind": "request"}, {"exec_seed": 99}, 10, "続行", "final-a"))
         self.assertEqual(store.begin_last_callback(handle, "alice", "expand-b", "final-b")[0], "dispatch")
         self.assertEqual(store.require(handle)["state"], "active")
 
