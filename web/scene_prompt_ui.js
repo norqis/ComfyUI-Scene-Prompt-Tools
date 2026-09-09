@@ -8290,9 +8290,7 @@ function resetSceneExpandRunControls(node, options = {}) {
     changed = setWidgetValue(node, "current_index", 0, { silent: true }) || changed;
     changed = setWidgetValue(node, "run_id", "", { silent: true }) || changed;
     changed = setWidgetValue(node, "seed_base", 0, { silent: true }) || changed;
-    if (!options.preserveSeedBaseLiteral) {
-        changed = setWidgetValue(node, "seed_base_literal", false, { silent: true }) || changed;
-    }
+    changed = setWidgetValue(node, "seed_base_literal", false, { silent: true }) || changed;
     updateSceneExpandCountWidget(node);
     if (changed && options.mark !== false) {
         markSceneNodeChanged(node, options);
@@ -9770,7 +9768,7 @@ function attachSceneUtilityNode(node, nodeName) {
     installSceneConnectionWatcher(node);
     if (isSceneExpandNodeName(nodeName)) {
         if (!sceneBatchRunForNode(node)) {
-            resetSceneExpandRunControls(node, { mark: false, preserveSeedBaseLiteral: true });
+            setWidgetValue(node, "run_id", "", { silent: true });
         }
         ensureSceneExpandControls(node);
     }

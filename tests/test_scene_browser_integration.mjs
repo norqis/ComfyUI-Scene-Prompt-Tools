@@ -905,8 +905,8 @@ try {
             { name: "headers_json", type: "text", value: "{}", options: {} },
         ]);
         class ExpandNode {
-            constructor() {
-                this.id = 203;
+            constructor(id, currentIndex, seedBase, seedBaseLiteral) {
+                this.id = id;
                 this.type = "ScenePrompterExpand";
                 this.comfyClass = this.type;
                 this.title = this.type;
@@ -919,15 +919,15 @@ try {
                 ];
                 this.outputs = [];
                 this.widgets = [
-                    { name: "current_index", type: "number", value: 0, options: {} },
-                    { name: "run_id", type: "text", value: "", options: {} },
-                    { name: "seed_base", type: "number", value: 1, options: {} },
+                    { name: "current_index", type: "number", value: currentIndex, options: {} },
+                    { name: "run_id", type: "text", value: "saved-run", options: {} },
+                    { name: "seed_base", type: "number", value: seedBase, options: {} },
                     { name: "timestamp_dir", type: "toggle", value: true, options: {} },
                     { name: "prefix", type: "text", value: "", options: {} },
                     { name: "model_mode", type: "combo", value: "Illustrious", options: {} },
                     { name: "callback_timeout_seconds", type: "number", value: 10, options: {} },
                     { name: "callback_failure_mode", type: "combo", value: "続行", options: {} },
-                    { name: "seed_base_literal", type: "toggle", value: true, options: {} },
+                    { name: "seed_base_literal", type: "toggle", value: seedBaseLiteral, options: {} },
                 ];
             }
             addWidget(type, name, value, callback, options = {}) {
@@ -940,14 +940,16 @@ try {
             setDirtyCanvas() {}
             setSize(size) { this.size = [...size]; }
         }
-        const expand = new ExpandNode();
+        const expand = new ExpandNode(203, 1, 41, false);
+        const zeroReplayExpand = new ExpandNode(204, 0, 0, true);
         await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallback" });
         callback.onNodeCreated();
         await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallbackRequest" });
         request.onNodeCreated();
         await window.__scenePromptExtension.beforeRegisterNodeDef(ExpandNode, { name: "ScenePrompterExpand" });
         expand.onNodeCreated();
-        window.app.graph._nodes.push(callback, request, expand);
+        zeroReplayExpand.onNodeCreated();
+        window.app.graph._nodes.push(callback, request, expand, zeroReplayExpand);
         callback.title = "Before Matrix";
         window.__scenePromptPopupTestHooks.syncAllScenePromptNames();
         const apiPrompt = { output: {
@@ -967,9 +969,11 @@ try {
             expandCallbackWidgets: expand.widgets
                 .filter((widget) => ["callback_timeout_seconds", "callback_failure_mode"].includes(widget.name))
                 .map((widget) => ({ name: widget.name, label: widget.label, hidden: !!widget.hidden })),
-            replaySeedLiteral: expand.widgets.find((widget) => widget.name === "seed_base_literal").value,
-            replaySeedLiteralHidden: expand.widgets.find((widget) => widget.name === "seed_base_literal").hidden,
-            replaySeedLiteralSerialized: expand.serialize().widgets_values[8],
+            loadedReplay: ["current_index", "seed_base", "seed_base_literal", "run_id"].map((name) => expand.widgets.find((widget) => widget.name === name).value),
+            loadedReplaySerialized: expand.serialize().widgets_values.slice(0, 3).concat(expand.serialize().widgets_values[8]),
+            zeroReplay: ["current_index", "seed_base", "seed_base_literal", "run_id"].map((name) => zeroReplayExpand.widgets.find((widget) => widget.name === name).value),
+            replaySeedLiteralHidden: zeroReplayExpand.widgets.find((widget) => widget.name === "seed_base_literal").hidden,
+            zeroReplaySerialized: zeroReplayExpand.serialize().widgets_values.slice(0, 3).concat(zeroReplayExpand.serialize().widgets_values[8]),
         };
         const method = request.widgets.find((widget) => widget.name === "method");
         method.value = "POST";
@@ -997,9 +1001,11 @@ try {
         { name: "callback_timeout_seconds", label: "Callbackタイムアウト（秒）", hidden: false },
         { name: "callback_failure_mode", label: "Callback失敗時", hidden: false },
     ], "Expand shows Japanese Callback settings");
-    assert.equal(callbackUi.replaySeedLiteral, true, "a loaded PNG keeps literal seed 0 for one normal replay");
+    assert.deepEqual(callbackUi.loadedReplay, [1, 41, false, ""], "loading keeps a nonzero saved index and seed while clearing only stale run state");
+    assert.deepEqual(callbackUi.loadedReplaySerialized, [1, "", 41, false], "normal replay serialization keeps a nonzero saved index and seed");
+    assert.deepEqual(callbackUi.zeroReplay, [0, 0, true, ""], "loading keeps literal seed 0 for one normal replay");
     assert.equal(callbackUi.replaySeedLiteralHidden, true, "literal seed replay state stays internal");
-    assert.equal(callbackUi.replaySeedLiteralSerialized, true, "normal replay serialization keeps literal seed mode");
+    assert.deepEqual(callbackUi.zeroReplaySerialized, [0, "", 0, true], "normal replay serialization keeps literal seed mode");
 
     await page.evaluate(async () => {
         const originalGraphToPrompt = window.app.graphToPrompt;
