@@ -187,6 +187,8 @@ const server = http.createServer(async (request, response) => {
                 + `  openSavePromptPopup,\n`
                 + `  openCreatePromptPopup,\n`
                 + `  attachMatrixTextAreaAutocomplete,\n`
+                + `  syncAllScenePromptNames,\n`
+                + `  applySceneSourceNodeNames,\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
                 + `};\n`;
         }
@@ -864,6 +866,84 @@ try {
     });
     assert.equal(savedEditor.request.expected_revision, 3);
     assert.deepEqual(savedEditor.editor, { preset_id: "browser-preset", revision: 4 });
+
+    const callbackUi = await page.evaluate(async () => {
+        class CallbackNode {
+            constructor(type, widgets) {
+                this.id = type === "ScenePromptCallback" ? 201 : 202;
+                this.type = type;
+                this.comfyClass = type;
+                this.title = type;
+                this.size = [300, 180];
+                this.inputs = type === "ScenePromptCallback"
+                    ? [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }, { name: "callback", type: "SCENE_CALLBACK", link: null }]
+                    : [];
+                this.outputs = type === "ScenePromptCallback" ? [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }] : [{ name: "callback", type: "SCENE_CALLBACK", links: [] }];
+                this.graph = window.app.graph;
+                this.widgets = widgets;
+                this.widgets_values = widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        const callback = new CallbackNode("ScenePromptCallback", [
+            { name: "frequency", type: "combo", value: "毎回", options: {} },
+            { name: "timeout_seconds", type: "number", value: 10, options: {} },
+            { name: "failure_mode", type: "combo", value: "続行", options: {} },
+            { name: "source_node_name", type: "text", value: "", options: { hidden: true } },
+        ]);
+        const request = new CallbackNode("ScenePromptCallbackRequest", [
+            { name: "method", type: "combo", value: "GET", options: {} },
+            { name: "url", type: "text", value: "https://example.invalid", options: {} },
+            { name: "text", type: "text", value: "unused", options: {} },
+            { name: "body_type", type: "combo", value: "text", options: {} },
+            { name: "headers_json", type: "text", value: "{}", options: {} },
+        ]);
+        await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallback" });
+        callback.onNodeCreated();
+        await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallbackRequest" });
+        request.onNodeCreated();
+        window.app.graph._nodes.push(callback, request);
+        callback.title = "Before Matrix";
+        window.__scenePromptPopupTestHooks.syncAllScenePromptNames();
+        const apiPrompt = { output: {
+            "201": { class_type: "ScenePromptCallback", inputs: {} },
+            "202": { class_type: "ScenePromptCallbackRequest", inputs: {} },
+            "203": { class_type: "KSampler", inputs: {} },
+        } };
+        window.__scenePromptPopupTestHooks.applySceneSourceNodeNames(apiPrompt);
+        const before = {
+            callbackOutput: callback.outputs[0].type,
+            callbackInputOptional: callback.inputs.find((input) => input.name === "scene_prompt").link === null,
+            callbackName: callback.widgets.find((widget) => widget.name === "source_node_name").value,
+            apiCallbackName: apiPrompt.output["201"].inputs.source_node_name,
+            apiProducerName: apiPrompt.output["202"].inputs.source_node_name,
+            callbackVisible: callback.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+            getHiddenText: request.widgets.find((widget) => widget.name === "text").hidden,
+        };
+        const method = request.widgets.find((widget) => widget.name === "method");
+        method.value = "POST";
+        method.callback();
+        return {
+            ...before,
+            postVisibleText: !request.widgets.find((widget) => widget.name === "text").hidden,
+            requestWidgets: request.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+        };
+    });
+    assert.equal(callbackUi.callbackOutput, "SCENE_PROMPT");
+    assert.equal(callbackUi.callbackInputOptional, true, "Callback accepts an unconnected first Scene input");
+    assert.equal(callbackUi.callbackName, "Before Matrix", "Callback source names follow custom node titles before queueing");
+    assert.equal(callbackUi.apiCallbackName, "Before Matrix", "Callback title is injected into the queued Scene plan");
+    assert.equal(callbackUi.apiProducerName, undefined, "Callback configuration is not mistaken for a Scene-path node");
+    assert.deepEqual(callbackUi.callbackVisible, ["frequency", "timeout_seconds", "failure_mode"]);
+    assert.equal(callbackUi.getHiddenText, true, "GET hides its unused request body");
+    assert.equal(callbackUi.postVisibleText, true, "POST restores the request body input");
+    assert.deepEqual(callbackUi.requestWidgets, ["method", "url", "text", "body_type", "headers_json"]);
 
     await createPreparedRun(page);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));

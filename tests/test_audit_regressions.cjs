@@ -532,6 +532,8 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
             async graphToPrompt() { return { output: {} }; },
         },
         scenePresetList: [],
+        syncAllScenePromptNames() {},
+        applySceneSourceNodeNames(prompt) { return prompt; },
         findWidget(target, name) { return target.widgets.find((widget) => widget.name === name); },
         api: { async fetchApi() { return { ok: true, payload: { metadata: { name: "Preset A", revision: 1 } } }; } },
         async readApiJson(response) { return response.payload; },

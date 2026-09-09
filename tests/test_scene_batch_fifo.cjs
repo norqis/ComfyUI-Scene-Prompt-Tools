@@ -204,6 +204,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
                 return structuredClone(this.graph.prompt);
             },
         },
+        applySceneSourceNodeNames(prompt) { return prompt; },
         sceneBatchRun: { runId: "tab-a" },
         sceneBatchRunsById: new Map(),
         sceneBatchDetachedRuns: new Map(),
@@ -662,7 +663,7 @@ async function testPresetErrorMarksOnlyTargetReference() {
 }
 
 async function testSelectedExpandBranchOnlyQueues() {
-    const branchContext = { Map, Set, Object, String, Array };
+    const branchContext = { Map, Set, Object, String, Array, applySceneSourceNodeNames(prompt) { return prompt; } };
     vm.createContext(branchContext);
     for (const name of [
         "apiLink",

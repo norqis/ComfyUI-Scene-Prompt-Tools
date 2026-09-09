@@ -65,6 +65,11 @@ const context = {
     registerQueuedSceneRunHandle(promptId, handle) { context.sceneRunHandlesByPromptId.set(promptId, handle); },
     acceptSceneBatchPrompt() {},
     buildSceneBatchCachedPrompt() { return null; },
+    applySceneSourceNodeNames() {},
+    SCENE_PLAN_NODE_CLASS_TYPES: new Set([
+        "ScenePrompter", "SceneMatrix", "ScenePath", "ScenePrompterMerge",
+        "ScenePromptCounter", "ScenePrompterQueue", "SceneEmptyLatent", "ScenePresetReference",
+    ]),
 };
 vm.createContext(context);
 for (const name of [
@@ -173,6 +178,22 @@ context.installSceneBatchPromptCapture();
     assert.deepEqual(preparedPayload.workflow, { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] });
     assert.equal(multiExpand.output["10"].inputs.run_handle, "two-expand-handle");
     assert.equal(multiExpand.output["20"].inputs.run_handle, "two-expand-handle");
+
+    for (const name of ["cloneScenePromptPayload", "scenePromptInputSourceId", "scenePromptInputSources", "buildSceneBatchCachedPrompt"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    const cachedWithCallback = context.buildSceneBatchCachedPrompt({ output: {
+        "1": { class_type: "ScenePrompter", inputs: {} },
+        "2": { class_type: "ScenePromptCallback", inputs: { scene_prompt: ["1", 0], callback: ["3", 0] } },
+        "3": { class_type: "ScenePromptCallbackDiscord", inputs: {} },
+        "4": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["2", 0] } },
+        "99": { class_type: "ScenePrompter", inputs: {} },
+    } }, "4");
+    assert.equal(cachedWithCallback.output["4"].inputs.scene_prompt, undefined, "cached Expand removes only its consumed Scene input");
+    assert.ok(cachedWithCallback.output["2"], "Callback remains in each cached loop prompt");
+    assert.ok(cachedWithCallback.output["1"], "Callback keeps its upstream Scene plan available");
+    assert.ok(cachedWithCallback.output["3"], "Callback keeps its configuration producer available");
+    assert.equal(cachedWithCallback.output["99"], undefined, "unrelated plan nodes remain stripped from cached loop prompts");
     console.log("Scene Prompt queue wrapper wiring tests passed.");
 })().catch((error) => {
     console.error(error);

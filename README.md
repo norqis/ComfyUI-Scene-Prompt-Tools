@@ -116,6 +116,36 @@ Each saved Preset requires one connected Input and one connected Output. Only Sc
 
 In a regular workflow, add **Scene Preset Reference**, choose the saved Preset, and connect its `scene_prompt` output to the next Scene node or to Scene Prompt Expand. Its **Preset編集 (Preset Edit)** button opens the saved fragment in a new workflow tab.
 
+## Callbacks
+
+Use a callback to notify another service for a Scene batch. A configuration node creates a `callback` value; **Scene Prompt Callback** decides when it runs and passes `scene_prompt` through unchanged.
+
+```text
+Scene Prompt / Matrix -> Scene Prompt Callback -> Scene Prompt Expand
+Scene Prompt Callback (Discord or Request) -> Scene Prompt Callback.callback
+```
+
+`scene_prompt` on **Scene Prompt Callback** is optional, so it can begin a plan. Place it anywhere on the Scene path, including inside a Preset. An unconnected Callback is ignored. It never fires while a plan is previewed or counted.
+
+| Configuration node | Fields |
+| --- | --- |
+| Scene Prompt Callback (Discord) | Webhook URL, text, optional display name. |
+| Scene Prompt Callback (Request) | GET or POST, URL, text, text or JSON body, optional JSON headers. |
+
+For GET, the text body is disabled; put query parameters in the URL. For a JSON body, write valid JSON and use variables inside string values, for example `{"content":"{all_positive}"}`. The common Callback node has **frequency** (`初回` or `毎回`), timeout seconds, and failure behavior (`続行` or `停止`). `初回` runs once for that Callback node during a continuous-generation run; `毎回` runs whenever its position is traversed in that run.
+
+Text fields support these variables. `all` is the completed prompt for the current batch, not every batch in the run.
+
+| Variable | Value |
+| --- | --- |
+| `{current_positive}` / `{current_negative}` | Prompt content accumulated before this Callback. |
+| `{all_positive}` / `{all_negative}` | Final positive or negative prompt for the current batch. |
+| `{current_node_names}` | Scene node display names used before this Callback, joined with `_`. |
+| `{all_node_names}` | Scene node display names used by the complete current path, joined with `_`. |
+| `{exec_current_count}` / `{exec_total_count}` | Current batch number (starting at 1) and total batches in this continuous run. |
+| `{exec_model}` | Model mode selected on Scene Prompt Expand. |
+| `{exec_seed}` | Seed for the current batch. |
+
 ## Nodes
 
 | Node | Use |
@@ -127,6 +157,9 @@ In a regular workflow, add **Scene Preset Reference**, choose the saved Preset, 
 | Scene Prompt Count | Multiplies the generation count for each row. |
 | Scene Path | Adds output-folder parts without changing the prompt. |
 | Scene Empty Latent | Sets width, height, and batch size for the plan. |
+| Scene Prompt Callback | Runs a configured callback at its position in a continuous Scene run. |
+| Scene Prompt Callback (Discord) | Configures a Discord webhook callback. |
+| Scene Prompt Callback (Request) | Configures a GET or POST callback. |
 | Scene Prompt Expand | Produces one planned batch with prompt strings, seed, metadata, and latent image. |
 | Scene Save Image | Saves PNGs using the Scene output path, filename information, and selected metadata mode. |
 | Scene Preset Input / Output / Reference | Save, reuse, and edit Scene plan fragments. |

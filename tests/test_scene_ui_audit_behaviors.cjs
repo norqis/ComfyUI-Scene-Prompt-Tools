@@ -24,6 +24,7 @@ const previewContext = {
     isSceneNodeMuted() { return false; }, isSceneNodeBypassed() { return false; },
     scenePromptInputSource(node) { return node.upstream || null; },
     isScenePromptNode(node) { return node.kind === "prompt"; },
+    isScenePromptCallbackNode(node) { return node.kind === "callback"; },
     scenePromptTitle(node) { return node.title; },
     isPromptMatrixNode(node) { return node.kind === "matrix"; },
     matrixLinesForNode(node) { return node.rows || []; },
@@ -56,6 +57,17 @@ const merge = { id: "merge", kind: "merge", left: base, right: { id: "right", ki
 assert.deepEqual(JSON.parse(JSON.stringify(previewContext.scenePromptPreviewEntries(merge, 10))).map((entry) => entry.parts.join("")), ["AM1", "AM2", "AM3", "AM4", "AM5", "AM6", "AM7", "AM8", "AM9", "AM10"], "Merge preview fetches enough right-hand rows for its backend prefix");
 const empty = { id: "empty", kind: "matrix", upstream: base, rows: [], configured: 1 };
 assert.equal(previewContext.scenePromptPreviewEntries({ id: "downstream", kind: "matrix", upstream: empty, rows: [{ label: "X" }] }, 160).length, 0, "connected empty Matrix stays empty");
+const callback = { id: "callback", kind: "callback", upstream: matrix };
+assert.deepEqual(
+    JSON.parse(JSON.stringify(previewContext.scenePromptPreviewEntries(callback, 2))).map((entry) => entry.parts.join("")),
+    ["AM1", "AM2"],
+    "Callback stays transparent to Scene preview rows",
+);
+assert.equal(
+    previewContext.scenePromptPreviewEntries({ id: "callback-first", kind: "callback" }, 2).length,
+    1,
+    "Callback can start a Scene plan without a scene_prompt input",
+);
 const mergeContext = { Array, Number, Math, sceneStatNumber(value) { return Number(value || 0); }, mergeScenePromptRows() { return {}; } };
 vm.createContext(mergeContext);
 for (const name of ["mergeScenePromptEntryPair", "mergeScenePromptEntryLists"]) vm.runInContext(functionSource(name), mergeContext);
