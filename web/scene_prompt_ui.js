@@ -8550,7 +8550,7 @@ function startSceneBatchRun(node) {
         return;
     }
 
-    if (sceneBatchRun || sceneBatchDetachedRuns.size) {
+    if (sceneBatchRun || sceneBatchDetachedRuns.size || sceneBatchFinalizingRuns.size) {
         sceneBatchPendingRuns.push(run);
         refreshSceneBatchRunNode(run);
         for (const pending of sceneBatchPendingRuns) {
