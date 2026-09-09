@@ -69,6 +69,7 @@ const context = {
     SCENE_PLAN_NODE_CLASS_TYPES: new Set([
         "ScenePrompter", "SceneMatrix", "ScenePath", "ScenePrompterMerge",
         "ScenePromptCounter", "ScenePrompterQueue", "SceneEmptyLatent", "ScenePresetReference",
+        "ScenePromptCallback", "ScenePromptCallbackDiscord", "ScenePromptCallbackRequest",
     ]),
 };
 vm.createContext(context);
@@ -190,9 +191,9 @@ context.installSceneBatchPromptCapture();
         "99": { class_type: "ScenePrompter", inputs: {} },
     } }, "4");
     assert.equal(cachedWithCallback.output["4"].inputs.scene_prompt, undefined, "cached Expand removes only its consumed Scene input");
-    assert.ok(cachedWithCallback.output["2"], "Callback remains in each cached loop prompt");
-    assert.ok(cachedWithCallback.output["1"], "Callback keeps its upstream Scene plan available");
-    assert.ok(cachedWithCallback.output["3"], "Callback keeps its configuration producer available");
+    assert.equal(cachedWithCallback.output["2"], undefined, "Callback is stripped from each cached loop prompt");
+    assert.equal(cachedWithCallback.output["1"], undefined, "Callback's consumed upstream Scene plan is stripped too");
+    assert.equal(cachedWithCallback.output["3"], undefined, "Callback configuration is stripped with its unused executor");
     assert.equal(cachedWithCallback.output["99"], undefined, "unrelated plan nodes remain stripped from cached loop prompts");
     console.log("Scene Prompt queue wrapper wiring tests passed.");
 })().catch((error) => {

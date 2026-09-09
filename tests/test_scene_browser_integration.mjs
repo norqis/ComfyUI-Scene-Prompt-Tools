@@ -189,6 +189,7 @@ const server = http.createServer(async (request, response) => {
                 + `  attachMatrixTextAreaAutocomplete,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
+                + `  saveScenePreset,\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
                 + `};\n`;
         }
@@ -895,7 +896,6 @@ try {
             { name: "frequency", type: "combo", value: "毎回", options: {} },
             { name: "timeout_seconds", type: "number", value: 10, options: {} },
             { name: "failure_mode", type: "combo", value: "続行", options: {} },
-            { name: "source_node_name", type: "text", value: "", options: { hidden: true } },
         ]);
         const request = new CallbackNode("ScenePromptCallbackRequest", [
             { name: "method", type: "combo", value: "GET", options: {} },
@@ -920,7 +920,6 @@ try {
         const before = {
             callbackOutput: callback.outputs[0].type,
             callbackInputOptional: callback.inputs.find((input) => input.name === "scene_prompt").link === null,
-            callbackName: callback.widgets.find((widget) => widget.name === "source_node_name").value,
             apiCallbackName: apiPrompt.output["201"].inputs.source_node_name,
             apiProducerName: apiPrompt.output["202"].inputs.source_node_name,
             callbackVisible: callback.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
@@ -937,13 +936,39 @@ try {
     });
     assert.equal(callbackUi.callbackOutput, "SCENE_PROMPT");
     assert.equal(callbackUi.callbackInputOptional, true, "Callback accepts an unconnected first Scene input");
-    assert.equal(callbackUi.callbackName, "Before Matrix", "Callback source names follow custom node titles before queueing");
-    assert.equal(callbackUi.apiCallbackName, "Before Matrix", "Callback title is injected into the queued Scene plan");
+    assert.equal(callbackUi.apiCallbackName, undefined, "Callback itself is excluded from Scene path names");
     assert.equal(callbackUi.apiProducerName, undefined, "Callback configuration is not mistaken for a Scene-path node");
     assert.deepEqual(callbackUi.callbackVisible, ["frequency", "timeout_seconds", "failure_mode"]);
     assert.equal(callbackUi.getHiddenText, true, "GET hides its unused request body");
     assert.equal(callbackUi.postVisibleText, true, "POST restores the request body input");
     assert.deepEqual(callbackUi.requestWidgets, ["method", "url", "text", "body_type", "headers_json"]);
+
+    await page.evaluate(async () => {
+        const originalGraphToPrompt = window.app.graphToPrompt;
+        window.app.graphToPrompt = async () => ({ output: {
+            "201": { class_type: "ScenePromptCallback", inputs: { callback: ["202", 0] } },
+            "202": { class_type: "ScenePromptCallbackRequest", inputs: {} },
+            "301": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["201", 0] } },
+        } });
+        await window.__scenePromptPopupTestHooks.saveScenePreset({
+            id: 301,
+            graph: window.app.graph,
+            widgets: [
+                { name: "preset_id", value: "callback-preset" },
+                { name: "preset_name", value: "Callback Preset" },
+            ],
+        });
+        window.app.graphToPrompt = originalGraphToPrompt;
+    });
+    const callbackPresetSave = await page.evaluate(() => {
+        const call = window.__scenePromptCalls.findLast((entry) => entry.url.includes("/scene_presets/save"));
+        return JSON.parse(call.options.body).api_graph.output;
+    });
+    assert.equal(
+        callbackPresetSave["201"].inputs.source_node_name,
+        undefined,
+        "Preset saving does not inject an unsupported source_node_name into Scene Prompt Callback",
+    );
 
     await createPreparedRun(page);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));

@@ -38,10 +38,19 @@ const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePrompterQueue",
     "SceneEmptyLatent",
     "ScenePresetReference",
+    "ScenePromptCallback",
+    "ScenePromptCallbackDiscord",
+    "ScenePromptCallbackRequest",
 ]);
 const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
-    ...SCENE_PLAN_NODE_CLASS_TYPES,
-    "ScenePromptCallback",
+    "ScenePrompter",
+    "SceneMatrix",
+    "ScenePath",
+    "ScenePrompterMerge",
+    "ScenePromptCounter",
+    "ScenePrompterQueue",
+    "SceneEmptyLatent",
+    "ScenePresetReference",
 ]);
 const NODE_NAMES = new Set([
     ...PROMPT_NODE_NAMES,
@@ -3634,12 +3643,6 @@ function sceneSourceNodeName(node) {
     return title && title !== classType && title !== defaultName ? title : defaultName;
 }
 
-function syncSceneSourceNodeName(node) {
-    if (findWidget(node, "source_node_name")) {
-        setWidgetValue(node, "source_node_name", sceneSourceNodeName(node));
-    }
-}
-
 function syncScenePromptNameFromTitle(node) {
     const widget = findWidget(node, "prompt_name");
     if (!widget) {
@@ -7150,9 +7153,12 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
     return snapshot;
 }
 
-function applySceneSourceNodeNames(apiGraph) {
+function applySceneSourceNodeNames(apiGraph, options = {}) {
     for (const [nodeId, promptNode] of Object.entries(apiGraph?.output || {})) {
         if (!SCENE_SOURCE_NODE_CLASS_TYPES.has(promptNode?.class_type)) {
+            continue;
+        }
+        if (options.onlyMissing && String(promptNode?.inputs?.source_node_name || "").trim()) {
             continue;
         }
         const node = sceneNodeById(nodeId);
@@ -7516,7 +7522,7 @@ function installSceneBatchPromptCapture() {
     }
     const originalQueuePrompt = api.queuePrompt.bind(api);
     api.queuePrompt = async function (number, prompt) {
-        applySceneSourceNodeNames(prompt);
+        applySceneSourceNodeNames(prompt, { onlyMissing: true });
         let preparedRunHandle = "";
         if (prompt?.output && sceneRunTargetNodes(prompt).length) {
             const existingHandle = sceneRunTargetNodes(prompt)
@@ -8216,7 +8222,6 @@ function syncAllScenePromptNames() {
             sceneTitleSyncNodes.delete(node);
             continue;
         }
-        syncSceneSourceNodeName(node);
         if (isScenePromptNode(node)) {
             syncScenePromptNameFromTitle(node);
         }
@@ -9700,9 +9705,8 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
 
 function attachSceneNode(node, nodeName) {
     installSceneNodeRemovalCleanup(node, nodeName);
-    if (isScenePromptSourceNode(node)) {
+    if (isScenePromptSourceNode(node) && !isScenePromptCallbackNode(node)) {
         sceneTitleSyncNodes.add(node);
-        syncSceneSourceNodeName(node);
     }
     if (isScenePresetOutputNode(node) || SCENE_PRESET_OUTPUT_NODE_NAMES.has(nodeName)) {
         attachScenePresetOutput(node);

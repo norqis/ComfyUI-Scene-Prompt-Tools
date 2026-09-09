@@ -125,14 +125,14 @@ Scene Prompt / Matrix -> Scene Prompt Callback -> Scene Prompt Expand
 Scene Prompt Callback (Discord or Request) -> Scene Prompt Callback.callback
 ```
 
-`scene_prompt` on **Scene Prompt Callback** is optional, so it can begin a plan. Place it anywhere on the Scene path, including inside a Preset. An unconnected Callback is ignored. It never fires while a plan is previewed or counted.
+`scene_prompt` on **Scene Prompt Callback** is optional, so it can begin a plan. Place it anywhere on the Scene path, including inside a Preset. A Callback outside the Scene path is ignored, and a common Callback with no setting is a no-op passthrough. It never fires while a plan is previewed or counted.
 
 | Configuration node | Fields |
 | --- | --- |
 | Scene Prompt Callback (Discord) | Webhook URL, text, optional display name. |
 | Scene Prompt Callback (Request) | GET or POST, URL, text, text or JSON body, optional JSON headers. |
 
-For GET, the text body is disabled; put query parameters in the URL. For a JSON body, write valid JSON and use variables inside string values, for example `{"content":"{all_positive}"}`. The common Callback node has **frequency** (`初回` or `毎回`), timeout seconds, and failure behavior (`続行` or `停止`). `初回` runs once for that Callback node during a continuous-generation run; `毎回` runs whenever its position is traversed in that run.
+For GET, the text body is disabled; put query parameters in the URL. Variables used in URLs are percent-encoded. For a JSON body, write valid JSON and use variables inside string values, for example `{"content":"{all_positive}"}`. The common Callback node has **frequency** (`初回` or `毎回`), timeout seconds, and failure behavior (`続行` or `停止`). `初回` runs once for that Callback node during a continuous-generation run; `毎回` runs whenever its position is traversed in that run. Sending happens after Expand has finalized the batch prompt and before image generation starts.
 
 Text fields support these variables. `all` is the completed prompt for the current batch, not every batch in the run.
 
@@ -140,11 +140,13 @@ Text fields support these variables. `all` is the completed prompt for the curre
 | --- | --- |
 | `{current_positive}` / `{current_negative}` | Prompt content accumulated before this Callback. |
 | `{all_positive}` / `{all_negative}` | Final positive or negative prompt for the current batch. |
-| `{current_node_names}` | Scene node display names used before this Callback, joined with `_`. |
-| `{all_node_names}` | Scene node display names used by the complete current path, joined with `_`. |
+| `{current_node_names}` | Scene node display names used before this Callback, joined with `_`. Callback nodes, their configuration nodes, and Expand are excluded. |
+| `{all_node_names}` | Scene node display names used by the complete current path, joined with `_`. Callback nodes, their configuration nodes, and Expand are excluded. |
 | `{exec_current_count}` / `{exec_total_count}` | Current batch number (starting at 1) and total batches in this continuous run. |
 | `{exec_model}` | Model mode selected on Scene Prompt Expand. |
 | `{exec_seed}` | Seed for the current batch. |
+
+Unknown variables stay unchanged, so a literal placeholder is never silently removed.
 
 ## Nodes
 
