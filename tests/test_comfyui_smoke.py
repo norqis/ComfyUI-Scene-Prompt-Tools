@@ -74,7 +74,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
         discord = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackDiscord"].INPUT_TYPES()
         request = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackRequest"].INPUT_TYPES()
 
-        self.assertEqual(callback["required"]["callback"][0], "SCENE_CALLBACK")
+        self.assertEqual(callback["optional"]["callback"][0], "SCENE_CALLBACK")
         self.assertIn("frequency", callback["required"])
         self.assertIn("timeout_seconds", callback["required"])
         self.assertIn("failure_mode", callback["required"])

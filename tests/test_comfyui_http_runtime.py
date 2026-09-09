@@ -59,6 +59,7 @@ class _CallbackReceiver:
                         "path": self.path,
                         "headers": dict(self.headers.items()),
                         "body": body,
+                        "received_at": time.time(),
                     })
                 self.send_response(204)
                 self.end_headers()
@@ -252,7 +253,7 @@ def _callback_graph(receiver_url, path="callbacks", *, batch_size=2, count=2, ex
         "10": {
             "class_type": "ScenePrompterExpand",
             "inputs": {
-                "scene_prompt": ["9", 0],
+                "scene_prompt": ["15", 0],
                 "current_index": 0,
                 "run_id": "callback-http",
                 "seed_base": 41,
@@ -280,6 +281,46 @@ def _callback_graph(receiver_url, path="callbacks", *, batch_size=2, count=2, ex
                 **_scene_prompt_inputs(),
                 "positive_base": "unconnected",
                 "source_node_name": "Unconnected branch",
+            },
+        },
+        "14": {
+            "class_type": "ScenePromptCallbackRequest",
+            "inputs": {
+                "method": "POST",
+                "url": "http://127.0.0.1:1/unreachable",
+                "text": "must stay isolated",
+                "body_type": "text",
+                "headers_json": "{}",
+            },
+        },
+        "15": {
+            "class_type": "ScenePromptCallback",
+            "inputs": {"scene_prompt": ["9", 0]},
+        },
+        "16": {
+            "class_type": "ScenePrompter",
+            "inputs": {
+                **_scene_prompt_inputs(),
+                "positive_base": "other queue",
+                "source_node_name": "Other queue source",
+            },
+        },
+        "17": {
+            "class_type": "ScenePrompterQueue",
+            "inputs": {"scene_prompt1": ["16", 0], "source_node_name": "Other queue"},
+        },
+        "18": {
+            "class_type": "SceneEmptyLatent",
+            "inputs": {"scene_prompt": ["17", 0], "width": 16, "height": 16, "batch_size": 1},
+        },
+        "19": {
+            "class_type": "ScenePrompterExpand",
+            "inputs": {
+                "scene_prompt": ["18", 0],
+                "current_index": 0,
+                "run_id": "other-expand",
+                "seed_base": 0,
+                "timestamp_dir": False,
             },
         },
     }
@@ -473,6 +514,12 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                 self.assertIn("12", first["outputs"])
                 received = receiver.wait_for(2)
                 self.assertEqual(len(received), 2)
+                first_files = sorted((self.base / "output" / "callback-runtime").glob("*.png"))
+                self.assertEqual(len(first_files), 2)
+                self.assertLessEqual(
+                    max(request["received_at"] for request in received),
+                    min(file_path.stat().st_mtime for file_path in first_files) + 0.02,
+                )
 
                 cached = copy.deepcopy({node_id: graph[node_id] for node_id in ("10", "11", "12")})
                 del cached["10"]["inputs"]["scene_prompt"]
@@ -481,6 +528,14 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                 self._queue_callback_graph(cached, handle, workflow)
                 received = receiver.wait_for(3)
                 self.assertEqual(len(received), 3)
+                second_files = sorted((self.base / "output" / "callback-runtime").glob("*.png"))
+                self.assertEqual(len(second_files), 4)
+                new_files = [file_path for file_path in second_files if file_path not in first_files]
+                self.assertEqual(len(new_files), 2)
+                self.assertLessEqual(
+                    received[-1]["received_at"],
+                    min(file_path.stat().st_mtime for file_path in new_files) + 0.02,
+                )
             finally:
                 self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
 
@@ -497,6 +552,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         payloads = [json.loads(request["body"].decode("utf-8")) for request in received_before_reset]
         reset_payloads = [json.loads(request["body"].decode("utf-8")) for request in reset_received[-2:]]
         self.assertEqual({payload["marker"] for payload in reset_payloads}, {"every", "first"})
+        self.assertEqual([payload["marker"] for payload in payloads], ["every", "first", "every"])
         every = [payload for payload in payloads if payload["marker"] == "every"]
         first_only = [payload for payload in payloads if payload["marker"] == "first"]
         self.assertEqual(len(every), 2)
@@ -510,12 +566,11 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["all_negative"], "before-negative, after-negative")
             self.assertEqual(payload["exec_total_count"], "2")
             self.assertEqual(payload["exec_model"], "Illustrious")
-            self.assertIn("Callback source", payload["current_node_names"])
-            self.assertNotIn("Later source", payload["current_node_names"])
-            self.assertIn("Callback source", payload["all_node_names"])
-            self.assertIn("Later source", payload["all_node_names"])
-            self.assertIn("Selected queue", payload["all_node_names"])
-            self.assertNotIn("Unconnected branch", payload["all_node_names"])
+            self.assertEqual(payload["current_node_names"], "Callback source")
+            self.assertEqual(
+                payload["all_node_names"],
+                "Callback source_Later source_Selected queue_Selected count_Selected latent",
+            )
 
         self.assertEqual(received[0]["headers"]["X-Callback-Test"], "1")
         files = sorted((self.base / "output" / "callback-runtime").glob("*.png"))
@@ -529,6 +584,11 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             self.assertIn("4", saved_prompt)
             self.assertIn("5", saved_prompt)
             self.assertNotIn("13", saved_prompt)
+            self.assertNotIn("14", saved_prompt)
+            self.assertNotIn("16", saved_prompt)
+            self.assertNotIn("17", saved_prompt)
+            self.assertNotIn("18", saved_prompt)
+            self.assertNotIn("19", saved_prompt)
 
     def test_http_preset_callbacks_expand_into_execution_metadata_and_replay(self):
         with _CallbackReceiver() as receiver:
@@ -559,7 +619,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                         "inputs": {
                             "scene_prompt": ["2", 0],
                             "callback": ["3", 0],
-                            "frequency": "毎回",
+                            "frequency": "初回",
                             "timeout_seconds": 10,
                             "failure_mode": "停止",
                         },
@@ -632,33 +692,46 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             handle, workflow = self._prepare_callback_run(graph, "6")
             try:
                 self._queue_callback_graph(graph, handle, workflow, claim_run=True)
-                graph["6"]["inputs"]["current_index"] = 1
-                self._queue_callback_graph(graph, handle, workflow)
+                cached = copy.deepcopy({node_id: graph[node_id] for node_id in ("6", "7", "8", "9")})
+                del cached["6"]["inputs"]["scene_prompt"]
+                cached["6"]["inputs"]["current_index"] = 1
+                self._queue_callback_graph(cached, handle, workflow)
                 received = receiver.wait_for(2)
                 self.assertEqual(len(received), 2)
+                self.assertEqual(
+                    [json.loads(request["body"].decode("utf-8"))["exec_current_count"] for request in received],
+                    ["1", "2"],
+                )
             finally:
                 self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
 
             from PIL import Image
-            with Image.open(sorted((self.base / "output" / "preset-callback-off").glob("*.png"))[0]) as image:
-                off_prompt = json.loads(image.text["prompt"])
-            with Image.open(sorted((self.base / "output" / "preset-callback-on").glob("*.png"))[0]) as image:
-                on_prompt = json.loads(image.text["prompt"])
-                on_workflow = json.loads(image.text["workflow"])
+            off_pngs = sorted((self.base / "output" / "preset-callback-off").glob("*.png"))
+            on_pngs = sorted((self.base / "output" / "preset-callback-on").glob("*.png"))
+            self.assertEqual(len(off_pngs), 2)
+            self.assertEqual(len(on_pngs), 2)
+            on_prompts = []
+            for file_path in off_pngs:
+                with Image.open(file_path) as image:
+                    off_prompt = json.loads(image.text["prompt"])
+                self.assertIn("ScenePresetReference", {node["class_type"] for node in off_prompt.values()})
+            for file_path in on_pngs:
+                with Image.open(file_path) as image:
+                    on_prompt = json.loads(image.text["prompt"])
+                    on_workflow = json.loads(image.text["workflow"])
+                on_prompts.append(on_prompt)
+                self.assertNotIn("ScenePresetReference", {node["class_type"] for node in on_prompt.values()})
+                self.assertIn("ScenePromptCallback", {node["class_type"] for node in on_prompt.values()})
+                self.assertIn("ScenePromptCallbackRequest", {node["class_type"] for node in on_prompt.values()})
+                callback_node = next(node for node in on_prompt.values() if node["class_type"] == "ScenePromptCallback")
+                callback_source = callback_node["inputs"]["callback"]
+                self.assertIsInstance(callback_source, list)
+                self.assertEqual(on_prompt[str(callback_source[0])]["class_type"], "ScenePromptCallbackRequest")
+                self.assertIn("ScenePromptCallback", {node["type"] for node in on_workflow["nodes"]})
 
-            self.assertIn("ScenePresetReference", {node["class_type"] for node in off_prompt.values()})
-            self.assertNotIn("ScenePresetReference", {node["class_type"] for node in on_prompt.values()})
-            self.assertIn("ScenePromptCallback", {node["class_type"] for node in on_prompt.values()})
-            self.assertIn("ScenePromptCallbackRequest", {node["class_type"] for node in on_prompt.values()})
-            callback_node = next(node for node in on_prompt.values() if node["class_type"] == "ScenePromptCallback")
-            callback_source = callback_node["inputs"]["callback"]
-            self.assertIsInstance(callback_source, list)
-            self.assertEqual(on_prompt[str(callback_source[0])]["class_type"], "ScenePromptCallbackRequest")
-            self.assertIn("ScenePromptCallback", {node["type"] for node in on_workflow["nodes"]})
-
-            replay_handle, replay_workflow = self._prepare_callback_run(on_prompt, "6")
+            replay_handle, replay_workflow = self._prepare_callback_run(on_prompts[0], "6")
             try:
-                self._queue_callback_graph(on_prompt, replay_handle, replay_workflow, claim_run=True)
+                self._queue_callback_graph(on_prompts[0], replay_handle, replay_workflow, claim_run=True)
                 replay_received = receiver.wait_for(3)
                 self.assertEqual(len(replay_received), 3)
             finally:
