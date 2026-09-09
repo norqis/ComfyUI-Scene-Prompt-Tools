@@ -122,7 +122,7 @@ Use a callback to notify another service for a Scene batch. A configuration node
 
 ```text
 Scene Prompt / Matrix -> Scene Prompt Callback -> Scene Prompt Expand
-Scene Prompt Callback (Discord or Request) -> Scene Prompt Callback.callback
+Scene Prompt Callback (Discord, Request, or Desktop) -> Scene Prompt Callback.callback
 ```
 
 `scene_prompt` on **Scene Prompt Callback** is optional, so it can begin a plan. Place it anywhere on the Scene path, including inside a Preset. A Callback outside the Scene path is ignored, and a common Callback with no setting is a no-op passthrough. It never fires while a plan is previewed or counted.
@@ -131,10 +131,13 @@ Scene Prompt Callback (Discord or Request) -> Scene Prompt Callback.callback
 | --- | --- |
 | Scene Prompt Callback (Discord) | Webhook URL, text, optional display name. |
 | Scene Prompt Callback (Request) | GET or POST, URL, text, text or JSON body, optional JSON headers. |
+| Scene Prompt Callback (Desktop) | Desktop-notification title and text. |
+
+**Scene Prompt Callback (Desktop)** displays an operating-system notification on the computer running the browser that started the run. Click its **デスクトップ通知を許可** button once to grant browser permission; the node never asks automatically while loading or generating. Browsers allow these notifications only on HTTPS or localhost. If that browser tab is closed, no notification is displayed. The callback completes when the browser reports that the notification was shown, not when the user dismisses it.
 
 For GET, the text body is disabled; put query parameters in the URL. Variables used in URLs are percent-encoded. For a JSON body, write valid JSON and use variables inside string values, for example `{"content":"{all_positive}"}`. The common Callback node has **frequency** (`初回` or `毎回`), timeout seconds, and failure behavior (`続行` or `停止`). `初回` runs once for that Callback node during a continuous-generation run; `毎回` runs whenever its position is traversed in that run. Sending happens after Expand has finalized the batch prompt and before image generation starts. Selected Callbacks run in path order and each request completes before the next Callback or image generation continues; `続行` logs a failure and continues, while `停止` stops the run.
 
-**Scene Prompt Expand** also accepts optional `callback_first`, `callback_each`, and `callback_last` inputs. Connect a Discord or Request configuration node directly to them when the callback belongs to that Expand rather than to a location in the Scene path. `callback_first` runs only for the first batch, `callback_each` runs for every batch, and `callback_last` runs once after the final batch has generated successfully. They use the Expand callback timeout and failure settings. `callback_last` waits for the request before its run context is released and before the next queued continuous run begins. It does not run after an error, interruption, manual stop, or closing the page. With `続行`, transport errors are returned as warnings and the next queued run continues; with `停止`, the completed run is released but later queued runs do not start automatically.
+**Scene Prompt Expand** also accepts optional `callback_first`, `callback_each`, and `callback_last` inputs. Connect a Discord, Request, or Desktop configuration node directly to them when the callback belongs to that Expand rather than to a location in the Scene path. `callback_first` runs only for the first batch, `callback_each` runs for every batch, and `callback_last` runs once after the final batch has generated successfully. They use the Expand callback timeout and failure settings. `callback_last` waits for the request before its run context is released and before the next queued continuous run begins. It does not run after an error, interruption, manual stop, or closing the page. With `続行`, transport errors are returned as warnings and the next queued run continues; with `停止`, the completed run is released but later queued runs do not start automatically.
 
 Text fields support these variables. `all` is the completed prompt for the current batch, not every batch in the run.
 
@@ -164,6 +167,7 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Prompt Callback | Runs a configured callback at its position in a continuous Scene run. |
 | Scene Prompt Callback (Discord) | Configures a Discord webhook callback. |
 | Scene Prompt Callback (Request) | Configures a GET or POST callback. |
+| Scene Prompt Callback (Desktop) | Configures a desktop notification for the originating browser. |
 | Scene Prompt Expand | Produces one planned batch with prompt strings, seed, metadata, and latent image. |
 | Scene Save Image | Saves PNGs using the Scene output path, filename information, and selected metadata mode. |
 | Scene Preset Input / Output / Reference | Save, reuse, and edit Scene plan fragments. |

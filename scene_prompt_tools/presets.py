@@ -25,6 +25,7 @@ from .nodes import (
     ScenePromptCallback,
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
+    ScenePromptCallbackDesktop,
 )
 from .runs import get_run_user_id, require_run_context
 
@@ -58,6 +59,7 @@ SAFE_NODE_CLASSES = {
     "ScenePromptCallback": ScenePromptCallback,
     "ScenePromptCallbackDiscord": ScenePromptCallbackDiscord,
     "ScenePromptCallbackRequest": ScenePromptCallbackRequest,
+    "ScenePromptCallbackDesktop": ScenePromptCallbackDesktop,
     "ScenePresetReference": None,
 }
 # ComfyUI serializes widget-input Primitive nodes as executable API nodes.  They
@@ -83,6 +85,7 @@ DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePrompterQueue": "Scene Prompt Queue",
     "SceneEmptyLatent": "Scene Empty Latent",
     "ScenePresetReference": "Scene Preset Reference",
+    "ScenePromptCallbackDesktop": "Scene Prompt Callback (Desktop)",
 }
 
 
@@ -1023,7 +1026,7 @@ def expand_preset_reference(
         target = graph.lookup_node(str(node_id))
         for name, value in _node_inputs(node).items():
             target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
-        if class_type in (set(SAFE_NODE_CLASSES) - {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest"}) or class_type == "ScenePresetReference":
+        if class_type in (set(SAFE_NODE_CLASSES) - {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop"}) or class_type == "ScenePresetReference":
             target.set_input("source_node_id", f"{reference_source_id}/{node_id}" if reference_source_id else str(node_id))
             if class_type != "ScenePromptCallback":
                 target.set_input("source_node_name", _source_node_name(node))

@@ -25,7 +25,7 @@ from .runs import (
     release_run_context,
     set_run_expiration_callback,
 )
-from .callbacks import CALLBACK_FAILURE_STOP, SceneCallbackError, dispatch_callback
+from .callbacks import CALLBACK_FAILURE_STOP, SceneCallbackError, acknowledge_desktop_callback, dispatch_callback
 from .presets import (
     ScenePresetConflictError,
     ScenePresetError,
@@ -670,7 +670,8 @@ def define_routes():
             live_prompt_ids = _queued_prompt_ids()
             if live_prompt_ids is not None:
                 reconcile_active_run_contexts(live_prompt_ids)
-            handle = create_run_context(user_id, _is_continuous_scene_run(api_graph, expand_node_id))
+            client_id = payload.get("client_id", "") if isinstance(payload, dict) else ""
+            handle = create_run_context(user_id, _is_continuous_scene_run(api_graph, expand_node_id), client_id)
             snapshot = await asyncio.to_thread(
                 snapshot_presets_for_run, handle, api_graph, expand_node_id, user_id, workflow
             )
@@ -739,7 +740,13 @@ def define_routes():
             if state == "failed":
                 return web.json_response({"state": "error"}, status=502)
             try:
-                await asyncio.to_thread(dispatch_callback, callback["config"], callback["values"], callback["timeout_seconds"])
+                await asyncio.to_thread(
+                    dispatch_callback,
+                    callback["config"],
+                    callback["values"],
+                    callback["timeout_seconds"],
+                    desktop_context=callback.get("delivery_context"),
+                )
             except SceneCallbackError as exc:
                 if callback["failure_mode"] == CALLBACK_FAILURE_STOP:
                     finish_last_callback(run_handle, expand_node_id, False)
@@ -752,6 +759,24 @@ def define_routes():
             return web.json_response({"state": "invalid"}, status=400)
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=400)
+
+    @PromptServer.instance.routes.post("/scene_prompt/callbacks/desktop/ack")
+    async def scene_prompt_desktop_callback_ack(request):
+        try:
+            payload = await request.json()
+            request_id = payload.get("request_id") if isinstance(payload, dict) else ""
+            success = payload.get("success") if isinstance(payload, dict) else None
+            error = payload.get("error") if isinstance(payload, dict) else ""
+            state = acknowledge_desktop_callback(request_id, _request_user_id(request), success, error)
+            if state == "acknowledged":
+                return web.json_response({"acknowledged": True})
+            if state == "forbidden":
+                return web.json_response({"error": "forbidden"}, status=403)
+            if state == "missing":
+                return web.json_response({"error": "missing"}, status=404)
+            return web.json_response({"error": "invalid"}, status=400)
+        except Exception:
+            return web.json_response({"error": "invalid"}, status=400)
 
     @PromptServer.instance.routes.post("/scene_presets/save")
     async def scene_presets_save(request):

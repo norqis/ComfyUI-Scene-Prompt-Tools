@@ -29,6 +29,7 @@ const SCENE_PRESET_REFERENCE_NODE_NAMES = new Set(["ScenePresetReference", "Scen
 const SCENE_PROMPT_CALLBACK_NODE_NAMES = new Set(["ScenePromptCallback", "Scene Prompt Callback"]);
 const SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES = new Set(["ScenePromptCallbackDiscord", "Scene Prompt Callback (Discord)"]);
 const SCENE_PROMPT_CALLBACK_REQUEST_NODE_NAMES = new Set(["ScenePromptCallbackRequest", "Scene Prompt Callback (Request)"]);
+const SCENE_PROMPT_CALLBACK_DESKTOP_NODE_NAMES = new Set(["ScenePromptCallbackDesktop", "Scene Prompt Callback (Desktop)"]);
 const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePrompter",
     "SceneMatrix",
@@ -41,6 +42,7 @@ const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePromptCallback",
     "ScenePromptCallbackDiscord",
     "ScenePromptCallbackRequest",
+    "ScenePromptCallbackDesktop",
 ]);
 const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
     "ScenePrompter",
@@ -68,6 +70,7 @@ const NODE_NAMES = new Set([
     ...SCENE_PROMPT_CALLBACK_NODE_NAMES,
     ...SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES,
     ...SCENE_PROMPT_CALLBACK_REQUEST_NODE_NAMES,
+    ...SCENE_PROMPT_CALLBACK_DESKTOP_NODE_NAMES,
 ]);
 const POPUP_MIN_WIDTH = 420;
 const POPUP_MIN_HEIGHT = 180;
@@ -155,6 +158,7 @@ const SCENE_WIDGET_LABELS = {
     url: "URL",
     body_type: "本文形式",
     headers_json: "ヘッダー（JSON）",
+    title: "タイトル",
     callback_first: "開始時Callback",
     callback_each: "毎回Callback",
     callback_last: "完了時Callback",
@@ -180,6 +184,7 @@ const SCENE_NODE_DISPLAY_NAMES = {
     ScenePromptCallback: "Scene Prompt Callback",
     ScenePromptCallbackDiscord: "Scene Prompt Callback (Discord)",
     ScenePromptCallbackRequest: "Scene Prompt Callback (Request)",
+    ScenePromptCallbackDesktop: "Scene Prompt Callback (Desktop)",
 };
 
 let promptItems = null;
@@ -203,6 +208,7 @@ const sceneBatchPendingReleases = new Map();
 const sceneBatchDetachedRuns = new Map();
 const sceneBatchFinalizingRuns = new Set();
 const sceneBatchTerminalEvents = new Map();
+const sceneDesktopNotificationRequests = new Map();
 const SCENE_DETACHED_RETRY_MS = 30 * 1000;
 const SCENE_DETACHED_MAX_RETRIES = 20;
 let chipMeasureContext = null;
@@ -3737,10 +3743,13 @@ function hideSceneCallbackWidgets(node) {
 }
 
 function hideSceneCallbackProducerWidgets(node, nodeName) {
+    const isDesktop = SCENE_PROMPT_CALLBACK_DESKTOP_NODE_NAMES.has(nodeName);
     const visibleWidgets = SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES.has(nodeName)
         ? new Set(["webhook_url", "text", "username"])
-        : new Set(["method", "url", "text", "body_type", "headers_json"]);
-    const isGet = String(findWidget(node, "method")?.value || "POST").toUpperCase() === "GET";
+        : isDesktop
+            ? new Set(["title", "text"])
+            : new Set(["method", "url", "text", "body_type", "headers_json"]);
+    const isGet = !isDesktop && String(findWidget(node, "method")?.value || "POST").toUpperCase() === "GET";
     for (const widget of node.widgets || []) {
         if (widget?.sceneRole || (visibleWidgets.has(widget?.name) && !(isGet && widget?.name === "text"))) {
             showWidget(widget);
@@ -4586,6 +4595,7 @@ function isScenePromptCallbackProducerNode(node) {
     return nodeClassNames(node).some((name) => (
         SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES.has(name)
         || SCENE_PROMPT_CALLBACK_REQUEST_NODE_NAMES.has(name)
+        || SCENE_PROMPT_CALLBACK_DESKTOP_NODE_NAMES.has(name)
     ));
 }
 
@@ -7223,7 +7233,7 @@ async function prepareSceneRunContext(apiGraph, expandNodeId = null, workflow = 
     const response = await api.fetchApi("/scene_prompt/runs/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId, workflow }),
+        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId, workflow, client_id: api.clientId || "" }),
     });
     const data = await readApiJson(response, "Scene Promptの実行準備に失敗しました");
     if (!response.ok || !data?.run_handle) {
@@ -9739,10 +9749,48 @@ function attachScenePromptCallback(node) {
     app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function sceneDesktopNotificationStatus() {
+    if (typeof Notification === "undefined") {
+        return { state: "unsupported", label: "通知：非対応" };
+    }
+    if (typeof window !== "undefined" && window.isSecureContext === false) {
+        return { state: "unsupported", label: "通知：HTTPSまたはlocalhostが必要" };
+    }
+    if (Notification.permission === "granted") {
+        return { state: "granted", label: "通知：許可済み" };
+    }
+    if (Notification.permission === "denied") {
+        return { state: "denied", label: "通知：ブラウザ設定で許可" };
+    }
+    return { state: "default", label: "デスクトップ通知を許可" };
+}
+
+function refreshSceneDesktopNotificationPermission(node) {
+    const status = sceneDesktopNotificationStatus();
+    const button = addSceneButton(node, "scene_desktop_notification_permission", status.label, async () => {
+        if (sceneDesktopNotificationStatus().state !== "default") {
+            refreshSceneDesktopNotificationPermission(node);
+            return;
+        }
+        try {
+            await Notification.requestPermission();
+        } catch (error) {
+            console.warn("[Scene Prompt] デスクトップ通知の許可を取得できませんでした", error);
+        }
+        refreshSceneDesktopNotificationPermission(node);
+    });
+    button.sceneDesktopNotificationState = status.state;
+    node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+}
+
 function attachScenePromptCallbackProducer(node, nodeName) {
     injectStyle();
     applySceneWidgetLabels(node);
     node.resizable = true;
+    if (SCENE_PROMPT_CALLBACK_DESKTOP_NODE_NAMES.has(nodeName)) {
+        refreshSceneDesktopNotificationPermission(node);
+    }
     const method = findWidget(node, "method");
     if (method && !method.sceneCallbackRequestSyncWrapped) {
         const originalCallback = method.callback;
@@ -9988,6 +10036,62 @@ function clearSceneSavePreviews() {
     }
 }
 
+function acknowledgeSceneDesktopNotification(requestId, success, error = "") {
+    return api.fetchApi("/scene_prompt/callbacks/desktop/ack", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request_id: requestId, success, error }),
+    }).catch((ackError) => {
+        console.warn("[Scene Prompt] デスクトップ通知の応答を送信できませんでした", ackError);
+    });
+}
+
+function settleSceneDesktopNotification(requestId, success, error = "") {
+    const pending = sceneDesktopNotificationRequests.get(requestId);
+    if (!pending) {
+        return;
+    }
+    sceneDesktopNotificationRequests.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.notification.onshow = null;
+    pending.notification.onerror = null;
+    void acknowledgeSceneDesktopNotification(requestId, success, error);
+}
+
+function receiveSceneDesktopNotification(detail) {
+    const requestId = String(detail?.request_id || "");
+    if (!requestId || sceneDesktopNotificationRequests.has(requestId)) {
+        return;
+    }
+    const status = sceneDesktopNotificationStatus();
+    if (status.state === "unsupported") {
+        void acknowledgeSceneDesktopNotification(requestId, false, "unavailable");
+        return;
+    }
+    if (status.state !== "granted") {
+        void acknowledgeSceneDesktopNotification(requestId, false, "permission_denied");
+        return;
+    }
+    const timeoutSeconds = Number(detail?.timeout_seconds);
+    const timeoutMs = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+        ? Math.max(1, timeoutSeconds * 1000)
+        : 10_000;
+    let notification;
+    try {
+        notification = new Notification(String(detail?.title || ""), { body: String(detail?.text || "") });
+    } catch (error) {
+        void acknowledgeSceneDesktopNotification(requestId, false, "display_failed");
+        return;
+    }
+    const pending = {
+        notification,
+        timer: setTimeout(() => settleSceneDesktopNotification(requestId, false, "timeout"), timeoutMs),
+    };
+    sceneDesktopNotificationRequests.set(requestId, pending);
+    notification.onshow = () => settleSceneDesktopNotification(requestId, true);
+    notification.onerror = () => settleSceneDesktopNotification(requestId, false, "display_failed");
+}
+
 app.registerExtension({
     name: "ScenePrompt.UI",
 
@@ -9999,6 +10103,7 @@ app.registerExtension({
         scheduleScenePromptQueueSyncInstall();
         installSceneWorkflowLoadGuard();
         window.addEventListener("pagehide", releaseSceneRunsOnPageHide);
+        api.addEventListener("scene_prompt_desktop_notification", ({ detail }) => receiveSceneDesktopNotification(detail));
         api.addEventListener("execution_start", () => {
             if (!sceneBatchRun) {
                 clearSceneSavePreviews();

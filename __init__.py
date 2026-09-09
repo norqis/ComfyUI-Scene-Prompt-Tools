@@ -9,6 +9,7 @@ from .scene_prompt_tools.nodes import (
     ScenePromptCallback,
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
+    ScenePromptCallbackDesktop,
     SceneSaveImage,
 )
 from .scene_prompt_tools.prompt import ScenePrompt
@@ -26,6 +27,7 @@ NODE_CLASS_MAPPINGS = {
     "ScenePromptCallback": ScenePromptCallback,
     "ScenePromptCallbackDiscord": ScenePromptCallbackDiscord,
     "ScenePromptCallbackRequest": ScenePromptCallbackRequest,
+    "ScenePromptCallbackDesktop": ScenePromptCallbackDesktop,
     "SceneEmptyLatent": SceneEmptyLatent,
     "ScenePrompterExpand": ScenePromptExpand,
     "SceneSaveImage": SceneSaveImage,
@@ -44,6 +46,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ScenePromptCallback": "Scene Prompt Callback",
     "ScenePromptCallbackDiscord": "Scene Prompt Callback (Discord)",
     "ScenePromptCallbackRequest": "Scene Prompt Callback (Request)",
+    "ScenePromptCallbackDesktop": "Scene Prompt Callback (Desktop)",
     "SceneEmptyLatent": "Scene Empty Latent",
     "ScenePrompterExpand": "Scene Prompt Expand",
     "SceneSaveImage": "Scene Save Image",

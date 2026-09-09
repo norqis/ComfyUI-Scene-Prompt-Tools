@@ -73,7 +73,7 @@ class RunContextStore:
     def _touch_locked(entry, now):
         entry["last_access"] = now
 
-    def create(self, user_id, continuous=False):
+    def create(self, user_id, continuous=False, client_id=""):
         now = time.monotonic()
         with self._lock:
             expired = self._purge_expired_locked(now)
@@ -86,6 +86,7 @@ class RunContextStore:
                 "prompts": {},
                 "callback_attempts": set(),
                 "last_callbacks": {},
+                "delivery_context": {"client_id": str(client_id or ""), "user_id": str(user_id)},
                 "state": "prepared",
                 "prompt_id": "",
                 "continuous": bool(continuous),
@@ -270,6 +271,12 @@ class RunContextStore:
         entry = self.require(handle)
         return entry["prompts"].get(key)
 
+    def get_delivery_context(self, handle):
+        if not str(handle or "").strip():
+            return None
+        entry = self.require(handle)
+        return dict(entry.get("delivery_context") or {})
+
     def set_prompt_reference(self, handle, expand_node_id, prompt):
         key = str(expand_node_id or "").strip()
         if not key or not isinstance(prompt, dict):
@@ -283,7 +290,7 @@ class RunContextStore:
                 stored["prompts"][key] = copy.deepcopy(prompt)
             return stored["prompts"][key]
 
-    def register_last_callback(self, handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id=""):
+    def register_last_callback(self, handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id="", delivery_context=None):
         key = str(expand_node_id or "").strip()
         entry = self.require(handle)
         if not key or not isinstance(config, dict):
@@ -297,6 +304,7 @@ class RunContextStore:
             stored["last_callbacks"][key] = {
                 "config": copy.deepcopy(config), "values": copy.deepcopy(values), "timeout_seconds": int(timeout_seconds),
                 "failure_mode": str(failure_mode), "prompt_id": str(prompt_id or stored.get("prompt_id") or ""),
+                "delivery_context": copy.deepcopy(delivery_context) if isinstance(delivery_context, dict) else None,
                 "state": "pending",
             }
             return True
@@ -381,8 +389,8 @@ def set_run_expiration_callback(callback):
     RUN_CONTEXTS.set_expiration_callback(callback)
 
 
-def create_run_context(user_id, continuous=False):
-    return RUN_CONTEXTS.create(user_id, continuous)
+def create_run_context(user_id, continuous=False, client_id=""):
+    return RUN_CONTEXTS.create(user_id, continuous, client_id)
 
 
 def reconcile_active_run_contexts(live_prompt_ids):
@@ -425,12 +433,16 @@ def get_run_prompt_reference(handle, expand_node_id):
     return RUN_CONTEXTS.get_prompt_reference(handle, expand_node_id)
 
 
+def get_run_delivery_context(handle):
+    return RUN_CONTEXTS.get_delivery_context(handle)
+
+
 def set_run_prompt_reference(handle, expand_node_id, prompt):
     return RUN_CONTEXTS.set_prompt_reference(handle, expand_node_id, prompt)
 
 
-def register_last_callback(handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id=""):
-    return RUN_CONTEXTS.register_last_callback(handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id)
+def register_last_callback(handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id="", delivery_context=None):
+    return RUN_CONTEXTS.register_last_callback(handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id, delivery_context)
 
 
 def begin_last_callback(handle, user_id, expand_node_id, prompt_id):

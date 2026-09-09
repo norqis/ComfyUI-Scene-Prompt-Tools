@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -16,7 +17,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +98,82 @@ class _CallbackReceiver:
             time.sleep(0.02)
         with self._lock:
             return list(self.requests)
+
+
+class _DesktopCallbackClient:
+    """A loopback WebSocket client standing in for one ComfyUI browser tab."""
+
+    def __init__(self, port, client_id):
+        self.port = port
+        self.client_id = client_id
+        self._lock = Lock()
+        self._connected = Event()
+        self._loop = None
+        self._session = None
+        self._socket = None
+        self._thread = None
+        self._error = None
+        self.notifications = []
+
+    def __enter__(self):
+        self._thread = Thread(target=self._run, daemon=True)
+        self._thread.start()
+        if not self._connected.wait(10):
+            raise RuntimeError(f"Desktop callback WebSocket did not connect: {self._error}")
+        if self._error:
+            raise RuntimeError(f"Desktop callback WebSocket failed: {self._error}")
+        return self
+
+    def __exit__(self, *_exc_info):
+        if self._loop and self._socket and not self._socket.closed:
+            future = asyncio.run_coroutine_threadsafe(self._socket.close(), self._loop)
+            future.result(timeout=10)
+        if self._thread:
+            self._thread.join(timeout=10)
+
+    def _run(self):
+        try:
+            asyncio.run(self._listen())
+        except Exception as exc:  # surfaced synchronously by __enter__ or wait_for
+            self._error = exc
+            self._connected.set()
+
+    async def _listen(self):
+        import aiohttp
+
+        self._loop = asyncio.get_running_loop()
+        self._session = aiohttp.ClientSession()
+        try:
+            self._socket = await self._session.ws_connect(
+                f"ws://127.0.0.1:{self.port}/ws?clientId={self.client_id}",
+                timeout=10,
+            )
+            self._connected.set()
+            async for message in self._socket:
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(message.data)
+                if payload.get("type") != "scene_prompt_desktop_notification":
+                    continue
+                with self._lock:
+                    self.notifications.append({
+                        **payload["data"],
+                        "received_at": time.time(),
+                    })
+        finally:
+            await self._session.close()
+
+    def wait_for(self, count, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if len(self.notifications) >= count:
+                    return list(self.notifications)
+            if self._error:
+                raise RuntimeError(f"Desktop callback WebSocket failed: {self._error}")
+            time.sleep(0.02)
+        with self._lock:
+            return list(self.notifications)
 
 
 def _scene_prompt_inputs():
@@ -423,6 +500,21 @@ def _expand_lifecycle_graph(receiver_url, path="expand-lifecycle", *, count=2):
     }
 
 
+def _desktop_callback_graph(path="desktop-callback", *, count=2, failure_mode="停止", timeout_seconds=10):
+    """Use the lifecycle graph with desktop producers and no external notification target."""
+    graph = _expand_lifecycle_graph("", path, count=count)
+    for node_id, marker in (("2", "first"), ("3", "each"), ("4", "pathA"), ("6", "pathB"), ("11", "last")):
+        graph[node_id] = {
+            "class_type": "ScenePromptCallbackDesktop",
+            "inputs": {"title": f"Desktop {marker}", "text": f"{marker} {{exec_seed}}"},
+        }
+    graph["10"]["inputs"]["callback_timeout_seconds"] = timeout_seconds
+    graph["10"]["inputs"]["callback_failure_mode"] = failure_mode
+    graph["5"]["inputs"]["failure_mode"] = failure_mode
+    graph["7"]["inputs"]["failure_mode"] = failure_mode
+    return graph
+
+
 def _renumber_graph(graph, offset):
     """Make a disjoint prompt graph that can share a single run handle."""
     mapping = {str(node_id): str(int(node_id) + offset) for node_id in graph}
@@ -615,21 +707,27 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             payload["extra_data"] = extra_data
         return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
 
-    def _prepare_callback_run(self, graph, expand_node_id="10", workflow=None):
+    def _prepare_callback_run(self, graph, expand_node_id="10", workflow=None, client_id=None):
         workflow = workflow or _workflow_for_graph(graph)
-        prepared = self._request("/scene_prompt/runs/prepare", {
+        payload = {
             "api_graph": {"output": graph},
             "expand_node_id": expand_node_id,
             "workflow": workflow,
-        })
+        }
+        if client_id is not None:
+            payload["client_id"] = client_id
+        prepared = self._request("/scene_prompt/runs/prepare", payload)
         _apply_run_handle(graph, prepared["run_handle"])
         return prepared["run_handle"], workflow
 
-    def _queue_callback_graph(self, graph, handle, workflow, *, claim_run=False):
-        queued = self._request("/prompt", {
+    def _queue_callback_graph(self, graph, handle, workflow, *, claim_run=False, client_id=None):
+        payload = {
             "prompt": graph,
             "extra_data": {"extra_pnginfo": {"workflow": workflow}},
-        })
+        }
+        if client_id is not None:
+            payload["client_id"] = client_id
+        queued = self._request("/prompt", payload)
         if claim_run:
             claimed = self._request("/scene_prompt/runs/claim", {
                 "run_handle": handle,
@@ -638,11 +736,14 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             self.assertTrue(claimed["claimed"])
         return self._wait_for_prompt(queued["prompt_id"])
 
-    def _queue_lifecycle_graph(self, graph, handle, workflow, *, claim_run=False):
-        queued = self._request("/prompt", {
+    def _queue_lifecycle_graph(self, graph, handle, workflow, *, claim_run=False, client_id=None):
+        payload = {
             "prompt": graph,
             "extra_data": {"extra_pnginfo": {"workflow": workflow}},
-        })
+        }
+        if client_id is not None:
+            payload["client_id"] = client_id
+        queued = self._request("/prompt", payload)
         if claim_run:
             claimed = self._request("/scene_prompt/runs/claim", {
                 "run_handle": handle,
@@ -650,6 +751,147 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             })
             self.assertTrue(claimed["claimed"])
         return queued["prompt_id"], self._wait_for_prompt(queued["prompt_id"])
+
+    def _desktop_ack(self, notification, *, success=True, error=None):
+        payload = {"request_id": notification["request_id"], "success": success}
+        if error is not None:
+            payload["error"] = error
+        return self._request("/scene_prompt/callbacks/desktop/ack", payload)
+
+    def _queue_desktop_graph(self, graph, handle, workflow, client_id, *, claim_run=False):
+        queued = self._request("/prompt", {
+            "prompt": graph,
+            "client_id": client_id,
+            "extra_data": {"extra_pnginfo": {"workflow": workflow}},
+        })
+        if claim_run:
+            self.assertTrue(self._request("/scene_prompt/runs/claim", {
+                "run_handle": handle,
+                "prompt_id": queued["prompt_id"],
+            })["claimed"])
+        return queued["prompt_id"]
+
+    def test_http_desktop_callbacks_target_one_client_and_wait_for_ack(self):
+        client_id = "desktop-callback-target"
+        graph = _desktop_callback_graph()
+        with _DesktopCallbackClient(self.port, client_id) as target, _DesktopCallbackClient(
+            self.port, "desktop-callback-observer"
+        ) as observer:
+            handle, workflow = self._prepare_callback_run(graph, client_id=client_id)
+            try:
+                first_prompt_id = self._queue_desktop_graph(
+                    graph, handle, workflow, client_id, claim_run=True
+                )
+                expected = (("first", "101"), ("each", "101"), ("pathA", "101"), ("pathB", "101"))
+                for index, (marker, seed) in enumerate(expected, start=1):
+                    notifications = target.wait_for(index)
+                    self.assertEqual(len(notifications), index)
+                    notification = notifications[-1]
+                    self.assertEqual(notification["title"], f"Desktop {marker}")
+                    self.assertEqual(notification["text"], f"{marker} {seed}")
+                    self.assertEqual(notification["timeout_seconds"], 10)
+                    self.assertTrue(notification["request_id"])
+                    self.assertEqual(observer.wait_for(1, timeout=0.1), [])
+                    if index == 1:
+                        self.assertEqual(target.wait_for(2, timeout=0.2), [notification])
+                        self.assertEqual(list((self.base / "output" / "desktop-callback").glob("*.png")), [])
+                    self.assertTrue(self._desktop_ack(notification)["acknowledged"])
+                first_entry = self._wait_for_prompt(first_prompt_id)
+                self.assertIn("13", first_entry["outputs"])
+                first_files = sorted((self.base / "output" / "desktop-callback").glob("*.png"))
+                self.assertEqual(len(first_files), 1)
+
+                cached = copy.deepcopy({node_id: graph[node_id] for node_id in ("2", "3", "10", "11", "12", "13")})
+                del cached["10"]["inputs"]["scene_prompt"]
+                cached["10"]["inputs"]["current_index"] = 1
+                second_prompt_id = self._queue_desktop_graph(cached, handle, workflow, client_id)
+                expected = (("each", "102"), ("pathA", "102"), ("pathB", "102"))
+                for index, (marker, seed) in enumerate(expected, start=5):
+                    notification = target.wait_for(index)[-1]
+                    self.assertEqual(notification["title"], f"Desktop {marker}")
+                    self.assertEqual(notification["text"], f"{marker} {seed}")
+                    self.assertTrue(self._desktop_ack(notification)["acknowledged"])
+                self._wait_for_prompt(second_prompt_id)
+                all_files = sorted((self.base / "output" / "desktop-callback").glob("*.png"))
+                self.assertEqual(len(all_files), 2)
+
+                finalized = {}
+                finalize_error = []
+
+                def finalize():
+                    try:
+                        finalized.update(self._request("/scene_prompt/runs/finalize", {
+                            "run_handle": handle,
+                            "expand_node_id": "10",
+                            "prompt_id": second_prompt_id,
+                        }))
+                    except Exception as exc:
+                        finalize_error.append(exc)
+
+                final_thread = Thread(target=finalize)
+                final_thread.start()
+                last = target.wait_for(8)[-1]
+                self.assertEqual(last["title"], "Desktop last")
+                self.assertEqual(last["text"], "last 102")
+                self.assertGreaterEqual(last["received_at"], max(file_path.stat().st_mtime for file_path in all_files))
+                self.assertTrue(self._desktop_ack(last)["acknowledged"])
+                final_thread.join(timeout=15)
+                self.assertFalse(final_thread.is_alive())
+                if finalize_error:
+                    raise finalize_error[0]
+                self.assertEqual(finalized["state"], "finalized")
+                self.assertEqual(observer.wait_for(1, timeout=0.1), [])
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+
+    def test_http_desktop_callback_ack_failure_policies_and_timeout(self):
+        def queue_first(client, graph, client_id):
+            handle, workflow = self._prepare_callback_run(graph, client_id=client_id)
+            prompt_id = self._queue_desktop_graph(graph, handle, workflow, client_id, claim_run=True)
+            return handle, prompt_id
+
+        with _DesktopCallbackClient(self.port, "desktop-callback-continue") as client:
+            graph = _desktop_callback_graph("desktop-callback-continue", count=1, failure_mode="続行")
+            handle, prompt_id = queue_first(client, graph, client.client_id)
+            try:
+                first = client.wait_for(1)[-1]
+                self.assertTrue(self._desktop_ack(first, success=False, error="permission_denied")["acknowledged"])
+                for index in range(2, 5):
+                    self.assertTrue(self._desktop_ack(client.wait_for(index)[-1])["acknowledged"])
+                self._wait_for_prompt(prompt_id)
+                self.assertEqual(len(list((self.base / "output" / "desktop-callback-continue").glob("*.png"))), 1)
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+
+        with _DesktopCallbackClient(self.port, "desktop-callback-stop") as client:
+            graph = _desktop_callback_graph("desktop-callback-stop", count=1, failure_mode="停止")
+            handle, prompt_id = queue_first(client, graph, client.client_id)
+            try:
+                first = client.wait_for(1)[-1]
+                self.assertTrue(self._desktop_ack(first, success=False, error="permission_denied")["acknowledged"])
+                self._wait_for_prompt_error(prompt_id)
+                self.assertEqual(len(client.wait_for(2, timeout=0.2)), 1)
+                self.assertEqual(list((self.base / "output" / "desktop-callback-stop").glob("*.png")), [])
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+
+        with _DesktopCallbackClient(self.port, "desktop-callback-timeout") as client:
+            graph = _desktop_callback_graph(
+                "desktop-callback-timeout", count=1, failure_mode="続行", timeout_seconds=1
+            )
+            handle, prompt_id = queue_first(client, graph, client.client_id)
+            try:
+                timed_out = client.wait_for(1)[-1]
+                self.assertEqual(client.wait_for(2, timeout=5)[-1]["title"], "Desktop each")
+                status, _late_ack = self._request_status("/scene_prompt/callbacks/desktop/ack", {
+                    "request_id": timed_out["request_id"], "success": True,
+                })
+                self.assertEqual(status, 404)
+                for index in range(2, 5):
+                    self.assertTrue(self._desktop_ack(client.wait_for(index)[-1])["acknowledged"])
+                self._wait_for_prompt(prompt_id)
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
 
     def test_http_expand_callback_lifecycle_finalizes_after_last_saved_image(self):
         with _CallbackReceiver() as receiver:
@@ -932,7 +1174,8 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             self.assertNotIn("19", saved_prompt)
 
     def test_http_preset_callbacks_expand_into_execution_metadata_and_replay(self):
-        with _CallbackReceiver() as receiver:
+        client_id = "desktop-callback-preset"
+        with _CallbackReceiver() as receiver, _DesktopCallbackClient(self.port, client_id) as desktop:
             preset_graph = {
                 "output": {
                     "1": {"class_type": "ScenePresetInput", "inputs": {}},
@@ -966,11 +1209,25 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                         },
                     },
                     "5": {
+                        "class_type": "ScenePromptCallbackDesktop",
+                        "inputs": {"title": "Desktop preset", "text": "preset {exec_seed}"},
+                    },
+                    "6": {
+                        "class_type": "ScenePromptCallback",
+                        "inputs": {
+                            "scene_prompt": ["4", 0],
+                            "callback": ["5", 0],
+                            "frequency": "初回",
+                            "timeout_seconds": 10,
+                            "failure_mode": "停止",
+                        },
+                    },
+                    "7": {
                         "class_type": "ScenePresetOutput",
                         "inputs": {
                             "preset_id": "callback-preset",
                             "preset_name": "Callback preset",
-                            "scene_prompt": ["4", 0],
+                            "scene_prompt": ["6", 0],
                         },
                     },
                 },
@@ -978,7 +1235,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             self._request("/scene_presets/save", {
                 "preset_id": "callback-preset",
                 "name": "Callback preset",
-                "output_node_id": "5",
+                "output_node_id": "7",
                 "api_graph": preset_graph,
                 "workflow": _workflow_for_graph(preset_graph["output"]),
             })
@@ -1054,13 +1311,19 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                     },
                 },
             }
-            handle, workflow = self._prepare_callback_run(graph, "6")
+            handle, workflow = self._prepare_callback_run(graph, "6", client_id=client_id)
             try:
-                self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                first_prompt_id = self._queue_desktop_graph(graph, handle, workflow, client_id, claim_run=True)
+                self.assertEqual(desktop.wait_for(1)[-1]["text"], "preset 7")
+                self.assertTrue(self._desktop_ack(desktop.notifications[-1])["acknowledged"])
+                self._wait_for_prompt(first_prompt_id)
                 cached = copy.deepcopy({node_id: graph[node_id] for node_id in ("6", "7", "8", "9")})
                 del cached["6"]["inputs"]["scene_prompt"]
                 cached["6"]["inputs"]["current_index"] = 1
-                self._queue_callback_graph(cached, handle, workflow)
+                second_prompt_id = self._queue_desktop_graph(cached, handle, workflow, client_id)
+                self.assertEqual(desktop.wait_for(2)[-1]["text"], "preset 8")
+                self.assertTrue(self._desktop_ack(desktop.notifications[-1])["acknowledged"])
+                self._wait_for_prompt(second_prompt_id)
                 received = receiver.wait_for(2)
                 self.assertEqual(len(received), 2)
                 self.assertEqual(
@@ -1092,11 +1355,15 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                 self.assertNotIn("ScenePresetReference", {node["class_type"] for node in on_prompt.values()})
                 self.assertIn("ScenePromptCallback", {node["class_type"] for node in on_prompt.values()})
                 self.assertIn("ScenePromptCallbackRequest", {node["class_type"] for node in on_prompt.values()})
-                callback_node = next(node for node in on_prompt.values() if node["class_type"] == "ScenePromptCallback")
-                callback_source = callback_node["inputs"]["callback"]
-                self.assertIsInstance(callback_source, list)
-                self.assertEqual(on_prompt[str(callback_source[0])]["class_type"], "ScenePromptCallbackRequest")
+                self.assertIn("ScenePromptCallbackDesktop", {node["class_type"] for node in on_prompt.values()})
+                callback_sources = {
+                    on_prompt[str(node["inputs"]["callback"][0])]["class_type"]
+                    for node in on_prompt.values()
+                    if node["class_type"] == "ScenePromptCallback" and isinstance(node["inputs"].get("callback"), list)
+                }
+                self.assertEqual(callback_sources, {"ScenePromptCallbackRequest", "ScenePromptCallbackDesktop"})
                 self.assertIn("ScenePromptCallback", {node["type"] for node in on_workflow["nodes"]})
+                self.assertIn("ScenePromptCallbackDesktop", {node["type"] for node in on_workflow["nodes"]})
                 saved_replays.setdefault("on", []).append((on_prompt, on_workflow))
 
             original_second = json.loads(received[1]["body"].decode("utf-8"))
@@ -1106,10 +1373,15 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                 self.assertEqual(replay_prompt["6"]["inputs"]["current_index"], 0)
                 self.assertEqual(replay_prompt["6"]["inputs"]["seed_base"], int(original_second["exec_seed"]))
                 replay_handle, replay_workflow = self._prepare_callback_run(
-                    replay_prompt, "6", replay_png_workflow
+                    replay_prompt, "6", replay_png_workflow, client_id=client_id
                 )
                 try:
-                    self._queue_callback_graph(replay_prompt, replay_handle, replay_workflow, claim_run=True)
+                    replay_prompt_id = self._queue_desktop_graph(
+                        replay_prompt, replay_handle, replay_workflow, client_id, claim_run=True
+                    )
+                    self.assertEqual(desktop.wait_for(3 + len(replay_payloads))[-1]["text"], "preset 8")
+                    self.assertTrue(self._desktop_ack(desktop.notifications[-1])["acknowledged"])
+                    self._wait_for_prompt(replay_prompt_id)
                     replay_received = receiver.wait_for(3 + len(replay_payloads))
                     self.assertEqual(len(replay_received), 3 + len(replay_payloads))
                     replay_payloads.append(json.loads(replay_received[-1]["body"].decode("utf-8")))

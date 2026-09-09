@@ -13,6 +13,41 @@ const assets = new Map([
 ]);
 
 const appModule = `
+const desktopNotificationMock = { available: true, permission: "default", requestedPermission: "granted", requestCalls: 0, mode: "manual", notifications: [] };
+class MockNotification {
+  static get permission() { return desktopNotificationMock.permission; }
+  static requestPermission() {
+    desktopNotificationMock.requestCalls += 1;
+    desktopNotificationMock.permission = desktopNotificationMock.requestedPermission;
+    return Promise.resolve(desktopNotificationMock.permission);
+  }
+  constructor(title, options = {}) {
+    if (desktopNotificationMock.mode === "throw") throw new Error("display failed");
+    this.title = title;
+    this.options = options;
+    this.onshow = null;
+    this.onerror = null;
+    desktopNotificationMock.notifications.push(this);
+    if (desktopNotificationMock.mode === "show" || desktopNotificationMock.mode === "error") {
+      queueMicrotask(() => this[desktopNotificationMock.mode === "show" ? "onshow" : "onerror"]?.());
+    }
+  }
+}
+function installDesktopNotificationMock() {
+  Object.defineProperty(window, "Notification", { value: desktopNotificationMock.available ? MockNotification : undefined, configurable: true });
+}
+installDesktopNotificationMock();
+window.__sceneDesktopNotificationMock = {
+  configure({ available, permission, requestedPermission, mode } = {}) {
+    if (available !== undefined) desktopNotificationMock.available = available;
+    if (permission !== undefined) desktopNotificationMock.permission = permission;
+    if (requestedPermission !== undefined) desktopNotificationMock.requestedPermission = requestedPermission;
+    if (mode !== undefined) desktopNotificationMock.mode = mode;
+    installDesktopNotificationMock();
+  },
+  emit(event) { desktopNotificationMock.notifications.at(-1)?.[event === "show" ? "onshow" : "onerror"]?.(); },
+  snapshot() { return { ...desktopNotificationMock, notifications: desktopNotificationMock.notifications.map(({ title, options }) => ({ title, options })) }; },
+};
 const graph = {
   _nodes: [],
   extra: { original_tab: true },
@@ -60,6 +95,7 @@ const promptItems = [baseItem, nestedItem, ...Array.from({ length: 60 }, (_value
 }))];
 const savedPrompt = { id: "browser-set", name: "Browser Set", description: "", items: [baseItem] };
 export const api = {
+  clientId: "browser-client",
   fileURL(route) {
     calls.push({ url: "fileURL:" + route, options: {} });
     return route;
@@ -190,6 +226,7 @@ const server = http.createServer(async (request, response) => {
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset,\n`
+                + `  pendingDesktopNotifications() { return sceneDesktopNotificationRequests.size; },\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
                 + `};\n`;
         }
@@ -904,6 +941,10 @@ try {
             { name: "body_type", type: "combo", value: "text", options: {} },
             { name: "headers_json", type: "text", value: "{}", options: {} },
         ]);
+        const desktop = new CallbackNode("ScenePromptCallbackDesktop", [
+            { name: "title", type: "text", value: "完了", options: {} },
+            { name: "text", type: "text", value: "{all_positive}", options: {} },
+        ]);
         class ExpandNode {
             constructor(id, currentIndex, seedBase, seedBaseLiteral) {
                 this.id = id;
@@ -946,16 +987,19 @@ try {
         callback.onNodeCreated();
         await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallbackRequest" });
         request.onNodeCreated();
+        await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallbackDesktop" });
+        desktop.onNodeCreated();
         await window.__scenePromptExtension.beforeRegisterNodeDef(ExpandNode, { name: "ScenePrompterExpand" });
         expand.onNodeCreated();
         zeroReplayExpand.onNodeCreated();
-        window.app.graph._nodes.push(callback, request, expand, zeroReplayExpand);
+        window.app.graph._nodes.push(callback, request, desktop, expand, zeroReplayExpand);
         callback.title = "Before Matrix";
         window.__scenePromptPopupTestHooks.syncAllScenePromptNames();
         const apiPrompt = { output: {
             "201": { class_type: "ScenePromptCallback", inputs: {} },
             "202": { class_type: "ScenePromptCallbackRequest", inputs: {} },
-            "203": { class_type: "KSampler", inputs: {} },
+            "203": { class_type: "ScenePromptCallbackDesktop", inputs: {} },
+            "204": { class_type: "KSampler", inputs: {} },
         } };
         window.__scenePromptPopupTestHooks.applySceneSourceNodeNames(apiPrompt);
         const before = {
@@ -963,8 +1007,12 @@ try {
             callbackInputOptional: callback.inputs.find((input) => input.name === "scene_prompt").link === null,
             apiCallbackName: apiPrompt.output["201"].inputs.source_node_name,
             apiProducerName: apiPrompt.output["202"].inputs.source_node_name,
+            apiDesktopName: apiPrompt.output["203"].inputs.source_node_name,
             callbackVisible: callback.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
             getHiddenText: request.widgets.find((widget) => widget.name === "text").hidden,
+            desktopVisible: desktop.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+            desktopPermission: desktop.widgets.find((widget) => widget.sceneRole === "scene_desktop_notification_permission")?.name,
+            desktopPermissionRequestsBeforeClick: window.__sceneDesktopNotificationMock.snapshot().requestCalls,
             expandCallbackInputs: expand.inputs.map((input) => ({ name: input.name, type: input.type, link: input.link })),
             expandCallbackWidgets: expand.widgets
                 .filter((widget) => ["callback_timeout_seconds", "callback_failure_mode"].includes(widget.name))
@@ -978,18 +1026,27 @@ try {
         const method = request.widgets.find((widget) => widget.name === "method");
         method.value = "POST";
         method.callback();
+        window.__sceneDesktopNotificationMock.configure({ permission: "default", requestedPermission: "granted" });
+        await desktop.widgets.find((widget) => widget.sceneRole === "scene_desktop_notification_permission").callback();
         return {
             ...before,
             postVisibleText: !request.widgets.find((widget) => widget.name === "text").hidden,
             requestWidgets: request.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+            desktopPermissionAfterClick: desktop.widgets.find((widget) => widget.sceneRole === "scene_desktop_notification_permission")?.name,
+            desktopPermissionRequestsAfterClick: window.__sceneDesktopNotificationMock.snapshot().requestCalls,
         };
     });
     assert.equal(callbackUi.callbackOutput, "SCENE_PROMPT");
     assert.equal(callbackUi.callbackInputOptional, true, "Callback accepts an unconnected first Scene input");
     assert.equal(callbackUi.apiCallbackName, undefined, "Callback itself is excluded from Scene path names");
     assert.equal(callbackUi.apiProducerName, undefined, "Callback configuration is not mistaken for a Scene-path node");
+    assert.equal(callbackUi.apiDesktopName, undefined, "Desktop callback configuration is not mistaken for a Scene-path node");
     assert.deepEqual(callbackUi.callbackVisible, ["frequency", "timeout_seconds", "failure_mode"]);
     assert.equal(callbackUi.getHiddenText, true, "GET hides its unused request body");
+    assert.deepEqual(callbackUi.desktopVisible, ["title", "text", "デスクトップ通知を許可"]);
+    assert.equal(callbackUi.desktopPermissionRequestsBeforeClick, 0, "Desktop permission is never requested while a node is attached");
+    assert.equal(callbackUi.desktopPermissionRequestsAfterClick, 1, "Desktop permission is requested only by the node button");
+    assert.equal(callbackUi.desktopPermissionAfterClick, "通知：許可済み");
     assert.equal(callbackUi.postVisibleText, true, "POST restores the request body input");
     assert.deepEqual(callbackUi.requestWidgets, ["method", "url", "text", "body_type", "headers_json"]);
     assert.deepEqual(callbackUi.expandCallbackInputs, [
@@ -1007,11 +1064,74 @@ try {
     assert.equal(callbackUi.replaySeedLiteralHidden, true, "literal seed replay state stays internal");
     assert.deepEqual(callbackUi.zeroReplaySerialized, [0, "", 0, true], "normal replay serialization keeps literal seed mode");
 
+    await page.evaluate(() => {
+        const listener = window.__scenePromptListeners.get("scene_prompt_desktop_notification");
+        window.__sceneDesktopNotificationMock.configure({ permission: "granted", mode: "manual" });
+        listener({ detail: { request_id: "desktop-show", title: "Scene done", text: "image ready", timeout_seconds: 1 } });
+        listener({ detail: { request_id: "desktop-show", title: "duplicate", text: "must not show", timeout_seconds: 1 } });
+        window.__sceneDesktopNotificationMock.emit("show");
+    });
+    await page.waitForFunction(() => window.__scenePromptCalls.some((call) => (
+        call.url === "/scene_prompt/callbacks/desktop/ack"
+        && JSON.parse(call.options.body).request_id === "desktop-show"
+    )));
+    const desktopShow = await page.evaluate(() => ({
+        notifications: window.__sceneDesktopNotificationMock.snapshot().notifications,
+        acknowledgements: window.__scenePromptCalls
+            .filter((call) => call.url === "/scene_prompt/callbacks/desktop/ack")
+            .map((call) => JSON.parse(call.options.body)),
+        pending: window.__scenePromptPopupTestHooks.pendingDesktopNotifications(),
+    }));
+    assert.deepEqual(desktopShow.notifications, [{ title: "Scene done", options: { body: "image ready" } }], "duplicate targeted event creates one browser Notification");
+    assert.deepEqual(desktopShow.acknowledgements, [{ request_id: "desktop-show", success: true, error: "" }], "show acknowledges success without waiting for dismissal");
+    assert.equal(desktopShow.pending, 0, "shown notification is removed from bounded pending state");
+
+    await page.evaluate(() => {
+        const listener = window.__scenePromptListeners.get("scene_prompt_desktop_notification");
+        window.__sceneDesktopNotificationMock.configure({ permission: "granted", mode: "error" });
+        listener({ detail: { request_id: "desktop-error", title: "Error", text: "", timeout_seconds: 1 } });
+    });
+    await page.waitForFunction(() => window.__scenePromptCalls.some((call) => (
+        call.url === "/scene_prompt/callbacks/desktop/ack"
+        && JSON.parse(call.options.body).request_id === "desktop-error"
+    )));
+    await page.evaluate(() => {
+        const listener = window.__scenePromptListeners.get("scene_prompt_desktop_notification");
+        window.__sceneDesktopNotificationMock.configure({ permission: "granted", mode: "throw" });
+        listener({ detail: { request_id: "desktop-throw", title: "Throw", text: "", timeout_seconds: 1 } });
+        window.__sceneDesktopNotificationMock.configure({ permission: "denied", mode: "manual" });
+        listener({ detail: { request_id: "desktop-denied", title: "Denied", text: "", timeout_seconds: 1 } });
+        window.__sceneDesktopNotificationMock.configure({ permission: "granted", mode: "manual" });
+        listener({ detail: { request_id: "desktop-timeout", title: "Timeout", text: "", timeout_seconds: 0.001 } });
+        window.__sceneDesktopNotificationMock.configure({ available: false });
+        listener({ detail: { request_id: "desktop-unavailable", title: "Unavailable", text: "", timeout_seconds: 1 } });
+        window.__sceneDesktopNotificationMock.configure({ available: true, permission: "granted", mode: "manual" });
+    });
+    await page.waitForFunction(() => window.__scenePromptCalls.filter((call) => (
+        call.url === "/scene_prompt/callbacks/desktop/ack"
+        && ["desktop-throw", "desktop-denied", "desktop-timeout", "desktop-unavailable"].includes(JSON.parse(call.options.body).request_id)
+    )).length === 4);
+    const desktopFailures = await page.evaluate(() => ({
+        acknowledgements: window.__scenePromptCalls
+            .filter((call) => call.url === "/scene_prompt/callbacks/desktop/ack")
+            .map((call) => JSON.parse(call.options.body))
+            .filter((body) => body.request_id !== "desktop-show"),
+        pending: window.__scenePromptPopupTestHooks.pendingDesktopNotifications(),
+    }));
+    assert.deepEqual(desktopFailures.acknowledgements, [
+        { request_id: "desktop-error", success: false, error: "display_failed" },
+        { request_id: "desktop-throw", success: false, error: "display_failed" },
+        { request_id: "desktop-denied", success: false, error: "permission_denied" },
+        { request_id: "desktop-unavailable", success: false, error: "unavailable" },
+        { request_id: "desktop-timeout", success: false, error: "timeout" },
+    ], "error, throw, denied permission, timeout, and unavailable browser each send one fixed failure acknowledgement");
+    assert.equal(desktopFailures.pending, 0, "all failed desktop requests clear listeners and pending state");
+
     await page.evaluate(async () => {
         const originalGraphToPrompt = window.app.graphToPrompt;
         window.app.graphToPrompt = async () => ({ output: {
             "201": { class_type: "ScenePromptCallback", inputs: { callback: ["202", 0] } },
-            "202": { class_type: "ScenePromptCallbackRequest", inputs: {} },
+            "202": { class_type: "ScenePromptCallbackDesktop", inputs: {} },
             "301": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["201", 0] } },
         } });
         await window.__scenePromptPopupTestHooks.saveScenePreset({
@@ -1033,8 +1153,18 @@ try {
         undefined,
         "Preset saving does not inject an unsupported source_node_name into Scene Prompt Callback",
     );
+    assert.equal(
+        callbackPresetSave["202"].inputs.source_node_name,
+        undefined,
+        "Preset saving serializes Desktop callback configuration without a source node name",
+    );
 
     await createPreparedRun(page);
+    const preparedClientId = await page.evaluate(() => {
+        const prepare = window.__scenePromptCalls.findLast((call) => call.url.includes("/runs/prepare"));
+        return JSON.parse(prepare.options.body).client_id;
+    });
+    assert.equal(preparedClientId, "browser-client", "run preparation sends the originating browser client id without a node widget");
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
     await page.waitForTimeout(50);
     assert.equal((await releaseCalls(page)).length, 0);
