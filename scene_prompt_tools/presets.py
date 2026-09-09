@@ -22,6 +22,9 @@ from .nodes import (
     ScenePromptMerge,
     ScenePromptQueue,
     ScenePromptCounter,
+    ScenePromptCallback,
+    ScenePromptCallbackDiscord,
+    ScenePromptCallbackRequest,
 )
 from .runs import get_run_user_id, require_run_context
 
@@ -52,6 +55,9 @@ SAFE_NODE_CLASSES = {
     "ScenePromptCounter": ScenePromptCounter,
     "ScenePrompterQueue": ScenePromptQueue,
     "SceneEmptyLatent": SceneEmptyLatent,
+    "ScenePromptCallback": ScenePromptCallback,
+    "ScenePromptCallbackDiscord": ScenePromptCallbackDiscord,
+    "ScenePromptCallbackRequest": ScenePromptCallbackRequest,
     "ScenePresetReference": None,
 }
 # ComfyUI serializes widget-input Primitive nodes as executable API nodes.  They
@@ -704,6 +710,8 @@ def _scene_node_value_impl(
     kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
     if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
+    if class_type == "ScenePromptCallback":
+        kwargs["source_node_id"] = node_id
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     memo[node_id] = result[0]
     return result[0]
@@ -954,6 +962,7 @@ def expand_preset_reference(
     run_handle="",
     _require_context=False,
     source_node_id="",
+    source_node_name="",
     unique_id=None,
 ):
     preset_id = _clean_preset_id(preset_id)
@@ -993,8 +1002,10 @@ def expand_preset_reference(
         target = graph.lookup_node(str(node_id))
         for name, value in _node_inputs(node).items():
             target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
-        if class_type in SAFE_NODE_CLASSES or class_type == "ScenePresetReference":
+        if class_type in (set(SAFE_NODE_CLASSES) - {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest"}) or class_type == "ScenePresetReference":
             target.set_input("source_node_id", f"{reference_source_id}/{node_id}" if reference_source_id else str(node_id))
+            if class_type != "ScenePromptCallback":
+                target.set_input("source_node_name", str(node.get("_meta", {}).get("title") or ""))
         if class_type in {"ScenePrompter", "SceneMatrix"}:
             target.set_input("run_handle", str(run_handle))
         if class_type == "ScenePresetReference":
@@ -1008,6 +1019,7 @@ def expand_preset_reference(
     marker.set_input("scene_prompt", result)
     marker.set_input("count", 1)
     marker.set_input("source_node_id", reference_source_id)
+    marker.set_input("source_node_name", str(source_node_name or ""))
     result = marker.out(0)
     return {"result": (result,), "expand": graph.finalize()}
 
@@ -1070,6 +1082,7 @@ class ScenePresetReference:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1081,12 +1094,13 @@ class ScenePresetReference:
         metadata = preset["metadata"]
         return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_handle}"
 
-    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id=""):
+    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id="", source_node_name=""):
         return expand_preset_reference(
             preset_id,
             scene_prompt,
             run_handle,
             _require_context=True,
             source_node_id=source_node_id,
+            source_node_name=source_node_name,
             unique_id=unique_id,
         )

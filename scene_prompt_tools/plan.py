@@ -8,7 +8,7 @@ import json
 
 
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MIN_DIMENSION = 16
 MAX_DIMENSION = 16_384
@@ -21,11 +21,15 @@ PLAN_ITEM_KEYS = {
     "row", "count", "start_index", "row_index", "label", "queue_index", "source_id", "source_title",
 }
 ROW_KEYS = {
-    "labels", "positive_parts", "negative_parts", "path_parts", "filename_parts", "display_labels", "display_label_groups", "set_refs", "source_node_ids",
+    "labels", "positive_parts", "negative_parts", "path_parts", "filename_parts", "display_labels", "display_label_groups", "set_refs", "source_node_ids", "source_node_names", "callbacks",
 }
 LATENT_KEYS = {"width", "height", "batch_size"}
 SOURCE_KEYS = {"index", "row_count", "total_images", "total_batches"}
 SET_REF_KEYS = {"category", "name", "path_label", "node_id"}
+CALLBACK_KEYS = {
+    "callback_node_id", "config", "frequency", "timeout_seconds", "failure_mode",
+    "current_positive_parts", "current_negative_parts", "current_source_node_ids",
+}
 
 
 class ScenePlanError(ValueError):
@@ -93,6 +97,33 @@ def _clone_row(row):
             raise ScenePlanError("Scene Prompt row set_refs must be a list of objects.")
         _require_exact_keys(ref, SET_REF_KEYS, "Scene Prompt row set_ref")
         cloned_refs.append({key: _require_string(ref[key], f"Scene Prompt row set_ref {key}") for key in SET_REF_KEYS})
+    source_node_names = row["source_node_names"]
+    if not isinstance(source_node_names, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in source_node_names.items()
+    ):
+        raise ScenePlanError("Scene Prompt row source_node_names must be an object of strings.")
+    callbacks = row["callbacks"]
+    if not isinstance(callbacks, list):
+        raise ScenePlanError("Scene Prompt row callbacks must be a list.")
+    cloned_callbacks = []
+    for callback in callbacks:
+        if not isinstance(callback, dict):
+            raise ScenePlanError("Scene Prompt row callbacks must contain objects.")
+        _require_exact_keys(callback, CALLBACK_KEYS, "Scene Prompt row callback")
+        config = callback["config"]
+        if not isinstance(config, dict):
+            raise ScenePlanError("Scene Prompt callback config must be an object.")
+        cloned_callbacks.append({
+            "callback_node_id": _require_string(callback["callback_node_id"], "Scene Prompt callback node id", allow_empty=False),
+            "config": copy.deepcopy(config),
+            "frequency": _require_string(callback["frequency"], "Scene Prompt callback frequency", allow_empty=False),
+            "timeout_seconds": _require_int(callback["timeout_seconds"], "Scene Prompt callback timeout_seconds", 1, 120),
+            "failure_mode": _require_string(callback["failure_mode"], "Scene Prompt callback failure_mode", allow_empty=False),
+            "current_positive_parts": _require_string_list(callback["current_positive_parts"], "Scene Prompt callback current_positive_parts"),
+            "current_negative_parts": _require_string_list(callback["current_negative_parts"], "Scene Prompt callback current_negative_parts"),
+            "current_source_node_ids": _require_string_list(callback["current_source_node_ids"], "Scene Prompt callback current_source_node_ids"),
+        })
     cloned = {
         "labels": _require_string_list(row["labels"], "Scene Prompt row labels"),
         "positive_parts": _require_string_list(row["positive_parts"], "Scene Prompt row positive_parts"),
@@ -103,6 +134,8 @@ def _clone_row(row):
         "display_label_groups": _require_string_groups(row["display_label_groups"], "Scene Prompt row display_label_groups"),
         "set_refs": cloned_refs,
         "source_node_ids": _require_string_list(row["source_node_ids"], "Scene Prompt row source_node_ids"),
+        "source_node_names": dict(source_node_names),
+        "callbacks": cloned_callbacks,
     }
     if "latent" in row:
         cloned["latent"] = _clone_latent(row["latent"])
@@ -113,6 +146,7 @@ def empty_row():
     return {
         "labels": [], "positive_parts": [], "negative_parts": [], "path_parts": [], "filename_parts": [],
         "display_labels": [], "display_label_groups": [], "set_refs": [], "source_node_ids": [],
+        "source_node_names": {}, "callbacks": [],
     }
 
 
@@ -242,18 +276,43 @@ def transform(plan, transform_row):
     return make_plan(rows, sources=source["sources"])
 
 
-def with_source_node(plan, node_id):
+def with_source_node(plan, node_id, node_name=""):
     """Record the Scene node that contributed to every output row."""
     source_id = str(node_id or "").strip()
     if not source_id:
         return normalize_plan(plan)
+    name = str(node_name or "").strip()
     return transform(
         plan,
         lambda row, _item: {
             **row,
             "source_node_ids": _unique_strings([*row["source_node_ids"], source_id]),
+            "source_node_names": {**row["source_node_names"], **({source_id: name} if name else {})},
         },
     )
+
+
+def append_callback(plan, callback_node_id, config, frequency, timeout_seconds, failure_mode):
+    """Attach a pure callback descriptor to each row without performing I/O."""
+    node_id = _require_string(str(callback_node_id or "").strip(), "Scene Prompt callback node id", allow_empty=False)
+    if not isinstance(config, dict):
+        raise ScenePlanError("Scene Prompt callback config must be an object.")
+    timeout = _require_int(timeout_seconds, "Scene Prompt callback timeout_seconds", 1, 120)
+    frequency = _require_string(frequency, "Scene Prompt callback frequency", allow_empty=False)
+    failure_mode = _require_string(failure_mode, "Scene Prompt callback failure_mode", allow_empty=False)
+    def add(row, _item):
+        descriptor = {
+            "callback_node_id": node_id,
+            "config": copy.deepcopy(config),
+            "frequency": frequency,
+            "timeout_seconds": timeout,
+            "failure_mode": failure_mode,
+            "current_positive_parts": list(row["positive_parts"]),
+            "current_negative_parts": list(row["negative_parts"]),
+            "current_source_node_ids": list(row["source_node_ids"]),
+        }
+        return {**row, "callbacks": [*row["callbacks"], descriptor]}
+    return transform(plan, add)
 
 
 def multiply_count(plan, factor):
@@ -297,11 +356,25 @@ def merge_rows(left, right):
         "display_label_groups": [*left_row["display_label_groups"], *right_row["display_label_groups"]],
         "set_refs": [*left_row["set_refs"], *right_row["set_refs"]],
         "source_node_ids": _unique_strings([*left_row["source_node_ids"], *right_row["source_node_ids"]]),
+        "source_node_names": {**left_row["source_node_names"], **right_row["source_node_names"]},
+        "callbacks": _merge_callbacks(left_row["callbacks"], right_row["callbacks"]),
     }
     latent = right_row.get("latent") or left_row.get("latent")
     if latent is not None:
         row["latent"] = latent
     return row
+
+
+def _merge_callbacks(left, right):
+    result = []
+    seen = set()
+    for callback in [*left, *right]:
+        key = callback["callback_node_id"]
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(copy.deepcopy(callback))
+    return result
 
 
 def merge(left, right):
@@ -355,6 +428,8 @@ def matrix_product(plan, matrix_rows, configured):
                 if key in matrix_row
             }
             matrix_plan_row["source_node_ids"] = []
+            matrix_plan_row["source_node_names"] = {}
+            matrix_plan_row["callbacks"] = []
             row = merge_rows(base["row"], matrix_plan_row)
             name = _require_string(matrix_row.get("name"), "Scene Matrix row name", allow_empty=False).strip()
             row["labels"] = [*base["row"]["labels"], name]

@@ -83,6 +83,8 @@ class RunContextStore:
             self._entries[handle] = {
                 "user_id": str(user_id),
                 "plans": {},
+                "prompts": {},
+                "callback_attempts": set(),
                 "state": "prepared",
                 "prompt_id": "",
                 "continuous": bool(continuous),
@@ -235,6 +237,51 @@ class RunContextStore:
             raise SceneRunError("実行コンテキストの有効期限が切れました。画像生成を開始し直してください。")
         return result
 
+    def claim_callback_attempt(self, handle, callback_node_id):
+        """Atomically reserve a once-per-run callback attempt."""
+        value = str(handle or "").strip()
+        callback_id = str(callback_node_id or "").strip()
+        if not value or not callback_id:
+            return True
+        with self._lock:
+            entry = self._entries.get(value)
+            if entry is None:
+                expired = []
+                claimed = False
+            else:
+                now = time.monotonic()
+                if self._is_expired_locked(entry, now):
+                    self._entries.pop(value, None)
+                    expired = [(value, entry["user_id"])]
+                    claimed = False
+                else:
+                    expired = []
+                    self._touch_locked(entry, now)
+                    attempts = entry.setdefault("callback_attempts", set())
+                    claimed = callback_id not in attempts
+                    if claimed:
+                        attempts.add(callback_id)
+        self._notify_expired(expired)
+        return claimed
+
+    def get_prompt_reference(self, handle, expand_node_id):
+        key = str(expand_node_id or "").strip()
+        entry = self.require(handle)
+        return entry["prompts"].get(key)
+
+    def set_prompt_reference(self, handle, expand_node_id, prompt):
+        key = str(expand_node_id or "").strip()
+        if not key or not isinstance(prompt, dict):
+            return None
+        entry = self.require(handle)
+        with self._lock:
+            stored = self._entries.get(str(handle or "").strip())
+            if stored is None:
+                return None
+            if key not in stored["prompts"]:
+                stored["prompts"][key] = copy.deepcopy(prompt)
+            return stored["prompts"][key]
+
     def claim(self, handle, user_id, prompt_id):
         value = str(handle or "").strip()
         prompt_value = str(prompt_id or "").strip()
@@ -320,6 +367,18 @@ def set_run_plan(handle, expand_node_id, plan):
 
 def set_run_plan_reference(handle, expand_node_id, plan):
     return RUN_CONTEXTS.set_plan_reference(handle, expand_node_id, plan)
+
+
+def claim_callback_attempt(handle, callback_node_id):
+    return RUN_CONTEXTS.claim_callback_attempt(handle, callback_node_id)
+
+
+def get_run_prompt_reference(handle, expand_node_id):
+    return RUN_CONTEXTS.get_prompt_reference(handle, expand_node_id)
+
+
+def set_run_prompt_reference(handle, expand_node_id, prompt):
+    return RUN_CONTEXTS.set_prompt_reference(handle, expand_node_id, prompt)
 
 
 def claim_run_context(handle, user_id, prompt_id):

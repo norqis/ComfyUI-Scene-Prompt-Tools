@@ -437,6 +437,7 @@ class _ScenePromptBase:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -487,6 +488,7 @@ class _ScenePromptBase:
         run_handle="",
         unique_id=None,
         source_node_id="",
+        source_node_name="",
         filename_enabled=False,
         **kwargs,
     ):
@@ -526,12 +528,14 @@ class _ScenePromptBase:
                 "display_label_groups": list(row.get("display_label_groups", [])),
                 "set_refs": list(row.get("set_refs", [])),
                 "source_node_ids": list(row.get("source_node_ids", [])),
+                "source_node_names": dict(row.get("source_node_names", {})),
+                "callbacks": list(row.get("callbacks", [])),
             }
             if "latent" in row:
                 output_row["latent"] = dict(row["latent"])
             rows.append({"row": output_row, "count": item["count"]})
 
-        return (with_source_node(make_plan(rows), source_node_id or unique_id),)
+        return (with_source_node(make_plan(rows), source_node_id or unique_id, source_node_name),)
 
 
 class ScenePrompt(_ScenePromptBase):
