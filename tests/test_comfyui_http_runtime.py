@@ -856,8 +856,9 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             with Image.open(new_files[0]) as image:
                 replay_prompt = json.loads(image.text["prompt"])
                 replay_png_workflow = json.loads(image.text["workflow"])
-            self.assertEqual(replay_prompt["10"]["inputs"]["current_index"], 0)
-            self.assertEqual(replay_prompt["10"]["inputs"]["seed_base"], 42)
+            self.assertEqual(replay_prompt["10"]["inputs"]["current_index"], 1)
+            self.assertEqual(replay_prompt["10"]["inputs"]["seed_base"], 41)
+            replay_prompt["12"]["inputs"]["path"] = "callback-runtime-replay"
 
             replay_handle, replay_workflow = self._prepare_callback_run(
                 replay_prompt, "10", replay_png_workflow
@@ -897,8 +898,8 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["current_negative"], original_second["current_negative"])
             self.assertEqual(payload["all_negative"], original_second["all_negative"])
             self.assertEqual(payload["exec_seed"], original_second["exec_seed"])
-            self.assertEqual(payload["exec_current_count"], "1")
-            self.assertEqual(payload["exec_total_count"], "1")
+            self.assertEqual(payload["exec_current_count"], "2")
+            self.assertEqual(payload["exec_total_count"], "2")
         for payload in payloads:
             self.assertEqual(payload["current_positive"], "before")
             self.assertEqual(payload["current_negative"], "before-negative")
