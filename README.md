@@ -132,7 +132,7 @@ Scene Prompt Callback (Discord or Request) -> Scene Prompt Callback.callback
 | Scene Prompt Callback (Discord) | Webhook URL, text, optional display name. |
 | Scene Prompt Callback (Request) | GET or POST, URL, text, text or JSON body, optional JSON headers. |
 
-For GET, the text body is disabled; put query parameters in the URL. Variables used in URLs are percent-encoded. For a JSON body, write valid JSON and use variables inside string values, for example `{"content":"{all_positive}"}`. The common Callback node has **frequency** (`初回` or `毎回`), timeout seconds, and failure behavior (`続行` or `停止`). `初回` runs once for that Callback node during a continuous-generation run; `毎回` runs whenever its position is traversed in that run. Sending happens after Expand has finalized the batch prompt and before image generation starts.
+For GET, the text body is disabled; put query parameters in the URL. Variables used in URLs are percent-encoded. For a JSON body, write valid JSON and use variables inside string values, for example `{"content":"{all_positive}"}`. The common Callback node has **frequency** (`初回` or `毎回`), timeout seconds, and failure behavior (`続行` or `停止`). `初回` runs once for that Callback node during a continuous-generation run; `毎回` runs whenever its position is traversed in that run. Sending happens after Expand has finalized the batch prompt and before image generation starts. Selected Callbacks run in path order and each request completes before the next Callback or image generation continues; `続行` logs a failure and continues, while `停止` stops the run.
 
 Text fields support these variables. `all` is the completed prompt for the current batch, not every batch in the run.
 
