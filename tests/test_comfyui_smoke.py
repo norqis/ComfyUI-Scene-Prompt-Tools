@@ -61,6 +61,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
     def test_registers_current_nodes_and_web_directory(self):
         self.assertIn("ScenePrompter", self.package.NODE_CLASS_MAPPINGS)
         self.assertIn("ScenePromptCallback", self.package.NODE_CLASS_MAPPINGS)
+        self.assertIn("ScenePromptCallbackDesktop", self.package.NODE_CLASS_MAPPINGS)
         self.assertIn("ScenePromptCallbackDiscord", self.package.NODE_CLASS_MAPPINGS)
         self.assertIn("ScenePromptCallbackRequest", self.package.NODE_CLASS_MAPPINGS)
         self.assertEqual(self.package.NODE_DISPLAY_NAME_MAPPINGS["ScenePrompter"], "Scene Prompt")
@@ -71,6 +72,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
 
     def test_callback_node_contract_uses_real_comfyui_type_registration(self):
         callback = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallback"].INPUT_TYPES()
+        desktop = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackDesktop"].INPUT_TYPES()
         discord = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackDiscord"].INPUT_TYPES()
         request = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackRequest"].INPUT_TYPES()
         expand = self.package.NODE_CLASS_MAPPINGS["ScenePrompterExpand"].INPUT_TYPES()
@@ -80,6 +82,12 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertIn("timeout_seconds", callback["required"])
         self.assertIn("failure_mode", callback["required"])
         self.assertEqual(callback["optional"]["scene_prompt"][0], "SCENE_PROMPT")
+        self.assertEqual(desktop["required"]["title"][0], "STRING")
+        self.assertEqual(desktop["required"]["text"][0], "STRING")
+        self.assertEqual(
+            self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackDesktop"].RETURN_TYPES,
+            ("SCENE_CALLBACK",),
+        )
         self.assertEqual(discord["required"]["webhook_url"][0], "STRING")
         self.assertEqual(discord["required"]["text"][0], "STRING")
         self.assertIn("username", discord["optional"])
