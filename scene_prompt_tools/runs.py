@@ -85,6 +85,7 @@ class RunContextStore:
                 "plans": {},
                 "prompts": {},
                 "callback_attempts": set(),
+                "last_callbacks": {},
                 "state": "prepared",
                 "prompt_id": "",
                 "continuous": bool(continuous),
@@ -282,6 +283,51 @@ class RunContextStore:
                 stored["prompts"][key] = copy.deepcopy(prompt)
             return stored["prompts"][key]
 
+    def register_last_callback(self, handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id=""):
+        key = str(expand_node_id or "").strip()
+        entry = self.require(handle)
+        if not key or not isinstance(config, dict):
+            return False
+        with self._lock:
+            stored = self._entries.get(str(handle or "").strip())
+            if stored is None:
+                return False
+            stored["last_callbacks"][key] = {
+                "config": copy.deepcopy(config), "values": copy.deepcopy(values), "timeout_seconds": int(timeout_seconds),
+                "failure_mode": str(failure_mode), "prompt_id": str(prompt_id or stored.get("prompt_id") or ""),
+                "state": "pending",
+            }
+            return True
+
+    def begin_last_callback(self, handle, user_id, expand_node_id, prompt_id):
+        key = str(expand_node_id or "").strip()
+        with self._lock:
+            entry = self._entries.get(str(handle or "").strip())
+            if entry is None or entry["user_id"] != str(user_id):
+                return "missing", None
+            callback = entry["last_callbacks"].get(key)
+            if callback is None:
+                return "noop", None
+            if callback["prompt_id"] != str(prompt_id or ""):
+                return "wrong_prompt", None
+            if callback["state"] == "finalized":
+                return "finalized", None
+            if callback["state"] == "failed":
+                return "failed", None
+            if callback["state"] == "in_progress":
+                return "in_progress", None
+            callback["state"] = "in_progress"
+            return "dispatch", copy.deepcopy(callback)
+
+    def finish_last_callback(self, handle, expand_node_id, success):
+        with self._lock:
+            entry = self._entries.get(str(handle or "").strip())
+            callback = entry["last_callbacks"].get(str(expand_node_id or "")) if entry else None
+            if callback is None:
+                return False
+            callback["state"] = "finalized" if success else "failed"
+            return True
+
     def claim(self, handle, user_id, prompt_id):
         value = str(handle or "").strip()
         prompt_value = str(prompt_id or "").strip()
@@ -379,6 +425,18 @@ def get_run_prompt_reference(handle, expand_node_id):
 
 def set_run_prompt_reference(handle, expand_node_id, prompt):
     return RUN_CONTEXTS.set_prompt_reference(handle, expand_node_id, prompt)
+
+
+def register_last_callback(handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id=""):
+    return RUN_CONTEXTS.register_last_callback(handle, expand_node_id, config, values, timeout_seconds, failure_mode, prompt_id)
+
+
+def begin_last_callback(handle, user_id, expand_node_id, prompt_id):
+    return RUN_CONTEXTS.begin_last_callback(handle, user_id, expand_node_id, prompt_id)
+
+
+def finish_last_callback(handle, expand_node_id, success):
+    return RUN_CONTEXTS.finish_last_callback(handle, expand_node_id, success)
 
 
 def claim_run_context(handle, user_id, prompt_id):

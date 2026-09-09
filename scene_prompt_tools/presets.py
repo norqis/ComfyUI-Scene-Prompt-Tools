@@ -74,6 +74,16 @@ BOUNDARY_INPUT = "ScenePresetInput"
 BOUNDARY_OUTPUT = "ScenePresetOutput"
 BOUNDARY_CLASSES = {BOUNDARY_INPUT, BOUNDARY_OUTPUT}
 WORKFLOW_NON_EXECUTION_TYPES = {"reroute", "note", "markdownnote", "comment", "group"}
+DEFAULT_SOURCE_NODE_NAMES = {
+    "ScenePrompter": "Scene Prompt",
+    "SceneMatrix": "Scene Matrix",
+    "ScenePath": "Scene Path",
+    "ScenePrompterMerge": "Scene Prompt Merge",
+    "ScenePromptCounter": "Scene Prompt Count",
+    "ScenePrompterQueue": "Scene Prompt Queue",
+    "SceneEmptyLatent": "Scene Empty Latent",
+    "ScenePresetReference": "Scene Preset Reference",
+}
 
 
 class ScenePresetError(ValueError):
@@ -155,6 +165,17 @@ def _node_label(node_id, node):
 def _node_inputs(node):
     inputs = node.get("inputs")
     return inputs if isinstance(inputs, dict) else {}
+
+
+def _source_node_name(node):
+    inputs = _node_inputs(node)
+    stored = inputs.get("source_node_name")
+    if isinstance(stored, str) and stored.strip():
+        return stored.strip()
+    title = str(node.get("_meta", {}).get("title") or "").strip()
+    if title:
+        return title
+    return DEFAULT_SOURCE_NODE_NAMES.get(str(node.get("class_type") or ""), "")
 
 
 def _linked_nodes(node):
@@ -1005,7 +1026,7 @@ def expand_preset_reference(
         if class_type in (set(SAFE_NODE_CLASSES) - {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest"}) or class_type == "ScenePresetReference":
             target.set_input("source_node_id", f"{reference_source_id}/{node_id}" if reference_source_id else str(node_id))
             if class_type != "ScenePromptCallback":
-                target.set_input("source_node_name", str(node.get("_meta", {}).get("title") or ""))
+                target.set_input("source_node_name", _source_node_name(node))
         if class_type in {"ScenePrompter", "SceneMatrix"}:
             target.set_input("run_handle", str(run_handle))
         if class_type == "ScenePresetReference":

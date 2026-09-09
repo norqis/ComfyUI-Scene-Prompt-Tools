@@ -53,6 +53,7 @@ from .runs import (
     claim_callback_attempt,
     get_run_plan_reference,
     get_run_prompt_reference,
+    register_last_callback,
     require_run_context,
     set_run_plan_reference,
     set_run_prompt_reference,
@@ -386,12 +387,12 @@ def _metadata_for_save_mode(
     if extra_pnginfo is not None and not isinstance(extra_pnginfo, dict):
         raise ValueError("Scene Save Image の extra_pnginfo が不正です。")
 
-    if metadata_mode == SAVE_METADATA_EXECUTION_PATH and isinstance(scene_info, dict):
+    if metadata_mode != SAVE_METADATA_PROMPT_ONLY and isinstance(scene_info, dict):
         run_handle = str(scene_info.get("run_handle") or "").strip()
         for expand_id in reversed(scene_info.get("source_node_ids", [])):
             cached_prompt = get_run_prompt_reference(run_handle, expand_id) if run_handle else None
             if cached_prompt is not None:
-                prompt = cached_prompt
+                prompt = _merge_cached_prompt(cached_prompt, prompt)
                 break
 
     if metadata_mode == SAVE_METADATA_WORKFLOW and not expand_preset_contents:
@@ -486,6 +487,26 @@ def _metadata_for_save_mode(
                 extra_pnginfo["workflow"], ancestor_ids
             )
     return saved_prompt, saved_extra
+
+
+def _merge_cached_prompt(cached_prompt, current_prompt):
+    """Restore cached upstream nodes without reverting this iteration's widgets."""
+    if not isinstance(cached_prompt, dict):
+        return current_prompt
+    restored = copy.deepcopy(cached_prompt)
+    if not isinstance(current_prompt, dict):
+        return restored
+    for node_id, current_node in current_prompt.items():
+        previous = restored.get(node_id)
+        if not isinstance(previous, dict) or not isinstance(current_node, dict):
+            restored[node_id] = copy.deepcopy(current_node)
+            continue
+        merged = {**previous, **copy.deepcopy(current_node)}
+        previous_inputs = previous.get("inputs") if isinstance(previous.get("inputs"), dict) else {}
+        current_inputs = current_node.get("inputs") if isinstance(current_node.get("inputs"), dict) else {}
+        merged["inputs"] = {**copy.deepcopy(previous_inputs), **copy.deepcopy(current_inputs)}
+        restored[node_id] = merged
+    return restored
 
 
 def _latent_dimension(value, default=512):
@@ -1404,7 +1425,7 @@ class ScenePromptCallback:
         source_node_id="",
     ):
         if callback is None:
-            return (normalize_plan(scene_prompt),)
+            return (with_source_node(normalize_plan(scene_prompt), source_node_id or unique_id),)
         if not isinstance(callback, dict):
             raise ValueError("Scene callback setting is invalid.")
         if frequency not in {CALLBACK_FREQUENCY_FIRST, CALLBACK_FREQUENCY_EVERY}:
@@ -1482,6 +1503,29 @@ def _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, all_positiv
             print(f"Scene Callback warning: {exc}")
 
 
+def _dispatch_expand_callback(config, callback_id, timeout_seconds, failure_mode, values, run_handle, once=False):
+    if config is None:
+        return
+    if not isinstance(config, dict):
+        raise ValueError("Scene callback setting is invalid.")
+    if once and not claim_callback_attempt(run_handle, callback_id):
+        return
+    try:
+        dispatch_callback(config, values, timeout_seconds)
+    except SceneCallbackError as exc:
+        if failure_mode == CALLBACK_FAILURE_STOP:
+            raise RuntimeError(f"Scene Callback failed: {exc}") from exc
+        print(f"Scene Callback warning: {exc}")
+
+
+def _current_prompt_id():
+    try:
+        from server import PromptServer
+        return str(getattr(PromptServer.instance, "last_prompt_id", "") or "")
+    except Exception:
+        return ""
+
+
 class ScenePromptExpand:
     DESCRIPTION = """Scene生成計画から、生成番号に対応する1件を取り出して展開します。\nポジティブ、ネガティブ、保存用メタ情報、シード、空の潜在画像を出力し、{A|B|C} 形式の候補もこの段階で開始シードを基準に確定します。\n連続生成では計画全体を1枚ずつ処理し、複数の実行要求は順番に実行されます。このノード自身は画像を保存しません。"""
     CATEGORY = "Scene/prompt"
@@ -1553,6 +1597,11 @@ class ScenePromptExpand:
                         "label": "モデル",
                     },
                 ),
+                "callback_first": (SCENE_CALLBACK_TYPE, {"display_name": "callback_first"}),
+                "callback_each": (SCENE_CALLBACK_TYPE, {"display_name": "callback_each"}),
+                "callback_last": (SCENE_CALLBACK_TYPE, {"display_name": "callback_last"}),
+                "callback_timeout_seconds": ("INT", {"default": 10, "min": 1, "max": 120, "display_name": "callback_timeout_seconds"}),
+                "callback_failure_mode": ([CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP], {"default": CALLBACK_FAILURE_CONTINUE, "display_name": "callback_failure_mode"}),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
@@ -1574,6 +1623,11 @@ class ScenePromptExpand:
         run_handle="",
         unique_id=None,
         prompt=None,
+        callback_first=None,
+        callback_each=None,
+        callback_last=None,
+        callback_timeout_seconds=10,
+        callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
     ):
         return "|".join(
             [
@@ -1599,6 +1653,11 @@ class ScenePromptExpand:
         run_handle="",
         unique_id=None,
         prompt=None,
+        callback_first=None,
+        callback_each=None,
+        callback_last=None,
+        callback_timeout_seconds=10,
+        callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
     ):
         separator = ", "
         if run_handle and unique_id is not None and isinstance(prompt, dict):
@@ -1621,7 +1680,22 @@ class ScenePromptExpand:
         if _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA:
             positive = positive.replace("_", " ")
             negative = negative.replace("_", " ")
+        callback_values = {
+            "current_positive": positive, "current_negative": negative,
+            "all_positive": positive, "all_negative": negative,
+            "current_node_names": _callback_names(row, row.get("source_node_ids", [])),
+            "all_node_names": _callback_names(row, row.get("source_node_ids", [])),
+            "exec_current_count": global_index + 1,
+            "exec_total_count": int(item.get("total_batches", 0)),
+            "exec_model": _normalize_model_mode(model_mode), "exec_seed": seed,
+        }
+        callback_id = str(unique_id or "")
+        _dispatch_expand_callback(callback_first, f"{callback_id}:first", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, once=True)
+        _dispatch_expand_callback(callback_each, f"{callback_id}:each", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle)
         _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, positive, negative)
+        if callback_last is not None and run_handle and global_index + 1 == int(item.get("total_batches", 0)):
+            prompt_id = _current_prompt_id()
+            register_last_callback(run_handle, callback_id, callback_last, callback_values, callback_timeout_seconds, callback_failure_mode, prompt_id)
         latent_config = _row_latent(row)
         latent = _empty_latent(latent_config)
         use_run_dir = _scene_bool(timestamp_dir)

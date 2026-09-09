@@ -216,6 +216,22 @@ class RunContextTests(unittest.TestCase):
         editable["rows"][0]["row"]["positive_parts"].append("changed")
         self.assertEqual(stored["rows"][0]["row"]["positive_parts"], ["A"])
 
+    def test_last_callback_is_expand_and_prompt_specific_and_idempotent(self):
+        store = RUNS.RunContextStore()
+        handle = store.create("alice", continuous=True)
+        self.assertTrue(store.claim(handle, "alice", "initial"))
+        self.assertTrue(store.register_last_callback(handle, "expand-a", {"kind": "request"}, {"exec_seed": 2}, 10, "続行", "final-a"))
+        self.assertTrue(store.register_last_callback(handle, "expand-b", {"kind": "request"}, {"exec_seed": 3}, 10, "続行", "final-b"))
+        self.assertEqual(store.begin_last_callback(handle, "alice", "expand-a", "wrong")[0], "wrong_prompt")
+        state, callback = store.begin_last_callback(handle, "alice", "expand-a", "final-a")
+        self.assertEqual(state, "dispatch")
+        self.assertEqual(callback["values"]["exec_seed"], 2)
+        self.assertEqual(store.begin_last_callback(handle, "alice", "expand-a", "final-a")[0], "in_progress")
+        self.assertTrue(store.finish_last_callback(handle, "expand-a", True))
+        self.assertEqual(store.begin_last_callback(handle, "alice", "expand-a", "final-a")[0], "finalized")
+        self.assertEqual(store.begin_last_callback(handle, "alice", "expand-b", "final-b")[0], "dispatch")
+        self.assertEqual(store.require(handle)["state"], "active")
+
     def test_nodes_do_not_expose_user_id_inputs(self):
         source = "\n".join(
             (ROOT / "scene_prompt_tools" / filename).read_text(encoding="utf-8")

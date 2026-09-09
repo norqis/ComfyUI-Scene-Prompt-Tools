@@ -1445,6 +1445,17 @@ class ScenePresetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "実行コンテキスト"):
             self.module.ScenePresetReference().expand("standalone", run_handle="forged")
 
+    def test_preset_source_name_uses_saved_input_then_title_then_display_name(self):
+        self.assertEqual(
+            self.module._source_node_name({"class_type": "ScenePrompter", "inputs": {"source_node_name": "Stored"}, "_meta": {"title": "Title"}}),
+            "Stored",
+        )
+        self.assertEqual(
+            self.module._source_node_name({"class_type": "ScenePrompter", "inputs": {}, "_meta": {"title": "Title"}}),
+            "Title",
+        )
+        self.assertEqual(self.module._source_node_name({"class_type": "ScenePrompter", "inputs": {}}), "Scene Prompt")
+
 
 if __name__ == "__main__":
     unittest.main()

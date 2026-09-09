@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -83,7 +84,7 @@ def _open(request, timeout_seconds):
             response.read(_MAX_RESPONSE_BYTES)
     except HTTPError as exc:
         raise SceneCallbackError(f"Callback request returned HTTP {exc.code}.") from exc
-    except (URLError, OSError, ValueError) as exc:
+    except (HTTPException, URLError, OSError, ValueError) as exc:
         raise SceneCallbackError(f"Callback request failed: {type(exc).__name__}.") from exc
 
 

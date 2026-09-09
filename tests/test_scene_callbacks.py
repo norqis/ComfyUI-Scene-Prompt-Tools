@@ -1,6 +1,8 @@
 import json
+import importlib
 import sys
 import threading
+import types
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -8,6 +10,7 @@ from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from scene_prompt_tools.callbacks import (
     SceneCallbackError,
@@ -17,6 +20,30 @@ from scene_prompt_tools.callbacks import (
 )
 from scene_prompt_tools.plan import append_callback, empty_row, make_plan, merge, with_source_node
 from scene_prompt_tools.runs import RunContextStore
+from comfy_stubs import install_comfy_execution_stub, install_torch_stub
+
+
+def _nodes_module():
+    install_comfy_execution_stub()
+    torch = install_torch_stub()
+    comfy = types.ModuleType("comfy")
+    management = types.ModuleType("comfy.model_management")
+    management.intermediate_device = lambda: "cpu"
+    management.intermediate_dtype = lambda: torch.float32
+    cli_args = types.ModuleType("comfy.cli_args")
+    cli_args.args = types.SimpleNamespace(disable_metadata=False)
+    comfy.model_management = management
+    folder_paths = types.ModuleType("folder_paths")
+    folder_paths.get_output_directory = lambda: "."
+    folder_paths.get_user_directory = lambda: "."
+    folder_paths.get_public_user_directory = lambda _user_id: "."
+    sys.modules.update({
+        "comfy": comfy,
+        "comfy.model_management": management,
+        "comfy.cli_args": cli_args,
+        "folder_paths": folder_paths,
+    })
+    return importlib.import_module("scene_prompt_tools.nodes")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -111,6 +138,57 @@ class SceneCallbackTests(unittest.TestCase):
         self.assertTrue(store.claim_callback_attempt(first, "callback"))
         self.assertFalse(store.claim_callback_attempt(first, "callback"))
         self.assertTrue(store.claim_callback_attempt(store.create("user"), "callback"))
+
+    def test_cached_metadata_keeps_current_iteration_inputs(self):
+        nodes = _nodes_module()
+        cached = {
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["callback", 0], "current_index": 0, "seed_base": 10}},
+            "callback": {"class_type": "ScenePromptCallback", "inputs": {"scene_prompt": ["prompt", 0]}},
+        }
+        current = {"expand": {"class_type": "ScenePrompterExpand", "inputs": {"current_index": 3, "seed_base": 13}}}
+        merged = nodes._merge_cached_prompt(cached, current)
+        self.assertEqual(merged["expand"]["inputs"], {"scene_prompt": ["callback", 0], "current_index": 3, "seed_base": 13})
+        self.assertEqual(cached["expand"]["inputs"]["current_index"], 0)
+
+    def test_noop_callback_keeps_its_source_id_but_not_a_name(self):
+        nodes = _nodes_module()
+        plan = nodes.ScenePromptCallback().apply_callback(scene_prompt=None, unique_id="callback")[0]
+        row = plan["rows"][0]["row"]
+        self.assertEqual(row["source_node_ids"], ["callback"])
+        self.assertEqual(row["source_node_names"], {})
+
+    def test_queue_late_first_and_snapshot_values(self):
+        nodes = _nodes_module()
+        store = RunContextStore()
+        handle = store.create("user")
+        first = with_source_node(make_plan([{"row": empty_row(), "count": 1}]), "first", "First")
+        second = append_callback(
+            with_source_node(make_plan([{"row": {**empty_row(), "positive_parts": ["before"], "negative_parts": ["no"]}, "count": 1}]), "second", "Second"),
+            "late", {"kind": "request"}, "初回", 10, "停止",
+        )
+        plan = merge(first, second)
+        calls = []
+        with mock.patch.object(nodes, "claim_callback_attempt", side_effect=lambda _handle, callback_id: store.claim_callback_attempt(handle, callback_id)), mock.patch.object(nodes, "dispatch_callback", side_effect=lambda _config, values, _timeout: calls.append(values)):
+            nodes._dispatch_row_callbacks(plan["rows"][0]["row"], {"global_index": 1, "total_batches": 2}, 17, "Illustrious", handle, "before", "no")
+            nodes._dispatch_row_callbacks(plan["rows"][0]["row"], {"global_index": 1, "total_batches": 2}, 17, "Illustrious", handle, "before", "no")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["current_positive"], "before")
+        self.assertEqual(calls[0]["all_node_names"], "First_Second")
+
+    def test_callback_failures_do_not_reach_latent_and_continue_runs_next(self):
+        nodes = _nodes_module()
+        base = make_plan([{"row": {**empty_row(), "positive_parts": ["prompt"]}, "count": 1}])
+        stop_plan = append_callback(base, "stop", {"kind": "request"}, "毎回", 10, "停止")
+        events = []
+        with mock.patch.object(nodes, "dispatch_callback", side_effect=nodes.SceneCallbackError("failed")), mock.patch.object(nodes, "_empty_latent", side_effect=lambda _value: events.append("latent")):
+            with self.assertRaises(RuntimeError):
+                nodes.ScenePromptExpand().expand(scene_prompt=stop_plan, timestamp_dir=False)
+        self.assertEqual(events, [])
+        continue_plan = append_callback(append_callback(base, "continue", {"kind": "request"}, "毎回", 10, "続行"), "next", {"kind": "request"}, "毎回", 10, "停止")
+        sent = []
+        with mock.patch.object(nodes, "dispatch_callback", side_effect=[nodes.SceneCallbackError("failed"), lambda *_args: None]) as dispatch, mock.patch.object(nodes, "_empty_latent", return_value="latent"):
+            nodes.ScenePromptExpand().expand(scene_prompt=continue_plan, timestamp_dir=False)
+        self.assertEqual(dispatch.call_count, 2)
 
 
 if __name__ == "__main__":

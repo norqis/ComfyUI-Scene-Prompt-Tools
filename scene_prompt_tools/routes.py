@@ -16,13 +16,16 @@ from .prompt import (
 )
 from .runs import (
     SceneRunError,
+    begin_last_callback,
     claim_run_context,
     create_run_context,
+    finish_last_callback,
     purge_expired_run_contexts,
     reconcile_active_run_contexts,
     release_run_context,
     set_run_expiration_callback,
 )
+from .callbacks import CALLBACK_FAILURE_STOP, SceneCallbackError, dispatch_callback
 from .presets import (
     ScenePresetConflictError,
     ScenePresetError,
@@ -66,6 +69,16 @@ def _queued_prompt_ids():
         for item in (*running, *pending)
         if isinstance(item, (tuple, list)) and len(item) > 1 and str(item[1])
     }
+
+
+def _completed_prompt_status(prompt_id):
+    prompt_queue = getattr(PromptServer.instance, "prompt_queue", None)
+    history = prompt_queue.get_history(prompt_id=str(prompt_id)) if prompt_queue is not None else {}
+    entry = history.get(str(prompt_id)) if isinstance(history, dict) else None
+    status = entry.get("status") if isinstance(entry, dict) else None
+    if not isinstance(status, dict) or not status.get("completed"):
+        return "pending"
+    return "success" if status.get("status_str") == "success" else "failed"
 
 
 def _is_continuous_scene_run(api_graph, expand_node_id):
@@ -691,6 +704,46 @@ def define_routes():
             released = release_run_context(run_handle, user_id)
             preset_released = release_scene_preset_snapshot(run_handle, user_id)
             return web.json_response({"released": released or preset_released})
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+    @PromptServer.instance.routes.post("/scene_prompt/runs/finalize")
+    async def scene_prompt_finalize_run(request):
+        try:
+            payload = await request.json()
+            run_handle = payload.get("run_handle") if isinstance(payload, dict) else ""
+            expand_node_id = payload.get("expand_node_id") if isinstance(payload, dict) else ""
+            prompt_id = payload.get("prompt_id") if isinstance(payload, dict) else ""
+            if not str(run_handle or "").strip() or not str(expand_node_id or "").strip() or not str(prompt_id or "").strip():
+                return web.json_response({"state": "invalid"}, status=400)
+            status = _completed_prompt_status(prompt_id)
+            if status == "pending":
+                return web.json_response({"state": "pending"}, status=202)
+            if status != "success":
+                return web.json_response({"state": "not_success"}, status=409)
+            user_id = _request_user_id(request)
+            state, callback = begin_last_callback(run_handle, user_id, expand_node_id, prompt_id)
+            if state == "noop":
+                return web.json_response({"state": "finalized"})
+            if state in {"missing", "wrong_prompt"}:
+                return web.json_response({"state": state}, status=409)
+            if state == "in_progress":
+                return web.json_response({"state": state}, status=202)
+            if state == "finalized":
+                return web.json_response({"state": state})
+            if state == "failed":
+                return web.json_response({"state": "error"}, status=502)
+            try:
+                await asyncio.to_thread(dispatch_callback, callback["config"], callback["values"], callback["timeout_seconds"])
+            except SceneCallbackError as exc:
+                finish_last_callback(run_handle, expand_node_id, False)
+                if callback["failure_mode"] == CALLBACK_FAILURE_STOP:
+                    return web.json_response({"state": "error", "error": str(exc)}, status=502)
+                return web.json_response({"state": "finalized", "warning": str(exc)})
+            finish_last_callback(run_handle, expand_node_id, True)
+            return web.json_response({"state": "finalized"})
+        except (SceneRunError, ValueError, TypeError):
+            return web.json_response({"state": "invalid"}, status=400)
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
