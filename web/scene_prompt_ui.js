@@ -155,6 +155,11 @@ const SCENE_WIDGET_LABELS = {
     url: "URL",
     body_type: "本文形式",
     headers_json: "ヘッダー（JSON）",
+    callback_first: "開始時Callback",
+    callback_each: "毎回Callback",
+    callback_last: "完了時Callback",
+    callback_timeout_seconds: "Callbackタイムアウト（秒）",
+    callback_failure_mode: "Callback失敗時",
     frequency: "実行頻度",
     timeout_seconds: "タイムアウト（秒）",
     failure_mode: "失敗時",
@@ -196,6 +201,7 @@ const sceneBatchRunsById = new Map();
 const sceneBatchPendingRuns = [];
 const sceneBatchPendingReleases = new Map();
 const sceneBatchDetachedRuns = new Map();
+const sceneBatchFinalizingRuns = new Set();
 const sceneBatchTerminalEvents = new Map();
 const SCENE_DETACHED_RETRY_MS = 30 * 1000;
 const SCENE_DETACHED_MAX_RETRIES = 20;
@@ -227,6 +233,8 @@ const sceneRunHandleReconcileTimers = new Map();
 const sceneRunReleaseStates = new Map();
 const SCENE_RUN_TERMINAL_MAX = 256;
 const SCENE_RUN_TERMINAL_RETENTION_MS = 10 * 60 * 1000;
+const SCENE_CALLBACK_FINALIZE_POLL_MS = 250;
+const SCENE_CALLBACK_FINALIZE_MAX_POLLS = 480;
 let sceneRunTerminalOverflowUntil = 0;
 
 const VISIBLE_INPUT_NAMES = new Set(["scene_prompt"]);
@@ -3699,7 +3707,11 @@ function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : isSceneExpandNodeName(nodeName)
-            ? new Set(["timestamp_dir", "prefix", "model_mode"])
+            ? new Set([
+                "timestamp_dir", "prefix", "model_mode",
+                "callback_first", "callback_each", "callback_last",
+                "callback_timeout_seconds", "callback_failure_mode",
+            ])
             : SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
                 ? new Set(["width", "height", "batch_size"])
                 : new Set();
@@ -6899,6 +6911,9 @@ function sceneBatchRunStatus(run) {
     if (sceneBatchPendingRuns.includes(run)) {
         return "pending";
     }
+    if (sceneBatchFinalizingRuns.has(run)) {
+        return "finalizing";
+    }
     if (run.releaseBlocked) {
         return "blocked";
     }
@@ -6933,7 +6948,9 @@ function updateSceneExpandButton(node, options = {}) {
     const run = sceneBatchRunForNode(node);
     const status = sceneBatchRunStatus(run);
     if (status === "active") {
-        if (run.preparing) {
+        if (run.finalizing) {
+            button.name = "完了通知中";
+        } else if (run.preparing) {
             button.name = "準備中";
         } else {
             const current = Math.min(run.nextIndex + 1, run.total);
@@ -6942,7 +6959,7 @@ function updateSceneExpandButton(node, options = {}) {
     } else if (status === "pending") {
         const position = Math.max(1, sceneBatchPendingRuns.indexOf(run) + 1);
         button.name = `待機 ${position}/${sceneBatchPendingRuns.length}`;
-    } else if (status === "stopping") {
+    } else if (status === "stopping" || status === "finalizing") {
         button.name = "停止処理中";
     } else if (status === "blocked") {
         button.name = "停止確認待ち";
@@ -7636,15 +7653,14 @@ function releaseSceneBatchPlan(runId) {
     const key = String(runId || "");
     const run = sceneBatchRunsById.get(key) || sceneBatchDetachedRuns.get(key);
     if (!run || run.releaseRequested) {
-        return;
+        return run?.releasePromise || Promise.resolve(false);
     }
     run.releaseRequested = true;
     const release = () => releaseSceneRunHandle(run.runHandle);
-    if (run.runClaimPromise) {
-        run.runClaimPromise.finally(release);
-    } else {
-        release();
-    }
+    run.releasePromise = run.runClaimPromise
+        ? Promise.resolve(run.runClaimPromise).then(release, release)
+        : release();
+    return run.releasePromise;
 }
 
 function pruneSceneRunTerminalPromptIds(now = Date.now()) {
@@ -8305,7 +8321,7 @@ function cancelPendingSceneBatchRun(run) {
 }
 
 function activateNextSceneBatchRun() {
-    if (sceneBatchRun || sceneBatchDetachedRuns.size) {
+    if (sceneBatchRun || sceneBatchDetachedRuns.size || sceneBatchFinalizingRuns.size) {
         return;
     }
     let nextRun = sceneBatchPendingRuns.shift();
@@ -8493,6 +8509,10 @@ function startSceneBatchRun(node) {
     const existingRun = sceneBatchRunForNode(node);
     const existingStatus = sceneBatchRunStatus(existingRun);
     if (existingStatus === "active") {
+        if (existingRun.finalizing) {
+            showSceneBatchError("完了時Callbackの実行を待っています。");
+            return;
+        }
         stopSceneBatchRun();
         return;
     }
@@ -8506,6 +8526,10 @@ function startSceneBatchRun(node) {
     }
     if (existingStatus === "stopping") {
         showSceneBatchError("この連続生成は停止処理中です。完了後に再実行してください。");
+        return;
+    }
+    if (existingStatus === "finalizing") {
+        showSceneBatchError("完了時Callbackの実行を待っています。");
         return;
     }
 
@@ -8545,9 +8569,94 @@ function startSceneBatchRun(node) {
     queueNextSceneBatchItem();
 }
 
+function sceneExpandHasLastCallback(run) {
+    const expand = run?.firstPromptSnapshot?.output?.[String(run.nodeId)]
+        || run?.cachedPrompt?.output?.[String(run.nodeId)];
+    return !!scenePromptInputSourceId(expand?.inputs?.callback_last);
+}
+
+async function completeFinalSceneBatchRun(run, options = {}) {
+    if (!run || run.finalized) {
+        return;
+    }
+    run.finalized = true;
+    if (run.nextTimer) {
+        clearTimeout(run.nextTimer);
+        run.nextTimer = null;
+    }
+    if (run.activeReconcileTimer) {
+        clearTimeout(run.activeReconcileTimer);
+        run.activeReconcileTimer = null;
+    }
+    if (sceneBatchRun === run) {
+        sceneBatchRun = null;
+    }
+    sceneBatchFinalizingRuns.add(run);
+    clearPendingSceneBatchReleasesForRun(run.runId);
+    await releaseSceneBatchPlan(run.runId);
+    sceneBatchRunsById.delete(run.runId);
+    sceneBatchFinalizingRuns.delete(run);
+    const node = sceneNodeForRun(run);
+    if (node) {
+        resetSceneExpandRunControls(node, { mark: false });
+        updateSceneExpandButton(node);
+    }
+    if (options.activateNext !== false) {
+        activateNextSceneBatchRun();
+    }
+}
+
+async function finalizeSceneBatchRun(run, promptId) {
+    if (!run || run.finalizing || run.finalized || !promptId) {
+        return;
+    }
+    run.finalizing = true;
+    refreshSceneBatchRunNode(run, { graphChange: false, background: false });
+    try {
+        const request = {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                run_handle: run.runHandle,
+                expand_node_id: String(run.nodeId),
+                prompt_id: String(promptId),
+            }),
+        };
+        for (let attempt = 0; attempt < SCENE_CALLBACK_FINALIZE_MAX_POLLS; attempt += 1) {
+            const response = await api.fetchApi("/scene_prompt/runs/finalize", request);
+            const data = await readApiJson(response, "完了時Callbackの実行に失敗しました");
+            if (!response.ok) {
+                throw new Error(data?.error || "完了時Callbackの実行に失敗しました");
+            }
+            const state = String(data?.state || "");
+            if (response.status === 202 || state === "pending" || state === "in_progress") {
+                await new Promise((resolve) => setTimeout(resolve, SCENE_CALLBACK_FINALIZE_POLL_MS));
+                continue;
+            }
+            if (state === "error") {
+                throw new Error(data?.error || "完了時Callbackの実行に失敗しました");
+            }
+            const warnings = Array.isArray(data?.warnings)
+                ? data.warnings
+                : data?.warning ? [data.warning] : [];
+            for (const warning of warnings) {
+                console.warn("[Scene Prompt] 完了時Callback:", warning);
+            }
+            await completeFinalSceneBatchRun(run);
+            return;
+        }
+        throw new Error("完了時Callbackの完了確認がタイムアウトしました");
+    } catch (error) {
+        await completeFinalSceneBatchRun(run, { activateNext: false });
+        showSceneBatchError("完了時Callbackに失敗したため、後続の連続生成は開始しません。", error);
+    } finally {
+        run.finalizing = false;
+    }
+}
+
 function continueSceneBatchRun(detail = null) {
     const run = sceneBatchRun;
-    if (!run || !run.waiting) {
+    if (!run || !run.waiting || run.finalizing) {
         return;
     }
     if (!sceneBatchEventMatchesRun(run, detail)) {
@@ -8565,6 +8674,10 @@ function continueSceneBatchRun(detail = null) {
     if (promptId) {
         run.pendingPromptIds.delete(promptId);
         sceneBatchTerminalEvents.delete(promptId);
+    }
+    if (run.nextIndex + 1 >= run.total && sceneExpandHasLastCallback(run)) {
+        run.finalizePromise = finalizeSceneBatchRun(run, promptId);
+        return;
     }
     run.currentPromptId = "";
     run.promptAccepted = false;

@@ -904,11 +904,48 @@ try {
             { name: "body_type", type: "combo", value: "text", options: {} },
             { name: "headers_json", type: "text", value: "{}", options: {} },
         ]);
+        class ExpandNode {
+            constructor() {
+                this.id = 203;
+                this.type = "ScenePrompterExpand";
+                this.comfyClass = this.type;
+                this.title = this.type;
+                this.size = [300, 180];
+                this.graph = window.app.graph;
+                this.inputs = [
+                    { name: "callback_first", type: "SCENE_CALLBACK", link: null },
+                    { name: "callback_each", type: "SCENE_CALLBACK", link: null },
+                    { name: "callback_last", type: "SCENE_CALLBACK", link: null },
+                ];
+                this.outputs = [];
+                this.widgets = [
+                    { name: "current_index", type: "number", value: 0, options: {} },
+                    { name: "run_id", type: "text", value: "", options: {} },
+                    { name: "seed_base", type: "number", value: 1, options: {} },
+                    { name: "timestamp_dir", type: "toggle", value: true, options: {} },
+                    { name: "prefix", type: "text", value: "", options: {} },
+                    { name: "model_mode", type: "combo", value: "Illustrious", options: {} },
+                    { name: "callback_timeout_seconds", type: "number", value: 10, options: {} },
+                    { name: "callback_failure_mode", type: "combo", value: "続行", options: {} },
+                ];
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            addCustomWidget(widget) { this.widgets.push(widget); return widget; }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        const expand = new ExpandNode();
         await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallback" });
         callback.onNodeCreated();
         await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallbackRequest" });
         request.onNodeCreated();
-        window.app.graph._nodes.push(callback, request);
+        await window.__scenePromptExtension.beforeRegisterNodeDef(ExpandNode, { name: "ScenePrompterExpand" });
+        expand.onNodeCreated();
+        window.app.graph._nodes.push(callback, request, expand);
         callback.title = "Before Matrix";
         window.__scenePromptPopupTestHooks.syncAllScenePromptNames();
         const apiPrompt = { output: {
@@ -924,6 +961,10 @@ try {
             apiProducerName: apiPrompt.output["202"].inputs.source_node_name,
             callbackVisible: callback.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
             getHiddenText: request.widgets.find((widget) => widget.name === "text").hidden,
+            expandCallbackInputs: expand.inputs.map((input) => ({ name: input.name, type: input.type, link: input.link })),
+            expandCallbackWidgets: expand.widgets
+                .filter((widget) => ["callback_timeout_seconds", "callback_failure_mode"].includes(widget.name))
+                .map((widget) => ({ name: widget.name, label: widget.label, hidden: !!widget.hidden })),
         };
         const method = request.widgets.find((widget) => widget.name === "method");
         method.value = "POST";
@@ -942,6 +983,15 @@ try {
     assert.equal(callbackUi.getHiddenText, true, "GET hides its unused request body");
     assert.equal(callbackUi.postVisibleText, true, "POST restores the request body input");
     assert.deepEqual(callbackUi.requestWidgets, ["method", "url", "text", "body_type", "headers_json"]);
+    assert.deepEqual(callbackUi.expandCallbackInputs, [
+        { name: "callback_first", type: "SCENE_CALLBACK", link: null },
+        { name: "callback_each", type: "SCENE_CALLBACK", link: null },
+        { name: "callback_last", type: "SCENE_CALLBACK", link: null },
+    ], "Expand registers three optional Callback sockets");
+    assert.deepEqual(callbackUi.expandCallbackWidgets, [
+        { name: "callback_timeout_seconds", label: "Callbackタイムアウト（秒）", hidden: false },
+        { name: "callback_failure_mode", label: "Callback失敗時", hidden: false },
+    ], "Expand shows Japanese Callback settings");
 
     await page.evaluate(async () => {
         const originalGraphToPrompt = window.app.graphToPrompt;

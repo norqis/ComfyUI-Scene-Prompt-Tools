@@ -187,13 +187,30 @@ context.installSceneBatchPromptCapture();
         "1": { class_type: "ScenePrompter", inputs: {} },
         "2": { class_type: "ScenePromptCallback", inputs: { scene_prompt: ["1", 0], callback: ["3", 0] } },
         "3": { class_type: "ScenePromptCallbackDiscord", inputs: {} },
-        "4": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["2", 0] } },
+        "4": {
+            class_type: "ScenePrompterExpand",
+            inputs: {
+                scene_prompt: ["2", 0],
+                callback_first: ["5", 0],
+                callback_each: ["6", 0],
+                callback_last: ["7", 0],
+            },
+        },
+        "5": { class_type: "ScenePromptCallbackDiscord", inputs: {} },
+        "6": { class_type: "ScenePromptCallbackRequest", inputs: {} },
+        "7": { class_type: "ScenePromptCallbackDiscord", inputs: {} },
         "99": { class_type: "ScenePrompter", inputs: {} },
     } }, "4");
     assert.equal(cachedWithCallback.output["4"].inputs.scene_prompt, undefined, "cached Expand removes only its consumed Scene input");
     assert.equal(cachedWithCallback.output["2"], undefined, "Callback is stripped from each cached loop prompt");
     assert.equal(cachedWithCallback.output["1"], undefined, "Callback's consumed upstream Scene plan is stripped too");
     assert.equal(cachedWithCallback.output["3"], undefined, "Callback configuration is stripped with its unused executor");
+    assert.deepEqual(cachedWithCallback.output["4"].inputs.callback_first, ["5", 0], "cached Expand keeps its first Callback input");
+    assert.deepEqual(cachedWithCallback.output["4"].inputs.callback_each, ["6", 0], "cached Expand keeps its each Callback input");
+    assert.deepEqual(cachedWithCallback.output["4"].inputs.callback_last, ["7", 0], "cached Expand keeps its last Callback input");
+    assert.ok(cachedWithCallback.output["5"], "cached Expand keeps its first Callback configuration");
+    assert.ok(cachedWithCallback.output["6"], "cached Expand keeps its each Callback configuration");
+    assert.ok(cachedWithCallback.output["7"], "cached Expand keeps its last Callback configuration");
     assert.equal(cachedWithCallback.output["99"], undefined, "unrelated plan nodes remain stripped from cached loop prompts");
     console.log("Scene Prompt queue wrapper wiring tests passed.");
 })().catch((error) => {
