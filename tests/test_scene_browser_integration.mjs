@@ -927,6 +927,7 @@ try {
                     { name: "model_mode", type: "combo", value: "Illustrious", options: {} },
                     { name: "callback_timeout_seconds", type: "number", value: 10, options: {} },
                     { name: "callback_failure_mode", type: "combo", value: "続行", options: {} },
+                    { name: "seed_base_literal", type: "toggle", value: true, options: {} },
                 ];
             }
             addWidget(type, name, value, callback, options = {}) {
@@ -935,6 +936,7 @@ try {
                 return widget;
             }
             addCustomWidget(widget) { this.widgets.push(widget); return widget; }
+            serialize() { return { widgets_values: this.widgets.map((widget) => widget.value) }; }
             setDirtyCanvas() {}
             setSize(size) { this.size = [...size]; }
         }
@@ -965,6 +967,9 @@ try {
             expandCallbackWidgets: expand.widgets
                 .filter((widget) => ["callback_timeout_seconds", "callback_failure_mode"].includes(widget.name))
                 .map((widget) => ({ name: widget.name, label: widget.label, hidden: !!widget.hidden })),
+            replaySeedLiteral: expand.widgets.find((widget) => widget.name === "seed_base_literal").value,
+            replaySeedLiteralHidden: expand.widgets.find((widget) => widget.name === "seed_base_literal").hidden,
+            replaySeedLiteralSerialized: expand.serialize().widgets_values[8],
         };
         const method = request.widgets.find((widget) => widget.name === "method");
         method.value = "POST";
@@ -992,6 +997,9 @@ try {
         { name: "callback_timeout_seconds", label: "Callbackタイムアウト（秒）", hidden: false },
         { name: "callback_failure_mode", label: "Callback失敗時", hidden: false },
     ], "Expand shows Japanese Callback settings");
+    assert.equal(callbackUi.replaySeedLiteral, true, "a loaded PNG keeps literal seed 0 for one normal replay");
+    assert.equal(callbackUi.replaySeedLiteralHidden, true, "literal seed replay state stays internal");
+    assert.equal(callbackUi.replaySeedLiteralSerialized, true, "normal replay serialization keeps literal seed mode");
 
     await page.evaluate(async () => {
         const originalGraphToPrompt = window.app.graphToPrompt;

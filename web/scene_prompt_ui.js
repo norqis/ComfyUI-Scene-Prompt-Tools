@@ -249,6 +249,7 @@ const INTERNAL_INPUT_NAMES = new Set([
     "current_index",
     "run_id",
     "seed_base",
+    "seed_base_literal",
     "randomize",
 ]);
 
@@ -7447,6 +7448,7 @@ async function queueSingleScenePrompt() {
         expandPrompt.inputs.current_index = run.nextIndex;
         expandPrompt.inputs.run_id = run.runId;
         expandPrompt.inputs.seed_base = run.currentSeed;
+        expandPrompt.inputs.seed_base_literal = false;
         const result = await api.queuePrompt(0, run.cachedPrompt);
         acceptSceneBatchPrompt(run, result);
         return result;
@@ -8288,6 +8290,9 @@ function resetSceneExpandRunControls(node, options = {}) {
     changed = setWidgetValue(node, "current_index", 0, { silent: true }) || changed;
     changed = setWidgetValue(node, "run_id", "", { silent: true }) || changed;
     changed = setWidgetValue(node, "seed_base", 0, { silent: true }) || changed;
+    if (!options.preserveSeedBaseLiteral) {
+        changed = setWidgetValue(node, "seed_base_literal", false, { silent: true }) || changed;
+    }
     updateSceneExpandCountWidget(node);
     if (changed && options.mark !== false) {
         markSceneNodeChanged(node, options);
@@ -8373,6 +8378,7 @@ function createSceneBatchRun(node, total) {
     setWidgetValue(node, "current_index", 0, { silent: true });
     setWidgetValue(node, "run_id", run.runId, { silent: true });
     setWidgetValue(node, "seed_base", run.currentSeed, { silent: true });
+    setWidgetValue(node, "seed_base_literal", false, { silent: true });
     run.promptCapturePromise = createSceneBatchPromptSnapshot(node.id).catch((error) => {
         run.promptCaptureError = error;
         return null;
@@ -8474,9 +8480,10 @@ async function queueNextSceneBatchItem() {
             const changedIndex = setWidgetValue(node, "current_index", run.nextIndex, { silent: true });
             const changedRun = setWidgetValue(node, "run_id", run.runId, { silent: true });
             const changedSeed = setWidgetValue(node, "seed_base", run.currentSeed, { silent: true });
+            const changedSeedLiteral = setWidgetValue(node, "seed_base_literal", false, { silent: true });
             const lightweightDirty = { graphChange: false, background: false };
             refreshSceneBatchRunNode(run, lightweightDirty);
-            if (changedIndex || changedRun || changedSeed) {
+            if (changedIndex || changedRun || changedSeed || changedSeedLiteral) {
                 markSceneNodeChanged(node, lightweightDirty);
             }
         }
@@ -9763,7 +9770,7 @@ function attachSceneUtilityNode(node, nodeName) {
     installSceneConnectionWatcher(node);
     if (isSceneExpandNodeName(nodeName)) {
         if (!sceneBatchRunForNode(node)) {
-            resetSceneExpandRunControls(node, { mark: false });
+            resetSceneExpandRunControls(node, { mark: false, preserveSeedBaseLiteral: true });
         }
         ensureSceneExpandControls(node);
     }
