@@ -47,8 +47,28 @@ from .plan import (
     queue,
     transform,
     with_source_node,
+    append_callback,
 )
-from .runs import get_run_plan_reference, require_run_context, set_run_plan_reference
+from .runs import (
+    claim_callback_attempt,
+    get_run_plan_reference,
+    get_run_prompt_reference,
+    register_last_callback,
+    require_run_context,
+    set_run_plan_reference,
+    set_run_prompt_reference,
+)
+from .callbacks import (
+    CALLBACK_FAILURE_CONTINUE,
+    CALLBACK_FAILURE_STOP,
+    CALLBACK_FREQUENCY_EVERY,
+    CALLBACK_FREQUENCY_FIRST,
+    SCENE_CALLBACK_TYPE,
+    SceneCallbackError,
+    discord_callback,
+    dispatch_callback,
+    request_callback,
+)
 
 
 MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE"
@@ -309,6 +329,7 @@ def _slice_workflow_for_output(workflow, ancestor_ids):
 SCENE_NODE_TYPES = {
     "ScenePrompter", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePrompterExpand",
     "ScenePromptCounter", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
+    "ScenePromptCallback",
     "ScenePresetInput", "ScenePresetOutput", "ScenePresetReference",
 }
 
@@ -318,6 +339,98 @@ def _scene_source_ids(scene_info):
         return set()
     values = scene_info.get("source_node_ids", [])
     return {str(value) for value in values if str(value).strip()} if isinstance(values, list) else set()
+
+
+_EXPAND_WORKFLOW_WIDGET_INDEX = {
+    "current_index": 0,
+    "seed_base": 2,
+    # ``seed_base_literal`` is an internal optional widget, appended after the
+    # existing Expand widgets so old workflow positions stay stable.
+    "seed_base_literal": 8,
+}
+
+
+def _visible_scene_source_ids(prompt, source_aliases=None):
+    """Return source ids represented by the complete prompt before slicing."""
+    if not isinstance(prompt, dict):
+        return set()
+    aliases = source_aliases if isinstance(source_aliases, dict) else {}
+    return {
+        str(aliases.get(str(node_id), node_id))
+        for node_id, node in prompt.items()
+        if isinstance(node, dict) and node.get("class_type") in SCENE_NODE_TYPES
+    }
+
+
+def _replay_expand_values(scene_info, full_prompt, source_aliases=None):
+    """Rebase an execution-path replay onto just the rows saved in the PNG."""
+    if not isinstance(scene_info, dict):
+        return None
+    plan = scene_info.get("_plan_ref")
+    rows = plan.get("rows") if isinstance(plan, dict) else None
+    if not isinstance(rows, list):
+        return None
+    row_index = scene_info.get("row_index")
+    repeat_index = scene_info.get("repeat_index")
+    if type(row_index) is not int or type(repeat_index) is not int or row_index < 0 or repeat_index < 1:
+        return None
+    selected_sources = _scene_source_ids(scene_info)
+    visible_sources = _visible_scene_source_ids(full_prompt, source_aliases)
+
+    def is_retained(item):
+        row = item.get("row") if isinstance(item, dict) else None
+        source_ids = row.get("source_node_ids", []) if isinstance(row, dict) else []
+        row_visible = {str(source_id) for source_id in source_ids if str(source_id) in visible_sources}
+        return row_visible.issubset(selected_sources)
+
+    if row_index >= len(rows) or not is_retained(rows[row_index]):
+        return None
+    new_index = repeat_index - 1
+    for index, item in enumerate(rows):
+        if index >= row_index:
+            break
+        if isinstance(item, dict) and is_retained(item):
+            new_index += int(item.get("count", 0))
+    seed_base = (int(scene_info.get("seed", 0)) - new_index) % SEED_MODULO
+    return {
+        "current_index": new_index,
+        "seed_base": seed_base,
+        "seed_base_literal": seed_base == 0,
+    }
+
+
+def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_aliases=None):
+    """Apply replay widgets only to the Expand that produced this image."""
+    if not values or not isinstance(prompt, dict):
+        return prompt, workflow
+    aliases = source_aliases if isinstance(source_aliases, dict) else {}
+    selected_sources = _scene_source_ids(scene_info)
+    expand_ids = {
+        str(node_id)
+        for node_id, node in prompt.items()
+        if isinstance(node, dict)
+        and node.get("class_type") == "ScenePrompterExpand"
+        and str(aliases.get(str(node_id), node_id)) in selected_sources
+    }
+    if not expand_ids:
+        return prompt, workflow
+    for node_id in expand_ids:
+        inputs = prompt[node_id].setdefault("inputs", {})
+        inputs.update(values)
+    if not isinstance(workflow, dict):
+        return prompt, workflow
+    for node in workflow.get("nodes", []):
+        if not isinstance(node, dict) or str(node.get("id")) not in expand_ids:
+            continue
+        if node.get("type") != "ScenePrompterExpand":
+            continue
+        widgets = node.get("widgets_values")
+        if not isinstance(widgets, list):
+            continue
+        for name, index in _EXPAND_WORKFLOW_WIDGET_INDEX.items():
+            if index < len(widgets):
+                widgets[index] = values[name]
+    return prompt, workflow
 
 
 def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=None):
@@ -366,8 +479,13 @@ def _metadata_for_save_mode(
     if extra_pnginfo is not None and not isinstance(extra_pnginfo, dict):
         raise ValueError("Scene Save Image の extra_pnginfo が不正です。")
 
-    if metadata_mode == SAVE_METADATA_WORKFLOW and not expand_preset_contents:
-        return prompt, extra_pnginfo
+    if metadata_mode != SAVE_METADATA_PROMPT_ONLY and isinstance(scene_info, dict):
+        run_handle = str(scene_info.get("run_handle") or "").strip()
+        for expand_id in reversed(scene_info.get("source_node_ids", [])):
+            cached_prompt = get_run_prompt_reference(run_handle, expand_id) if run_handle else None
+            if cached_prompt is not None:
+                prompt = _merge_cached_prompt(cached_prompt, prompt)
+                break
 
     if metadata_mode == SAVE_METADATA_PROMPT_ONLY:
         saved_prompt = None
@@ -381,6 +499,9 @@ def _metadata_for_save_mode(
             }
         )
         return saved_prompt, saved_extra
+
+    if metadata_mode == SAVE_METADATA_WORKFLOW and not expand_preset_contents:
+        return prompt, extra_pnginfo
 
     if expand_preset_contents and isinstance(prompt, dict):
         has_prompt_reference = any(
@@ -424,6 +545,7 @@ def _metadata_for_save_mode(
         if metadata_mode == SAVE_METADATA_WORKFLOW:
             return expanded_prompt, expanded_extra
         selected_sources = _scene_source_ids(scene_info)
+        replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases)
         selected_ids = {
             node_id
             for node_id, source_id in source_aliases.items()
@@ -439,6 +561,9 @@ def _metadata_for_save_mode(
             if key not in {"prompt", "workflow"}
         }
         saved_extra["workflow"] = _slice_workflow_for_output(expanded_workflow, ancestor_ids)
+        _apply_replay_expand_values(
+            saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
+        )
         return saved_prompt, saved_extra
 
     if metadata_mode == SAVE_METADATA_WORKFLOW:
@@ -446,6 +571,7 @@ def _metadata_for_save_mode(
 
     ancestor_ids = _selected_ancestor_ids(prompt, unique_id, scene_info)
     saved_prompt = _slice_prompt_to_ids(prompt, ancestor_ids)
+    replay_values = _replay_expand_values(scene_info, prompt)
     saved_extra = None
     if extra_pnginfo is not None:
         saved_extra = {
@@ -457,7 +583,33 @@ def _metadata_for_save_mode(
             saved_extra["workflow"] = _slice_workflow_for_output(
                 extra_pnginfo["workflow"], ancestor_ids
             )
+    _apply_replay_expand_values(
+        saved_prompt,
+        saved_extra.get("workflow") if isinstance(saved_extra, dict) else None,
+        scene_info,
+        replay_values,
+    )
     return saved_prompt, saved_extra
+
+
+def _merge_cached_prompt(cached_prompt, current_prompt):
+    """Restore cached upstream nodes without reverting this iteration's widgets."""
+    if not isinstance(cached_prompt, dict):
+        return current_prompt
+    restored = copy.deepcopy(cached_prompt)
+    if not isinstance(current_prompt, dict):
+        return restored
+    for node_id, current_node in current_prompt.items():
+        previous = restored.get(node_id)
+        if not isinstance(previous, dict) or not isinstance(current_node, dict):
+            restored[node_id] = copy.deepcopy(current_node)
+            continue
+        merged = {**previous, **copy.deepcopy(current_node)}
+        previous_inputs = previous.get("inputs") if isinstance(previous.get("inputs"), dict) else {}
+        current_inputs = current_node.get("inputs") if isinstance(current_node.get("inputs"), dict) else {}
+        merged["inputs"] = {**copy.deepcopy(previous_inputs), **copy.deepcopy(current_inputs)}
+        restored[node_id] = merged
+    return restored
 
 
 def _latent_dimension(value, default=512):
@@ -974,7 +1126,7 @@ def _normalize_scene_save_info(value):
     if not isinstance(value, dict):
         return {}
     use_run_dir = value.get("use_run_dir", True)
-    return {
+    info = {
         "run_dir": str(value.get("run_dir") or "").strip(),
         "use_run_dir": _scene_bool(use_run_dir),
         "path": str(value.get("path") or "").strip(),
@@ -991,6 +1143,11 @@ def _normalize_scene_save_info(value):
         "source_node_ids": [str(node_id) for node_id in value.get("source_node_ids", []) if str(node_id).strip()] if isinstance(value.get("source_node_ids"), list) else [],
         "run_handle": str(value.get("run_handle") or "").strip(),
     }
+    # The plan reference is process-local provenance for metadata slicing. It
+    # must stay by reference here and is intentionally absent from PNG JSON.
+    if isinstance(value.get("_plan_ref"), dict):
+        info["_plan_ref"] = value["_plan_ref"]
+    return info
 
 class SceneMatrix:
     DESCRIPTION = """複数のプロンプト行を作り、入力された scene_prompt と組み合わせて生成計画を展開します。\n有効なMatrix行ごとにポジティブ・ネガティブ候補が追加され、入力行との全組み合わせが出力されます。\nMatrix行が未設定なら入力をそのまま通し、設定済みの行がすべて無効なら生成対象は0件になります。"""
@@ -1017,6 +1174,7 @@ class SceneMatrix:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1043,6 +1201,7 @@ class SceneMatrix:
         scene_prompt=None,
         unique_id=None,
         source_node_id="",
+        source_node_name="",
         **kwargs,
     ):
         del kwargs
@@ -1053,7 +1212,7 @@ class SceneMatrix:
                 scene_prompt,
                 matrix_sets,
                 bool(matrix_data["sets"]),
-            ), source_node_id or unique_id),
+            ), source_node_id or unique_id, source_node_name),
         )
 
 
@@ -1078,6 +1237,7 @@ class ScenePath:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1092,13 +1252,13 @@ class ScenePath:
             ]
         )
 
-    def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, unique_id=None, source_node_id=""):
+    def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, unique_id=None, source_node_id="", source_node_name=""):
         label = str(path_name or "").strip() or "Scene Path"
         return (
             with_source_node(transform(
                 scene_prompt,
                 lambda row, _item: {**row, "path_parts": _append_path_part(row.get("path_parts", []), label, path_mode)},
-            ), source_node_id or unique_id),
+            ), source_node_id or unique_id, source_node_name),
         )
 
 
@@ -1124,6 +1284,7 @@ class ScenePromptQueue:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1136,8 +1297,8 @@ class ScenePromptQueue:
                 parts.append(_scene_prompt_change_key(value))
         return "|".join(parts)
 
-    def queue(self, unique_id=None, source_node_id="", **kwargs):
-        return (with_source_node(queue([kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES]), source_node_id or unique_id),)
+    def queue(self, unique_id=None, source_node_id="", source_node_name="", **kwargs):
+        return (with_source_node(queue([kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES]), source_node_id or unique_id, source_node_name),)
 
 
 class ScenePromptMerge:
@@ -1164,6 +1325,7 @@ class ScenePromptMerge:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1176,8 +1338,8 @@ class ScenePromptMerge:
             ]
         )
 
-    def merge(self, scene_prompt1=None, scene_prompt2=None, unique_id=None, source_node_id=""):
-        return (with_source_node(merge(scene_prompt1, scene_prompt2), source_node_id or unique_id),)
+    def merge(self, scene_prompt1=None, scene_prompt2=None, unique_id=None, source_node_id="", source_node_name=""):
+        return (with_source_node(merge(scene_prompt1, scene_prompt2), source_node_id or unique_id, source_node_name),)
 
 
 class ScenePromptCounter:
@@ -1206,6 +1368,7 @@ class ScenePromptCounter:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1218,8 +1381,8 @@ class ScenePromptCounter:
             ]
         )
 
-    def count(self, scene_prompt=None, count=1, unique_id=None, source_node_id=""):
-        return (with_source_node(multiply_count(scene_prompt, count), source_node_id or unique_id),)
+    def count(self, scene_prompt=None, count=1, unique_id=None, source_node_id="", source_node_name=""):
+        return (with_source_node(multiply_count(scene_prompt, count), source_node_id or unique_id, source_node_name),)
 
 
 class SceneEmptyLatent:
@@ -1273,6 +1436,7 @@ class SceneEmptyLatent:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1288,9 +1452,186 @@ class SceneEmptyLatent:
             ]
         )
 
-    def apply_latent(self, scene_prompt=None, width=512, height=512, batch_size=1, unique_id=None, source_node_id=""):
+    def apply_latent(self, scene_prompt=None, width=512, height=512, batch_size=1, unique_id=None, source_node_id="", source_node_name=""):
         latent = _normalize_latent_config({"width": width, "height": height, "batch_size": batch_size})
-        return (with_source_node(transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)}), source_node_id or unique_id),)
+        return (with_source_node(transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)}), source_node_id or unique_id, source_node_name),)
+
+
+class ScenePromptCallbackDiscord:
+    """Discord通知の設定を作ります。このノード単体では送信しません。"""
+    DESCRIPTION = """Discord Webhook用の通知設定です。このノードは送信せず、Scene Prompt Callbackへ接続した場合だけ生成開始時に通知されます。"""
+    CATEGORY = "Scene/callback"
+    RETURN_TYPES = (SCENE_CALLBACK_TYPE,)
+    RETURN_NAMES = ("callback",)
+    FUNCTION = "build"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "webhook_url": ("STRING", {"default": "", "multiline": False, "display_name": "Webhook URL"}),
+            "text": ("STRING", {"default": "", "multiline": True, "display_name": "本文"}),
+        }, "optional": {
+            "username": ("STRING", {"default": "", "multiline": False, "display_name": "ユーザー名"}),
+        }}
+
+    def build(self, webhook_url="", text="", username=""):
+        return discord_callback(webhook_url, text, username)
+
+
+class ScenePromptCallbackRequest:
+    """HTTP通知の設定を作ります。このノード単体では送信しません。"""
+    DESCRIPTION = """GETまたはPOSTのHTTP通知設定です。このノードは送信せず、Scene Prompt Callbackへ接続した場合だけ生成開始時に通知されます。"""
+    CATEGORY = "Scene/callback"
+    RETURN_TYPES = (SCENE_CALLBACK_TYPE,)
+    RETURN_NAMES = ("callback",)
+    FUNCTION = "build"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "method": (["GET", "POST"], {"default": "GET", "display_name": "Method"}),
+            "url": ("STRING", {"default": "", "multiline": False, "display_name": "URL"}),
+            "text": ("STRING", {"default": "", "multiline": True, "display_name": "本文"}),
+            "body_type": (["text", "json"], {"default": "text", "display_name": "本文形式"}),
+            "headers_json": ("STRING", {"default": "", "multiline": True, "display_name": "Headers JSON"}),
+        }}
+
+    def build(self, method="GET", url="", text="", body_type="text", headers_json=""):
+        return request_callback(method, url, text, body_type, headers_json)
+
+
+class ScenePromptCallback:
+    """通知をScene計画へ記録し、Expandで送信します。"""
+    DESCRIPTION = """Callback設定をScene計画へ追加します。Preview、計画作成、Preset保存では送信せず、Scene Prompt Expandが最終プロンプトを確定した後、画像生成前にだけ送信します。"""
+    CATEGORY = "Scene/callback"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "apply_callback"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "frequency": ([CALLBACK_FREQUENCY_FIRST, CALLBACK_FREQUENCY_EVERY], {"default": CALLBACK_FREQUENCY_FIRST, "display_name": "送信頻度"}),
+            "timeout_seconds": ("INT", {"default": 10, "min": 1, "max": 120, "display_name": "タイムアウト秒"}),
+            "failure_mode": ([CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP], {"default": CALLBACK_FAILURE_CONTINUE, "display_name": "失敗時"}),
+        }, "optional": {
+            "callback": (SCENE_CALLBACK_TYPE, {"display_name": "callback"}),
+            "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt"}),
+        }, "hidden": {
+            "unique_id": "UNIQUE_ID",
+            "source_node_id": ("STRING", {"default": "", "hidden": True}),
+        }}
+
+    def apply_callback(
+        self,
+        callback=None,
+        frequency=CALLBACK_FREQUENCY_FIRST,
+        timeout_seconds=10,
+        failure_mode=CALLBACK_FAILURE_CONTINUE,
+        scene_prompt=None,
+        unique_id=None,
+        source_node_id="",
+    ):
+        if callback is None:
+            return (with_source_node(normalize_plan(scene_prompt), source_node_id or unique_id),)
+        if not isinstance(callback, dict):
+            raise ValueError("Scene callback setting is invalid.")
+        if frequency not in {CALLBACK_FREQUENCY_FIRST, CALLBACK_FREQUENCY_EVERY}:
+            raise ValueError("Scene callback frequency is invalid.")
+        if failure_mode not in {CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP}:
+            raise ValueError("Scene callback failure mode is invalid.")
+        plan = append_callback(
+            scene_prompt,
+            source_node_id or unique_id,
+            callback,
+            frequency,
+            timeout_seconds,
+            failure_mode,
+        )
+        return (with_source_node(plan, source_node_id or unique_id),)
+
+
+def _callback_prompts(positive_parts, negative_parts, seed, model_mode):
+    positive_parts, negative_parts = _merge_positive_negative_parts(
+        _expand_prompt_parts(positive_parts, seed, "positive"),
+        _expand_prompt_parts(negative_parts, seed, "negative"),
+        [], [],
+    )
+    positive = _join_unique(positive_parts, ", ")
+    negative = _join_unique(negative_parts, ", ")
+    if _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA:
+        return positive.replace("_", " "), negative.replace("_", " ")
+    return positive, negative
+
+
+def _callback_names(row, source_ids):
+    names = row.get("source_node_names", {})
+    if not isinstance(names, dict):
+        return ""
+    return "_".join(str(names.get(str(node_id), "")).strip() for node_id in source_ids if str(names.get(str(node_id), "")).strip())
+
+
+def _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, all_positive, all_negative):
+    callbacks = row.get("callbacks", [])
+    seen = set()
+    for descriptor in callbacks if isinstance(callbacks, list) else []:
+        if not isinstance(descriptor, dict):
+            continue
+        callback_id = str(descriptor.get("callback_node_id") or "").strip()
+        if not callback_id or callback_id in seen:
+            continue
+        seen.add(callback_id)
+        frequency = descriptor.get("frequency")
+        if frequency == CALLBACK_FREQUENCY_FIRST and not claim_callback_attempt(run_handle, callback_id):
+            continue
+        current_ids = descriptor.get("current_source_node_ids", [])
+        current_positive, current_negative = _callback_prompts(
+            descriptor.get("current_positive_parts", []),
+            descriptor.get("current_negative_parts", []),
+            seed,
+            model_mode,
+        )
+        values = {
+            "current_positive": current_positive,
+            "current_negative": current_negative,
+            "all_positive": all_positive,
+            "all_negative": all_negative,
+            "current_node_names": _callback_names(row, current_ids),
+            "all_node_names": _callback_names(row, row.get("source_node_ids", [])),
+            "exec_current_count": int(item.get("global_index", 0)) + 1,
+            "exec_total_count": int(item.get("total_batches", 0)),
+            "exec_model": _normalize_model_mode(model_mode),
+            "exec_seed": seed,
+        }
+        try:
+            dispatch_callback(descriptor.get("config"), values, descriptor.get("timeout_seconds", 10))
+        except SceneCallbackError as exc:
+            if descriptor.get("failure_mode") == CALLBACK_FAILURE_STOP:
+                raise RuntimeError(f"Scene Callback failed: {exc}") from exc
+            print(f"Scene Callback warning: {exc}")
+
+
+def _dispatch_expand_callback(config, callback_id, timeout_seconds, failure_mode, values, run_handle, once=False):
+    if config is None:
+        return
+    if not isinstance(config, dict):
+        raise ValueError("Scene callback setting is invalid.")
+    if once and not claim_callback_attempt(run_handle, callback_id):
+        return
+    try:
+        dispatch_callback(config, values, timeout_seconds)
+    except SceneCallbackError as exc:
+        if failure_mode == CALLBACK_FAILURE_STOP:
+            raise RuntimeError(f"Scene Callback failed: {exc}") from exc
+        print(f"Scene Callback warning: {exc}")
+
+
+def _current_prompt_id():
+    try:
+        from server import PromptServer
+        return str(getattr(PromptServer.instance, "last_prompt_id", "") or "")
+    except Exception:
+        return ""
 
 
 class ScenePromptExpand:
@@ -1364,10 +1705,17 @@ class ScenePromptExpand:
                         "label": "モデル",
                     },
                 ),
+                "callback_first": (SCENE_CALLBACK_TYPE, {"display_name": "callback_first"}),
+                "callback_each": (SCENE_CALLBACK_TYPE, {"display_name": "callback_each"}),
+                "callback_last": (SCENE_CALLBACK_TYPE, {"display_name": "callback_last"}),
+                "callback_timeout_seconds": ("INT", {"default": 10, "min": 1, "max": 120, "display_name": "callback_timeout_seconds"}),
+                "callback_failure_mode": ([CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP], {"default": CALLBACK_FAILURE_CONTINUE, "display_name": "callback_failure_mode"}),
+                "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
                 "unique_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
             },
         }
 
@@ -1383,6 +1731,13 @@ class ScenePromptExpand:
         model_mode=MODEL_MODE_ILLUSTRIOUS,
         run_handle="",
         unique_id=None,
+        prompt=None,
+        callback_first=None,
+        callback_each=None,
+        callback_last=None,
+        callback_timeout_seconds=10,
+        callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
+        seed_base_literal=False,
     ):
         return "|".join(
             [
@@ -1390,6 +1745,7 @@ class ScenePromptExpand:
                 str(current_index),
                 str(run_id or ""),
                 _seed_change_key(seed_base),
+                str(_scene_bool(seed_base_literal)),
                 str(_scene_bool(timestamp_dir)),
                 _safe_filename_prefix(prefix),
                 _normalize_model_mode(model_mode),
@@ -1407,13 +1763,23 @@ class ScenePromptExpand:
         model_mode=MODEL_MODE_ILLUSTRIOUS,
         run_handle="",
         unique_id=None,
+        prompt=None,
+        callback_first=None,
+        callback_each=None,
+        callback_last=None,
+        callback_timeout_seconds=10,
+        callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
+        seed_base_literal=False,
     ):
         separator = ", "
+        if run_handle and unique_id is not None and isinstance(prompt, dict):
+            set_run_prompt_reference(run_handle, unique_id, prompt)
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
         global_index = int(item.get("global_index", 0) or 0)
-        seed = (_auto_seed_base(seed_base) + global_index) % SEED_MODULO
+        base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
+        seed = (base_seed + global_index) % SEED_MODULO
         positive_parts = _expand_prompt_parts(row.get("positive_parts", []), seed, "positive")
         negative_parts = _expand_prompt_parts(row.get("negative_parts", []), seed, "negative")
         positive_parts, negative_parts = _merge_positive_negative_parts(
@@ -1427,6 +1793,22 @@ class ScenePromptExpand:
         if _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA:
             positive = positive.replace("_", " ")
             negative = negative.replace("_", " ")
+        callback_values = {
+            "current_positive": positive, "current_negative": negative,
+            "all_positive": positive, "all_negative": negative,
+            "current_node_names": _callback_names(row, row.get("source_node_ids", [])),
+            "all_node_names": _callback_names(row, row.get("source_node_ids", [])),
+            "exec_current_count": global_index + 1,
+            "exec_total_count": int(item.get("total_batches", 0)),
+            "exec_model": _normalize_model_mode(model_mode), "exec_seed": seed,
+        }
+        callback_id = str(unique_id or "")
+        _dispatch_expand_callback(callback_first, f"{callback_id}:first", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, once=True)
+        _dispatch_expand_callback(callback_each, f"{callback_id}:each", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle)
+        _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, positive, negative)
+        if callback_last is not None and run_handle and global_index + 1 == int(item.get("total_batches", 0)):
+            prompt_id = _current_prompt_id()
+            register_last_callback(run_handle, callback_id, callback_last, callback_values, callback_timeout_seconds, callback_failure_mode, prompt_id)
         latent_config = _row_latent(row)
         latent = _empty_latent(latent_config)
         use_run_dir = _scene_bool(timestamp_dir)
@@ -1453,6 +1835,7 @@ class ScenePromptExpand:
             "latent": latent_config,
             "source_node_ids": [*row.get("source_node_ids", []), str(unique_id)] if unique_id is not None else list(row.get("source_node_ids", [])),
             "run_handle": str(run_handle or ""),
+            "_plan_ref": plan,
         }
 
         return (positive, negative, save_info, seed, latent)

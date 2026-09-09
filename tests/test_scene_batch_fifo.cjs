@@ -34,6 +34,7 @@ const context = {
     sceneBatchRun: null,
     sceneBatchRunsById: new Map(),
     sceneBatchDetachedRuns: new Map(),
+    sceneBatchFinalizingRuns: new Set(),
     sceneBatchPendingRuns: [],
     activated: [],
     queuedPrompts: [],
@@ -120,7 +121,7 @@ assert.deepEqual(context.activated, ["tab-b", "tab-c"]);
 
 async function testQueuedPrefixesStayWithTheirTabs() {
     const promptA = {
-        output: { "41": { inputs: { prefix: "tab_a_", current_index: 0 } } },
+        output: { "41": { inputs: { prefix: "tab_a_", current_index: 0, seed_base_literal: true } } },
     };
     const promptB = {
         output: { "41": { inputs: { prefix: "tab_b_", current_index: 0 } } },
@@ -152,6 +153,7 @@ async function testQueuedPrefixesStayWithTheirTabs() {
     assert.equal(context.queuedPrompts[1].output["41"].inputs.prefix, "tab_b_");
     assert.equal(context.queuedPrompts[0].output["41"].inputs.current_index, 3);
     assert.equal(context.queuedPrompts[1].output["41"].inputs.current_index, 7);
+    assert.equal(context.queuedPrompts[0].output["41"].inputs.seed_base_literal, false, "continuous cached prompts never reuse a replay-only literal seed");
 
     const waitingPrompt = {
         output: { "41": { inputs: { prefix: "waiting_b_", current_index: 0 } } },
@@ -186,6 +188,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
         { name: "current_index", value: 0 },
         { name: "run_id", value: "" },
         { name: "seed_base", value: 0 },
+        { name: "seed_base_literal", value: true },
     ] };
     let preparedSnapshot = null;
     const tabContext = {
@@ -204,9 +207,11 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
                 return structuredClone(this.graph.prompt);
             },
         },
+        applySceneSourceNodeNames(prompt) { return prompt; },
         sceneBatchRun: { runId: "tab-a" },
         sceneBatchRunsById: new Map(),
         sceneBatchDetachedRuns: new Map(),
+        sceneBatchFinalizingRuns: new Set(),
         sceneBatchPendingRuns: [],
         sceneBatchPlanId() { return "captured-plan"; },
         sceneBatchRunId() { return "run"; },
@@ -249,6 +254,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
     }
 
     const pendingB = tabContext.createSceneBatchRun(nodeB, 1);
+    assert.equal(nodeB.widgets.find((widget) => widget.name === "seed_base_literal").value, false, "a new continuous run clears replay-only literal seed mode before snapshotting");
     tabContext.sceneBatchPendingRuns.push(pendingB);
     assert.equal(preparedSnapshot, null, "pending click does not prepare a server run context");
 
@@ -456,6 +462,7 @@ async function testPresetResolutionKeepsClickFifo() {
         sceneBatchRun: null,
         sceneBatchRunsById: new Map(),
         sceneBatchDetachedRuns: new Map(),
+        sceneBatchFinalizingRuns: new Set(),
         sceneBatchPendingRuns: [],
         activated: [],
         clearSceneSavePreviews() {},
@@ -595,6 +602,7 @@ async function testRunRefreshAndResetUpdateCount() {
     vm.runInContext(functionSource("resetSceneExpandRunControls"), resetContext);
     resetContext.resetSceneExpandRunControls(node);
     assert.equal(resetContext.countUpdates, 1, "cancel or failure resets the count display");
+    assert.equal(node.seed_base_literal, false, "reset clears replay-only literal seed mode");
 }
 
 async function testMismatchedSuccessDoesNotAdvanceExpandProgress() {
@@ -662,7 +670,7 @@ async function testPresetErrorMarksOnlyTargetReference() {
 }
 
 async function testSelectedExpandBranchOnlyQueues() {
-    const branchContext = { Map, Set, Object, String, Array };
+    const branchContext = { Map, Set, Object, String, Array, applySceneSourceNodeNames(prompt) { return prompt; } };
     vm.createContext(branchContext);
     for (const name of [
         "apiLink",

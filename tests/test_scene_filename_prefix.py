@@ -90,6 +90,9 @@ def _load_node_package(output_dir):
         "ScenePromptExpand",
         "ScenePromptMerge",
         "ScenePromptQueue",
+        "ScenePromptCallback",
+        "ScenePromptCallbackDiscord",
+        "ScenePromptCallbackRequest",
         "SceneSaveImage",
     ):
         setattr(internal_package, name, getattr(internal_package.nodes, name))
@@ -865,6 +868,135 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 if isinstance(value, list) and len(value) == 2:
                     self.assertIn(str(value[0]), saved_prompt)
 
+    def test_execution_path_rebases_queue_second_branch_and_preserves_repeat(self):
+        def branch(source_id, text, count):
+            plan = self.nodes.with_source_node(
+                self.nodes.transform(None, lambda row, _item: {**row, "positive_parts": [text]}),
+                source_id,
+            )
+            return self.nodes.multiply_count(plan, count)
+
+        queued = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=branch("a", "first", 2),
+            scene_prompt2=branch("b", "second", 3),
+            unique_id="queue",
+        )[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=3,
+            seed_base=100,
+            timestamp_dir=False,
+            scene_prompt=queued,
+            unique_id="expand",
+        )[2]
+        self.assertEqual(info["repeat_index"], 2)
+        self.assertIs(info["_plan_ref"], self.nodes._normalize_scene_save_info(info)["_plan_ref"])
+        prompt = {
+            "a": {"class_type": "ScenePrompter", "inputs": {}},
+            "b": {"class_type": "ScenePrompter", "inputs": {}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["a", 0], "scene_prompt2": ["b", 0]}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["queue", 0], "current_index": 3, "seed_base": 100}},
+            "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["expand", 4]}},
+        }
+        workflow = {
+            "nodes": [
+                {"id": node_id, "type": node["class_type"], "widgets_values": [3, "", 100, False, "", "Illustrious", 10, "続行", False], "inputs": [], "outputs": []}
+                for node_id, node in prompt.items()
+            ],
+            "links": [],
+            "groups": [],
+        }
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "save",
+            self.nodes.SAVE_METADATA_EXECUTION_PATH,
+            info,
+        )
+        self.assertNotIn("a", saved_prompt)
+        self.assertEqual(saved_prompt["expand"]["inputs"]["current_index"], 1)
+        self.assertEqual(saved_prompt["expand"]["inputs"]["seed_base"], 102)
+        self.assertFalse(saved_prompt["expand"]["inputs"]["seed_base_literal"])
+        saved_expand = next(node for node in saved_extra["workflow"]["nodes"] if str(node["id"]) == "expand")
+        self.assertEqual(saved_expand["widgets_values"][0], 1)
+        self.assertEqual(saved_expand["widgets_values"][2], 102)
+        self.assertFalse(saved_expand["widgets_values"][8])
+
+    def test_execution_path_keeps_matrix_rows_with_the_same_visible_sources(self):
+        base = self.nodes.with_source_node(
+            self.nodes.transform(None, lambda row, _item: {**row, "positive_parts": ["base"]}),
+            "scene",
+        )
+        matrix = self.nodes.SceneMatrix().build(
+            json.dumps({"version": 1, "sets": [_matrix_line("one"), _matrix_line("two")]}),
+            scene_prompt=base,
+            unique_id="matrix",
+        )[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=1,
+            seed_base=200,
+            timestamp_dir=False,
+            scene_prompt=matrix,
+            unique_id="expand",
+        )[2]
+        prompt = {
+            "scene": {"class_type": "ScenePrompter", "inputs": {}},
+            "matrix": {"class_type": "SceneMatrix", "inputs": {"scene_prompt": ["scene", 0]}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["matrix", 0], "current_index": 1, "seed_base": 200}},
+            "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["expand", 4]}},
+        }
+        saved_prompt, _saved_extra = self.nodes._metadata_for_save_mode(
+            prompt, None, "save",
+            self.nodes.SAVE_METADATA_EXECUTION_PATH, info,
+        )
+        self.assertEqual(saved_prompt["expand"]["inputs"]["current_index"], 1)
+        self.assertEqual(saved_prompt["expand"]["inputs"]["seed_base"], 200)
+
+    def test_replay_visible_sources_distinguish_expanded_nested_preset_only(self):
+        left = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "20/30/left")
+        right = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "20/30/right")
+        plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=left, scene_prompt2=right)[0]
+        info = {"_plan_ref": plan, "row_index": 1, "repeat_index": 1, "seed": 50, "source_node_ids": ["20/30/right", "expand"]}
+        preset_closed = {
+            "20": {"class_type": "ScenePresetReference", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        preset_open = {
+            "left": {"class_type": "ScenePrompter", "inputs": {}},
+            "right": {"class_type": "ScenePrompter", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        self.assertEqual(self.nodes._replay_expand_values(info, preset_closed), {"current_index": 1, "seed_base": 49, "seed_base_literal": False})
+        self.assertEqual(
+            self.nodes._replay_expand_values(
+                info, preset_open, {"left": "20/30/left", "right": "20/30/right", "expand": "expand"}
+            ),
+            {"current_index": 0, "seed_base": 50, "seed_base_literal": False},
+        )
+
+    def test_literal_zero_seed_replays_after_wraparound(self):
+        self.assertIn("seed_base_literal", self.nodes.ScenePromptExpand.INPUT_TYPES()["optional"])
+        plan = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "scene")
+        info = {
+            "_plan_ref": plan,
+            "row_index": 0,
+            "repeat_index": 1,
+            "seed": 0,
+            "source_node_ids": ["scene", "expand"],
+        }
+        values = self.nodes._replay_expand_values(
+            info,
+            {"scene": {"class_type": "ScenePrompter", "inputs": {}}, "expand": {"class_type": "ScenePrompterExpand", "inputs": {}}},
+        )
+        self.assertEqual(values, {"current_index": 0, "seed_base": 0, "seed_base_literal": True})
+        replay = self.nodes.ScenePromptExpand().expand(
+            current_index=0,
+            seed_base=0,
+            seed_base_literal=True,
+            timestamp_dir=False,
+            scene_prompt=plan,
+        )
+        self.assertEqual(replay[3], 0)
+
     def test_generation_path_metadata_rejects_unknown_target_and_invalid_links(self):
         prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {"images": ["missing", 0]}}}
         with self.assertRaisesRegex(ValueError, "保存対象のノードID"):
@@ -904,6 +1036,9 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             "ScenePrompterMerge",
             "ScenePromptCounter",
             "ScenePrompterQueue",
+            "ScenePromptCallback",
+            "ScenePromptCallbackDiscord",
+            "ScenePromptCallbackRequest",
             "SceneEmptyLatent",
             "ScenePrompterExpand",
             "SceneSaveImage",
@@ -921,6 +1056,9 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 "ScenePrompterMerge": "Scene Prompt Merge",
                 "ScenePromptCounter": "Scene Prompt Count",
                 "ScenePrompterQueue": "Scene Prompt Queue",
+                "ScenePromptCallback": "Scene Prompt Callback",
+                "ScenePromptCallbackDiscord": "Scene Prompt Callback (Discord)",
+                "ScenePromptCallbackRequest": "Scene Prompt Callback (Request)",
                 "SceneEmptyLatent": "Scene Empty Latent",
                 "ScenePrompterExpand": "Scene Prompt Expand",
                 "SceneSaveImage": "Scene Save Image",

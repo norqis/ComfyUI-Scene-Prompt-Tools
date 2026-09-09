@@ -187,6 +187,9 @@ const server = http.createServer(async (request, response) => {
                 + `  openSavePromptPopup,\n`
                 + `  openCreatePromptPopup,\n`
                 + `  attachMatrixTextAreaAutocomplete,\n`
+                + `  syncAllScenePromptNames,\n`
+                + `  applySceneSourceNodeNames,\n`
+                + `  saveScenePreset,\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
                 + `};\n`;
         }
@@ -864,6 +867,172 @@ try {
     });
     assert.equal(savedEditor.request.expected_revision, 3);
     assert.deepEqual(savedEditor.editor, { preset_id: "browser-preset", revision: 4 });
+
+    const callbackUi = await page.evaluate(async () => {
+        class CallbackNode {
+            constructor(type, widgets) {
+                this.id = type === "ScenePromptCallback" ? 201 : 202;
+                this.type = type;
+                this.comfyClass = type;
+                this.title = type;
+                this.size = [300, 180];
+                this.inputs = type === "ScenePromptCallback"
+                    ? [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }, { name: "callback", type: "SCENE_CALLBACK", link: null }]
+                    : [];
+                this.outputs = type === "ScenePromptCallback" ? [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }] : [{ name: "callback", type: "SCENE_CALLBACK", links: [] }];
+                this.graph = window.app.graph;
+                this.widgets = widgets;
+                this.widgets_values = widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        const callback = new CallbackNode("ScenePromptCallback", [
+            { name: "frequency", type: "combo", value: "毎回", options: {} },
+            { name: "timeout_seconds", type: "number", value: 10, options: {} },
+            { name: "failure_mode", type: "combo", value: "続行", options: {} },
+        ]);
+        const request = new CallbackNode("ScenePromptCallbackRequest", [
+            { name: "method", type: "combo", value: "GET", options: {} },
+            { name: "url", type: "text", value: "https://example.invalid", options: {} },
+            { name: "text", type: "text", value: "unused", options: {} },
+            { name: "body_type", type: "combo", value: "text", options: {} },
+            { name: "headers_json", type: "text", value: "{}", options: {} },
+        ]);
+        class ExpandNode {
+            constructor(id, currentIndex, seedBase, seedBaseLiteral) {
+                this.id = id;
+                this.type = "ScenePrompterExpand";
+                this.comfyClass = this.type;
+                this.title = this.type;
+                this.size = [300, 180];
+                this.graph = window.app.graph;
+                this.inputs = [
+                    { name: "callback_first", type: "SCENE_CALLBACK", link: null },
+                    { name: "callback_each", type: "SCENE_CALLBACK", link: null },
+                    { name: "callback_last", type: "SCENE_CALLBACK", link: null },
+                ];
+                this.outputs = [];
+                this.widgets = [
+                    { name: "current_index", type: "number", value: currentIndex, options: {} },
+                    { name: "run_id", type: "text", value: "saved-run", options: {} },
+                    { name: "seed_base", type: "number", value: seedBase, options: {} },
+                    { name: "timestamp_dir", type: "toggle", value: true, options: {} },
+                    { name: "prefix", type: "text", value: "", options: {} },
+                    { name: "model_mode", type: "combo", value: "Illustrious", options: {} },
+                    { name: "callback_timeout_seconds", type: "number", value: 10, options: {} },
+                    { name: "callback_failure_mode", type: "combo", value: "続行", options: {} },
+                    { name: "seed_base_literal", type: "toggle", value: seedBaseLiteral, options: {} },
+                ];
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            addCustomWidget(widget) { this.widgets.push(widget); return widget; }
+            serialize() { return { widgets_values: this.widgets.map((widget) => widget.value) }; }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        const expand = new ExpandNode(203, 1, 41, false);
+        const zeroReplayExpand = new ExpandNode(204, 0, 0, true);
+        await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallback" });
+        callback.onNodeCreated();
+        await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallbackRequest" });
+        request.onNodeCreated();
+        await window.__scenePromptExtension.beforeRegisterNodeDef(ExpandNode, { name: "ScenePrompterExpand" });
+        expand.onNodeCreated();
+        zeroReplayExpand.onNodeCreated();
+        window.app.graph._nodes.push(callback, request, expand, zeroReplayExpand);
+        callback.title = "Before Matrix";
+        window.__scenePromptPopupTestHooks.syncAllScenePromptNames();
+        const apiPrompt = { output: {
+            "201": { class_type: "ScenePromptCallback", inputs: {} },
+            "202": { class_type: "ScenePromptCallbackRequest", inputs: {} },
+            "203": { class_type: "KSampler", inputs: {} },
+        } };
+        window.__scenePromptPopupTestHooks.applySceneSourceNodeNames(apiPrompt);
+        const before = {
+            callbackOutput: callback.outputs[0].type,
+            callbackInputOptional: callback.inputs.find((input) => input.name === "scene_prompt").link === null,
+            apiCallbackName: apiPrompt.output["201"].inputs.source_node_name,
+            apiProducerName: apiPrompt.output["202"].inputs.source_node_name,
+            callbackVisible: callback.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+            getHiddenText: request.widgets.find((widget) => widget.name === "text").hidden,
+            expandCallbackInputs: expand.inputs.map((input) => ({ name: input.name, type: input.type, link: input.link })),
+            expandCallbackWidgets: expand.widgets
+                .filter((widget) => ["callback_timeout_seconds", "callback_failure_mode"].includes(widget.name))
+                .map((widget) => ({ name: widget.name, label: widget.label, hidden: !!widget.hidden })),
+            loadedReplay: ["current_index", "seed_base", "seed_base_literal", "run_id"].map((name) => expand.widgets.find((widget) => widget.name === name).value),
+            loadedReplaySerialized: expand.serialize().widgets_values.slice(0, 3).concat(expand.serialize().widgets_values[8]),
+            zeroReplay: ["current_index", "seed_base", "seed_base_literal", "run_id"].map((name) => zeroReplayExpand.widgets.find((widget) => widget.name === name).value),
+            replaySeedLiteralHidden: zeroReplayExpand.widgets.find((widget) => widget.name === "seed_base_literal").hidden,
+            zeroReplaySerialized: zeroReplayExpand.serialize().widgets_values.slice(0, 3).concat(zeroReplayExpand.serialize().widgets_values[8]),
+        };
+        const method = request.widgets.find((widget) => widget.name === "method");
+        method.value = "POST";
+        method.callback();
+        return {
+            ...before,
+            postVisibleText: !request.widgets.find((widget) => widget.name === "text").hidden,
+            requestWidgets: request.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+        };
+    });
+    assert.equal(callbackUi.callbackOutput, "SCENE_PROMPT");
+    assert.equal(callbackUi.callbackInputOptional, true, "Callback accepts an unconnected first Scene input");
+    assert.equal(callbackUi.apiCallbackName, undefined, "Callback itself is excluded from Scene path names");
+    assert.equal(callbackUi.apiProducerName, undefined, "Callback configuration is not mistaken for a Scene-path node");
+    assert.deepEqual(callbackUi.callbackVisible, ["frequency", "timeout_seconds", "failure_mode"]);
+    assert.equal(callbackUi.getHiddenText, true, "GET hides its unused request body");
+    assert.equal(callbackUi.postVisibleText, true, "POST restores the request body input");
+    assert.deepEqual(callbackUi.requestWidgets, ["method", "url", "text", "body_type", "headers_json"]);
+    assert.deepEqual(callbackUi.expandCallbackInputs, [
+        { name: "callback_first", type: "SCENE_CALLBACK", link: null },
+        { name: "callback_each", type: "SCENE_CALLBACK", link: null },
+        { name: "callback_last", type: "SCENE_CALLBACK", link: null },
+    ], "Expand registers three optional Callback sockets");
+    assert.deepEqual(callbackUi.expandCallbackWidgets, [
+        { name: "callback_timeout_seconds", label: "Callbackタイムアウト（秒）", hidden: false },
+        { name: "callback_failure_mode", label: "Callback失敗時", hidden: false },
+    ], "Expand shows Japanese Callback settings");
+    assert.deepEqual(callbackUi.loadedReplay, [1, 41, false, ""], "loading keeps a nonzero saved index and seed while clearing only stale run state");
+    assert.deepEqual(callbackUi.loadedReplaySerialized, [1, "", 41, false], "normal replay serialization keeps a nonzero saved index and seed");
+    assert.deepEqual(callbackUi.zeroReplay, [0, 0, true, ""], "loading keeps literal seed 0 for one normal replay");
+    assert.equal(callbackUi.replaySeedLiteralHidden, true, "literal seed replay state stays internal");
+    assert.deepEqual(callbackUi.zeroReplaySerialized, [0, "", 0, true], "normal replay serialization keeps literal seed mode");
+
+    await page.evaluate(async () => {
+        const originalGraphToPrompt = window.app.graphToPrompt;
+        window.app.graphToPrompt = async () => ({ output: {
+            "201": { class_type: "ScenePromptCallback", inputs: { callback: ["202", 0] } },
+            "202": { class_type: "ScenePromptCallbackRequest", inputs: {} },
+            "301": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["201", 0] } },
+        } });
+        await window.__scenePromptPopupTestHooks.saveScenePreset({
+            id: 301,
+            graph: window.app.graph,
+            widgets: [
+                { name: "preset_id", value: "callback-preset" },
+                { name: "preset_name", value: "Callback Preset" },
+            ],
+        });
+        window.app.graphToPrompt = originalGraphToPrompt;
+    });
+    const callbackPresetSave = await page.evaluate(() => {
+        const call = window.__scenePromptCalls.findLast((entry) => entry.url.includes("/scene_presets/save"));
+        return JSON.parse(call.options.body).api_graph.output;
+    });
+    assert.equal(
+        callbackPresetSave["201"].inputs.source_node_name,
+        undefined,
+        "Preset saving does not inject an unsupported source_node_name into Scene Prompt Callback",
+    );
 
     await createPreparedRun(page);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));

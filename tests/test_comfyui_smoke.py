@@ -60,10 +60,38 @@ class RealComfyUISmokeTests(unittest.TestCase):
 
     def test_registers_current_nodes_and_web_directory(self):
         self.assertIn("ScenePrompter", self.package.NODE_CLASS_MAPPINGS)
+        self.assertIn("ScenePromptCallback", self.package.NODE_CLASS_MAPPINGS)
+        self.assertIn("ScenePromptCallbackDiscord", self.package.NODE_CLASS_MAPPINGS)
+        self.assertIn("ScenePromptCallbackRequest", self.package.NODE_CLASS_MAPPINGS)
         self.assertEqual(self.package.NODE_DISPLAY_NAME_MAPPINGS["ScenePrompter"], "Scene Prompt")
+        self.assertEqual(self.package.NODE_DISPLAY_NAME_MAPPINGS["ScenePromptCallback"], "Scene Prompt Callback")
         self.assertEqual(self.package.NODE_CLASS_MAPPINGS["SceneSaveImage"].CATEGORY, "Scene/output")
         self.assertEqual(self.package.WEB_DIRECTORY, "./web")
         self.assertTrue((ROOT / self.package.WEB_DIRECTORY).is_dir())
+
+    def test_callback_node_contract_uses_real_comfyui_type_registration(self):
+        callback = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallback"].INPUT_TYPES()
+        discord = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackDiscord"].INPUT_TYPES()
+        request = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackRequest"].INPUT_TYPES()
+        expand = self.package.NODE_CLASS_MAPPINGS["ScenePrompterExpand"].INPUT_TYPES()
+
+        self.assertEqual(callback["optional"]["callback"][0], "SCENE_CALLBACK")
+        self.assertIn("frequency", callback["required"])
+        self.assertIn("timeout_seconds", callback["required"])
+        self.assertIn("failure_mode", callback["required"])
+        self.assertEqual(callback["optional"]["scene_prompt"][0], "SCENE_PROMPT")
+        self.assertEqual(discord["required"]["webhook_url"][0], "STRING")
+        self.assertEqual(discord["required"]["text"][0], "STRING")
+        self.assertIn("username", discord["optional"])
+        self.assertEqual(request["required"]["method"][0], ["GET", "POST"])
+        self.assertEqual(request["required"]["url"][0], "STRING")
+        self.assertEqual(request["required"]["text"][0], "STRING")
+        self.assertEqual(request["required"]["body_type"][0], ["text", "json"])
+        self.assertEqual(request["required"]["headers_json"][0], "STRING")
+        for name in ("callback_first", "callback_each", "callback_last"):
+            self.assertEqual(expand["optional"][name][0], "SCENE_CALLBACK")
+        self.assertIn("callback_timeout_seconds", expand["optional"])
+        self.assertIn("callback_failure_mode", expand["optional"])
 
     def test_uses_established_scene_node_ids_without_aliases(self):
         self.assertNotIn("ScenePrompt", self.package.NODE_CLASS_MAPPINGS)

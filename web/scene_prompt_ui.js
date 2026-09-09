@@ -26,7 +26,23 @@ const SCENE_SAVE_IMAGE_NODE_NAMES = new Set(["SceneSaveImage", "Scene Save Image
 const SCENE_PRESET_INPUT_NODE_NAMES = new Set(["ScenePresetInput", "Scene Preset Input"]);
 const SCENE_PRESET_OUTPUT_NODE_NAMES = new Set(["ScenePresetOutput", "Scene Preset Output"]);
 const SCENE_PRESET_REFERENCE_NODE_NAMES = new Set(["ScenePresetReference", "Scene Preset Reference"]);
+const SCENE_PROMPT_CALLBACK_NODE_NAMES = new Set(["ScenePromptCallback", "Scene Prompt Callback"]);
+const SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES = new Set(["ScenePromptCallbackDiscord", "Scene Prompt Callback (Discord)"]);
+const SCENE_PROMPT_CALLBACK_REQUEST_NODE_NAMES = new Set(["ScenePromptCallbackRequest", "Scene Prompt Callback (Request)"]);
 const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
+    "ScenePrompter",
+    "SceneMatrix",
+    "ScenePath",
+    "ScenePrompterMerge",
+    "ScenePromptCounter",
+    "ScenePrompterQueue",
+    "SceneEmptyLatent",
+    "ScenePresetReference",
+    "ScenePromptCallback",
+    "ScenePromptCallbackDiscord",
+    "ScenePromptCallbackRequest",
+]);
+const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
     "ScenePrompter",
     "SceneMatrix",
     "ScenePath",
@@ -49,6 +65,9 @@ const NODE_NAMES = new Set([
     ...SCENE_PRESET_INPUT_NODE_NAMES,
     ...SCENE_PRESET_OUTPUT_NODE_NAMES,
     ...SCENE_PRESET_REFERENCE_NODE_NAMES,
+    ...SCENE_PROMPT_CALLBACK_NODE_NAMES,
+    ...SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES,
+    ...SCENE_PROMPT_CALLBACK_REQUEST_NODE_NAMES,
 ]);
 const POPUP_MIN_WIDTH = 420;
 const POPUP_MIN_HEIGHT = 180;
@@ -129,6 +148,21 @@ const SCENE_WIDGET_LABELS = {
     path: "保存パス",
     preset_id: "Preset ID",
     preset_name: "表示名",
+    webhook_url: "Webhook URL",
+    text: "テキスト",
+    username: "表示名",
+    method: "メソッド",
+    url: "URL",
+    body_type: "本文形式",
+    headers_json: "ヘッダー（JSON）",
+    callback_first: "開始時Callback",
+    callback_each: "毎回Callback",
+    callback_last: "完了時Callback",
+    callback_timeout_seconds: "Callbackタイムアウト（秒）",
+    callback_failure_mode: "Callback失敗時",
+    frequency: "実行頻度",
+    timeout_seconds: "タイムアウト（秒）",
+    failure_mode: "失敗時",
 };
 const SCENE_NODE_DISPLAY_NAMES = {
     ScenePrompter: "Scene Prompt",
@@ -143,6 +177,9 @@ const SCENE_NODE_DISPLAY_NAMES = {
     ScenePresetInput: "Scene Preset Input",
     ScenePresetOutput: "Scene Preset Output",
     ScenePresetReference: "Scene Preset Reference",
+    ScenePromptCallback: "Scene Prompt Callback",
+    ScenePromptCallbackDiscord: "Scene Prompt Callback (Discord)",
+    ScenePromptCallbackRequest: "Scene Prompt Callback (Request)",
 };
 
 let promptItems = null;
@@ -164,6 +201,7 @@ const sceneBatchRunsById = new Map();
 const sceneBatchPendingRuns = [];
 const sceneBatchPendingReleases = new Map();
 const sceneBatchDetachedRuns = new Map();
+const sceneBatchFinalizingRuns = new Set();
 const sceneBatchTerminalEvents = new Map();
 const SCENE_DETACHED_RETRY_MS = 30 * 1000;
 const SCENE_DETACHED_MAX_RETRIES = 20;
@@ -195,6 +233,8 @@ const sceneRunHandleReconcileTimers = new Map();
 const sceneRunReleaseStates = new Map();
 const SCENE_RUN_TERMINAL_MAX = 256;
 const SCENE_RUN_TERMINAL_RETENTION_MS = 10 * 60 * 1000;
+const SCENE_CALLBACK_FINALIZE_POLL_MS = 250;
+const SCENE_CALLBACK_FINALIZE_MAX_POLLS = 480;
 let sceneRunTerminalOverflowUntil = 0;
 
 const VISIBLE_INPUT_NAMES = new Set(["scene_prompt"]);
@@ -209,6 +249,7 @@ const INTERNAL_INPUT_NAMES = new Set([
     "current_index",
     "run_id",
     "seed_base",
+    "seed_base_literal",
     "randomize",
 ]);
 
@@ -3604,6 +3645,13 @@ function scenePromptTitle(node) {
     return "Scene Prompt";
 }
 
+function sceneSourceNodeName(node) {
+    const classType = nodeClassName(node);
+    const defaultName = SCENE_NODE_DISPLAY_NAMES[classType] || classType || "Scene Prompt";
+    const title = String(node?.title || "").trim();
+    return title && title !== classType && title !== defaultName ? title : defaultName;
+}
+
 function syncScenePromptNameFromTitle(node) {
     const widget = findWidget(node, "prompt_name");
     if (!widget) {
@@ -3660,12 +3708,41 @@ function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : isSceneExpandNodeName(nodeName)
-            ? new Set(["timestamp_dir", "prefix", "model_mode"])
+            ? new Set([
+                "timestamp_dir", "prefix", "model_mode",
+                "callback_first", "callback_each", "callback_last",
+                "callback_timeout_seconds", "callback_failure_mode",
+            ])
             : SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
                 ? new Set(["width", "height", "batch_size"])
                 : new Set();
     for (const widget of node.widgets || []) {
         if (widget?.sceneRole || visibleWidgets.has(widget?.name)) {
+            showWidget(widget);
+        } else {
+            hideWidget(widget);
+        }
+    }
+}
+
+function hideSceneCallbackWidgets(node) {
+    const visibleWidgets = new Set(["frequency", "timeout_seconds", "failure_mode"]);
+    for (const widget of node.widgets || []) {
+        if (widget?.sceneRole || visibleWidgets.has(widget?.name)) {
+            showWidget(widget);
+        } else {
+            hideWidget(widget);
+        }
+    }
+}
+
+function hideSceneCallbackProducerWidgets(node, nodeName) {
+    const visibleWidgets = SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES.has(nodeName)
+        ? new Set(["webhook_url", "text", "username"])
+        : new Set(["method", "url", "text", "body_type", "headers_json"]);
+    const isGet = String(findWidget(node, "method")?.value || "POST").toUpperCase() === "GET";
+    for (const widget of node.widgets || []) {
+        if (widget?.sceneRole || (visibleWidgets.has(widget?.name) && !(isGet && widget?.name === "text"))) {
             showWidget(widget);
         } else {
             hideWidget(widget);
@@ -4501,6 +4578,17 @@ function isScenePresetReferenceNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PRESET_REFERENCE_NODE_NAMES.has(name));
 }
 
+function isScenePromptCallbackNode(node) {
+    return nodeClassNames(node).some((name) => SCENE_PROMPT_CALLBACK_NODE_NAMES.has(name));
+}
+
+function isScenePromptCallbackProducerNode(node) {
+    return nodeClassNames(node).some((name) => (
+        SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES.has(name)
+        || SCENE_PROMPT_CALLBACK_REQUEST_NODE_NAMES.has(name)
+    ));
+}
+
 function isScenePromptSourceNode(node) {
     return isScenePromptNode(node)
         || isPromptMatrixNode(node)
@@ -4509,7 +4597,8 @@ function isScenePromptSourceNode(node) {
         || isScenePromptCounterNode(node)
         || isScenePromptQueueNode(node)
         || isSceneEmptyLatentNode(node)
-        || isScenePresetReferenceNode(node);
+        || isScenePresetReferenceNode(node)
+        || isScenePromptCallbackNode(node);
 }
 
 function liteGraphNodeMode(name, defaultValue) {
@@ -5714,7 +5803,10 @@ function sceneQueueEntriesHeight(entries, width, ctx = null) {
 }
 
 function sceneNodeById(nodeId) {
-    return app.graph?.getNodeById?.(nodeId) || app.graph?.getNodeById?.(Number(nodeId)) || null;
+    return app.graph?.getNodeById?.(nodeId)
+        || app.graph?.getNodeById?.(Number(nodeId))
+        || (app.graph?._nodes || []).find((node) => String(node?.id) === String(nodeId))
+        || null;
 }
 
 function sceneExpandScenePromptSourceNode(node) {
@@ -5859,6 +5951,15 @@ function scenePromptSourceLocalCacheKey(node) {
             snapshot: node?.scenePresetGraph?.metadata?.sha256 || "",
         });
     }
+    if (isScenePromptCallbackNode(node)) {
+        return JSON.stringify({
+            type: "callback",
+            id: node?.id ?? null,
+            mode: sceneNodeMode(node),
+            input: linkedInputKey(node, "scene_prompt"),
+            callback: linkedInputKey(node, "callback"),
+        });
+    }
     return "";
 }
 
@@ -5969,6 +6070,8 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             result = sceneStatsQueue([result], hasSource);
         } else if (node.class_type === "ScenePresetReference") {
             result = scenePresetStats(String(apiInput(node, "preset_id") || ""), source("scene_prompt"), nextStack);
+        } else if (node.class_type === "ScenePromptCallback") {
+            result = source("scene_prompt") || sceneStatsSeed();
         }
         result = sceneStatsResult(result);
         memo.set(nodeId, result);
@@ -6150,6 +6253,9 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
         const presetId = String(findWidget(node, "preset_id")?.value || "").trim();
         const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
         return finish(scenePresetStats(presetId, base, new Set(), node.scenePresetGraph || null));
+    }
+    if (isScenePromptCallbackNode(node)) {
+        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     return finish(emptyScenePromptStats());
 }
@@ -6438,6 +6544,13 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
                 },
             };
         }));
+    }
+
+    if (isScenePromptCallbackNode(node)) {
+        const upstream = scenePromptInputSource(node);
+        return finish(upstream
+            ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : [{ parts: [], count: 1, row: emptyMatrixRow() }]);
     }
 
     if (isPromptMatrixNode(node)) {
@@ -6799,6 +6912,9 @@ function sceneBatchRunStatus(run) {
     if (sceneBatchPendingRuns.includes(run)) {
         return "pending";
     }
+    if (sceneBatchFinalizingRuns.has(run)) {
+        return "finalizing";
+    }
     if (run.releaseBlocked) {
         return "blocked";
     }
@@ -6833,7 +6949,9 @@ function updateSceneExpandButton(node, options = {}) {
     const run = sceneBatchRunForNode(node);
     const status = sceneBatchRunStatus(run);
     if (status === "active") {
-        if (run.preparing) {
+        if (run.finalizing) {
+            button.name = "完了通知中";
+        } else if (run.preparing) {
             button.name = "準備中";
         } else {
             const current = Math.min(run.nextIndex + 1, run.total);
@@ -6842,7 +6960,7 @@ function updateSceneExpandButton(node, options = {}) {
     } else if (status === "pending") {
         const position = Math.max(1, sceneBatchPendingRuns.indexOf(run) + 1);
         button.name = `待機 ${position}/${sceneBatchPendingRuns.length}`;
-    } else if (status === "stopping") {
+    } else if (status === "stopping" || status === "finalizing") {
         button.name = "停止処理中";
     } else if (status === "blocked") {
         button.name = "停止確認待ち";
@@ -7044,12 +7162,31 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
         throw new Error("このComfyUIでは開始時点のプロンプトを安全に固定できません。");
     }
     const prompt = await graphToPrompt();
+    applySceneSourceNodeNames(prompt);
     const snapshot = sliceSceneBatchPrompt(cloneScenePromptPayload(prompt || {}), expandNodeId);
     const expandPrompt = snapshot?.output?.[String(expandNodeId)];
     if (!snapshot?.output || !expandPrompt?.inputs) {
         throw new Error("Scene Prompt Expand のプロンプトを取得できませんでした。");
     }
     return snapshot;
+}
+
+function applySceneSourceNodeNames(apiGraph, options = {}) {
+    for (const [nodeId, promptNode] of Object.entries(apiGraph?.output || {})) {
+        if (!SCENE_SOURCE_NODE_CLASS_TYPES.has(promptNode?.class_type)) {
+            continue;
+        }
+        if (options.onlyMissing && String(promptNode?.inputs?.source_node_name || "").trim()) {
+            continue;
+        }
+        const node = sceneNodeById(nodeId);
+        if (!node || !isScenePromptSourceNode(node)) {
+            continue;
+        }
+        promptNode.inputs = promptNode.inputs || {};
+        promptNode.inputs.source_node_name = sceneSourceNodeName(node);
+    }
+    return apiGraph;
 }
 
 function sceneRunTargetNodes(apiGraph) {
@@ -7311,6 +7448,7 @@ async function queueSingleScenePrompt() {
         expandPrompt.inputs.current_index = run.nextIndex;
         expandPrompt.inputs.run_id = run.runId;
         expandPrompt.inputs.seed_base = run.currentSeed;
+        expandPrompt.inputs.seed_base_literal = false;
         const result = await api.queuePrompt(0, run.cachedPrompt);
         acceptSceneBatchPrompt(run, result);
         return result;
@@ -7403,6 +7541,7 @@ function installSceneBatchPromptCapture() {
     }
     const originalQueuePrompt = api.queuePrompt.bind(api);
     api.queuePrompt = async function (number, prompt) {
+        applySceneSourceNodeNames(prompt, { onlyMissing: true });
         let preparedRunHandle = "";
         if (prompt?.output && sceneRunTargetNodes(prompt).length) {
             const existingHandle = sceneRunTargetNodes(prompt)
@@ -7516,15 +7655,14 @@ function releaseSceneBatchPlan(runId) {
     const key = String(runId || "");
     const run = sceneBatchRunsById.get(key) || sceneBatchDetachedRuns.get(key);
     if (!run || run.releaseRequested) {
-        return;
+        return run?.releasePromise || Promise.resolve(false);
     }
     run.releaseRequested = true;
     const release = () => releaseSceneRunHandle(run.runHandle);
-    if (run.runClaimPromise) {
-        run.runClaimPromise.finally(release);
-    } else {
-        release();
-    }
+    run.releasePromise = run.runClaimPromise
+        ? Promise.resolve(run.runClaimPromise).then(release, release)
+        : release();
+    return run.releasePromise;
 }
 
 function pruneSceneRunTerminalPromptIds(now = Date.now()) {
@@ -8152,6 +8290,7 @@ function resetSceneExpandRunControls(node, options = {}) {
     changed = setWidgetValue(node, "current_index", 0, { silent: true }) || changed;
     changed = setWidgetValue(node, "run_id", "", { silent: true }) || changed;
     changed = setWidgetValue(node, "seed_base", 0, { silent: true }) || changed;
+    changed = setWidgetValue(node, "seed_base_literal", false, { silent: true }) || changed;
     updateSceneExpandCountWidget(node);
     if (changed && options.mark !== false) {
         markSceneNodeChanged(node, options);
@@ -8185,7 +8324,7 @@ function cancelPendingSceneBatchRun(run) {
 }
 
 function activateNextSceneBatchRun() {
-    if (sceneBatchRun || sceneBatchDetachedRuns.size) {
+    if (sceneBatchRun || sceneBatchDetachedRuns.size || sceneBatchFinalizingRuns.size) {
         return;
     }
     let nextRun = sceneBatchPendingRuns.shift();
@@ -8237,6 +8376,7 @@ function createSceneBatchRun(node, total) {
     setWidgetValue(node, "current_index", 0, { silent: true });
     setWidgetValue(node, "run_id", run.runId, { silent: true });
     setWidgetValue(node, "seed_base", run.currentSeed, { silent: true });
+    setWidgetValue(node, "seed_base_literal", false, { silent: true });
     run.promptCapturePromise = createSceneBatchPromptSnapshot(node.id).catch((error) => {
         run.promptCaptureError = error;
         return null;
@@ -8338,9 +8478,10 @@ async function queueNextSceneBatchItem() {
             const changedIndex = setWidgetValue(node, "current_index", run.nextIndex, { silent: true });
             const changedRun = setWidgetValue(node, "run_id", run.runId, { silent: true });
             const changedSeed = setWidgetValue(node, "seed_base", run.currentSeed, { silent: true });
+            const changedSeedLiteral = setWidgetValue(node, "seed_base_literal", false, { silent: true });
             const lightweightDirty = { graphChange: false, background: false };
             refreshSceneBatchRunNode(run, lightweightDirty);
-            if (changedIndex || changedRun || changedSeed) {
+            if (changedIndex || changedRun || changedSeed || changedSeedLiteral) {
                 markSceneNodeChanged(node, lightweightDirty);
             }
         }
@@ -8373,6 +8514,10 @@ function startSceneBatchRun(node) {
     const existingRun = sceneBatchRunForNode(node);
     const existingStatus = sceneBatchRunStatus(existingRun);
     if (existingStatus === "active") {
+        if (existingRun.finalizing) {
+            showSceneBatchError("完了時Callbackの実行を待っています。");
+            return;
+        }
         stopSceneBatchRun();
         return;
     }
@@ -8386,6 +8531,10 @@ function startSceneBatchRun(node) {
     }
     if (existingStatus === "stopping") {
         showSceneBatchError("この連続生成は停止処理中です。完了後に再実行してください。");
+        return;
+    }
+    if (existingStatus === "finalizing") {
+        showSceneBatchError("完了時Callbackの実行を待っています。");
         return;
     }
 
@@ -8406,7 +8555,7 @@ function startSceneBatchRun(node) {
         return;
     }
 
-    if (sceneBatchRun || sceneBatchDetachedRuns.size) {
+    if (sceneBatchRun || sceneBatchDetachedRuns.size || sceneBatchFinalizingRuns.size) {
         sceneBatchPendingRuns.push(run);
         refreshSceneBatchRunNode(run);
         for (const pending of sceneBatchPendingRuns) {
@@ -8425,9 +8574,94 @@ function startSceneBatchRun(node) {
     queueNextSceneBatchItem();
 }
 
+function sceneExpandHasLastCallback(run) {
+    const expand = run?.firstPromptSnapshot?.output?.[String(run.nodeId)]
+        || run?.cachedPrompt?.output?.[String(run.nodeId)];
+    return !!scenePromptInputSourceId(expand?.inputs?.callback_last);
+}
+
+async function completeFinalSceneBatchRun(run, options = {}) {
+    if (!run || run.finalized) {
+        return;
+    }
+    run.finalized = true;
+    if (run.nextTimer) {
+        clearTimeout(run.nextTimer);
+        run.nextTimer = null;
+    }
+    if (run.activeReconcileTimer) {
+        clearTimeout(run.activeReconcileTimer);
+        run.activeReconcileTimer = null;
+    }
+    if (sceneBatchRun === run) {
+        sceneBatchRun = null;
+    }
+    sceneBatchFinalizingRuns.add(run);
+    clearPendingSceneBatchReleasesForRun(run.runId);
+    await releaseSceneBatchPlan(run.runId);
+    sceneBatchRunsById.delete(run.runId);
+    sceneBatchFinalizingRuns.delete(run);
+    const node = sceneNodeForRun(run);
+    if (node) {
+        resetSceneExpandRunControls(node, { mark: false });
+        updateSceneExpandButton(node);
+    }
+    if (options.activateNext !== false) {
+        activateNextSceneBatchRun();
+    }
+}
+
+async function finalizeSceneBatchRun(run, promptId) {
+    if (!run || run.finalizing || run.finalized || !promptId) {
+        return;
+    }
+    run.finalizing = true;
+    refreshSceneBatchRunNode(run, { graphChange: false, background: false });
+    try {
+        const request = {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                run_handle: run.runHandle,
+                expand_node_id: String(run.nodeId),
+                prompt_id: String(promptId),
+            }),
+        };
+        for (let attempt = 0; attempt < SCENE_CALLBACK_FINALIZE_MAX_POLLS; attempt += 1) {
+            const response = await api.fetchApi("/scene_prompt/runs/finalize", request);
+            const data = await readApiJson(response, "完了時Callbackの実行に失敗しました");
+            if (!response.ok) {
+                throw new Error(data?.error || "完了時Callbackの実行に失敗しました");
+            }
+            const state = String(data?.state || "");
+            if (response.status === 202 || state === "pending" || state === "in_progress") {
+                await new Promise((resolve) => setTimeout(resolve, SCENE_CALLBACK_FINALIZE_POLL_MS));
+                continue;
+            }
+            if (state === "error") {
+                throw new Error(data?.error || "完了時Callbackの実行に失敗しました");
+            }
+            const warnings = Array.isArray(data?.warnings)
+                ? data.warnings
+                : data?.warning ? [data.warning] : [];
+            for (const warning of warnings) {
+                console.warn("[Scene Prompt] 完了時Callback:", warning);
+            }
+            await completeFinalSceneBatchRun(run);
+            return;
+        }
+        throw new Error("完了時Callbackの完了確認がタイムアウトしました");
+    } catch (error) {
+        await completeFinalSceneBatchRun(run, { activateNext: false });
+        showSceneBatchError("完了時Callbackに失敗したため、後続の連続生成は開始しません。", error);
+    } finally {
+        run.finalizing = false;
+    }
+}
+
 function continueSceneBatchRun(detail = null) {
     const run = sceneBatchRun;
-    if (!run || !run.waiting) {
+    if (!run || !run.waiting || run.finalizing) {
         return;
     }
     if (!sceneBatchEventMatchesRun(run, detail)) {
@@ -8445,6 +8679,10 @@ function continueSceneBatchRun(detail = null) {
     if (promptId) {
         run.pendingPromptIds.delete(promptId);
         sceneBatchTerminalEvents.delete(promptId);
+    }
+    if (run.nextIndex + 1 >= run.total && sceneExpandHasLastCallback(run)) {
+        run.finalizePromise = finalizeSceneBatchRun(run, promptId);
+        return;
     }
     run.currentPromptId = "";
     run.promptAccepted = false;
@@ -9277,7 +9515,9 @@ async function saveScenePreset(node) {
         if (!graphToPrompt || !app.graph?.serialize) {
             throw new Error("Preset保存に必要なComfyUI APIが見つかりません。");
         }
+        syncAllScenePromptNames();
         const apiGraph = await graphToPrompt();
+        applySceneSourceNodeNames(apiGraph);
         const workflow = app.graph.serialize();
         const expectedRevision = scenePresetEditorRevision(workflow, presetId);
         const payload = {
@@ -9487,13 +9727,48 @@ function attachScenePromptQueue(node) {
     app.canvas?.setDirty?.(true, true);
 }
 
+function attachScenePromptCallback(node) {
+    injectStyle();
+    applySceneWidgetLabels(node);
+    node.resizable = true;
+    installSceneConnectionWatcher(node);
+    hideSceneCallbackWidgets(node);
+    scheduleHideInternalDomWidgets();
+    installSceneResizeHandler(node, "simple");
+    node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function attachScenePromptCallbackProducer(node, nodeName) {
+    injectStyle();
+    applySceneWidgetLabels(node);
+    node.resizable = true;
+    const method = findWidget(node, "method");
+    if (method && !method.sceneCallbackRequestSyncWrapped) {
+        const originalCallback = method.callback;
+        method.callback = function () {
+            const result = originalCallback?.apply(this, arguments);
+            hideSceneCallbackProducerWidgets(node, nodeName);
+            node.setDirtyCanvas?.(true, true);
+            app.graph?.setDirtyCanvas?.(true, true);
+            return result;
+        };
+        method.sceneCallbackRequestSyncWrapped = true;
+    }
+    hideSceneCallbackProducerWidgets(node, nodeName);
+    scheduleHideInternalDomWidgets();
+    installSceneResizeHandler(node, "simple");
+    node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+}
+
 function attachSceneUtilityNode(node, nodeName) {
     injectStyle();
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
     if (isSceneExpandNodeName(nodeName)) {
         if (!sceneBatchRunForNode(node)) {
-            resetSceneExpandRunControls(node, { mark: false });
+            setWidgetValue(node, "run_id", "", { silent: true });
         }
         ensureSceneExpandControls(node);
     }
@@ -9548,6 +9823,9 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
 
 function attachSceneNode(node, nodeName) {
     installSceneNodeRemovalCleanup(node, nodeName);
+    if (isScenePromptSourceNode(node) && !isScenePromptCallbackNode(node)) {
+        sceneTitleSyncNodes.add(node);
+    }
     if (isScenePresetOutputNode(node) || SCENE_PRESET_OUTPUT_NODE_NAMES.has(nodeName)) {
         attachScenePresetOutput(node);
     } else if (isScenePresetReferenceNode(node) || SCENE_PRESET_REFERENCE_NODE_NAMES.has(nodeName)) {
@@ -9565,6 +9843,10 @@ function attachSceneNode(node, nodeName) {
         attachScenePromptCounter(node);
     } else if (isScenePromptQueueNode(node) || SCENE_PROMPT_QUEUE_NODE_NAMES.has(nodeName)) {
         attachScenePromptQueue(node);
+    } else if (isScenePromptCallbackNode(node) || SCENE_PROMPT_CALLBACK_NODE_NAMES.has(nodeName)) {
+        attachScenePromptCallback(node);
+    } else if (isScenePromptCallbackProducerNode(node)) {
+        attachScenePromptCallbackProducer(node, nodeName);
     } else if (
         SCENE_PROMPT_EXPAND_NODE_NAMES.has(nodeName)
         || SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)

@@ -84,6 +84,16 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertEqual(self.routes._load_items(), [])
         self.assertEqual(self.routes._load_saved_prompts(), [])
 
+    def test_completed_prompt_status_reports_error_before_completed_flag(self):
+        self.routes.PromptServer.instance.prompt_queue = types.SimpleNamespace(
+            get_history=lambda **_kwargs: {"failed": {"status": {"status_str": "error", "completed": False}}}
+        )
+        self.assertEqual(self.routes._completed_prompt_status("failed"), "failed")
+        self.routes.PromptServer.instance.prompt_queue = types.SimpleNamespace(
+            get_history=lambda **_kwargs: {"pending": {"status": {"status_str": None, "completed": False}}}
+        )
+        self.assertEqual(self.routes._completed_prompt_status("pending"), "pending")
+
     def test_corrupt_prompt_data_is_reported_with_filename(self):
         path = self.data_dir / "Category" / "prompt.json"
         path.parent.mkdir(parents=True)
