@@ -36,11 +36,13 @@ function lifecycleContext(response) {
         Object,
         encodeURIComponent,
         setTimeout,
+        clearTimeout,
         console: { warn() {} },
         SCENE_CALLBACK_FINALIZE_POLL_MS: 0,
         SCENE_CALLBACK_FINALIZE_MAX_POLLS: 4,
         sceneBatchRun: null,
         sceneBatchRunsById: new Map(),
+        sceneBatchDetachedRuns: new Map(),
         sceneBatchPendingRuns: [{ runId: "next" }],
         sceneBatchPendingReleases: new Map(),
         sceneBatchFinalizingRuns: new Set(),
@@ -62,7 +64,11 @@ function lifecycleContext(response) {
         sceneBatchEventMatchesRun(run, detail) { return String(detail?.prompt_id || "") === run.currentPromptId; },
         scenePromptIdFromValue(value) { return String(value?.prompt_id || ""); },
         sceneNodeForRun() { return null; },
-        clearPendingSceneBatchReleasesForRun() {},
+        sceneBatchRunForNode() { return context.nodeRun || null; },
+        cancelSceneBatchRunPreparation() {},
+        rememberDetachedSceneBatchRun() { throw new Error("finalizing runs must not detach"); },
+        cancelPendingSceneBatchRun() { throw new Error("finalizing runs must not become pending"); },
+        releaseDetachedSceneBatchRun() { throw new Error("finalizing runs must not release as detached"); },
         resetSceneExpandRunControls() {},
         updateSceneExpandButton() {},
         refreshSceneBatchRunNode() {},
@@ -78,10 +84,14 @@ function lifecycleContext(response) {
     };
     vm.createContext(context);
     for (const name of [
+        "clearPendingSceneBatchReleasesForRun",
+        "clearDetachedSceneBatchRun",
         "sceneExpandHasLastCallback",
         "completeFinalSceneBatchRun",
         "finalizeSceneBatchRun",
         "continueSceneBatchRun",
+        "stopSceneBatchRun",
+        "cancelSceneBatchRunForNode",
     ]) {
         vm.runInContext(functionSource(name), context);
     }
@@ -125,14 +135,18 @@ async function testFinalCallbackWaitsBeforeReleaseAndFifo() {
         run_handle: "handle-one", expand_node_id: "9", prompt_id: "prompt-one",
     });
     assert.equal(context.releaseCalls.length, 0, "the context stays live while final Callback is pending");
+    assert.equal(context.sceneBatchFinalizingRuns.has(run), true, "the finalizing run blocks FIFO as soon as final Callback communication starts");
     assert.equal(context.activated, 0, "the next FIFO run waits for final Callback");
 
     response.resolve({ ok: true, payload: { warnings: ["temporary transport error"] } });
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 5));
     assert.deepEqual(context.releaseCalls, ["run-one"], "final Callback completion releases its context");
+    assert.equal(context.sceneBatchFinalizingRuns.has(run), true, "FIFO remains blocked until context release completes");
     assert.equal(context.activated, 0, "release completion still gates the next FIFO run");
     release.resolve(true);
     await run.finalizePromise;
+    assert.equal(context.sceneBatchFinalizingRuns.size, 0, "completed finalization releases its FIFO gate");
+    assert.equal(context.sceneBatchDetachedRuns.size, 0, "completed finalization leaves no detached reconciliation entry");
     assert.equal(context.activated, 1, "the next FIFO run starts after final Callback and release complete");
 }
 
@@ -145,10 +159,92 @@ async function testFinalStopFailureDoesNotStartNextRun() {
     context.continueSceneBatchRun({ prompt_id: "prompt-one" });
     await new Promise((resolve) => setTimeout(resolve, 5));
     assert.deepEqual(context.releaseCalls, ["run-one"], "a stopping final Callback failure still releases its context");
+    context.nodeRun = run;
+    context.cancelSceneBatchRunForNode({});
+    assert.equal(context.sceneBatchDetachedRuns.size, 0, "removing the node during a failed final Callback cannot create a detached run");
+    assert.equal(context.sceneBatchPendingReleases.size, 0, "removing the node during finalization cannot schedule history reconciliation");
     release.resolve(true);
     await run.finalizePromise;
+    assert.equal(context.sceneBatchFinalizingRuns.size, 0, "failed finalization releases its FIFO gate after context cleanup");
+    assert.equal(context.sceneBatchDetachedRuns.size, 0, "failed finalization leaves no later reconciliation path");
     assert.equal(context.activated, 0, "a stopping final Callback failure does not start later queued runs");
     assert.equal(context.errors.length, 1, "a stopping final Callback failure is visible");
+}
+
+async function testFinalizingStopsDoNotDetach() {
+    for (const options of [{}, { forceRelease: true }]) {
+        const { context, release } = lifecycleContext({ ok: true, payload: {} });
+        const run = finalRun();
+        run.finalizing = true;
+        context.sceneBatchRun = run;
+        context.sceneBatchRunsById.set(run.runId, run);
+        context.sceneBatchFinalizingRuns.add(run);
+
+        context.stopSceneBatchRun(options);
+        assert.equal(context.sceneBatchRun, null, "stopping leaves the finalizing run inactive");
+        assert.equal(context.sceneBatchDetachedRuns.size, 0, "normal and forced stops never detach a finalizing run");
+        assert.equal(context.sceneBatchPendingReleases.size, 0, "normal and forced stops do not schedule detached release");
+        assert.equal(context.sceneBatchFinalizingRuns.has(run), true, "the finalization promise retains FIFO ownership");
+
+        const completion = context.completeFinalSceneBatchRun(run);
+        release.resolve(true);
+        await completion;
+        assert.equal(context.sceneBatchFinalizingRuns.size, 0, "completion clears the finalization gate");
+        assert.equal(context.activated, 1, "a successful finalization activates FIFO once after release");
+    }
+}
+
+async function testFinalCompletionClearsDetachedReconciliation() {
+    const { context, release } = lifecycleContext({ ok: true, payload: {} });
+    const run = finalRun();
+    run.detachedTimer = setTimeout(() => { throw new Error("detached reconciliation was not cleared"); }, 1_000);
+    context.sceneBatchRunsById.set(run.runId, run);
+    context.sceneBatchDetachedRuns.set(run.runId, run);
+    context.sceneBatchPendingReleases.set("prompt-one", {
+        runId: run.runId,
+        timer: setTimeout(() => { throw new Error("pending detached release was not cleared"); }, 1_000),
+    });
+
+    const completion = context.completeFinalSceneBatchRun(run);
+    assert.equal(context.sceneBatchDetachedRuns.size, 0, "final completion clears a detached run left by earlier cancellation");
+    assert.equal(context.sceneBatchPendingReleases.size, 0, "final completion clears its detached history-release timer");
+    release.resolve(true);
+    await completion;
+    assert.equal(context.sceneBatchFinalizingRuns.size, 0, "final completion releases the finalization gate");
+    assert.equal(context.activated, 1, "clean completion resumes FIFO once");
+}
+
+async function testFinalizingNodeRemovalDefersCleanupUntilResponse() {
+    for (const scenario of [
+        { name: "success", response: { ok: true, payload: {} }, activated: 1, errors: 0 },
+        { name: "failure", response: { ok: false, payload: { error: "callback stopped" } }, activated: 0, errors: 1 },
+    ]) {
+        const response = deferred();
+        const { context, release } = lifecycleContext(response.promise);
+        const run = finalRun();
+        context.sceneBatchRun = run;
+        context.nodeRun = run;
+        context.sceneBatchRunsById.set(run.runId, run);
+
+        context.continueSceneBatchRun({ prompt_id: "prompt-one" });
+        await new Promise((resolve) => setImmediate(resolve));
+        context.cancelSceneBatchRunForNode({});
+        assert.equal(context.sceneBatchRun, null, `${scenario.name}: node removal stops the active finalizing run`);
+        assert.equal(context.sceneBatchDetachedRuns.size, 0, `${scenario.name}: node removal while final request is pending does not detach it`);
+        assert.equal(context.sceneBatchFinalizingRuns.has(run), true, `${scenario.name}: node removal leaves finalization responsible for cleanup`);
+
+        response.resolve(scenario.response);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        assert.deepEqual(context.releaseCalls, ["run-one"], `${scenario.name}: finalization always waits for context release`);
+        assert.equal(context.activated, 0, `${scenario.name}: FIFO remains blocked while release is pending after node removal`);
+        release.resolve(true);
+        await run.finalizePromise;
+        assert.equal(context.sceneBatchDetachedRuns.size, 0, `${scenario.name}: cleanup removes every detached entry`);
+        assert.equal(context.sceneBatchPendingReleases.size, 0, `${scenario.name}: cleanup removes every detached release timer`);
+        assert.equal(context.sceneBatchFinalizingRuns.size, 0, `${scenario.name}: cleanup releases the finalization gate`);
+        assert.equal(context.activated, scenario.activated, `${scenario.name}: no later history reconciliation can change FIFO activation`);
+        assert.equal(context.errors.length, scenario.errors, `${scenario.name}: stopping failure remains visible`);
+    }
 }
 
 async function testFinalCallbackPollsUntilBackendFinalizes() {
@@ -212,6 +308,9 @@ function testNoLastCallbackUsesNormalCompletion() {
 Promise.resolve()
     .then(testFinalCallbackWaitsBeforeReleaseAndFifo)
     .then(testFinalStopFailureDoesNotStartNextRun)
+    .then(testFinalizingStopsDoNotDetach)
+    .then(testFinalCompletionClearsDetachedReconciliation)
+    .then(testFinalizingNodeRemovalDefersCleanupUntilResponse)
     .then(testFinalCallbackPollsUntilBackendFinalizes)
     .then(testHistorySuccessFinalizesBeforeRelease)
     .then(testNoLastCallbackUsesNormalCompletion)

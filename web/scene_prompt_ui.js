@@ -8179,6 +8179,7 @@ function sceneBatchEventMatchesRun(run, detail) {
 
 function stopSceneBatchRun(options = {}) {
     const run = sceneBatchRun;
+    const finalizing = !!run && (run.finalizing || sceneBatchFinalizingRuns.has(run));
     if (run?.nextTimer) {
         clearTimeout(run.nextTimer);
         run.nextTimer = null;
@@ -8192,6 +8193,12 @@ function stopSceneBatchRun(options = {}) {
         cancelSceneBatchRunPreparation(run);
     }
     sceneBatchRun = null;
+    if (finalizing) {
+        if (previousNode) {
+            updateSceneExpandButton(previousNode);
+        }
+        return;
+    }
     const deferRelease = options.forceRelease !== true && !!run?.waiting;
     if (deferRelease) {
         run.controlsResetPending = true;
@@ -8607,6 +8614,7 @@ async function completeFinalSceneBatchRun(run, options = {}) {
         sceneBatchRun = null;
     }
     sceneBatchFinalizingRuns.add(run);
+    clearDetachedSceneBatchRun(run);
     clearPendingSceneBatchReleasesForRun(run.runId);
     await releaseSceneBatchPlan(run.runId);
     sceneBatchRunsById.delete(run.runId);
@@ -8626,6 +8634,7 @@ async function finalizeSceneBatchRun(run, promptId) {
         return;
     }
     run.finalizing = true;
+    sceneBatchFinalizingRuns.add(run);
     refreshSceneBatchRunNode(run, { graphChange: false, background: false });
     try {
         const request = {
