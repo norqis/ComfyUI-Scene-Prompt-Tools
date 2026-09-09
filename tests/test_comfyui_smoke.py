@@ -73,6 +73,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
         callback = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallback"].INPUT_TYPES()
         discord = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackDiscord"].INPUT_TYPES()
         request = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallbackRequest"].INPUT_TYPES()
+        expand = self.package.NODE_CLASS_MAPPINGS["ScenePrompterExpand"].INPUT_TYPES()
 
         self.assertEqual(callback["optional"]["callback"][0], "SCENE_CALLBACK")
         self.assertIn("frequency", callback["required"])
@@ -87,6 +88,10 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertEqual(request["required"]["text"][0], "STRING")
         self.assertEqual(request["required"]["body_type"][0], ["text", "json"])
         self.assertEqual(request["required"]["headers_json"][0], "STRING")
+        for name in ("callback_first", "callback_each", "callback_last"):
+            self.assertEqual(expand["optional"][name][0], "SCENE_CALLBACK")
+        self.assertIn("callback_timeout_seconds", expand["optional"])
+        self.assertIn("callback_failure_mode", expand["optional"])
 
     def test_uses_established_scene_node_ids_without_aliases(self):
         self.assertNotIn("ScenePrompt", self.package.NODE_CLASS_MAPPINGS)

@@ -327,6 +327,110 @@ def _callback_graph(receiver_url, path="callbacks", *, batch_size=2, count=2, ex
     return graph
 
 
+def _expand_lifecycle_graph(receiver_url, path="expand-lifecycle", *, count=2):
+    def producer(marker):
+        return {
+            "class_type": "ScenePromptCallbackRequest",
+            "inputs": {
+                "method": "POST",
+                "url": receiver_url,
+                "text": _callback_payload_template(marker),
+                "body_type": "json",
+                "headers_json": "{}",
+            },
+        }
+
+    return {
+        "1": {
+            "class_type": "ScenePrompter",
+            "inputs": {
+                **_scene_prompt_inputs(),
+                "positive_base": "lifecycle",
+                "negative_base": "lifecycle-negative",
+                "source_node_name": "Lifecycle source",
+            },
+        },
+        "2": producer("first"),
+        "3": producer("each"),
+        "4": producer("pathA"),
+        "5": {
+            "class_type": "ScenePromptCallback",
+            "inputs": {
+                "scene_prompt": ["1", 0],
+                "callback": ["4", 0],
+                "frequency": "毎回",
+                "timeout_seconds": 10,
+                "failure_mode": "停止",
+            },
+        },
+        "6": producer("pathB"),
+        "7": {
+            "class_type": "ScenePromptCallback",
+            "inputs": {
+                "scene_prompt": ["5", 0],
+                "callback": ["6", 0],
+                "frequency": "毎回",
+                "timeout_seconds": 10,
+                "failure_mode": "停止",
+            },
+        },
+        "8": {
+            "class_type": "ScenePromptCounter",
+            "inputs": {"scene_prompt": ["7", 0], "count": count, "source_node_name": "Lifecycle count"},
+        },
+        "9": {
+            "class_type": "SceneEmptyLatent",
+            "inputs": {
+                "scene_prompt": ["8", 0],
+                "width": 16,
+                "height": 16,
+                "batch_size": 1,
+                "source_node_name": "Lifecycle latent",
+            },
+        },
+        "10": {
+            "class_type": "ScenePrompterExpand",
+            "inputs": {
+                "scene_prompt": ["9", 0],
+                "current_index": 0,
+                "run_id": "expand-lifecycle",
+                "seed_base": 101,
+                "timestamp_dir": False,
+                "prefix": "",
+                "callback_first": ["2", 0],
+                "callback_each": ["3", 0],
+                "callback_last": ["11", 0],
+                "callback_timeout_seconds": 10,
+                "callback_failure_mode": "停止",
+            },
+        },
+        "11": producer("last"),
+        "12": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+        "13": {
+            "class_type": "SceneSaveImage",
+            "inputs": {
+                "images": ["12", 0],
+                "path": path,
+                "metadata_mode": "生成経路ノードのみ",
+                "scene_info": ["10", 2],
+            },
+        },
+    }
+
+
+def _renumber_graph(graph, offset):
+    """Make a disjoint prompt graph that can share a single run handle."""
+    mapping = {str(node_id): str(int(node_id) + offset) for node_id in graph}
+    result = {}
+    for node_id, node in graph.items():
+        copied = copy.deepcopy(node)
+        for value in copied.get("inputs", {}).values():
+            if isinstance(value, list) and len(value) == 2 and str(value[0]) in mapping:
+                value[0] = mapping[str(value[0])]
+        result[mapping[str(node_id)]] = copied
+    return result
+
+
 def _workflow_for_graph(graph):
     nodes = []
     links = []
@@ -461,6 +565,21 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             detail = exc.read().decode("utf-8", errors="replace")
             raise AssertionError(f"{path} returned HTTP {exc.code}: {detail}") from exc
 
+    @classmethod
+    def _request_status(cls, path, payload=None):
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{cls.port}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"} if data else {},
+            method="POST" if data else "GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
     def _wait_for_prompt(self, prompt_id, timeout=60):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -474,6 +593,16 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                 self.fail(json.dumps(entry, ensure_ascii=False))
             time.sleep(0.2)
         self.fail(f"Timed out waiting for prompt {prompt_id}")
+
+    def _wait_for_prompt_error(self, prompt_id, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            entry = self._request(f"/history/{prompt_id}").get(prompt_id)
+            status = entry.get("status", {}) if isinstance(entry, dict) else {}
+            if status.get("status_str") == "error":
+                return entry
+            time.sleep(0.1)
+        self.fail(f"Timed out waiting for failed prompt {prompt_id}")
 
     def _queue_and_wait(self, graph, *, extra_data=None, timeout=60):
         payload = {"prompt": graph}
@@ -503,6 +632,184 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             })
             self.assertTrue(claimed["claimed"])
         return self._wait_for_prompt(queued["prompt_id"])
+
+    def _queue_lifecycle_graph(self, graph, handle, workflow, *, claim_run=False):
+        queued = self._request("/prompt", {
+            "prompt": graph,
+            "extra_data": {"extra_pnginfo": {"workflow": workflow}},
+        })
+        if claim_run:
+            claimed = self._request("/scene_prompt/runs/claim", {
+                "run_handle": handle,
+                "prompt_id": queued["prompt_id"],
+            })
+            self.assertTrue(claimed["claimed"])
+        return queued["prompt_id"], self._wait_for_prompt(queued["prompt_id"])
+
+    def test_http_expand_callback_lifecycle_finalizes_after_last_saved_image(self):
+        with _CallbackReceiver() as receiver:
+            graph = _expand_lifecycle_graph(receiver.url)
+            handle, workflow = self._prepare_callback_run(graph)
+            try:
+                first_prompt_id, _first = self._queue_lifecycle_graph(graph, handle, workflow, claim_run=True)
+                received = receiver.wait_for(4)
+                self.assertEqual(len(received), 4)
+                first_files = sorted((self.base / "output" / "expand-lifecycle").glob("*.png"))
+                self.assertEqual(len(first_files), 1)
+                self.assertLessEqual(
+                    max(request["received_at"] for request in received),
+                    first_files[0].stat().st_mtime + 0.02,
+                )
+
+                cached = copy.deepcopy({node_id: graph[node_id] for node_id in ("10", "12", "13")})
+                del cached["10"]["inputs"]["scene_prompt"]
+                cached["10"]["inputs"]["current_index"] = 1
+                second_prompt_id, _second = self._queue_lifecycle_graph(cached, handle, workflow)
+                received = receiver.wait_for(7)
+                self.assertEqual(len(received), 7)
+                all_files = sorted((self.base / "output" / "expand-lifecycle").glob("*.png"))
+                self.assertEqual(len(all_files), 2)
+                new_files = [file_path for file_path in all_files if file_path not in first_files]
+                self.assertEqual(len(new_files), 1)
+                self.assertLessEqual(
+                    max(request["received_at"] for request in received[4:]),
+                    new_files[0].stat().st_mtime + 0.02,
+                )
+
+                pending_status, pending = self._request_status("/scene_prompt/runs/finalize", {
+                    "run_handle": handle,
+                    "expand_node_id": "10",
+                    "prompt_id": f"{second_prompt_id}-not-finished",
+                })
+                self.assertEqual(pending_status, 202)
+                self.assertEqual(pending["state"], "pending")
+                self.assertEqual(len(receiver.wait_for(7, timeout=0.1)), 7)
+
+                wrong_status, wrong = self._request_status("/scene_prompt/runs/finalize", {
+                    "run_handle": handle,
+                    "expand_node_id": "10",
+                    "prompt_id": first_prompt_id,
+                })
+                self.assertEqual(wrong_status, 409)
+                self.assertEqual(wrong["state"], "wrong_prompt")
+                self.assertEqual(len(receiver.wait_for(7, timeout=0.1)), 7)
+
+                finalized = self._request("/scene_prompt/runs/finalize", {
+                    "run_handle": handle,
+                    "expand_node_id": "10",
+                    "prompt_id": second_prompt_id,
+                })
+                self.assertEqual(finalized["state"], "finalized")
+                received = receiver.wait_for(8)
+                self.assertEqual(len(received), 8)
+                self.assertGreaterEqual(received[-1]["received_at"], max(file_path.stat().st_mtime for file_path in all_files))
+
+                duplicate_status, duplicate = self._request_status("/scene_prompt/runs/finalize", {
+                    "run_handle": handle,
+                    "expand_node_id": "10",
+                    "prompt_id": second_prompt_id,
+                })
+                self.assertEqual(duplicate_status, 200)
+                self.assertEqual(duplicate["state"], "finalized")
+                self.assertEqual(len(receiver.wait_for(8, timeout=0.1)), 8)
+
+                a_received = list(received)
+                second_expand = _renumber_graph(
+                    _expand_lifecycle_graph(receiver.url, "expand-lifecycle-second", count=1),
+                    100,
+                )
+                second_expand["110"]["inputs"]["run_id"] = "expand-lifecycle-second"
+                _apply_run_handle(second_expand, handle)
+                second_prompt_id, _second_expand = self._queue_lifecycle_graph(
+                    second_expand, handle, _workflow_for_graph(second_expand)
+                )
+                second_received = receiver.wait_for(12)
+                self.assertEqual(len(second_received), 12)
+                self.assertEqual(
+                    [json.loads(request["body"].decode("utf-8"))["marker"] for request in second_received[-4:]],
+                    ["first", "each", "pathA", "pathB"],
+                )
+                self.assertEqual(self._request("/scene_prompt/runs/finalize", {
+                    "run_handle": handle,
+                    "expand_node_id": "110",
+                    "prompt_id": second_prompt_id,
+                })["state"], "finalized")
+                second_received = receiver.wait_for(13)
+                self.assertEqual(len(second_received), 13)
+                self.assertEqual(json.loads(second_received[-1]["body"].decode("utf-8"))["marker"], "last")
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+
+            payloads = [json.loads(request["body"].decode("utf-8")) for request in a_received]
+            self.assertEqual(
+                [payload["marker"] for payload in payloads],
+                ["first", "each", "pathA", "pathB", "each", "pathA", "pathB", "last"],
+            )
+            for payload in payloads:
+                self.assertEqual(payload["current_positive"], payload["all_positive"])
+                self.assertEqual(payload["current_negative"], payload["all_negative"])
+                self.assertEqual(payload["current_positive"], "lifecycle")
+                self.assertEqual(payload["current_negative"], "lifecycle-negative")
+                self.assertEqual(payload["exec_total_count"], "2")
+            self.assertEqual(payloads[0]["exec_current_count"], "1")
+            self.assertEqual(payloads[0]["exec_seed"], "101")
+            self.assertEqual(payloads[-1]["exec_current_count"], "2")
+            self.assertEqual(payloads[-1]["exec_seed"], "102")
+            for payload in payloads:
+                if payload["marker"] in {"first", "each", "last"}:
+                    self.assertEqual(payload["current_node_names"], payload["all_node_names"])
+                    self.assertEqual(
+                        payload["all_node_names"],
+                        "Lifecycle source_Lifecycle count_Lifecycle latent",
+                    )
+
+            reset_graph = _expand_lifecycle_graph(receiver.url, "expand-lifecycle-reset", count=1)
+            reset_handle, reset_workflow = self._prepare_callback_run(reset_graph)
+            try:
+                reset_prompt_id, _reset = self._queue_lifecycle_graph(
+                    reset_graph, reset_handle, reset_workflow, claim_run=True
+                )
+                self.assertEqual(len(receiver.wait_for(17)), 17)
+                self.assertEqual(self._request("/scene_prompt/runs/finalize", {
+                    "run_handle": reset_handle,
+                    "expand_node_id": "10",
+                    "prompt_id": reset_prompt_id,
+                })["state"], "finalized")
+                reset_received = receiver.wait_for(18)
+                self.assertEqual(len(reset_received), 18)
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": reset_handle})["released"])
+            self.assertEqual(
+                [json.loads(request["body"].decode("utf-8"))["marker"] for request in reset_received[-5:]],
+                ["first", "each", "pathA", "pathB", "last"],
+            )
+
+            blocked = self.base / "output" / "expand-lifecycle-failed"
+            blocked.parent.mkdir(parents=True, exist_ok=True)
+            blocked.write_text("not a directory", encoding="utf-8")
+            failed_graph = _expand_lifecycle_graph(receiver.url, "expand-lifecycle-failed", count=1)
+            failed_handle, failed_workflow = self._prepare_callback_run(failed_graph)
+            try:
+                queued = self._request("/prompt", {
+                    "prompt": failed_graph,
+                    "extra_data": {"extra_pnginfo": {"workflow": failed_workflow}},
+                })
+                self.assertTrue(self._request("/scene_prompt/runs/claim", {
+                    "run_handle": failed_handle,
+                    "prompt_id": queued["prompt_id"],
+                })["claimed"])
+                self._wait_for_prompt_error(queued["prompt_id"])
+                self.assertEqual(len(receiver.wait_for(22)), 22)
+                status_code, failed_finalize = self._request_status("/scene_prompt/runs/finalize", {
+                    "run_handle": failed_handle,
+                    "expand_node_id": "10",
+                    "prompt_id": queued["prompt_id"],
+                })
+                self.assertEqual(status_code, 409)
+                self.assertEqual(failed_finalize["state"], "not_success")
+                self.assertEqual(len(receiver.wait_for(22, timeout=0.1)), 22)
+            finally:
+                self._request("/scene_prompt/runs/release", {"run_handle": failed_handle})
 
     def test_http_callbacks_dispatch_final_values_once_per_run_and_reuse_cached_plan(self):
         with _CallbackReceiver() as receiver:
@@ -641,9 +948,33 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                 "api_graph": preset_graph,
                 "workflow": _workflow_for_graph(preset_graph["output"]),
             })
+            wrapper_graph = {
+                "output": {
+                    "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                    "2": {
+                        "class_type": "ScenePresetReference",
+                        "inputs": {"preset_id": "callback-preset", "scene_prompt": ["1", 0]},
+                    },
+                    "3": {
+                        "class_type": "ScenePresetOutput",
+                        "inputs": {
+                            "preset_id": "callback-wrapper",
+                            "preset_name": "Callback wrapper",
+                            "scene_prompt": ["2", 0],
+                        },
+                    },
+                },
+            }
+            self._request("/scene_presets/save", {
+                "preset_id": "callback-wrapper",
+                "name": "Callback wrapper",
+                "output_node_id": "3",
+                "api_graph": wrapper_graph,
+                "workflow": _workflow_for_graph(wrapper_graph["output"]),
+            })
             graph = {
                 "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-preset"}},
-                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-preset"}},
+                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-wrapper"}},
                 "3": {
                     "class_type": "ScenePrompterQueue",
                     "inputs": {
@@ -702,6 +1033,9 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
                     [json.loads(request["body"].decode("utf-8"))["exec_current_count"] for request in received],
                     ["1", "2"],
                 )
+                for request in received:
+                    names = json.loads(request["body"].decode("utf-8"))["all_node_names"].split("_")
+                    self.assertEqual(names, list(dict.fromkeys(names)))
             finally:
                 self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
 
