@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -13,11 +14,18 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock, Thread
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENE_RUN_NODE_CLASSES = {"ScenePrompter", "SceneMatrix", "ScenePresetReference", "ScenePrompterExpand"}
+SCENE_RUN_NODE_CLASSES = {
+    "ScenePrompter",
+    "SceneMatrix",
+    "ScenePresetReference",
+    "ScenePrompterExpand",
+}
 
 
 def _source_root():
@@ -33,6 +41,61 @@ def _free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         return listener.getsockname()[1]
+
+
+class _CallbackReceiver:
+    """A loopback-only callback endpoint used by the isolated CPU harness."""
+
+    def __enter__(self):
+        receiver = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _record(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b""
+                with receiver._lock:
+                    receiver.requests.append({
+                        "method": self.command,
+                        "path": self.path,
+                        "headers": dict(self.headers.items()),
+                        "body": body,
+                    })
+                self.send_response(204)
+                self.end_headers()
+
+            do_GET = _record
+            do_POST = _record
+
+            def log_message(self, _format, *_args):
+                pass
+
+        self._lock = Lock()
+        self.requests = []
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_exc_info):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    @property
+    def url(self):
+        host, port = self.server.server_address
+        return f"http://{host}:{port}/callback"
+
+    def wait_for(self, count, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if len(self.requests) >= count:
+                    return list(self.requests)
+            time.sleep(0.02)
+        with self._lock:
+            return list(self.requests)
 
 
 def _scene_prompt_inputs():
@@ -84,6 +147,142 @@ def _save_graph(mode, path="runtime", *, width=16, height=16, batch_size=1, expa
     if expand_presets:
         graph["6"]["inputs"]["expand_preset_contents"] = True
         graph["7"]["inputs"]["expand_preset_contents"] = True
+    return graph
+
+
+def _callback_payload_template(marker):
+    return json.dumps({
+        "marker": marker,
+        "current_positive": "{current_positive}",
+        "current_negative": "{current_negative}",
+        "all_positive": "{all_positive}",
+        "all_negative": "{all_negative}",
+        "current_node_names": "{current_node_names}",
+        "all_node_names": "{all_node_names}",
+        "exec_current_count": "{exec_current_count}",
+        "exec_total_count": "{exec_total_count}",
+        "exec_model": "{exec_model}",
+        "exec_seed": "{exec_seed}",
+    }, ensure_ascii=False)
+
+
+def _callback_graph(receiver_url, path="callbacks", *, batch_size=2, count=2, expand_presets=False):
+    """A no-inference graph whose callbacks bracket later plan contributions."""
+    graph = {
+        "1": {
+            "class_type": "ScenePrompter",
+            "inputs": {
+                **_scene_prompt_inputs(),
+                "positive_base": "before",
+                "negative_base": "before-negative",
+                "source_node_name": "Callback source",
+            },
+        },
+        "2": {
+            "class_type": "ScenePromptCallbackRequest",
+            "inputs": {
+                "method": "POST",
+                "url": receiver_url,
+                "text": _callback_payload_template("every"),
+                "body_type": "json",
+                "headers_json": '{"X-Callback-Test":"{exec_current_count}"}',
+            },
+        },
+        "3": {
+            "class_type": "ScenePromptCallback",
+            "inputs": {
+                "scene_prompt": ["1", 0],
+                "callback": ["2", 0],
+                "frequency": "毎回",
+                "timeout_seconds": 10,
+                "failure_mode": "停止",
+            },
+        },
+        "4": {
+            "class_type": "ScenePromptCallbackRequest",
+            "inputs": {
+                "method": "POST",
+                "url": receiver_url,
+                "text": _callback_payload_template("first"),
+                "body_type": "json",
+                "headers_json": "{}",
+            },
+        },
+        "5": {
+            "class_type": "ScenePromptCallback",
+            "inputs": {
+                "scene_prompt": ["3", 0],
+                "callback": ["4", 0],
+                "frequency": "初回",
+                "timeout_seconds": 10,
+                "failure_mode": "停止",
+            },
+        },
+        "6": {
+            "class_type": "ScenePrompter",
+            "inputs": {
+                **_scene_prompt_inputs(),
+                "scene_prompt": ["5", 0],
+                "positive_base": "after",
+                "negative_base": "after-negative",
+                "source_node_name": "Later source",
+            },
+        },
+        "7": {
+            "class_type": "ScenePrompterQueue",
+            "inputs": {
+                "scene_prompt1": ["6", 0],
+                "source_node_name": "Selected queue",
+            },
+        },
+        "8": {
+            "class_type": "ScenePromptCounter",
+            "inputs": {"scene_prompt": ["7", 0], "count": count, "source_node_name": "Selected count"},
+        },
+        "9": {
+            "class_type": "SceneEmptyLatent",
+            "inputs": {
+                "scene_prompt": ["8", 0],
+                "width": 16,
+                "height": 16,
+                "batch_size": batch_size,
+                "source_node_name": "Selected latent",
+            },
+        },
+        "10": {
+            "class_type": "ScenePrompterExpand",
+            "inputs": {
+                "scene_prompt": ["9", 0],
+                "current_index": 0,
+                "run_id": "callback-http",
+                "seed_base": 41,
+                "timestamp_dir": False,
+                "prefix": "",
+            },
+        },
+        "11": {
+            "class_type": "EmptyImage",
+            "inputs": {"width": 16, "height": 16, "batch_size": batch_size, "color": 0},
+        },
+        "12": {
+            "class_type": "SceneSaveImage",
+            "inputs": {
+                "images": ["11", 0],
+                "path": path,
+                "metadata_mode": "生成経路ノードのみ",
+                "scene_info": ["10", 2],
+                "expand_preset_contents": expand_presets,
+            },
+        },
+        "13": {
+            "class_type": "ScenePrompter",
+            "inputs": {
+                **_scene_prompt_inputs(),
+                "positive_base": "unconnected",
+                "source_node_name": "Unconnected branch",
+            },
+        },
+    }
     return graph
 
 
@@ -240,6 +439,235 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         if extra_data is not None:
             payload["extra_data"] = extra_data
         return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
+
+    def _prepare_callback_run(self, graph, expand_node_id="10"):
+        workflow = _workflow_for_graph(graph)
+        prepared = self._request("/scene_prompt/runs/prepare", {
+            "api_graph": {"output": graph},
+            "expand_node_id": expand_node_id,
+            "workflow": workflow,
+        })
+        _apply_run_handle(graph, prepared["run_handle"])
+        return prepared["run_handle"], workflow
+
+    def _queue_callback_graph(self, graph, handle, workflow, *, claim_run=False):
+        queued = self._request("/prompt", {
+            "prompt": graph,
+            "extra_data": {"extra_pnginfo": {"workflow": workflow}},
+        })
+        if claim_run:
+            claimed = self._request("/scene_prompt/runs/claim", {
+                "run_handle": handle,
+                "prompt_id": queued["prompt_id"],
+            })
+            self.assertTrue(claimed["claimed"])
+        return self._wait_for_prompt(queued["prompt_id"])
+
+    def test_http_callbacks_dispatch_final_values_once_per_run_and_reuse_cached_plan(self):
+        with _CallbackReceiver() as receiver:
+            graph = _callback_graph(receiver.url, "callback-runtime")
+            handle, workflow = self._prepare_callback_run(graph)
+            self.assertEqual(receiver.requests, [], "Preparing or previewing a run must not dispatch callbacks.")
+            try:
+                first = self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                self.assertIn("12", first["outputs"])
+                received = receiver.wait_for(2)
+                self.assertEqual(len(received), 2)
+
+                cached = copy.deepcopy({node_id: graph[node_id] for node_id in ("10", "11", "12")})
+                del cached["10"]["inputs"]["scene_prompt"]
+                cached["10"]["inputs"]["current_index"] = 1
+                cached["10"]["inputs"]["seed_base"] = 41
+                self._queue_callback_graph(cached, handle, workflow)
+                received = receiver.wait_for(3)
+                self.assertEqual(len(received), 3)
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+
+            received_before_reset = list(received)
+            reset_graph = _callback_graph(receiver.url, "callback-reset", batch_size=1, count=1)
+            reset_handle, reset_workflow = self._prepare_callback_run(reset_graph)
+            try:
+                self._queue_callback_graph(reset_graph, reset_handle, reset_workflow, claim_run=True)
+                reset_received = receiver.wait_for(5)
+                self.assertEqual(len(reset_received), 5)
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": reset_handle})["released"])
+
+        payloads = [json.loads(request["body"].decode("utf-8")) for request in received_before_reset]
+        reset_payloads = [json.loads(request["body"].decode("utf-8")) for request in reset_received[-2:]]
+        self.assertEqual({payload["marker"] for payload in reset_payloads}, {"every", "first"})
+        every = [payload for payload in payloads if payload["marker"] == "every"]
+        first_only = [payload for payload in payloads if payload["marker"] == "first"]
+        self.assertEqual(len(every), 2)
+        self.assertEqual(len(first_only), 1)
+        self.assertEqual([payload["exec_current_count"] for payload in every], ["1", "2"])
+        self.assertEqual([payload["exec_seed"] for payload in every], ["41", "42"])
+        for payload in payloads:
+            self.assertEqual(payload["current_positive"], "before")
+            self.assertEqual(payload["current_negative"], "before-negative")
+            self.assertEqual(payload["all_positive"], "before, after")
+            self.assertEqual(payload["all_negative"], "before-negative, after-negative")
+            self.assertEqual(payload["exec_total_count"], "2")
+            self.assertEqual(payload["exec_model"], "Illustrious")
+            self.assertIn("Callback source", payload["current_node_names"])
+            self.assertNotIn("Later source", payload["current_node_names"])
+            self.assertIn("Callback source", payload["all_node_names"])
+            self.assertIn("Later source", payload["all_node_names"])
+            self.assertIn("Selected queue", payload["all_node_names"])
+            self.assertNotIn("Unconnected branch", payload["all_node_names"])
+
+        self.assertEqual(received[0]["headers"]["X-Callback-Test"], "1")
+        files = sorted((self.base / "output" / "callback-runtime").glob("*.png"))
+        self.assertEqual(len(files), 4, "Two batches with batch_size=2 must save four images.")
+        from PIL import Image
+        for file_path in files:
+            with Image.open(file_path) as image:
+                saved_prompt = json.loads(image.text["prompt"])
+            self.assertIn("2", saved_prompt)
+            self.assertIn("3", saved_prompt)
+            self.assertIn("4", saved_prompt)
+            self.assertIn("5", saved_prompt)
+            self.assertNotIn("13", saved_prompt)
+
+    def test_http_preset_callbacks_expand_into_execution_metadata_and_replay(self):
+        with _CallbackReceiver() as receiver:
+            preset_graph = {
+                "output": {
+                    "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                    "2": {
+                        "class_type": "ScenePrompter",
+                        "inputs": {
+                            **_scene_prompt_inputs(),
+                            "scene_prompt": ["1", 0],
+                            "positive_base": "preset-positive",
+                            "source_node_name": "Preset source",
+                        },
+                    },
+                    "3": {
+                        "class_type": "ScenePromptCallbackRequest",
+                        "inputs": {
+                            "method": "POST",
+                            "url": receiver.url,
+                            "text": _callback_payload_template("preset"),
+                            "body_type": "json",
+                            "headers_json": "{}",
+                        },
+                    },
+                    "4": {
+                        "class_type": "ScenePromptCallback",
+                        "inputs": {
+                            "scene_prompt": ["2", 0],
+                            "callback": ["3", 0],
+                            "frequency": "毎回",
+                            "timeout_seconds": 10,
+                            "failure_mode": "停止",
+                        },
+                    },
+                    "5": {
+                        "class_type": "ScenePresetOutput",
+                        "inputs": {
+                            "preset_id": "callback-preset",
+                            "preset_name": "Callback preset",
+                            "scene_prompt": ["4", 0],
+                        },
+                    },
+                },
+            }
+            self._request("/scene_presets/save", {
+                "preset_id": "callback-preset",
+                "name": "Callback preset",
+                "output_node_id": "5",
+                "api_graph": preset_graph,
+                "workflow": _workflow_for_graph(preset_graph["output"]),
+            })
+            graph = {
+                "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-preset"}},
+                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-preset"}},
+                "3": {
+                    "class_type": "ScenePrompterQueue",
+                    "inputs": {
+                        "scene_prompt1": ["1", 0],
+                        "scene_prompt2": ["2", 0],
+                        "source_node_name": "Preset queue",
+                    },
+                },
+                "4": {
+                    "class_type": "SceneEmptyLatent",
+                    "inputs": {"scene_prompt": ["3", 0], "width": 16, "height": 16, "batch_size": 1},
+                },
+                "6": {
+                    "class_type": "ScenePrompterExpand",
+                    "inputs": {
+                        "scene_prompt": ["4", 0],
+                        "current_index": 0,
+                        "run_id": "preset-callback-http",
+                        "seed_base": 7,
+                        "timestamp_dir": False,
+                        "prefix": "",
+                    },
+                },
+                "7": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+                "8": {
+                    "class_type": "SceneSaveImage",
+                    "inputs": {
+                        "images": ["7", 0],
+                        "path": "preset-callback-off",
+                        "metadata_mode": "生成経路ノードのみ",
+                        "scene_info": ["6", 2],
+                        "expand_preset_contents": False,
+                    },
+                },
+                "9": {
+                    "class_type": "SceneSaveImage",
+                    "inputs": {
+                        "images": ["7", 0],
+                        "path": "preset-callback-on",
+                        "metadata_mode": "生成経路ノードのみ",
+                        "scene_info": ["6", 2],
+                        "expand_preset_contents": True,
+                    },
+                },
+            }
+            handle, workflow = self._prepare_callback_run(graph, "6")
+            try:
+                self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                graph["6"]["inputs"]["current_index"] = 1
+                self._queue_callback_graph(graph, handle, workflow)
+                received = receiver.wait_for(2)
+                self.assertEqual(len(received), 2)
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+
+            from PIL import Image
+            with Image.open(sorted((self.base / "output" / "preset-callback-off").glob("*.png"))[0]) as image:
+                off_prompt = json.loads(image.text["prompt"])
+            with Image.open(sorted((self.base / "output" / "preset-callback-on").glob("*.png"))[0]) as image:
+                on_prompt = json.loads(image.text["prompt"])
+                on_workflow = json.loads(image.text["workflow"])
+
+            self.assertIn("ScenePresetReference", {node["class_type"] for node in off_prompt.values()})
+            self.assertNotIn("ScenePresetReference", {node["class_type"] for node in on_prompt.values()})
+            self.assertIn("ScenePromptCallback", {node["class_type"] for node in on_prompt.values()})
+            self.assertIn("ScenePromptCallbackRequest", {node["class_type"] for node in on_prompt.values()})
+            callback_node = next(node for node in on_prompt.values() if node["class_type"] == "ScenePromptCallback")
+            callback_source = callback_node["inputs"]["callback"]
+            self.assertIsInstance(callback_source, list)
+            self.assertEqual(on_prompt[str(callback_source[0])]["class_type"], "ScenePromptCallbackRequest")
+            self.assertIn("ScenePromptCallback", {node["type"] for node in on_workflow["nodes"]})
+
+            replay_handle, replay_workflow = self._prepare_callback_run(on_prompt, "6")
+            try:
+                self._queue_callback_graph(on_prompt, replay_handle, replay_workflow, claim_run=True)
+                replay_received = receiver.wait_for(3)
+                self.assertEqual(len(replay_received), 3)
+            finally:
+                self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})["released"])
+
+        self.assertEqual(
+            [json.loads(request["body"].decode("utf-8"))["marker"] for request in replay_received],
+            ["preset", "preset", "preset"],
+        )
 
     def test_http_prompt_history_two_outputs_and_metadata_modes(self):
         for index, mode in enumerate(("ワークフロー全体", "生成経路ノードのみ", "プロンプトのみ"), start=1):
