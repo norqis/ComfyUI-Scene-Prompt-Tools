@@ -21,6 +21,7 @@ jobs:
         with:
           node-version: '20'
       - run: npm ci
+      - run: npx playwright install --with-deps chromium
       - run: python tools/fix_preset_force_race.py
       - run: |
           npm run check:frontend
