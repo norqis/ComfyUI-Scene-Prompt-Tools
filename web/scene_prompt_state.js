@@ -103,12 +103,12 @@ function parseSelectedPart(value, promptParts, label) {
         throw new Error(`${label} index is invalid.`);
     }
     const text = requireString(value.text, `${label} text`, { allowEmpty: false });
-    const missing = value.missing ?? false;
+    let missing = value.missing ?? false;
     if (typeof missing !== "boolean") {
         throw new Error(`${label} missing must be a boolean.`);
     }
     if (!missing && (value.index >= promptParts.length || promptParts[value.index] !== text)) {
-        throw new Error(`${label} does not match its prompt part.`);
+        missing = true;
     }
     const result = { index: value.index, text };
     if (missing) result.missing = true;

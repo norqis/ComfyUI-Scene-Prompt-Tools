@@ -205,9 +205,8 @@ def _validate_selected_part(part, prompt_parts, label):
     missing = part.get("missing", False)
     if "missing" in part and not isinstance(missing, bool):
         raise ValueError(f"{label} missing must be a boolean.")
-    if not missing:
-        if part["index"] >= len(prompt_parts) or prompt_parts[part["index"]] != text:
-            raise ValueError(f"{label} does not match its prompt part.")
+    if not missing and (part["index"] >= len(prompt_parts) or prompt_parts[part["index"]] != text):
+        missing = True
     result = {"index": part["index"], "text": text}
     if missing:
         result["missing"] = True

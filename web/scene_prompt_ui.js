@@ -9541,6 +9541,21 @@ async function openScenePresetPicker(node) {
         return;
     }
     const popup = openPopupShell(node, "Scene Presetを選択", { hideReload: true, hideClear: true });
+    const toolbar = document.createElement("div");
+    toolbar.className = "pc-toolbar";
+    const reload = createButton("再読み込み");
+    reload.addEventListener("click", async () => {
+        const refreshed = await loadPopupRequest(
+            node,
+            () => refreshScenePresetReferenceList(node, true),
+            "Preset一覧を再取得できませんでした。",
+        );
+        if (!refreshed) return;
+        refreshAllScenePresetReferences(refreshed);
+        openScenePresetPicker(node);
+    });
+    toolbar.appendChild(reload);
+    popup.appendChild(toolbar);
     const list = document.createElement("div");
     list.className = "pc-popup-list pc-popup-category-list";
     if (!presets.length) {

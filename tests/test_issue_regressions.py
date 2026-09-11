@@ -114,6 +114,37 @@ class OpenIssueRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(self.presets.ScenePresetError, "hash"):
             self.presets._validate_preset_payload(corrupted)
 
+    def test_legacy_file_load_is_read_only_and_same_id_overwrite_bumps_revision(self):
+        raw = self.legacy_payload()
+        path = self.presets._preset_path("legacy", "default")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        original_bytes = (json.dumps(raw, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        path.write_bytes(original_bytes)
+
+        loaded = self.presets.load_preset("legacy", "default")
+        self.assertEqual(loaded["api_graph"]["output"]["2"]["class_type"], "ScenePrompter")
+        self.assertEqual(path.read_bytes(), original_bytes)
+
+        current_graph = loaded["api_graph"]
+        current_workflow = loaded["workflow"]
+        saved = self.presets.save_preset({
+            "preset_id": "legacy",
+            "name": "Legacy",
+            "expected_revision": 1,
+            "output_node_id": "3",
+            "api_graph": current_graph,
+            "workflow": current_workflow,
+        }, "default")
+        self.assertEqual(saved["metadata"]["revision"], 2)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["metadata"]["revision"], 2)
+        self.assertEqual(on_disk["api_graph"]["output"]["2"]["class_type"], "ScenePrompter")
+        self.assertEqual(on_disk["workflow"]["nodes"][1]["type"], "ScenePrompter")
+        self.assertEqual(
+            on_disk["metadata"]["sha256"],
+            self.presets._content_hash(on_disk["api_graph"], on_disk["workflow"]),
+        )
+
     def test_legacy_expand_remains_disallowed_after_normalization(self):
         payload = self.legacy_payload("ScenePromptExpand")
         with self.assertRaises(self.presets.ScenePresetError):

@@ -140,6 +140,11 @@ def _normalize_model_mode(value):
 
 
 def _model_prompt_weight(weight, model_mode):
+    # The ranges overlap, so values already inside the selected model's distinct
+    # range are left alone to avoid double conversion.  For Anima, Illustrious
+    # 1.0..1.5 is scaled by 5x around 1.0 and clamped at 3.0 (1.4 -> 3.0).
+    # For Illustrious, Anima-only >1.5..3.0 uses the inverse mapping. Values
+    # below 1.0, above 3.0, and negative weights are intentionally unchanged.
     value = float(weight)
     mode = _normalize_model_mode(model_mode)
     if mode == MODEL_MODE_ANIMA and 1.0 <= value <= 1.5:
