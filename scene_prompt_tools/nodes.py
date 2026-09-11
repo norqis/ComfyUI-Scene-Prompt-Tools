@@ -97,6 +97,7 @@ PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
 MODEL_MODE_ILLUSTRIOUS = "Illustrious"
 MODEL_MODE_ANIMA = "Anima"
 MODEL_MODE_CHOICES = (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
+MODEL_WEIGHT_RE = re.compile(r"(:\s*)([+-]?(?:\d+(?:\.\d+)?|\.\d+))(?=\s*\))")
 
 DEFAULT_MATRIX_JSON = "{\"version\":1,\"sets\":[]}"
 SCENE_PROMPT_INPUT_NAMES = tuple(f"scene_prompt{index}" for index in range(1, 11))
@@ -136,6 +137,27 @@ def _normalize_path_mode(value):
 
 def _normalize_model_mode(value):
     return MODEL_MODE_ANIMA if str(value or "").strip() == MODEL_MODE_ANIMA else MODEL_MODE_ILLUSTRIOUS
+
+
+def _model_prompt_weight(weight, model_mode):
+    value = float(weight)
+    mode = _normalize_model_mode(model_mode)
+    if mode == MODEL_MODE_ANIMA and 1.0 <= value <= 1.5:
+        return min(3.0, 1.0 + ((value - 1.0) * 5.0))
+    if mode == MODEL_MODE_ILLUSTRIOUS and 1.5 < value <= 3.0:
+        return 1.0 + ((value - 1.0) / 5.0)
+    return value
+
+
+def _convert_model_prompt_weights(text, model_mode):
+    def replace(match):
+        raw = float(match.group(2))
+        converted = _model_prompt_weight(raw, model_mode)
+        if abs(converted - raw) < 0.0005:
+            return match.group(0)
+        return f"{match.group(1)}{converted:.3f}".rstrip("0").rstrip(".")
+
+    return MODEL_WEIGHT_RE.sub(replace, str(text or ""))
 
 
 def _scene_bool(value, default=True):
@@ -1811,7 +1833,10 @@ class ScenePromptExpand:
         )
         positive = _join_unique(positive_parts, separator)
         negative = _join_unique(negative_parts, separator)
-        if _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA:
+        normalized_model = _normalize_model_mode(model_mode)
+        positive = _convert_model_prompt_weights(positive, normalized_model)
+        negative = _convert_model_prompt_weights(negative, normalized_model)
+        if normalized_model == MODEL_MODE_ANIMA:
             positive = positive.replace("_", " ")
             negative = negative.replace("_", " ")
         callback_values = {
@@ -1821,13 +1846,13 @@ class ScenePromptExpand:
             "all_node_names": _callback_names(row, row.get("source_node_ids", [])),
             "exec_current_count": global_index + 1,
             "exec_total_count": int(item.get("total_batches", 0)),
-            "exec_model": _normalize_model_mode(model_mode), "exec_seed": seed,
+            "exec_model": normalized_model, "exec_seed": seed,
         }
         callback_id = str(unique_id or "")
         desktop_context = get_run_delivery_context(run_handle)
         _dispatch_expand_callback(callback_first, f"{callback_id}:first", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, once=True, desktop_context=desktop_context)
         _dispatch_expand_callback(callback_each, f"{callback_id}:each", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, desktop_context=desktop_context)
-        _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, positive, negative, desktop_context=desktop_context)
+        _dispatch_row_callbacks(row, item, seed, normalized_model, run_handle, positive, negative, desktop_context=desktop_context)
         if callback_last is not None and run_handle and global_index + 1 == int(item.get("total_batches", 0)):
             prompt_id = _current_prompt_id()
             register_last_callback(run_handle, callback_id, callback_last, callback_values, callback_timeout_seconds, callback_failure_mode, prompt_id, desktop_context)

@@ -17,7 +17,7 @@ SELECTION_ITEM_KNOWN_KEYS = (
     SELECTION_ITEM_REQUIRED_KEYS | SELECTION_ITEM_OPTIONAL_KEYS | SELECTION_ITEM_LEGACY_OPTIONAL_KEYS
 )
 SELECTED_PART_REQUIRED_KEYS = {"index", "text"}
-SELECTED_PART_OPTIONAL_KEYS = {"weight"}
+SELECTED_PART_OPTIONAL_KEYS = {"weight", "missing"}
 MIN_WEIGHT = 0.05
 MAX_WEIGHT = 3.0
 
@@ -112,6 +112,8 @@ def _selected_prompt_parts(categories, order):
             selected_parts = item.get("selected_parts")
             if selected_parts is not None:
                 for selected_part in selected_parts:
+                    if selected_part.get("missing") is True:
+                        continue
                     part_text = selected_part["text"]
                     weight = _item_weight(selected_part)
                     parts.extend(_apply_weight(part, weight) for part in _split_prompt(part_text))
@@ -197,12 +199,18 @@ def _validate_weight(value, label):
 
 def _validate_selected_part(part, prompt_parts, label):
     _require_exact_keys(part, SELECTED_PART_REQUIRED_KEYS, SELECTED_PART_OPTIONAL_KEYS, label)
-    if type(part["index"]) is not int or not 0 <= part["index"] < len(prompt_parts):
+    if type(part["index"]) is not int or part["index"] < 0:
         raise ValueError(f"{label} index is invalid.")
     text = _require_nonempty_string(part["text"], f"{label} text")
-    if prompt_parts[part["index"]] != text:
-        raise ValueError(f"{label} does not match its prompt part.")
+    missing = part.get("missing", False)
+    if "missing" in part and not isinstance(missing, bool):
+        raise ValueError(f"{label} missing must be a boolean.")
+    if not missing:
+        if part["index"] >= len(prompt_parts) or prompt_parts[part["index"]] != text:
+            raise ValueError(f"{label} does not match its prompt part.")
     result = {"index": part["index"], "text": text}
+    if missing:
+        result["missing"] = True
     if "weight" in part:
         result["weight"] = _validate_weight(part["weight"], f"{label} weight")
     return result

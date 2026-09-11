@@ -911,17 +911,49 @@ function normalizedSelectedParts(item, source = item) {
     if (!source.selected_parts.length) {
         throw new Error("選択済みのプロンプト要素が空です。");
     }
-    const seen = new Set();
+    const sourceParts = itemPromptParts(source);
+    const used = new Set();
+    const fallbackOccurrences = new Map();
     return source.selected_parts.map((raw) => {
-        if (!raw || typeof raw !== "object" || !Number.isInteger(raw.index) || raw.index < 0 || raw.index >= parts.length) {
+        if (!raw || typeof raw !== "object" || !Number.isInteger(raw.index) || raw.index < 0
+            || typeof raw.text !== "string" || !raw.text.trim()) {
             throw new Error("選択済みのプロンプト要素が不正です。");
         }
-        const part = parts[raw.index];
-        if (raw.text !== part.text || seen.has(part.index)) {
-            throw new Error("選択済みのプロンプト要素が現在のプロンプトと一致しません。");
+        if (Object.hasOwn(raw, "missing") && typeof raw.missing !== "boolean") {
+            throw new Error("選択済みのプロンプト要素が不正です。");
         }
-        seen.add(part.index);
-        const selectedPart = { index: part.index, text: part.text };
+        const text = raw.text.trim();
+        let occurrence = null;
+        if (!raw.missing && raw.index < sourceParts.length && sourceParts[raw.index]?.text === text) {
+            occurrence = sourceParts
+                .slice(0, raw.index + 1)
+                .filter((part) => part.text === text)
+                .length - 1;
+        }
+        if (occurrence === null) {
+            occurrence = fallbackOccurrences.get(text) || 0;
+        }
+        fallbackOccurrences.set(text, occurrence + 1);
+
+        let matched = null;
+        let seen = -1;
+        for (const part of parts) {
+            if (part.text !== text) {
+                continue;
+            }
+            seen += 1;
+            if (seen === occurrence && !used.has(part.index)) {
+                matched = part;
+                break;
+            }
+        }
+
+        const selectedPart = matched
+            ? { index: matched.index, text: matched.text }
+            : { index: raw.index, text, missing: true };
+        if (matched) {
+            used.add(matched.index);
+        }
         const stored = weightForStorage(raw.weight ?? 1);
         if (stored !== null) selectedPart.weight = stored;
         return selectedPart;
@@ -934,7 +966,10 @@ function itemHasPartSelection(item) {
 
 function itemHasPartialSelection(item) {
     const selectedParts = normalizedSelectedParts(item, item);
-    return !!selectedParts && selectedParts.length < itemPromptParts(item).length;
+    return !!selectedParts && (
+        selectedParts.some((part) => part.missing)
+        || selectedParts.filter((part) => !part.missing).length < itemPromptParts(item).length
+    );
 }
 
 function itemWeightSuffix(item) {
@@ -975,12 +1010,6 @@ function itemForState(item, weightSource = item) {
 }
 
 function itemForEditedState(updatedItem, previousItem) {
-    if (!Array.isArray(previousItem?.selected_parts)) {
-        return itemForState(updatedItem, previousItem);
-    }
-    if (updatedItem.prompt !== previousItem.prompt) {
-        throw new Error("一部選択されている候補は、選択を解除してからプロンプトを編集してください。");
-    }
     return itemForState(updatedItem, previousItem);
 }
 
@@ -1116,6 +1145,51 @@ function graphNodes() {
     return Array.isArray(app?.graph?._nodes) ? app.graph._nodes.filter(Boolean) : [];
 }
 
+function preflightPromptItemReplacement(node, originalItem, updatedItem, options = {}) {
+    const originalCategory = itemCategoryKey(originalItem);
+    const updatedCategory = itemCategoryKey(updatedItem);
+    const originalKey = itemKey(originalItem);
+    if (!originalCategory || !updatedCategory || !originalKey) {
+        return;
+    }
+
+    const matrixLineContext = matrixLineDraftContextFor(node, options.stateWidgetName);
+    if (matrixLineContext) {
+        for (const side of ["positive", "negative"]) {
+            replacePromptItemInState(
+                matrixLineDraftSelectionState(matrixLineContext.draft, side),
+                originalCategory,
+                originalKey,
+                updatedItem,
+                updatedCategory,
+            );
+        }
+    }
+
+    for (const graphNode of graphNodes()) {
+        if (isScenePromptNode(graphNode)) {
+            for (const stateWidgetName of selectionStateWidgetNames(graphNode)) {
+                replacePromptItemInState(
+                    readStateFromWidget(graphNode, stateWidgetName),
+                    originalCategory,
+                    originalKey,
+                    updatedItem,
+                    updatedCategory,
+                );
+            }
+        }
+        if (isPromptMatrixNode(graphNode)) {
+            replacePromptItemInMatrixState(
+                readMatrixState(graphNode),
+                originalCategory,
+                originalKey,
+                updatedItem,
+                updatedCategory,
+            );
+        }
+    }
+}
+
 function replacePromptItemEverywhere(originalItem, updatedItem) {
     if (!updatedItem) {
         return false;
@@ -1222,6 +1296,7 @@ function promptTextFromSelectedItem(item) {
     const selectedParts = normalizedSelectedParts(item, item);
     if (selectedParts) {
         return selectedParts
+            .filter((part) => !part.missing)
             .map((part) => {
                 const weight = itemWeight(part);
                 return Math.abs(weight - 1) < 0.0005 ? part.text : `(${part.text}:${formatWeight(weight)})`;
@@ -1425,6 +1500,7 @@ function itemSelectionSignature(item) {
             parts: selectedParts.map((part) => ({
                 index: part.index,
                 text: part.text,
+                missing: !!part.missing,
                 weight: weightForStorage(part.weight),
             })),
         });
@@ -1672,8 +1748,10 @@ function partSelectionsForItem(item, selectedItem = null) {
     const parts = itemPromptParts(item);
     const selectedParts = normalizedSelectedParts(item, selectedItem);
     if (selectedParts) {
-        const selectedMap = new Map(selectedParts.map((part) => [partKey(part), part]));
-        return parts.map((part) => {
+        const selectedMap = new Map(
+            selectedParts.filter((part) => !part.missing).map((part) => [partKey(part), part]),
+        );
+        const current = parts.map((part) => {
             const selectedPart = selectedMap.get(partKey(part));
             return {
                 ...part,
@@ -1681,6 +1759,10 @@ function partSelectionsForItem(item, selectedItem = null) {
                 weight: selectedPart ? itemWeight(selectedPart) : 1,
             };
         });
+        const missing = selectedParts
+            .filter((part) => part.missing)
+            .map((part) => ({ ...part, checked: true, weight: itemWeight(part) }));
+        return [...current, ...missing];
     }
 
     const wholeSelected = !!selectedItem;
@@ -1703,10 +1785,11 @@ function writeItemPartSelections(node, item, selections, options = {}) {
     const allParts = itemPromptParts(item);
     const allKeys = new Set(allParts.map(partKey));
     const checked = (selections || [])
-        .filter((part) => part.checked && allKeys.has(partKey(part)))
+        .filter((part) => part.checked && (part.missing || allKeys.has(partKey(part))))
         .map((part) => ({
             index: part.index,
             text: part.text,
+            ...(part.missing ? { missing: true } : {}),
             weight: itemWeight(part),
         }));
 
@@ -1725,7 +1808,7 @@ function writeItemPartSelections(node, item, selections, options = {}) {
     }
 
     const selected = itemForState(item);
-    const allChecked = checked.length === allParts.length;
+    const allChecked = !checked.some((part) => part.missing) && checked.length === allParts.length;
     const firstWeight = weightForStorage(checked[0]?.weight);
     const sameWeight = checked.every((part) => weightForStorage(part.weight) === firstWeight);
     if (allChecked && sameWeight && !options.forceParts) {
@@ -1739,6 +1822,7 @@ function writeItemPartSelections(node, item, selections, options = {}) {
         delete selected.weight;
         selected.selected_parts = checked.map((part) => {
             const selectedPart = { index: part.index, text: part.text };
+            if (part.missing) selectedPart.missing = true;
             const stored = weightForStorage(part.weight);
             if (stored !== null) {
                 selectedPart.weight = stored;
@@ -2414,7 +2498,9 @@ function appendPartRow(container, node, item, partSelection, onUpdate, options =
 
     const text = document.createElement("div");
     text.className = "pc-part-text";
-    text.textContent = partSelection.text;
+    text.textContent = partSelection.missing
+        ? `${partSelection.text}（現在の候補にありません）`
+        : partSelection.text;
     row.appendChild(text);
 
     const weight = createPartWeightInput(partSelection.weight, !partSelection.checked, (value, options = {}) => {
@@ -3009,6 +3095,13 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
         error.textContent = "";
         save.disabled = true;
         try {
+            const prospective = {
+                ...item,
+                label: nameInput.value,
+                prompt: promptInput.value,
+                description: descInput.value,
+            };
+            preflightPromptItemReplacement(node, item, prospective, { stateWidgetName });
             const updated = await updatePromptItem({
                 category_path: itemPath(item),
                 original: {
@@ -9328,7 +9421,7 @@ async function loadScenePresetList(force = false) {
     if (!force && scenePresetListCacheCurrent && Array.isArray(scenePresetList)) {
         return scenePresetList;
     }
-    if (!force && scenePresetListPromise) {
+    if (scenePresetListPromise) {
         return scenePresetListPromise;
     }
     const generation = ++scenePresetListRequestGeneration;
@@ -9441,7 +9534,7 @@ async function refreshScenePresetReferenceList(node, force = false) {
 async function openScenePresetPicker(node) {
     const presets = await loadPopupRequest(
         node,
-        () => refreshScenePresetReferenceList(node, true),
+        () => refreshScenePresetReferenceList(node, false),
         "Preset一覧を取得できませんでした。",
     );
     if (!presets) {
@@ -9597,12 +9690,12 @@ function attachScenePresetReference(node) {
         const previousOnSelected = node.onSelected;
         node.onSelected = function (...args) {
             const result = previousOnSelected?.apply(this, args);
-            refreshScenePresetReferenceList(node, true).catch((error) => console.warn("[Scene Prompt]", error));
+            refreshScenePresetReference(node, scenePresetList || []);
             return result;
         };
         node.scenePresetSelectionRefreshInstalled = true;
     }
-    refreshScenePresetReferenceList(node, true).catch((error) => console.warn("[Scene Prompt]", error));
+    refreshScenePresetReferenceList(node, false).catch((error) => console.warn("[Scene Prompt]", error));
     scheduleHideInternalDomWidgets();
     node.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas?.(true, true);
