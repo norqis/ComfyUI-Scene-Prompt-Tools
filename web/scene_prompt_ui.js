@@ -9421,7 +9421,7 @@ async function loadScenePresetList(force = false) {
     if (!force && scenePresetListCacheCurrent && Array.isArray(scenePresetList)) {
         return scenePresetList;
     }
-    if (scenePresetListPromise) {
+    if (!force && scenePresetListPromise) {
         return scenePresetListPromise;
     }
     const generation = ++scenePresetListRequestGeneration;
