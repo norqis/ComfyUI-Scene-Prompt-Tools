@@ -2,7 +2,7 @@ import json
 import random
 import re
 from collections import OrderedDict
-from .plan import make_plan, normalize_plan, with_source_node
+from .plan import make_plan, normalize_plan, with_prompt_trace, with_source_node
 
 
 DEFAULT_CATEGORY_ORDER = ""
@@ -540,6 +540,7 @@ class _ScenePromptBase:
             }
             if "latent" in row:
                 output_row["latent"] = dict(row["latent"])
+            output_row = with_prompt_trace(output_row, row, positive_parts, negative_parts)
             rows.append({"row": output_row, "count": item["count"]})
 
         return (with_source_node(make_plan(rows), source_node_id or unique_id, source_node_name),)

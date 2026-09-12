@@ -30,6 +30,10 @@ CALLBACK_KEYS = {
     "callback_node_id", "config", "frequency", "timeout_seconds", "failure_mode",
     "current_positive_parts", "current_negative_parts", "current_source_node_ids",
 }
+PROMPT_TRACE_KEYS = {
+    "kind", "before_positive_parts", "before_negative_parts", "added_positive_parts", "added_negative_parts",
+}
+PROMPT_TRACE_KINDS = {"delta", "passthrough", "whole"}
 
 
 class ScenePlanError(ValueError):
@@ -82,10 +86,25 @@ def _clone_latent(value):
     return {"width": width, "height": height, "batch_size": batch_size}
 
 
+def _clone_prompt_trace(value):
+    if not isinstance(value, dict):
+        raise ScenePlanError("Scene Prompt row prompt_trace must be an object.")
+    _require_exact_keys(value, PROMPT_TRACE_KEYS, "Scene Prompt row prompt_trace")
+    kind = _require_string(value["kind"], "Scene Prompt row prompt_trace kind", allow_empty=False)
+    if kind not in PROMPT_TRACE_KINDS:
+        raise ScenePlanError("Scene Prompt row prompt_trace kind is invalid.")
+    cloned = {"kind": kind}
+    cloned.update({
+        key: _require_string_list(value[key], f"Scene Prompt row prompt_trace {key}")
+        for key in PROMPT_TRACE_KEYS - {"kind"}
+    })
+    return cloned
+
+
 def _clone_row(row):
     if not isinstance(row, dict):
         raise ScenePlanError("Scene Prompt plan row must be an object.")
-    allowed_keys = ROW_KEYS | {"latent"}
+    allowed_keys = ROW_KEYS | {"latent", "prompt_trace"}
     if not ROW_KEYS.issubset(row) or set(row) - allowed_keys:
         raise ScenePlanError("Scene Prompt plan row has unsupported or missing fields.")
     set_refs = row["set_refs"]
@@ -139,6 +158,8 @@ def _clone_row(row):
     }
     if "latent" in row:
         cloned["latent"] = _clone_latent(row["latent"])
+    if "prompt_trace" in row:
+        cloned["prompt_trace"] = _clone_prompt_trace(row["prompt_trace"])
     return cloned
 
 
@@ -276,6 +297,64 @@ def transform(plan, transform_row):
     return make_plan(rows, sources=source["sources"])
 
 
+def with_prompt_trace(
+    row,
+    before_row=None,
+    added_positive_parts=None,
+    added_negative_parts=None,
+    kind="delta",
+):
+    """Attach runtime-only prompt provenance for the immediately preceding Scene node."""
+    current = _clone_row(row)
+    before = _clone_row(before_row if before_row is not None else empty_row())
+    if kind not in PROMPT_TRACE_KINDS:
+        raise ScenePlanError("Scene Prompt row prompt_trace kind is invalid.")
+    current["prompt_trace"] = {
+        "kind": kind,
+        "before_positive_parts": list(before["positive_parts"]),
+        "before_negative_parts": list(before["negative_parts"]),
+        "added_positive_parts": _require_string_list(
+            [] if added_positive_parts is None else list(added_positive_parts),
+            "Scene Prompt trace added_positive_parts",
+        ),
+        "added_negative_parts": _require_string_list(
+            [] if added_negative_parts is None else list(added_negative_parts),
+            "Scene Prompt trace added_negative_parts",
+        ),
+    }
+    return current
+
+
+def mark_prompt_passthrough(plan):
+    """Record a node that did not alter positive/negative prompt content."""
+    source = normalize_plan(plan)
+    return make_plan([
+        {
+            "row": with_prompt_trace(item["row"], item["row"], [], [], kind="passthrough"),
+            "count": item["count"],
+        }
+        for item in source["rows"]
+    ], sources=source["sources"])
+
+
+def mark_prompt_whole(plan):
+    """Treat a structural node's complete output row as that node's prompt contribution."""
+    source = normalize_plan(plan)
+    return make_plan([
+        {
+            "row": with_prompt_trace(
+                item["row"],
+                empty_row(),
+                item["row"]["positive_parts"],
+                item["row"]["negative_parts"],
+                kind="whole",
+            ),
+            "count": item["count"],
+        }
+        for item in source["rows"]
+    ], sources=source["sources"])
+
+
 def with_source_node(plan, node_id, node_name=""):
     """Record the Scene node that contributed to every output row."""
     source_id = str(node_id or "").strip()
@@ -312,7 +391,7 @@ def append_callback(plan, callback_node_id, config, frequency, timeout_seconds, 
             "current_source_node_ids": list(row["source_node_ids"]),
         }
         return {**row, "callbacks": [*row["callbacks"], descriptor]}
-    return transform(plan, add)
+    return mark_prompt_passthrough(transform(plan, add))
 
 
 def multiply_count(plan, factor):
@@ -324,7 +403,7 @@ def multiply_count(plan, factor):
         if count > MAX_SAFE_INTEGER:
             raise ScenePlanError("Scene Prompt total exceeds JavaScript's safe integer range.")
         rows.append({"row": item["row"], "count": count})
-    return make_plan(rows, sources=source["sources"])
+    return mark_prompt_passthrough(make_plan(rows, sources=source["sources"]))
 
 
 def _unique_strings(values):
@@ -387,7 +466,7 @@ def merge(left, right):
             if count > MAX_SAFE_INTEGER:
                 raise ScenePlanError("Scene Prompt total exceeds JavaScript's safe integer range.")
             rows.append({"row": merge_rows(left_item["row"], right_item["row"]), "count": count})
-    return make_plan(rows)
+    return mark_prompt_whole(make_plan(rows))
 
 
 def queue(values):
@@ -402,7 +481,7 @@ def queue(values):
             "total_images": plan["total_images"], "total_batches": plan["total_batches"],
         })
         rows.extend({"row": item["row"], "count": item["count"]} for item in plan["rows"])
-    return make_plan(rows, sources=sources)
+    return mark_prompt_whole(make_plan(rows, sources=sources))
 
 
 def matrix_product(plan, matrix_rows, configured):
@@ -416,7 +495,7 @@ def matrix_product(plan, matrix_rows, configured):
             raise ScenePlanError("Scene Matrix rows must be current validated objects.")
     active = [row for row in matrix_rows if row["enabled"]]
     if not configured:
-        return source
+        return mark_prompt_passthrough(source)
     if not active:
         return make_plan([])
     rows = []
@@ -431,6 +510,12 @@ def matrix_product(plan, matrix_rows, configured):
             matrix_plan_row["source_node_names"] = {}
             matrix_plan_row["callbacks"] = []
             row = merge_rows(base["row"], matrix_plan_row)
+            row = with_prompt_trace(
+                row,
+                base["row"],
+                matrix_plan_row["positive_parts"],
+                matrix_plan_row["negative_parts"],
+            )
             name = _require_string(matrix_row.get("name"), "Scene Matrix row name", allow_empty=False).strip()
             row["labels"] = [*base["row"]["labels"], name]
             rows.append({"row": row, "count": base["count"]})

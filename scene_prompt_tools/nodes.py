@@ -46,6 +46,9 @@ from .plan import (
     normalize_plan,
     queue,
     transform,
+    mark_prompt_passthrough,
+    mark_prompt_whole,
+    with_prompt_trace,
     with_source_node,
     append_callback,
 )
@@ -97,6 +100,9 @@ PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
 MODEL_MODE_ILLUSTRIOUS = "Illustrious"
 MODEL_MODE_ANIMA = "Anima"
 MODEL_MODE_CHOICES = (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
+REVERSE_SCOPE_ALL = "全てのノード"
+REVERSE_SCOPE_PREVIOUS = "直前のノード"
+REVERSE_SCOPE_CHOICES = (REVERSE_SCOPE_ALL, REVERSE_SCOPE_PREVIOUS)
 MODEL_WEIGHT_RE = re.compile(r"(:\s*)([+-]?(?:\d+(?:\.\d+)?|\.\d+))(?=\s*\))")
 
 DEFAULT_MATRIX_JSON = "{\"version\":1,\"sets\":[]}"
@@ -163,6 +169,10 @@ def _convert_model_prompt_weights(text, model_mode):
         return f"{match.group(1)}{converted:.3f}".rstrip("0").rstrip(".")
 
     return MODEL_WEIGHT_RE.sub(replace, str(text or ""))
+
+
+def _normalize_reverse_scope(value):
+    return REVERSE_SCOPE_PREVIOUS if str(value or "").strip() == REVERSE_SCOPE_PREVIOUS else REVERSE_SCOPE_ALL
 
 
 def _scene_bool(value, default=True):
@@ -357,7 +367,7 @@ def _slice_workflow_for_output(workflow, ancestor_ids):
 
 SCENE_NODE_TYPES = {
     "ScenePrompter", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePrompterExpand",
-    "ScenePromptCounter", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
+    "ScenePromptCounter", "ScenePromptReverse", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
     "ScenePromptCallback",
     "ScenePresetInput", "ScenePresetOutput", "ScenePresetReference",
 }
@@ -1283,12 +1293,11 @@ class ScenePath:
 
     def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, unique_id=None, source_node_id="", source_node_name=""):
         label = str(path_name or "").strip() or "Scene Path"
-        return (
-            with_source_node(transform(
-                scene_prompt,
-                lambda row, _item: {**row, "path_parts": _append_path_part(row.get("path_parts", []), label, path_mode)},
-            ), source_node_id or unique_id, source_node_name),
+        plan = transform(
+            scene_prompt,
+            lambda row, _item: {**row, "path_parts": _append_path_part(row.get("path_parts", []), label, path_mode)},
         )
+        return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 
 
 class ScenePromptQueue:
@@ -1371,6 +1380,76 @@ class ScenePromptMerge:
         return (with_source_node(merge(scene_prompt1, scene_prompt2), source_node_id or unique_id, source_node_name),)
 
 
+class ScenePromptReverse:
+    DESCRIPTION = """scene_prompt のポジティブとネガティブを入れ替えます。
+「全てのノード」は入力された最終prompt全体を反転し、「直前のノード」は直前のSceneノードが追加したprompt部分だけを反転します。Path、Count、Empty Latentなどpromptを変更しないノードが直前の場合はpromptを変更しません。"""
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "reverse"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"}),
+                "reverse_scope": (
+                    list(REVERSE_SCOPE_CHOICES),
+                    {"default": REVERSE_SCOPE_ALL, "display_name": "対象", "label": "対象"},
+                ),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, scene_prompt, reverse_scope=REVERSE_SCOPE_ALL, **kwargs):
+        del kwargs
+        return "|".join([_scene_prompt_change_key(scene_prompt), _normalize_reverse_scope(reverse_scope)])
+
+    def reverse(
+        self,
+        scene_prompt,
+        reverse_scope=REVERSE_SCOPE_ALL,
+        unique_id=None,
+        source_node_id="",
+        source_node_name="",
+    ):
+        scope = _normalize_reverse_scope(reverse_scope)
+
+        def reverse_row(row, _item):
+            input_positive = list(row.get("positive_parts", []))
+            input_negative = list(row.get("negative_parts", []))
+            if scope == REVERSE_SCOPE_PREVIOUS and isinstance(row.get("prompt_trace"), dict):
+                trace = row["prompt_trace"]
+                if trace.get("kind") == "passthrough":
+                    positive_parts, negative_parts = input_positive, input_negative
+                elif trace.get("kind") == "whole":
+                    positive_parts, negative_parts = input_negative, input_positive
+                else:
+                    positive_parts, negative_parts = _merge_positive_negative_parts(
+                        trace.get("before_positive_parts", []),
+                        trace.get("before_negative_parts", []),
+                        trace.get("added_negative_parts", []),
+                        trace.get("added_positive_parts", []),
+                    )
+            else:
+                positive_parts = input_negative
+                negative_parts = input_positive
+            next_row = {
+                **row,
+                "positive_parts": positive_parts,
+                "negative_parts": negative_parts,
+            }
+            return with_prompt_trace(next_row, row, positive_parts, negative_parts, kind="whole")
+
+        plan = transform(scene_prompt, reverse_row)
+        return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
+
+
 class ScenePromptCounter:
     DESCRIPTION = """入力された scene_prompt の全行の生成回数へ、指定値を掛けます。\nCountを直列につなぐと値は積算されます。0を指定すると生成対象は0件になります。\n未接続なら1行の空計画から開始します。"""
     CATEGORY = "Scene/prompt"
@@ -1398,6 +1477,7 @@ class ScenePromptCounter:
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
                 "source_node_name": ("STRING", {"default": "", "hidden": True}),
+                "prompt_trace_kind": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1410,8 +1490,19 @@ class ScenePromptCounter:
             ]
         )
 
-    def count(self, scene_prompt=None, count=1, unique_id=None, source_node_id="", source_node_name=""):
-        return (with_source_node(multiply_count(scene_prompt, count), source_node_id or unique_id, source_node_name),)
+    def count(
+        self,
+        scene_prompt=None,
+        count=1,
+        unique_id=None,
+        source_node_id="",
+        source_node_name="",
+        prompt_trace_kind="",
+    ):
+        plan = multiply_count(scene_prompt, count)
+        if prompt_trace_kind == "whole":
+            plan = mark_prompt_whole(plan)
+        return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 
 class SceneEmptyLatent:
@@ -1483,7 +1574,8 @@ class SceneEmptyLatent:
 
     def apply_latent(self, scene_prompt=None, width=512, height=512, batch_size=1, unique_id=None, source_node_id="", source_node_name=""):
         latent = _normalize_latent_config({"width": width, "height": height, "batch_size": batch_size})
-        return (with_source_node(transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)}), source_node_id or unique_id, source_node_name),)
+        plan = transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)})
+        return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 
 
 class ScenePromptCallbackDiscord:
@@ -1581,7 +1673,7 @@ class ScenePromptCallback:
         source_node_id="",
     ):
         if callback is None:
-            return (with_source_node(normalize_plan(scene_prompt), source_node_id or unique_id),)
+            return (with_source_node(mark_prompt_passthrough(normalize_plan(scene_prompt)), source_node_id or unique_id),)
         if not isinstance(callback, dict):
             raise ValueError("Scene callback setting is invalid.")
         if frequency not in {CALLBACK_FREQUENCY_FIRST, CALLBACK_FREQUENCY_EVERY}:
