@@ -36,6 +36,9 @@ PRESET_DIRECTORY_NAME = "scene_presets"
 SAVE_METADATA_WORKFLOW = "ワークフロー全体"
 PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,80}$")
 _PRESET_LOCK = threading.RLock()
+_PRESET_LIST_CACHE_LOCK = threading.RLock()
+_PRESET_LIST_CACHE = OrderedDict()
+_PRESET_LIST_CACHE_MAX_USERS = 64
 _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
 _RESOLVING_RUNS = {}
@@ -76,6 +79,13 @@ BOUNDARY_INPUT = "ScenePresetInput"
 BOUNDARY_OUTPUT = "ScenePresetOutput"
 BOUNDARY_CLASSES = {BOUNDARY_INPUT, BOUNDARY_OUTPUT}
 WORKFLOW_NON_EXECUTION_TYPES = {"reroute", "note", "markdownnote", "comment", "group"}
+LEGACY_PRESET_CLASS_TYPES = {
+    "ScenePrompt": "ScenePrompter",
+    "ScenePromptMerge": "ScenePrompterMerge",
+    "ScenePromptQueue": "ScenePrompterQueue",
+    "ScenePromptExpand": "ScenePrompterExpand",
+}
+
 DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePrompter": "Scene Prompt",
     "SceneMatrix": "Scene Matrix",
@@ -123,6 +133,94 @@ def _clean_preset_id(value):
 
 def _preset_path(preset_id, user_id="default"):
     return preset_directory(user_id) / f"{_clean_preset_id(preset_id)}{PRESET_FILE_SUFFIX}"
+
+
+def _normalize_legacy_preset_ids(preset):
+    normalized = copy.deepcopy(preset)
+    nodes = ((normalized.get("api_graph") or {}).get("output") if isinstance(normalized, dict) else None)
+    if isinstance(nodes, dict):
+        for node in nodes.values():
+            if not isinstance(node, dict):
+                continue
+            class_type = node.get("class_type")
+            if class_type in LEGACY_PRESET_CLASS_TYPES:
+                node["class_type"] = LEGACY_PRESET_CLASS_TYPES[class_type]
+
+    workflow_nodes = ((normalized.get("workflow") or {}).get("nodes") if isinstance(normalized, dict) else None)
+    if isinstance(workflow_nodes, list):
+        for node in workflow_nodes:
+            if not isinstance(node, dict):
+                continue
+            node_type = node.get("type")
+            if node_type in LEGACY_PRESET_CLASS_TYPES:
+                node["type"] = LEGACY_PRESET_CLASS_TYPES[node_type]
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                search_name = properties.get("Node name for S&R")
+                if search_name in LEGACY_PRESET_CLASS_TYPES:
+                    properties["Node name for S&R"] = LEGACY_PRESET_CLASS_TYPES[search_name]
+    return normalized
+
+
+def _preset_directory_signature(directory):
+    if not directory.exists():
+        return ()
+    signature = []
+    for path in sorted(directory.glob(f"*{PRESET_FILE_SUFFIX}"), key=lambda item: item.name.lower()):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((path.name, stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
+
+
+def _invalidate_preset_list_cache(user_id="default"):
+    with _PRESET_LIST_CACHE_LOCK:
+        _PRESET_LIST_CACHE.pop(str(user_id or "default"), None)
+
+
+def _compact_matrix_json(value):
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return value
+    sets = parsed.get("sets") if isinstance(parsed, dict) else None
+    if not isinstance(sets, list):
+        return value
+    compact = []
+    for index, line in enumerate(sets):
+        if not isinstance(line, dict):
+            return value
+        name = str(line.get("name") or f"row-{index + 1}")
+        compact.append({
+            "row_id": str(line.get("row_id") or f"row-{index + 1}"),
+            "name": name,
+            "path_label": str(line.get("path_label") or name),
+            "enabled": line.get("enabled", True) is not False,
+        })
+    return json.dumps({"version": 1, "sets": compact}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_preset_list_graph(api_graph):
+    nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
+    if not isinstance(nodes, dict):
+        return copy.deepcopy(api_graph)
+    compact_nodes = {}
+    scalar_inputs = {"matrix_json", "batch_size", "count", "preset_id"}
+    for node_id, node in nodes.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = {}
+        for name, value in _node_inputs(node).items():
+            if is_link(value):
+                inputs[name] = copy.deepcopy(value)
+            elif name in scalar_inputs:
+                inputs[name] = _compact_matrix_json(value) if name == "matrix_json" else copy.deepcopy(value)
+        compact_nodes[str(node_id)] = {"class_type": node.get("class_type"), "inputs": inputs}
+    return {"output": compact_nodes}
 
 
 def _canonical_json(value):
@@ -430,6 +528,8 @@ def _validate_preset_payload(preset):
     metadata = preset.get("metadata") if isinstance(preset, dict) else None
     if not isinstance(metadata, dict):
         raise ScenePresetError("Presetのメタデータが不正です。")
+    if preset.get("schema_version") != PRESET_SCHEMA_VERSION:
+        raise ScenePresetError("Presetの形式が対応していません。")
     _clean_preset_id(metadata.get("preset_id"))
     revision = metadata.get("revision")
     if not isinstance(revision, int) or revision < 1:
@@ -437,6 +537,18 @@ def _validate_preset_payload(preset):
     expected_hash = _content_hash(preset.get("api_graph"), preset.get("workflow"))
     if str(metadata.get("sha256") or "") != expected_hash:
         raise ScenePresetError("Presetの内容が壊れているか、hashが一致しません。")
+
+    normalized = _normalize_legacy_preset_ids(preset)
+    normalized_metadata = normalized.get("metadata")
+    if not isinstance(normalized_metadata, dict):
+        raise ScenePresetError("Presetのメタデータが不正です。")
+    normalized_metadata["sha256"] = _content_hash(
+        normalized.get("api_graph"),
+        normalized.get("workflow"),
+    )
+    preset.clear()
+    preset.update(normalized)
+    metadata = normalized_metadata
     name = str(metadata.get("name") or metadata.get("preset_id"))
     try:
         nodes = _preset_nodes(preset)
@@ -515,6 +627,7 @@ def save_preset(payload, user_id="default"):
                 os.fsync(handle.fileno())
             _validate_preset_payload(_read_json(Path(temp_name)))
             os.replace(temp_name, path)
+            _invalidate_preset_list_cache(user_id)
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
@@ -944,23 +1057,61 @@ def snapshot_presets_for_metadata(run_id, user_id="default"):
 
 
 def list_presets(user_id="default"):
-    with _PRESET_LOCK:
-        directory = preset_directory(user_id)
-        if not directory.exists():
-            return {"presets": [], "errors": []}
+    directory = preset_directory(user_id)
+    user_key = str(user_id or "default")
+    while True:
+        signature = _preset_directory_signature(directory)
+        with _PRESET_LIST_CACHE_LOCK:
+            cached = _PRESET_LIST_CACHE.get(user_key)
+            if cached and cached.get("signature") == signature:
+                _PRESET_LIST_CACHE.move_to_end(user_key)
+                return copy.deepcopy(cached["value"])
+            previous_files = dict((cached or {}).get("files") or {})
+
         presets = []
         errors = []
-        for path in sorted(directory.glob(f"*{PRESET_FILE_SUFFIX}"), key=lambda item: item.name.lower()):
-            try:
-                preset = load_preset(path.stem, user_id)
-            except ScenePresetError as exc:
-                errors.append({"preset_id": path.stem, "error": str(exc)})
-                continue
-            presets.append({
-                "metadata": copy.deepcopy(preset["metadata"]),
-                "api_graph": copy.deepcopy(preset["api_graph"]),
-            })
-        return {"presets": presets, "errors": errors}
+        next_files = {}
+        for filename, mtime_ns, size in signature:
+            file_signature = (mtime_ns, size)
+            cached_file = previous_files.get(filename)
+            if cached_file and cached_file.get("signature") == file_signature:
+                entry = copy.deepcopy(cached_file.get("entry"))
+                error = copy.deepcopy(cached_file.get("error"))
+            else:
+                path = directory / filename
+                try:
+                    preset = load_preset(path.stem, user_id)
+                    entry = {
+                        "metadata": copy.deepcopy(preset["metadata"]),
+                        "api_graph": _compact_preset_list_graph(preset["api_graph"]),
+                    }
+                    error = None
+                except ScenePresetError as exc:
+                    entry = None
+                    error = {"preset_id": path.stem, "error": str(exc)}
+            next_files[filename] = {
+                "signature": file_signature,
+                "entry": copy.deepcopy(entry),
+                "error": copy.deepcopy(error),
+            }
+            if entry is not None:
+                presets.append(entry)
+            if error is not None:
+                errors.append(error)
+
+        if signature != _preset_directory_signature(directory):
+            continue
+        value = {"presets": presets, "errors": errors}
+        with _PRESET_LIST_CACHE_LOCK:
+            _PRESET_LIST_CACHE[user_key] = {
+                "signature": signature,
+                "files": next_files,
+                "value": copy.deepcopy(value),
+            }
+            _PRESET_LIST_CACHE.move_to_end(user_key)
+            while len(_PRESET_LIST_CACHE) > _PRESET_LIST_CACHE_MAX_USERS:
+                _PRESET_LIST_CACHE.popitem(last=False)
+        return value
 
 
 def _replace_link(value, input_id, upstream_link, graph):

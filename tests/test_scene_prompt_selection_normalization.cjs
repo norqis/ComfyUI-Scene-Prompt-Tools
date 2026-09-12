@@ -43,6 +43,7 @@ for (const name of [
     "itemPromptParts",
     "normalizedSelectedParts",
     "itemForState",
+    "itemForEditedState",
     "itemSelectionSignature",
     "pruneStateToData",
 ]) {
@@ -107,6 +108,42 @@ assert.throws(
     () => context.pruneStateToData({}, stateFor(oldSelection), [current, candidate("目無し_3")]),
     /候補データにありません/u,
     "ambiguous matches remain an error",
+);
+
+const movedOld = {
+    ...candidate("stable", "Moved", "alpha, beta, alpha"),
+    selected_parts: [{ index: 2, text: "alpha", weight: 1.25 }],
+};
+const movedCurrent = candidate("stable", "Moved", "alpha, alpha, beta, added");
+const moved = context.itemForEditedState(movedCurrent, movedOld);
+assert.deepEqual(
+    JSON.parse(JSON.stringify(moved.selected_parts)),
+    [{ index: 1, text: "alpha", weight: 1.25 }],
+    "duplicate prompt parts remap by text occurrence order",
+);
+
+const removedOld = {
+    ...candidate("stable", "Removed", "alpha, beta, gamma"),
+    selected_parts: [{ index: 1, text: "beta", weight: 1.2 }],
+};
+const removedCurrent = candidate("stable", "Removed", "gamma, alpha");
+const removed = context.itemForEditedState(removedCurrent, removedOld);
+assert.deepEqual(
+    JSON.parse(JSON.stringify(removed.selected_parts)),
+    [{ index: 1, text: "beta", missing: true, weight: 1.2 }],
+    "a deleted selected part is retained as an explicit missing selection",
+);
+
+const reorderedOld = {
+    ...candidate("stable", "Reordered", "alpha, beta, gamma"),
+    selected_parts: [{ index: 0, text: "alpha" }, { index: 2, text: "gamma" }],
+};
+const reorderedCurrent = candidate("stable", "Reordered", "gamma, added, alpha, beta");
+const reordered = context.itemForEditedState(reorderedCurrent, reorderedOld);
+assert.deepEqual(
+    JSON.parse(JSON.stringify(reordered.selected_parts)),
+    [{ index: 2, text: "alpha" }, { index: 0, text: "gamma" }],
+    "reordering and additions preserve selected parts",
 );
 
 console.log("Scene Prompt selection normalization tests passed.");

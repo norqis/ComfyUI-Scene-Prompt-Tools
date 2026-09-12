@@ -98,6 +98,27 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(illustrious[1], "bad_hands")
         self.assertEqual(anima[0], "blue hair, score 7")
         self.assertEqual(anima[1], "bad hands")
+
+        weighted = self.prompt.ScenePrompt().build(
+            "W", "(blue_hair:1.4), ((eyes:1.2):0.8)", '{"version":1,"categories":{}}',
+            "(bad_hands:3)", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        weighted_anima = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=weighted, model_mode="Anima")
+        weighted_illustrious = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=weighted, model_mode="Illustrious")
+        self.assertEqual(weighted_anima[0], "(blue hair:3), ((eyes:2):0.8)")
+        self.assertEqual(weighted_anima[1], "(bad hands:3)")
+        self.assertEqual(weighted_illustrious[1], "(bad_hands:1.4)")
+
+        boundary = self.prompt.ScenePrompt().build(
+            "B", "(low:0.8), (already_anima:2), (high:4), (negative:-1.2), version 2.0",
+            '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        boundary_anima = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=boundary, model_mode="Anima")
+        self.assertEqual(
+            boundary_anima[0],
+            "(low:0.8), (already anima:2), (high:4), (negative:-1.2), version 2.0",
+        )
+
         self.assertEqual(anima[2]["positive"], anima[0])
         self.assertEqual(anima[2]["negative"], anima[1])
         self.assertEqual(anima[2]["filename_prefix"], illustrious[2]["filename_prefix"])

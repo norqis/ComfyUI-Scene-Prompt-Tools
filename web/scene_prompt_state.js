@@ -13,7 +13,7 @@ const SELECTION_ITEM_KNOWN_KEYS = new Set([
     ...SELECTION_ITEM_LEGACY_OPTIONAL_KEYS,
 ]);
 const SELECTED_PART_REQUIRED_KEYS = ["index", "text"];
-const SELECTED_PART_OPTIONAL_KEYS = ["weight"];
+const SELECTED_PART_OPTIONAL_KEYS = ["weight", "missing"];
 const MATRIX_LINE_KEYS = [
     "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled", "filename_enabled",
     "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
@@ -99,14 +99,19 @@ function parseSelectedPart(value, promptParts, label) {
         throw new Error(`${label} must be an object.`);
     }
     requireExactKeys(value, SELECTED_PART_REQUIRED_KEYS, SELECTED_PART_OPTIONAL_KEYS, label);
-    if (!Number.isSafeInteger(value.index) || value.index < 0 || value.index >= promptParts.length) {
+    if (!Number.isSafeInteger(value.index) || value.index < 0) {
         throw new Error(`${label} index is invalid.`);
     }
     const text = requireString(value.text, `${label} text`, { allowEmpty: false });
-    if (promptParts[value.index] !== text) {
-        throw new Error(`${label} does not match its prompt part.`);
+    let missing = value.missing ?? false;
+    if (typeof missing !== "boolean") {
+        throw new Error(`${label} missing must be a boolean.`);
+    }
+    if (!missing && (value.index >= promptParts.length || promptParts[value.index] !== text)) {
+        missing = true;
     }
     const result = { index: value.index, text };
+    if (missing) result.missing = true;
     if (Object.hasOwn(value, "weight")) {
         result.weight = requireWeight(value.weight, `${label} weight`);
     }

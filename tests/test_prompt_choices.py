@@ -206,6 +206,29 @@ def test_selection_keeps_its_stored_prompt_and_partial_selection():
     assert selected == [{"index": 1, "text": "beta", "weight": 1.2}]
 
 
+def test_missing_partial_selection_is_valid_but_not_emitted():
+    item = selection_item(
+        "alpha, gamma",
+        selected_parts=[
+            {"index": 0, "text": "alpha"},
+            {"index": 1, "text": "beta", "missing": True, "weight": 1.2},
+        ],
+    )
+    state = json.dumps({"version": 1, "categories": {"Category": [item]}})
+    parsed = _parse_selection_json(state)["Category"][0]
+    assert parsed["selected_parts"][1] == {"index": 1, "text": "beta", "missing": True, "weight": 1.2}
+    assert _compose_prompt_parts("", state, "", False, 0) == ["alpha"]
+
+    mismatched = selection_item(
+        "alpha, gamma",
+        selected_parts=[{"index": 1, "text": "beta", "weight": 1.2}],
+    )
+    mismatched_state = json.dumps({"version": 1, "categories": {"Category": [mismatched]}})
+    repaired = _parse_selection_json(mismatched_state)["Category"][0]["selected_parts"][0]
+    assert repaired == {"index": 1, "text": "beta", "missing": True, "weight": 1.2}
+    assert _compose_prompt_parts("", mismatched_state, "", False, 0) == []
+
+
 class PromptChoiceTests(unittest.TestCase):
     def test_choices(self):
         test_single_choice_is_always_present()
@@ -228,6 +251,7 @@ class PromptChoiceTests(unittest.TestCase):
 
     def test_selection_values_are_stored(self):
         test_selection_keeps_its_stored_prompt_and_partial_selection()
+        test_missing_partial_selection_is_valid_but_not_emitted()
 
 
 if __name__ == "__main__":
