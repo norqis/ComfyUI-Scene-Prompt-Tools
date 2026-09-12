@@ -157,6 +157,27 @@ class ScenePromptReverseTests(unittest.TestCase):
         self.assertEqual(rows[1]["row"]["positive_parts"], ["right_neg"])
         self.assertEqual(rows[1]["row"]["negative_parts"], ["right_pos"])
 
+    def test_previous_structural_reverse_matches_full_reverse_with_weighted_conflicts(self):
+        left = add_prompt(self.prompt, "A", "(shared:1.2)", "", node_id="1")
+        right = add_prompt(self.prompt, "B", "", "shared", node_id="2")
+        merged = self.nodes.ScenePromptMerge().merge(left, right, source_node_id="3")[0]
+
+        reverse_all = self.nodes.ScenePromptReverse().reverse(
+            merged, "全てのノード", source_node_id="4"
+        )[0]
+        reverse_previous = self.nodes.ScenePromptReverse().reverse(
+            merged, "直前のノード", source_node_id="5"
+        )[0]
+
+        self.assertEqual(
+            self.row(reverse_previous)["positive_parts"],
+            self.row(reverse_all)["positive_parts"],
+        )
+        self.assertEqual(
+            self.row(reverse_previous)["negative_parts"],
+            self.row(reverse_all)["negative_parts"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

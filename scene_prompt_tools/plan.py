@@ -31,8 +31,9 @@ CALLBACK_KEYS = {
     "current_positive_parts", "current_negative_parts", "current_source_node_ids",
 }
 PROMPT_TRACE_KEYS = {
-    "before_positive_parts", "before_negative_parts", "added_positive_parts", "added_negative_parts",
+    "kind", "before_positive_parts", "before_negative_parts", "added_positive_parts", "added_negative_parts",
 }
+PROMPT_TRACE_KINDS = {"delta", "passthrough", "whole"}
 
 
 class ScenePlanError(ValueError):
@@ -89,10 +90,15 @@ def _clone_prompt_trace(value):
     if not isinstance(value, dict):
         raise ScenePlanError("Scene Prompt row prompt_trace must be an object.")
     _require_exact_keys(value, PROMPT_TRACE_KEYS, "Scene Prompt row prompt_trace")
-    return {
+    kind = _require_string(value["kind"], "Scene Prompt row prompt_trace kind", allow_empty=False)
+    if kind not in PROMPT_TRACE_KINDS:
+        raise ScenePlanError("Scene Prompt row prompt_trace kind is invalid.")
+    cloned = {"kind": kind}
+    cloned.update({
         key: _require_string_list(value[key], f"Scene Prompt row prompt_trace {key}")
-        for key in PROMPT_TRACE_KEYS
-    }
+        for key in PROMPT_TRACE_KEYS - {"kind"}
+    })
+    return cloned
 
 
 def _clone_row(row):
@@ -291,11 +297,20 @@ def transform(plan, transform_row):
     return make_plan(rows, sources=source["sources"])
 
 
-def with_prompt_trace(row, before_row=None, added_positive_parts=None, added_negative_parts=None):
+def with_prompt_trace(
+    row,
+    before_row=None,
+    added_positive_parts=None,
+    added_negative_parts=None,
+    kind="delta",
+):
     """Attach runtime-only prompt provenance for the immediately preceding Scene node."""
     current = _clone_row(row)
     before = _clone_row(before_row if before_row is not None else empty_row())
+    if kind not in PROMPT_TRACE_KINDS:
+        raise ScenePlanError("Scene Prompt row prompt_trace kind is invalid.")
     current["prompt_trace"] = {
+        "kind": kind,
         "before_positive_parts": list(before["positive_parts"]),
         "before_negative_parts": list(before["negative_parts"]),
         "added_positive_parts": _require_string_list(
@@ -315,7 +330,7 @@ def mark_prompt_passthrough(plan):
     source = normalize_plan(plan)
     return make_plan([
         {
-            "row": with_prompt_trace(item["row"], item["row"], [], []),
+            "row": with_prompt_trace(item["row"], item["row"], [], [], kind="passthrough"),
             "count": item["count"],
         }
         for item in source["rows"]
@@ -332,6 +347,7 @@ def mark_prompt_whole(plan):
                 empty_row(),
                 item["row"]["positive_parts"],
                 item["row"]["negative_parts"],
+                kind="whole",
             ),
             "count": item["count"],
         }

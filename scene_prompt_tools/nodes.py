@@ -1424,12 +1424,17 @@ class ScenePromptReverse:
             input_negative = list(row.get("negative_parts", []))
             if scope == REVERSE_SCOPE_PREVIOUS and isinstance(row.get("prompt_trace"), dict):
                 trace = row["prompt_trace"]
-                positive_parts, negative_parts = _merge_positive_negative_parts(
-                    trace.get("before_positive_parts", []),
-                    trace.get("before_negative_parts", []),
-                    trace.get("added_negative_parts", []),
-                    trace.get("added_positive_parts", []),
-                )
+                if trace.get("kind") == "passthrough":
+                    positive_parts, negative_parts = input_positive, input_negative
+                elif trace.get("kind") == "whole":
+                    positive_parts, negative_parts = input_negative, input_positive
+                else:
+                    positive_parts, negative_parts = _merge_positive_negative_parts(
+                        trace.get("before_positive_parts", []),
+                        trace.get("before_negative_parts", []),
+                        trace.get("added_negative_parts", []),
+                        trace.get("added_positive_parts", []),
+                    )
             else:
                 positive_parts = input_negative
                 negative_parts = input_positive
@@ -1438,7 +1443,7 @@ class ScenePromptReverse:
                 "positive_parts": positive_parts,
                 "negative_parts": negative_parts,
             }
-            return with_prompt_trace(next_row, row, positive_parts, negative_parts)
+            return with_prompt_trace(next_row, row, positive_parts, negative_parts, kind="whole")
 
         plan = transform(scene_prompt, reverse_row)
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
