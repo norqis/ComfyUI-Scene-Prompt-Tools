@@ -74,6 +74,7 @@ const context = {
 };
 vm.createContext(context);
 for (const name of [
+    "randomizeStandardSceneSeeds",
     "sceneRunTargetNodes",
     "sceneHistoryStatus",
     "pruneSceneRunTerminalPromptIds",
@@ -158,6 +159,22 @@ context.installSceneBatchPromptCapture();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(context.released.at(-1), "overflow-handle", "overflow history reconciliation prevents a leaked handle");
     assert.equal(context.sceneRunHandlesByPromptId.has("overflow-0"), false);
+
+    const standardScene = await context.api.queuePrompt(0, { output: {
+        "5": { class_type: "ScenePrompterExpand", inputs: {
+            current_index: 2, run_id: "", seed_base: 41, seed_base_literal: true,
+        } },
+    } });
+    assert.equal(standardScene.received.output["5"].inputs.current_index, 2, "normal Queue keeps the selected Scene row");
+    assert.equal(standardScene.received.output["5"].inputs.seed_base, 0, "normal Queue requests a fresh seed every time");
+    assert.equal(standardScene.received.output["5"].inputs.seed_base_literal, false);
+
+    const continuousScene = await context.api.queuePrompt(0, { output: {
+        "6": { class_type: "ScenePrompterExpand", inputs: {
+            current_index: 3, run_id: "continuous-run", seed_base: 42, seed_base_literal: false,
+        } },
+    } });
+    assert.equal(continuousScene.received.output["6"].inputs.seed_base, 42, "continuous runs keep their per-batch seed");
 
     for (const name of ["applySceneRunHandle", "prepareSceneRunContext"]) {
         vm.runInContext(functionSource(name), context);

@@ -7696,6 +7696,16 @@ function buildSceneBatchCachedPrompt(prompt, expandNodeId) {
     return cached;
 }
 
+function randomizeStandardSceneSeeds(prompt) {
+    for (const promptNode of Object.values(prompt?.output || {})) {
+        if (promptNode?.class_type !== "ScenePrompterExpand" || String(promptNode.inputs?.run_id || "")) {
+            continue;
+        }
+        promptNode.inputs.seed_base = 0;
+        promptNode.inputs.seed_base_literal = false;
+    }
+}
+
 function installSceneBatchPromptCapture() {
     if (api.__ScenePromptBatchCaptureInstalled || typeof api.queuePrompt !== "function") {
         return;
@@ -7703,6 +7713,7 @@ function installSceneBatchPromptCapture() {
     const originalQueuePrompt = api.queuePrompt.bind(api);
     api.queuePrompt = async function (number, prompt) {
         applySceneSourceNodeNames(prompt, { onlyMissing: true });
+        randomizeStandardSceneSeeds(prompt);
         let preparedRunHandle = "";
         if (prompt?.output && sceneRunTargetNodes(prompt).length) {
             const existingHandle = sceneRunTargetNodes(prompt)
