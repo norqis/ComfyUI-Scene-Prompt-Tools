@@ -7706,12 +7706,127 @@ function randomizeStandardSceneSeeds(prompt) {
     }
 }
 
+function samplerSeedControlWidget(node, inputName) {
+    const names = inputName === "noise_seed"
+        ? ["control_after_generate_noise_seed", "control_after_generate_noise", "control_after_generate"]
+        : ["control_after_generate_seed", "control_after_generate"];
+    return names.map((name) => findWidget(node, name)).find(Boolean) || null;
+}
+
+function captureRandomizedSamplerSeedTargets(graph) {
+    const targets = [];
+    for (const node of graph?._nodes || []) {
+        for (const inputName of ["seed", "noise_seed"]) {
+            const input = (node.inputs || []).find((candidate) => candidate?.name === inputName);
+            if (!input || input.link != null) {
+                continue;
+            }
+            const widget = findWidget(node, inputName);
+            const control = samplerSeedControlWidget(node, inputName);
+            const widgetIndex = node.widgets?.indexOf(widget) ?? -1;
+            if (!widget || !control || widgetIndex < 0 || control.value !== "randomize") {
+                continue;
+            }
+            targets.push({
+                nodeId: String(node.id),
+                inputName,
+                widgetIndex,
+                min: Number(widget.options?.min ?? 0),
+                max: Number(widget.options?.max ?? Number.MAX_SAFE_INTEGER),
+            });
+        }
+    }
+    return targets;
+}
+
+function scenePromptWorkflowNodes(prompt) {
+    return prompt?.workflow?.nodes || prompt?.extra_data?.workflow?.nodes || [];
+}
+
+function samplerSeedControlValue(workflowNode, target) {
+    const named = workflowNode?.widgets_values_named;
+    if (named && Object.hasOwn(named, "control_after_generate")) {
+        return named.control_after_generate;
+    }
+    if (named && Object.hasOwn(named, `control_after_generate_${target.inputName}`)) {
+        return named[`control_after_generate_${target.inputName}`];
+    }
+    const values = workflowNode?.widgets_values;
+    return Array.isArray(values) ? values[target.widgetIndex + 1] : undefined;
+}
+
+function randomSamplerSeed(target, previousValue) {
+    const min = Math.max(0, Math.ceil(Number.isFinite(target.min) ? target.min : 0));
+    const max = Math.min(Number.MAX_SAFE_INTEGER, Math.floor(Number.isFinite(target.max) ? target.max : Number.MAX_SAFE_INTEGER));
+    if (max < min) {
+        return null;
+    }
+    const span = max - min + 1;
+    let seed = sceneBatchSeedBase();
+    if (seed < min || seed > max) {
+        seed = min + (seed % span);
+    }
+    const previous = Number(previousValue);
+    if (seed === previous && span > 1) {
+        seed = seed < max ? seed + 1 : min;
+    }
+    return seed;
+}
+
+function applyRandomizedSamplerSeeds(prompt, targets) {
+    const output = prompt?.output;
+    if (!output || !targets?.length) {
+        return;
+    }
+    const workflowNodes = new Map(scenePromptWorkflowNodes(prompt).map((node) => [String(node?.id), node]));
+    for (const target of targets) {
+        const promptNode = output[String(target.nodeId)];
+        const input = promptNode?.inputs?.[target.inputName];
+        if (typeof input !== "number") {
+            continue;
+        }
+        const workflowNode = workflowNodes.get(String(target.nodeId));
+        const control = samplerSeedControlValue(workflowNode, target);
+        if (control !== undefined && control !== "randomize") {
+            continue;
+        }
+        const seed = randomSamplerSeed(target, input);
+        if (seed === null) {
+            continue;
+        }
+        promptNode.inputs[target.inputName] = seed;
+        if (Array.isArray(workflowNode?.widgets_values)) {
+            workflowNode.widgets_values[target.widgetIndex] = seed;
+        }
+        if (workflowNode?.widgets_values_named && Object.hasOwn(workflowNode.widgets_values_named, target.inputName)) {
+            workflowNode.widgets_values_named[target.inputName] = seed;
+        }
+    }
+}
+
+function scenePromptSamplerSeedTargets(prompt) {
+    let hasExpand = false;
+    for (const node of Object.values(prompt?.output || {})) {
+        if (node?.class_type !== "ScenePrompterExpand") {
+            continue;
+        }
+        hasExpand = true;
+        const runId = String(node.inputs?.run_id || "");
+        const run = sceneBatchRun?.runId === runId ? sceneBatchRun : sceneBatchDetachedRuns.get(runId);
+        if (run) {
+            return run.samplerSeedTargets;
+        }
+    }
+    return hasExpand ? captureRandomizedSamplerSeedTargets(app.graph) : [];
+}
+
 function installSceneBatchPromptCapture() {
     if (api.__ScenePromptBatchCaptureInstalled || typeof api.queuePrompt !== "function") {
         return;
     }
     const originalQueuePrompt = api.queuePrompt.bind(api);
     api.queuePrompt = async function (number, prompt) {
+        const samplerSeedTargets = scenePromptSamplerSeedTargets(prompt);
         applySceneSourceNodeNames(prompt, { onlyMissing: true });
         randomizeStandardSceneSeeds(prompt);
         let preparedRunHandle = "";
@@ -7742,6 +7857,7 @@ function installSceneBatchPromptCapture() {
             && expandPrompt?.class_type === "ScenePrompterExpand"
             && String(expandPrompt.inputs?.run_id || "") === run.runId
             && Number(expandPrompt.inputs?.current_index || 0) === 0;
+        applyRandomizedSamplerSeeds(prompt, samplerSeedTargets);
         if (matchesFirstBatchPrompt) {
             run.firstApiPending = false;
             run.cachedPrompt = buildSceneBatchCachedPrompt(prompt, run.nodeId);
@@ -8532,6 +8648,7 @@ function createSceneBatchRun(node, total) {
         nodeId: node.id,
         node,
         graph: node.graph || app.graph,
+        samplerSeedTargets: captureRandomizedSamplerSeedTargets(node.graph || app.graph),
         total,
         totalImages: null,
         nextIndex: 0,

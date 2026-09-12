@@ -72,6 +72,41 @@ try {
 
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
+    const seedRequests = [];
+    await page.route("**/prompt", async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        seedRequests.push(route.request().postDataJSON());
+        await route.fulfill({ json: { prompt_id: `seed-test-${seedRequests.length}`, number: 0, node_errors: {} } });
+    });
+    await page.route("**/scene_prompt/runs/**", (route) => route.fulfill({
+        json: { run_handle: "seed-runtime-test", claimed: true, released: true },
+    }));
+    await page.route("**/scene_prompt_ui.js", async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({ response, body: `${await response.text()}
+window.__sceneSeedRuntimeTest = {
+    async queueBatch(node) {
+        const run = createSceneBatchRun(node, 3);
+        try {
+            run.firstPromptSnapshot = await run.promptCapturePromise;
+            if (!run.firstPromptSnapshot) throw run.promptCaptureError;
+            run.firstApiPending = true;
+            sceneBatchRun = run;
+            await queueSingleScenePrompt();
+            if (!run.cachedPrompt) throw new Error("Missing cached prompt");
+            for (let index = 1; index < 3; index += 1) {
+                run.nextIndex = index;
+                run.currentSeed = 1000 + index;
+                await queueSingleScenePrompt();
+            }
+        } finally {
+            sceneBatchRun = null;
+            sceneBatchRunsById.delete(run.runId);
+            resetSceneExpandRunControls(node, { mark: false });
+        }
+    },
+};` });
+    });
     await page.goto(url, { waitUntil: "networkidle", timeout: 60_000 });
     await page.waitForFunction(
         () => window.LiteGraph?.registered_node_types?.ScenePrompter && window.app?.graph,
@@ -149,6 +184,53 @@ try {
     assert.deepEqual(result.legacyAfterFirst, result.legacy, "a second configure must not alter v0.3 values");
     assert.equal(result.legacyFilename, false);
     console.log("real ComfyUI LGraphNode legacy choice widget round-trip passed");
+    const seedNodes = await page.evaluate(async () => {
+        window.app.graph.clear();
+        const add = (type) => {
+            const node = window.LiteGraph.createNode(type);
+            if (!node) throw new Error(`Missing native node ${type}`);
+            window.app.graph.add(node);
+            return node;
+        };
+        const scene = add("ScenePrompter");
+        const expand = add("ScenePrompterExpand");
+        const sampler = add("KSampler");
+        const decode = add("VAEDecode");
+        const save = add("SceneSaveImage");
+        const connect = (from, output, to, input) => {
+            const link = from.connect(from.outputs.findIndex((slot) => slot.name === output),
+                to, to.inputs.findIndex((slot) => slot.name === input));
+            if (!link) throw new Error(`Cannot connect ${output} to ${input}`);
+        };
+        scene.connect(0, expand, expand.inputs.findIndex((slot) => slot.name === "scene_prompt"));
+        sampler.connect(0, decode, decode.inputs.findIndex((slot) => slot.name === "samples"));
+        decode.connect(0, save, save.inputs.findIndex((slot) => slot.name === "images"));
+        // Keep Expand on the saved image's execution path without linking its seed.
+        connect(expand, "メタ情報", save, "scene_info");
+        sampler.widgets.find((widget) => widget.name === "seed").value = 123;
+        const control = sampler.widgets.find((widget) => widget.name === "control_after_generate");
+        if (!control) throw new Error("Missing native seed control");
+        control.value = "randomize";
+        // Freeze the native lifecycle to verify Scene's submission hook itself.
+        control.beforeQueued = () => {};
+        control.afterQueued = () => {};
+        await window.app.queuePrompt(0, 1);
+        await window.app.queuePrompt(0, 1);
+        await window.__sceneSeedRuntimeTest.queueBatch(expand);
+        return { samplerId: sampler.id, seedIndex: sampler.widgets.findIndex((widget) => widget.name === "seed") };
+    });
+    assert.equal(seedRequests.length, 5, "two normal submissions and three batch submissions reach the API");
+    const sentSeeds = seedRequests.map((request) => {
+        const seed = request.prompt[String(seedNodes.samplerId)].inputs.seed;
+        assert.ok(Number.isSafeInteger(seed));
+        assert.notEqual(seed, 123, "the original literal seed must not be reused");
+        const workflow = request.extra_data.extra_pnginfo.workflow;
+        const node = workflow.nodes.find((entry) => String(entry.id) === String(seedNodes.samplerId));
+        assert.equal(node.widgets_values[seedNodes.seedIndex], seed, "saved workflow matches the submitted sampler seed");
+        return seed;
+    });
+    assert.equal(new Set(sentSeeds).size, 5, "normal Queue, first snapshot, and cached repeats receive fresh seeds");
+    console.log("real ComfyUI normal Queue and cached batch sampler seed submissions passed");
 } finally {
     await browser?.close();
     if (child?.exitCode === null) {
