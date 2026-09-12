@@ -18,22 +18,6 @@ function functionSource(name) {
     throw new Error(`Unclosed function: ${name}`);
 }
 
-function expandNode(id, currentIndex, seedBase, seedBaseLiteral) {
-    return {
-        id,
-        widgets: [
-            { name: "current_index", value: currentIndex },
-            { name: "run_id", value: "" },
-            { name: "seed_base", value: seedBase },
-            { name: "seed_base_literal", value: seedBaseLiteral },
-        ],
-    };
-}
-
-const replayNode = expandNode(5, 2, 41, false);
-const failedReplayNode = expandNode(6, 3, 42, true);
-const continuousNode = expandNode(7, 4, 43, false);
-
 const context = {
     Date,
     Object,
@@ -43,11 +27,7 @@ const context = {
     encodeURIComponent,
     setTimeout,
     clearTimeout,
-    app: { graph: {
-        _nodes: [replayNode, failedReplayNode, continuousNode],
-        getNodeById(id) { return this._nodes.find((node) => String(node.id) === String(id)) || null; },
-        serialize() { return { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] }; },
-    } },
+    app: { graph: { serialize() { return { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] }; } } },
     sceneBatchRun: null,
     sceneBatchDetachedRuns: new Map(),
     sceneRunHandlesByPromptId: new Map(),
@@ -62,7 +42,6 @@ const context = {
     api: {
         async queuePrompt(_number, prompt) {
             if (prompt.output?.["3"]) throw new Error("queue failed");
-            if (prompt.output?.["6"]) throw new Error("replay queue failed");
             if (prompt.output?.["4"]) return { received: structuredClone(prompt) };
             context.queued += 1;
             return { prompt_id: `prompt-${context.queued}`, received: structuredClone(prompt) };
@@ -87,13 +66,6 @@ const context = {
     acceptSceneBatchPrompt() {},
     buildSceneBatchCachedPrompt() { return null; },
     applySceneSourceNodeNames() {},
-    findWidget(node, name) { return node.widgets.find((widget) => widget.name === name); },
-    resetSceneExpandRunControls(node) {
-        context.findWidget(node, "current_index").value = 0;
-        context.findWidget(node, "run_id").value = "";
-        context.findWidget(node, "seed_base").value = 0;
-        context.findWidget(node, "seed_base_literal").value = false;
-    },
     SCENE_PLAN_NODE_CLASS_TYPES: new Set([
         "ScenePrompter", "SceneMatrix", "ScenePath", "ScenePrompterMerge",
         "ScenePromptCounter", "ScenePrompterQueue", "SceneEmptyLatent", "ScenePresetReference",
@@ -102,9 +74,7 @@ const context = {
 };
 vm.createContext(context);
 for (const name of [
-    "sceneNodeById",
-    "captureSubmittedSceneReplayControls",
-    "resetSubmittedSceneReplayControls",
+    "randomizeStandardSceneSeeds",
     "sceneRunTargetNodes",
     "sceneHistoryStatus",
     "pruneSceneRunTerminalPromptIds",
@@ -190,37 +160,21 @@ context.installSceneBatchPromptCapture();
     assert.equal(context.released.at(-1), "overflow-handle", "overflow history reconciliation prevents a leaked handle");
     assert.equal(context.sceneRunHandlesByPromptId.has("overflow-0"), false);
 
-    const replayPrompt = { output: { "5": { class_type: "ScenePrompterExpand", inputs: {
-        current_index: 2, run_id: "", seed_base: 41, seed_base_literal: false,
-    } } } };
-    const replayResult = await context.api.queuePrompt(0, replayPrompt);
-    assert.equal(replayResult.received.output["5"].inputs.seed_base, 41, "the submitted replay keeps its saved seed");
-    assert.deepEqual(
-        replayNode.widgets.map((widget) => widget.value),
-        [0, "", 0, false],
-        "a successful normal replay is consumed once",
-    );
+    const standardScene = await context.api.queuePrompt(0, { output: {
+        "5": { class_type: "ScenePrompterExpand", inputs: {
+            current_index: 2, run_id: "", seed_base: 41, seed_base_literal: true,
+        } },
+    } });
+    assert.equal(standardScene.received.output["5"].inputs.current_index, 2, "normal Queue keeps the selected Scene row");
+    assert.equal(standardScene.received.output["5"].inputs.seed_base, 0, "normal Queue requests a fresh seed every time");
+    assert.equal(standardScene.received.output["5"].inputs.seed_base_literal, false);
 
-    await assert.rejects(
-        () => context.api.queuePrompt(0, { output: { "6": { class_type: "ScenePrompterExpand", inputs: {
-            current_index: 3, run_id: "", seed_base: 42, seed_base_literal: true,
-        } } } }),
-        /replay queue failed/,
-    );
-    assert.deepEqual(
-        failedReplayNode.widgets.map((widget) => widget.value),
-        [3, "", 42, true],
-        "a failed normal replay keeps its saved values",
-    );
-
-    await context.api.queuePrompt(0, { output: { "7": { class_type: "ScenePrompterExpand", inputs: {
-        current_index: 4, run_id: "continuous-run", seed_base: 43, seed_base_literal: false,
-    } } } });
-    assert.deepEqual(
-        continuousNode.widgets.map((widget) => widget.value),
-        [4, "", 43, false],
-        "continuous-run prompts do not consume normal replay state",
-    );
+    const continuousScene = await context.api.queuePrompt(0, { output: {
+        "6": { class_type: "ScenePrompterExpand", inputs: {
+            current_index: 3, run_id: "continuous-run", seed_base: 42, seed_base_literal: false,
+        } },
+    } });
+    assert.equal(continuousScene.received.output["6"].inputs.seed_base, 42, "continuous runs keep their per-batch seed");
 
     for (const name of ["applySceneRunHandle", "prepareSceneRunContext"]) {
         vm.runInContext(functionSource(name), context);

@@ -7696,38 +7696,13 @@ function buildSceneBatchCachedPrompt(prompt, expandNodeId) {
     return cached;
 }
 
-function captureSubmittedSceneReplayControls(prompt) {
-    const captured = [];
-    for (const [nodeId, promptNode] of Object.entries(prompt?.output || {})) {
+function randomizeStandardSceneSeeds(prompt) {
+    for (const promptNode of Object.values(prompt?.output || {})) {
         if (promptNode?.class_type !== "ScenePrompterExpand" || String(promptNode.inputs?.run_id || "")) {
             continue;
         }
-        const node = sceneNodeById(nodeId);
-        if (!node) {
-            continue;
-        }
-        const values = {
-            current_index: Number(promptNode.inputs?.current_index || 0),
-            run_id: "",
-            seed_base: Number(promptNode.inputs?.seed_base || 0),
-            seed_base_literal: !!promptNode.inputs?.seed_base_literal,
-        };
-        if (values.current_index || values.seed_base || values.seed_base_literal) {
-            captured.push({ node, values });
-        }
-    }
-    return captured;
-}
-
-function resetSubmittedSceneReplayControls(captured) {
-    for (const entry of captured || []) {
-        const matchesSubmittedValues = Object.entries(entry.values).every(([name, value]) => {
-            const current = findWidget(entry.node, name)?.value;
-            return name === "seed_base_literal" ? !!current === value : String(current ?? "") === String(value);
-        });
-        if (matchesSubmittedValues) {
-            resetSceneExpandRunControls(entry.node, { mark: false });
-        }
+        promptNode.inputs.seed_base = 0;
+        promptNode.inputs.seed_base_literal = false;
     }
 }
 
@@ -7738,7 +7713,7 @@ function installSceneBatchPromptCapture() {
     const originalQueuePrompt = api.queuePrompt.bind(api);
     api.queuePrompt = async function (number, prompt) {
         applySceneSourceNodeNames(prompt, { onlyMissing: true });
-        const submittedReplayControls = captureSubmittedSceneReplayControls(prompt);
+        randomizeStandardSceneSeeds(prompt);
         let preparedRunHandle = "";
         if (prompt?.output && sceneRunTargetNodes(prompt).length) {
             const existingHandle = sceneRunTargetNodes(prompt)
@@ -7780,9 +7755,6 @@ function installSceneBatchPromptCapture() {
             throw error;
         }
         const promptId = scenePromptIdFromValue(result);
-        if (promptId) {
-            resetSubmittedSceneReplayControls(submittedReplayControls);
-        }
         if (preparedRunHandle && promptId) {
             registerQueuedSceneRunHandle(promptId, preparedRunHandle);
         } else if (preparedRunHandle) {
