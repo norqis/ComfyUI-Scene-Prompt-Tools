@@ -175,7 +175,7 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 
 `Scene Prompt Expand` uses **Illustrious** mode by default. Select **Anima** to replace ASCII underscores in the final positive and negative prompts with spaces before they reach CLIP or PNG metadata.
 
-**Scene Prompt Reverse** swaps positive and negative prompt content without changing row order, generation counts, paths, latent settings, or callbacks. Select **全てのノード** to swap the complete prompt accumulated so far. Select **直前のノード** to swap only the prompt contribution of the immediately preceding Scene node. If the preceding node is Path, Count, Empty Latent, or Callback, it has no prompt contribution and the operation is a no-op. Merge and Queue treat each complete output row as their contribution.
+**Scene Prompt Reverse** swaps positive and negative prompt content without changing row order, generation counts, paths, latent settings, or callbacks. Select **全てのノード** to swap the complete prompt accumulated so far. Select **直前のノード** to swap only the prompt contribution of the immediately preceding Scene node. If the preceding node is Path, Count, Empty Latent, or Callback, it has no prompt contribution and the operation is a no-op. Merge, Queue, Preset Reference, and Reverse treat each complete output row as their contribution.
 
 When [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts) is installed, the positive and negative base-prompt fields opened from each **Scene Matrix** row use its existing autocomplete, including tag, embedding, and LoRA suggestions. Without it, the fields remain normal text inputs.
 

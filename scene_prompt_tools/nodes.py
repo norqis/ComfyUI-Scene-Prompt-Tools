@@ -47,6 +47,7 @@ from .plan import (
     queue,
     transform,
     mark_prompt_passthrough,
+    mark_prompt_whole,
     with_prompt_trace,
     with_source_node,
     append_callback,
@@ -1476,6 +1477,7 @@ class ScenePromptCounter:
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
                 "source_node_name": ("STRING", {"default": "", "hidden": True}),
+                "prompt_trace_kind": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -1488,8 +1490,19 @@ class ScenePromptCounter:
             ]
         )
 
-    def count(self, scene_prompt=None, count=1, unique_id=None, source_node_id="", source_node_name=""):
-        return (with_source_node(multiply_count(scene_prompt, count), source_node_id or unique_id, source_node_name),)
+    def count(
+        self,
+        scene_prompt=None,
+        count=1,
+        unique_id=None,
+        source_node_id="",
+        source_node_name="",
+        prompt_trace_kind="",
+    ):
+        plan = multiply_count(scene_prompt, count)
+        if prompt_trace_kind == "whole":
+            plan = mark_prompt_whole(plan)
+        return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 
 class SceneEmptyLatent:

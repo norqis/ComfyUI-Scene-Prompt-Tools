@@ -603,6 +603,35 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual(plan["rows"][0]["row"]["negative_parts"], ["preset_hands"])
         self.module.release_scene_preset_snapshot(run_handle)
 
+    def test_reverse_previous_treats_preset_reference_as_one_structural_node(self):
+        child = basic_nodes("child_pos")
+        child["2"]["inputs"]["negative_base"] = "child_neg"
+        self.save("reverse-child", child)
+
+        expanded = self.module.expand_preset_reference("reverse-child", source_node_id="20")["expand"]
+        plan = self.module._scene_node_value(expanded, "__scene_preset_source", {}, set())
+        reversed_plan = self.nodes.ScenePromptReverse().reverse(plan, "直前のノード")[0]
+        row = reversed_plan["rows"][0]["row"]
+        self.assertEqual(row["positive_parts"], ["child_neg"])
+        self.assertEqual(row["negative_parts"], ["child_pos"])
+
+        outer_nodes = {
+            "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "reverse-child"}},
+            "2": {
+                "class_type": "ScenePromptReverse",
+                "inputs": {"scene_prompt": ["1", 0], "reverse_scope": "直前のノード"},
+            },
+        }
+        nested = self.module._scene_node_value(
+            outer_nodes,
+            "2",
+            {"reverse-child": self.module.load_preset("reverse-child")},
+            set(),
+        )
+        nested_row = nested["rows"][0]["row"]
+        self.assertEqual(nested_row["positive_parts"], ["child_neg"])
+        self.assertEqual(nested_row["negative_parts"], ["child_pos"])
+
     def test_run_snapshot_never_falls_back_to_latest_preset(self):
         self.save("fixed", basic_nodes("first"))
         with self.assertRaisesRegex(self.module.ScenePresetError, "スナップショットがありません"):

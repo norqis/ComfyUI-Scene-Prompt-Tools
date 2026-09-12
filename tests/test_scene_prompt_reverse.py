@@ -178,6 +178,21 @@ class ScenePromptReverseTests(unittest.TestCase):
             self.row(reverse_all)["negative_parts"],
         )
 
+    def test_reverse_previous_after_reverse_swaps_the_previous_complete_output(self):
+        first = add_prompt(self.prompt, "A", "a_pos", "a_neg", node_id="1")
+        second = add_prompt(self.prompt, "B", "b_pos", "b_neg", first, node_id="2")
+        first_reverse = self.nodes.ScenePromptReverse().reverse(
+            second, "直前のノード", source_node_id="3"
+        )[0]
+        second_reverse = self.nodes.ScenePromptReverse().reverse(
+            first_reverse, "直前のノード", source_node_id="4"
+        )[0]
+
+        self.assertEqual(self.row(first_reverse)["positive_parts"], ["a_pos", "b_neg"])
+        self.assertEqual(self.row(first_reverse)["negative_parts"], ["a_neg", "b_pos"])
+        self.assertEqual(self.row(second_reverse)["positive_parts"], ["a_neg", "b_pos"])
+        self.assertEqual(self.row(second_reverse)["negative_parts"], ["a_pos", "b_neg"])
+
 
 if __name__ == "__main__":
     unittest.main()
