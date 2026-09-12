@@ -107,7 +107,11 @@ class OpenIssueRegressionTests(unittest.TestCase):
         self.assertEqual(payload["api_graph"]["output"]["2"]["class_type"], "ScenePrompter")
         self.assertEqual(payload["workflow"]["nodes"][1]["type"], "ScenePrompter")
         self.assertEqual(payload["workflow"]["nodes"][1]["properties"]["Node name for S&R"], "ScenePrompter")
-        self.assertEqual(payload["metadata"]["sha256"], original_hash)
+        self.assertNotEqual(payload["metadata"]["sha256"], original_hash)
+        self.assertEqual(
+            payload["metadata"]["sha256"],
+            self.presets._content_hash(payload["api_graph"], payload["workflow"]),
+        )
 
         corrupted = self.legacy_payload()
         corrupted["api_graph"]["output"]["2"]["inputs"]["positive_base"] = "tampered"
@@ -143,6 +147,24 @@ class OpenIssueRegressionTests(unittest.TestCase):
         self.assertEqual(
             on_disk["metadata"]["sha256"],
             self.presets._content_hash(on_disk["api_graph"], on_disk["workflow"]),
+        )
+
+    def test_legacy_reference_expansion_uses_normalized_in_memory_hash(self):
+        raw = self.legacy_payload()
+        path = self.presets._preset_path("legacy", "default")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        original_bytes = (json.dumps(raw, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        path.write_bytes(original_bytes)
+
+        expanded = self.presets.expand_preset_reference("legacy")
+        self.assertIn("result", expanded)
+        self.assertIn("expand", expanded)
+        self.assertEqual(path.read_bytes(), original_bytes)
+
+        loaded = self.presets.load_preset("legacy", "default")
+        self.assertEqual(
+            loaded["metadata"]["sha256"],
+            self.presets._content_hash(loaded["api_graph"], loaded["workflow"]),
         )
 
     def test_legacy_expand_remains_disallowed_after_normalization(self):

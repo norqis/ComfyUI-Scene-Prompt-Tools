@@ -539,8 +539,16 @@ def _validate_preset_payload(preset):
         raise ScenePresetError("Presetの内容が壊れているか、hashが一致しません。")
 
     normalized = _normalize_legacy_preset_ids(preset)
+    normalized_metadata = normalized.get("metadata")
+    if not isinstance(normalized_metadata, dict):
+        raise ScenePresetError("Presetのメタデータが不正です。")
+    normalized_metadata["sha256"] = _content_hash(
+        normalized.get("api_graph"),
+        normalized.get("workflow"),
+    )
     preset.clear()
     preset.update(normalized)
+    metadata = normalized_metadata
     name = str(metadata.get("name") or metadata.get("preset_id"))
     try:
         nodes = _preset_nodes(preset)
