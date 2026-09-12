@@ -30,7 +30,7 @@ const previewContext = {
     matrixLinesForNode(node) { return node.rows || []; },
     matrixConfiguredLineCount(node) { return node.configured || 0; },
     matrixLineLabel(row) { return row.label; },
-    isScenePathNode() { return false; }, isScenePromptCounterNode() { return false; }, isSceneEmptyLatentNode() { return false; },
+    isScenePathNode() { return false; }, isScenePromptCounterNode() { return false; }, isScenePromptReverseNode() { return false; }, isSceneEmptyLatentNode() { return false; },
     isScenePromptQueueNode(node) { return node.kind === "queue"; },
     connectedScenePromptSourcesForQueue(node) { return (node.sources || []).map((source) => ({ source })); },
     sceneQueueDisplayPartsForEntry(entry) { return entry.parts; },

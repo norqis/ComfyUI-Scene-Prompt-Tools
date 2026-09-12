@@ -13,7 +13,7 @@ from types import MappingProxyType
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
 from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
-from .plan import seed_plan
+from .plan import mark_prompt_whole, seed_plan
 from .storage import public_user_directory
 from .nodes import (
     SceneEmptyLatent,
@@ -22,6 +22,7 @@ from .nodes import (
     ScenePromptMerge,
     ScenePromptQueue,
     ScenePromptCounter,
+    ScenePromptReverse,
     ScenePromptCallback,
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
@@ -57,6 +58,7 @@ SAFE_NODE_CLASSES = {
     "ScenePath": ScenePath,
     "ScenePrompterMerge": ScenePromptMerge,
     "ScenePromptCounter": ScenePromptCounter,
+    "ScenePromptReverse": ScenePromptReverse,
     "ScenePrompterQueue": ScenePromptQueue,
     "SceneEmptyLatent": SceneEmptyLatent,
     "ScenePromptCallback": ScenePromptCallback,
@@ -92,6 +94,7 @@ DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePath": "Scene Path",
     "ScenePrompterMerge": "Scene Prompt Merge",
     "ScenePromptCounter": "Scene Prompt Count",
+    "ScenePromptReverse": "Scene Prompt Reverse",
     "ScenePrompterQueue": "Scene Prompt Queue",
     "SceneEmptyLatent": "Scene Empty Latent",
     "ScenePresetReference": "Scene Preset Reference",
@@ -209,7 +212,7 @@ def _compact_preset_list_graph(api_graph):
     if not isinstance(nodes, dict):
         return copy.deepcopy(api_graph)
     compact_nodes = {}
-    scalar_inputs = {"matrix_json", "batch_size", "count", "preset_id"}
+    scalar_inputs = {"matrix_json", "batch_size", "count", "preset_id", "reverse_scope"}
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
             continue
@@ -831,14 +834,14 @@ def _scene_node_value_impl(
         if not preset:
             raise ScenePresetError(f"Preset「{preset_id}」のスナップショットがありません。")
         upstream = value(_node_inputs(node).get("scene_prompt")) if is_link(_node_inputs(node).get("scene_prompt")) else None
-        result = _evaluate_preset_scene(
+        result = mark_prompt_whole(_evaluate_preset_scene(
             preset,
             resolved,
             upstream,
             user_id,
             run_handle,
             preset_stack,
-        )
+        ))
         memo[node_id] = result
         return result
     cls = SAFE_NODE_CLASSES.get(class_type)
@@ -1193,6 +1196,7 @@ def expand_preset_reference(
     marker = graph.node("ScenePromptCounter", "__scene_preset_source")
     marker.set_input("scene_prompt", result)
     marker.set_input("count", 1)
+    marker.set_input("prompt_trace_kind", "whole")
     marker.set_input("source_node_id", reference_source_id)
     marker.set_input("source_node_name", str(source_node_name or ""))
     result = marker.out(0)

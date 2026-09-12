@@ -107,7 +107,7 @@ Empty options are meaningful. Keep every `|` that represents a blank outcome.
 Create a reusable Scene fragment:
 
 ```text
-Scene Preset Input -> Scene Prompt / Matrix / Queue / Merge / Count / Path / Empty Latent -> Scene Preset Output
+Scene Preset Input -> Scene Prompt / Matrix / Queue / Merge / Count / Reverse / Path / Empty Latent -> Scene Preset Output
 ```
 
 One editor workflow can contain several independent Preset branches. Set a Preset ID and name on the Output for the branch you want, then click **保存 (Save)**. Saving keeps only that Output's connected upstream branch; unrelated nodes and other Preset branches are not included.
@@ -162,6 +162,7 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Prompt Merge | Creates every combination of two Scene plans. |
 | Scene Prompt Queue | Appends up to ten Scene plans in input order. |
 | Scene Prompt Count | Multiplies the generation count for each row. |
+| Scene Prompt Reverse | Swaps positive and negative prompts for the complete plan or only the immediately preceding Scene node. |
 | Scene Path | Adds output-folder parts without changing the prompt. |
 | Scene Empty Latent | Sets width, height, and batch size for the plan. |
 | Scene Prompt Callback | Runs a configured callback at its position in a continuous Scene run. |
@@ -173,6 +174,8 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Preset Input / Output / Reference | Save, reuse, and edit Scene plan fragments. |
 
 `Scene Prompt Expand` uses **Illustrious** mode by default. Select **Anima** to replace ASCII underscores in the final positive and negative prompts with spaces before they reach CLIP or PNG metadata.
+
+**Scene Prompt Reverse** swaps positive and negative prompt content without changing row order, generation counts, paths, latent settings, or callbacks. Select **全てのノード** to swap the complete prompt accumulated so far. Select **直前のノード** to swap only the prompt contribution of the immediately preceding Scene node. If the preceding node is Path, Count, Empty Latent, or Callback, it has no prompt contribution and the operation is a no-op. Merge, Queue, Preset Reference, and Reverse treat each complete output row as their contribution.
 
 When [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts) is installed, the positive and negative base-prompt fields opened from each **Scene Matrix** row use its existing autocomplete, including tag, embedding, and LoRA suggestions. Without it, the fields remain normal text inputs.
 

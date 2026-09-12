@@ -19,6 +19,7 @@ const PROMPT_MATRIX_NODE_NAMES = new Set(["SceneMatrix", "Scene Matrix"]);
 const SCENE_PATH_NODE_NAMES = new Set(["ScenePath", "Scene Path"]);
 const SCENE_PROMPT_MERGE_NODE_NAMES = new Set(["ScenePrompterMerge", "Scene Prompt Merge"]);
 const SCENE_PROMPT_COUNTER_NODE_NAMES = new Set(["ScenePromptCounter", "Scene Prompt Count"]);
+const SCENE_PROMPT_REVERSE_NODE_NAMES = new Set(["ScenePromptReverse", "Scene Prompt Reverse"]);
 const SCENE_PROMPT_QUEUE_NODE_NAMES = new Set(["ScenePrompterQueue", "Scene Prompt Queue"]);
 const SCENE_EMPTY_LATENT_NODE_NAMES = new Set(["SceneEmptyLatent", "Scene Empty Latent"]);
 const SCENE_PROMPT_EXPAND_NODE_NAMES = new Set(["ScenePrompterExpand", "Scene Prompt Expand"]);
@@ -36,6 +37,7 @@ const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePath",
     "ScenePrompterMerge",
     "ScenePromptCounter",
+    "ScenePromptReverse",
     "ScenePrompterQueue",
     "SceneEmptyLatent",
     "ScenePresetReference",
@@ -50,6 +52,7 @@ const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
     "ScenePath",
     "ScenePrompterMerge",
     "ScenePromptCounter",
+    "ScenePromptReverse",
     "ScenePrompterQueue",
     "SceneEmptyLatent",
     "ScenePresetReference",
@@ -60,6 +63,7 @@ const NODE_NAMES = new Set([
     ...SCENE_PATH_NODE_NAMES,
     ...SCENE_PROMPT_MERGE_NODE_NAMES,
     ...SCENE_PROMPT_COUNTER_NODE_NAMES,
+    ...SCENE_PROMPT_REVERSE_NODE_NAMES,
     ...SCENE_PROMPT_QUEUE_NODE_NAMES,
     ...SCENE_EMPTY_LATENT_NODE_NAMES,
     ...SCENE_PROMPT_EXPAND_NODE_NAMES,
@@ -130,6 +134,7 @@ const PATH_MODE_APPEND = "前のフォルダ名に結合";
 const SCENE_WIDGET_LABELS = {
     category: "カテゴリ",
     count: "生成回数",
+    reverse_scope: "対象",
     prompt_name: "ノード名",
     filename_enabled: "ファイル名付与",
     path_name: "ノード名",
@@ -174,6 +179,7 @@ const SCENE_NODE_DISPLAY_NAMES = {
     ScenePath: "Scene Path",
     ScenePrompterMerge: "Scene Prompt Merge",
     ScenePromptCounter: "Scene Prompt Count",
+    ScenePromptReverse: "Scene Prompt Reverse",
     ScenePrompterQueue: "Scene Prompt Queue",
     SceneEmptyLatent: "Scene Empty Latent",
     ScenePrompterExpand: "Scene Prompt Expand",
@@ -3814,7 +3820,9 @@ function hideSceneUtilityWidgets(node, nodeName) {
             ])
             : SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
                 ? new Set(["width", "height", "batch_size"])
-                : new Set();
+                : SCENE_PROMPT_REVERSE_NODE_NAMES.has(nodeName)
+                    ? new Set(["reverse_scope"])
+                    : new Set();
     for (const widget of node.widgets || []) {
         if (widget?.sceneRole || visibleWidgets.has(widget?.name)) {
             showWidget(widget);
@@ -4668,6 +4676,10 @@ function isScenePromptCounterNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PROMPT_COUNTER_NODE_NAMES.has(name));
 }
 
+function isScenePromptReverseNode(node) {
+    return nodeClassNames(node).some((name) => SCENE_PROMPT_REVERSE_NODE_NAMES.has(name));
+}
+
 function isScenePresetInputNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PRESET_INPUT_NODE_NAMES.has(name));
 }
@@ -4698,6 +4710,7 @@ function isScenePromptSourceNode(node) {
         || isScenePathNode(node)
         || isScenePromptMergeNode(node)
         || isScenePromptCounterNode(node)
+        || isScenePromptReverseNode(node)
         || isScenePromptQueueNode(node)
         || isSceneEmptyLatentNode(node)
         || isScenePresetReferenceNode(node)
@@ -5106,6 +5119,26 @@ function installScenePathWidgetSyncHandlers(node) {
         return result;
     };
     widget.scenePathSyncWrapped = true;
+}
+
+function scenePromptReverseScope(node) {
+    const value = String(findWidget(node, "reverse_scope")?.value || "").trim();
+    return value === "直前のノード" ? "直前のノード" : "全てのノード";
+}
+
+function installScenePromptReverseWidgetSyncHandlers(node) {
+    const widget = findWidget(node, "reverse_scope");
+    if (!widget || widget.scenePromptReverseSyncWrapped) {
+        return;
+    }
+    const originalCallback = widget.callback;
+    widget.callback = function () {
+        const result = originalCallback?.apply(this, arguments);
+        clearSceneComputedCaches(node);
+        refreshDownstreamSceneNodes(node);
+        return result;
+    };
+    widget.scenePromptReverseSyncWrapped = true;
 }
 
 function installScenePromptCounterWidgetSyncHandlers(node) {
@@ -6001,6 +6034,16 @@ function scenePromptSourceLocalCacheKey(node) {
             }),
         });
     }
+    if (isScenePromptReverseNode(node)) {
+        return JSON.stringify({
+            type: "reverse",
+            id: node?.id ?? null,
+            mode: sceneNodeMode(node),
+            reverse_scope: scenePromptReverseScope(node),
+            input: linkedInputKey(node, "scene_prompt"),
+            upstream: upstreamKey,
+        });
+    }
     if (isScenePromptCounterNode(node)) {
         return JSON.stringify({
             type: "counter",
@@ -6152,6 +6195,8 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             result = source("scene_prompt") || sceneStatsSeed();
         } else if (node.class_type === "SceneEmptyLatent") {
             result = sceneStatsWithLatent(source("scene_prompt") || sceneStatsSeed(), clampSceneCount(apiInput(node, "batch_size"), 1));
+        } else if (node.class_type === "ScenePromptReverse") {
+            result = source("scene_prompt") || emptyScenePromptStats();
         } else if (node.class_type === "ScenePromptCounter") {
             const base = source("scene_prompt") || sceneStatsSeed();
             const count = clampSceneCount(apiInput(node, "count"), 1);
@@ -6336,6 +6381,9 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
         const first = firstSource ? scenePromptStats(firstSource, new Set(seen), memo) : sceneStatsSeed();
         const second = secondSource ? scenePromptStats(secondSource, new Set(seen), memo) : sceneStatsSeed();
         return finish(sceneStatsMerge(first, second));
+    }
+    if (isScenePromptReverseNode(node)) {
+        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : emptyScenePromptStats());
     }
     if (isScenePromptCounterNode(node)) {
         const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
@@ -6562,6 +6610,9 @@ function scenePromptLineageKey(node, limit = 80) {
         if (isScenePromptCounterNode(current)) {
             parts.push(`count:${scenePromptCounterCount(current)}`);
         }
+        if (isScenePromptReverseNode(current)) {
+            parts.push(`reverse:${scenePromptReverseScope(current)}`);
+        }
         if (isSceneEmptyLatentNode(current)) {
             parts.push(`latent:${JSON.stringify(sceneEmptyLatentConfig(current))}`);
         }
@@ -6728,6 +6779,13 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const firstEntries = scenePromptPreviewEntries(firstSource, maxEntries, new Set(seen), memo);
         const secondEntries = scenePromptPreviewEntries(secondSource, maxEntries, new Set(seen), memo);
         return finish(mergeScenePromptEntryLists(firstEntries, secondEntries, maxEntries));
+    }
+
+    if (isScenePromptReverseNode(node)) {
+        const upstream = scenePromptInputSource(node);
+        return finish(upstream
+            ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : []);
     }
 
     if (isScenePromptCounterNode(node)) {
@@ -9979,6 +10037,9 @@ function attachSceneUtilityNode(node, nodeName) {
     if (SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)) {
         installSceneEmptyLatentWidgetSyncHandlers(node);
     }
+    if (SCENE_PROMPT_REVERSE_NODE_NAMES.has(nodeName)) {
+        installScenePromptReverseWidgetSyncHandlers(node);
+    }
     hideSceneUtilityWidgets(node, nodeName);
     scheduleHideInternalDomWidgets();
     if (isSceneExpandNodeName(nodeName)) {
@@ -10054,6 +10115,7 @@ function attachSceneNode(node, nodeName) {
     } else if (
         SCENE_PROMPT_EXPAND_NODE_NAMES.has(nodeName)
         || SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
+        || SCENE_PROMPT_REVERSE_NODE_NAMES.has(nodeName)
         || SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
     ) {
         attachSceneUtilityNode(node, nodeName);

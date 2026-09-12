@@ -1,6 +1,7 @@
 from .scene_prompt_tools.nodes import (
     SceneEmptyLatent,
     ScenePromptCounter,
+    ScenePromptReverse,
     SceneMatrix,
     ScenePath,
     ScenePromptMerge,
@@ -23,6 +24,7 @@ NODE_CLASS_MAPPINGS = {
     "ScenePath": ScenePath,
     "ScenePrompterMerge": ScenePromptMerge,
     "ScenePromptCounter": ScenePromptCounter,
+    "ScenePromptReverse": ScenePromptReverse,
     "ScenePrompterQueue": ScenePromptQueue,
     "ScenePromptCallback": ScenePromptCallback,
     "ScenePromptCallbackDiscord": ScenePromptCallbackDiscord,
@@ -42,6 +44,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ScenePath": "Scene Path",
     "ScenePrompterMerge": "Scene Prompt Merge",
     "ScenePromptCounter": "Scene Prompt Count",
+    "ScenePromptReverse": "Scene Prompt Reverse",
     "ScenePrompterQueue": "Scene Prompt Queue",
     "ScenePromptCallback": "Scene Prompt Callback",
     "ScenePromptCallbackDiscord": "Scene Prompt Callback (Discord)",
