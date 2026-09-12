@@ -22,6 +22,7 @@ from .nodes import (
     ScenePromptMerge,
     ScenePromptQueue,
     ScenePromptCounter,
+    ScenePromptReverse,
     ScenePromptCallback,
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
@@ -57,6 +58,7 @@ SAFE_NODE_CLASSES = {
     "ScenePath": ScenePath,
     "ScenePrompterMerge": ScenePromptMerge,
     "ScenePromptCounter": ScenePromptCounter,
+    "ScenePromptReverse": ScenePromptReverse,
     "ScenePrompterQueue": ScenePromptQueue,
     "SceneEmptyLatent": SceneEmptyLatent,
     "ScenePromptCallback": ScenePromptCallback,
@@ -92,6 +94,7 @@ DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePath": "Scene Path",
     "ScenePrompterMerge": "Scene Prompt Merge",
     "ScenePromptCounter": "Scene Prompt Count",
+    "ScenePromptReverse": "Scene Prompt Reverse",
     "ScenePrompterQueue": "Scene Prompt Queue",
     "SceneEmptyLatent": "Scene Empty Latent",
     "ScenePresetReference": "Scene Preset Reference",
@@ -209,7 +212,7 @@ def _compact_preset_list_graph(api_graph):
     if not isinstance(nodes, dict):
         return copy.deepcopy(api_graph)
     compact_nodes = {}
-    scalar_inputs = {"matrix_json", "batch_size", "count", "preset_id"}
+    scalar_inputs = {"matrix_json", "batch_size", "count", "preset_id", "reverse_scope"}
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
             continue
