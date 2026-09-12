@@ -44,6 +44,8 @@ Make these connections:
 
 Set the positive and negative base prompts on **Scene Prompt**. Set width, height, and batch size on **Scene Empty Latent**. Add a **Scene Save Image** node to write PNGs. Click **連続生成 (Continuous Generation)** on **Scene Prompt Expand** to run the complete plan one batch at a time.
 
+When a KSampler's `seed` or `noise_seed` is unconnected and its after-generate control is `randomize`, Scene Prompt refreshes it for every normal or continuous queue send. Fixed seeds are retained. Connect **Scene Prompt Expand.シード** when the sampler must use the planned Scene seed.
+
 ## Prompt Data
 
 Prompt candidates live outside the custom-node directory:

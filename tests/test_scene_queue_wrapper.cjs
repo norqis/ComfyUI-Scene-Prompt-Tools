@@ -85,6 +85,13 @@ for (const name of [
     "claimSceneRunHandle",
     "registerQueuedSceneRunHandle",
     "releaseCompletedSceneRun",
+    "samplerSeedControlWidget",
+    "captureRandomizedSamplerSeedTargets",
+    "scenePromptWorkflowNodes",
+    "samplerSeedControlValue",
+    "randomSamplerSeed",
+    "applyRandomizedSamplerSeeds",
+    "scenePromptSamplerSeedTargets",
     "installSceneBatchPromptCapture",
 ]) {
     vm.runInContext(functionSource(name), context);

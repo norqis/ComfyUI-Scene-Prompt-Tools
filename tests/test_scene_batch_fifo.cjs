@@ -45,6 +45,7 @@ const context = {
         },
     },
     acceptSceneBatchPrompt() {},
+    captureRandomizedSamplerSeedTargets() { return []; },
     findWidget(node, name) {
         return node?.widgets?.find((widget) => widget.name === name);
     },
@@ -216,6 +217,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
         sceneBatchPlanId() { return "captured-plan"; },
         sceneBatchRunId() { return "run"; },
         sceneBatchSeedBase() { return 123; },
+        captureRandomizedSamplerSeedTargets() { return []; },
         findWidget(node, name) { return node?.widgets?.find((widget) => widget.name === name); },
         setWidgetValue(node, name, value) {
             const widget = node.widgets.find((item) => item.name === name);
