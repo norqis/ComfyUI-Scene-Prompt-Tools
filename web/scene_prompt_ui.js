@@ -214,6 +214,9 @@ const sceneBatchPendingReleases = new Map();
 const sceneBatchDetachedRuns = new Map();
 const sceneBatchFinalizingRuns = new Set();
 const sceneBatchTerminalEvents = new Map();
+const scenePromptSubmissionsById = new Map();
+const sceneProgressNodeIdsByPromptId = new Map();
+let sceneExecutingPromptId = "";
 const sceneDesktopNotificationRequests = new Map();
 const SCENE_DETACHED_RETRY_MS = 30 * 1000;
 const SCENE_DETACHED_MAX_RETRIES = 20;
@@ -7049,15 +7052,72 @@ function sceneBatchNodeRunId(node) {
     return String(findWidget(node, "run_id")?.value || "").trim();
 }
 
-function sceneBatchRunForNode(node) {
-    const runId = sceneBatchNodeRunId(node);
-    if (runId && sceneBatchRunsById.has(runId)) {
-        return sceneBatchRunsById.get(runId);
+function sceneWorkflowManager() {
+    return app.extensionManager?.workflow || app.workflowManager || null;
+}
+
+function sceneActiveWorkflow() {
+    return sceneWorkflowManager()?.activeWorkflow || null;
+}
+
+function sceneWorkflowsMatch(left, right) {
+    if (!left || !right) {
+        return !left && !right;
     }
-    if (runId && sceneBatchDetachedRuns.has(runId)) {
-        return sceneBatchDetachedRuns.get(runId);
+    if (left === right) {
+        return true;
+    }
+    const leftPath = String(left.path || "");
+    const rightPath = String(right.path || "");
+    return !!leftPath && !!rightPath && leftPath === rightPath;
+}
+
+function sceneWorkflowFromPrompt(prompt) {
+    const workflowId = String(
+        prompt?.workflow?.id
+        || prompt?.extra_data?.extra_pnginfo?.workflow?.id
+        || prompt?.extra_data?.workflow?.id
+        || "",
+    );
+    const manager = sceneWorkflowManager();
+    if (workflowId && Array.isArray(manager?.openWorkflows)) {
+        const matches = manager.openWorkflows.filter((workflow) => (
+            String(workflow?.activeState?.id || "") === workflowId
+            || String(workflow?.initialState?.id || "") === workflowId
+        ));
+        if (matches.length === 1) {
+            return matches[0];
+        }
+    }
+    return sceneActiveWorkflow();
+}
+
+function sceneBatchRunFromPrompt(prompt) {
+    for (const promptNode of Object.values(prompt?.output || {})) {
+        if (promptNode?.class_type !== "ScenePrompterExpand") {
+            continue;
+        }
+        const runId = String(promptNode.inputs?.run_id || "");
+        const run = sceneBatchRunsById.get(runId) || sceneBatchDetachedRuns.get(runId);
+        if (run) {
+            return run;
+        }
     }
     return null;
+}
+
+function sceneBatchRunForNode(node) {
+    const runId = sceneBatchNodeRunId(node);
+    const run = sceneBatchRunsById.get(runId) || sceneBatchDetachedRuns.get(runId) || null;
+    if (!run) {
+        return null;
+    }
+    const activeWorkflow = typeof sceneActiveWorkflow === "function" ? sceneActiveWorkflow() : null;
+    if (run.workflow && activeWorkflow && typeof sceneWorkflowsMatch === "function"
+        && !sceneWorkflowsMatch(run.workflow, activeWorkflow)) {
+        return null;
+    }
+    return run;
 }
 
 function sceneBatchRunStatus(run) {
@@ -7084,10 +7144,37 @@ function sceneBatchRunStatus(run) {
 
 function sceneNodeForRun(run) {
     const node = run?.node || null;
-    if (!node || node.graph !== run.graph || String(node.id) !== String(run.nodeId)) {
+    const activeWorkflow = typeof sceneActiveWorkflow === "function" ? sceneActiveWorkflow() : null;
+    if (run?.workflow && activeWorkflow && typeof sceneWorkflowsMatch === "function"
+        && sceneWorkflowsMatch(run.workflow, activeWorkflow)) {
+        const current = app.graph?.getNodeById?.(Number(run.nodeId)) || app.graph?.getNodeById?.(run.nodeId) || null;
+        if (current && sceneBatchNodeRunId(current) === run.runId) {
+            run.node = current;
+            run.graph = current.graph || app.graph;
+            return current;
+        }
+    }
+    if (node && node.graph === run.graph && String(node.id) === String(run.nodeId)) {
+        return sceneBatchNodeRunId(node) === run.runId ? node : null;
+    }
+    return null;
+}
+
+function rebindSceneBatchRunNode(node) {
+    const runId = sceneBatchNodeRunId(node);
+    const run = sceneBatchRunsById.get(runId) || sceneBatchDetachedRuns.get(runId) || null;
+    if (!run) {
         return null;
     }
-    return sceneBatchNodeRunId(node) === run.runId ? node : null;
+    const activeWorkflow = sceneActiveWorkflow();
+    if (run.workflow && activeWorkflow && !sceneWorkflowsMatch(run.workflow, activeWorkflow)) {
+        return null;
+    }
+    run.workflow ||= activeWorkflow;
+    run.node = node;
+    run.nodeId = node.id;
+    run.graph = node.graph || app.graph;
+    return run;
 }
 
 function markSceneNodeChanged(node, options = {}) {
@@ -7826,6 +7913,9 @@ function installSceneBatchPromptCapture() {
     }
     const originalQueuePrompt = api.queuePrompt.bind(api);
     api.queuePrompt = async function (number, prompt) {
+        const submissionRun = typeof sceneBatchRunFromPrompt === "function" ? sceneBatchRunFromPrompt(prompt) : null;
+        const submissionWorkflow = submissionRun?.workflow
+            || (typeof sceneWorkflowFromPrompt === "function" ? sceneWorkflowFromPrompt(prompt) : null);
         const samplerSeedTargets = scenePromptSamplerSeedTargets(prompt);
         applySceneSourceNodeNames(prompt, { onlyMissing: true });
         randomizeStandardSceneSeeds(prompt);
@@ -7871,6 +7961,12 @@ function installSceneBatchPromptCapture() {
             throw error;
         }
         const promptId = scenePromptIdFromValue(result);
+        if (promptId && typeof scenePromptSubmissionsById !== "undefined") {
+            scenePromptSubmissionsById.set(promptId, {
+                workflow: submissionWorkflow,
+                runId: submissionRun?.runId || "",
+            });
+        }
         if (preparedRunHandle && promptId) {
             registerQueuedSceneRunHandle(promptId, preparedRunHandle);
         } else if (preparedRunHandle) {
@@ -8575,6 +8671,9 @@ function installSceneWorkflowLoadGuard() {
             return await originalLoadGraphData(...args);
         } finally {
             sceneWorkflowLoadDepth = Math.max(0, sceneWorkflowLoadDepth - 1);
+            if (sceneWorkflowLoadDepth === 0 && typeof clearForeignSceneProgressState === "function") {
+                clearForeignSceneProgressState();
+            }
         }
     };
     app.__ScenePromptWorkflowLoadGuardInstalled = true;
@@ -8630,7 +8729,7 @@ function activateNextSceneBatchRun() {
         return;
     }
     sceneBatchRun = nextRun;
-    clearSceneSavePreviews();
+    clearSceneSavePreviews(nextRun.workflow);
     refreshSceneBatchRunNode(nextRun, { graphChange: false, background: false });
     for (const pending of sceneBatchPendingRuns) {
         refreshSceneBatchRunNode(pending, { graphChange: false, background: false });
@@ -8648,6 +8747,7 @@ function createSceneBatchRun(node, total) {
         nodeId: node.id,
         node,
         graph: node.graph || app.graph,
+        workflow: typeof sceneActiveWorkflow === "function" ? sceneActiveWorkflow() : null,
         samplerSeedTargets: captureRandomizedSamplerSeedTargets(node.graph || app.graph),
         total,
         totalImages: null,
@@ -8833,6 +8933,11 @@ function startSceneBatchRun(node) {
         showSceneBatchError("完了時Callbackの実行を待っています。");
         return;
     }
+    if (typeof sceneBatchNodeRunId === "function" && sceneBatchNodeRunId(node)) {
+        resetSceneExpandRunControls(node, { mark: false });
+        updateSceneExpandButton(node);
+        return;
+    }
 
     syncSceneNodeModes();
     syncAllScenePromptNames();
@@ -8864,7 +8969,7 @@ function startSceneBatchRun(node) {
     }
 
     sceneBatchRun = run;
-    clearSceneSavePreviews();
+    clearSceneSavePreviews(run.workflow);
     refreshSceneBatchRunNode(run);
     prepareSceneBatchRunSnapshot(run, node);
     queueNextSceneBatchItem();
@@ -10118,7 +10223,8 @@ function attachSceneUtilityNode(node, nodeName) {
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
     if (isSceneExpandNodeName(nodeName)) {
-        if (!sceneBatchRunForNode(node)) {
+        const run = rebindSceneBatchRunNode(node);
+        if (!run) {
             setWidgetValue(node, "run_id", "", { silent: true });
         }
         ensureSceneExpandControls(node);
@@ -10237,8 +10343,26 @@ function previewUrl(imageRef) {
     return `./view?${params.toString()}&t=${Date.now()}${app.getPreviewFormatParam?.() || ""}`;
 }
 
+function sceneEventRootNodeId(detail) {
+    return String(detail?.display_node || detail?.node || "").split(":")[0];
+}
+
+function sceneEventSubmission(detail) {
+    const promptId = scenePromptIdFromValue(detail);
+    return promptId ? scenePromptSubmissionsById.get(promptId) || null : null;
+}
+
+function sceneEventTargetsActiveWorkflow(detail) {
+    const submission = sceneEventSubmission(detail);
+    const activeWorkflow = sceneActiveWorkflow();
+    return !submission?.workflow || !activeWorkflow || sceneWorkflowsMatch(submission.workflow, activeWorkflow);
+}
+
 function sceneNodeFromEvent(detail) {
-    const rawId = String(detail?.display_node || detail?.node || "").split(":")[0];
+    if (typeof sceneEventTargetsActiveWorkflow === "function" && !sceneEventTargetsActiveWorkflow(detail)) {
+        return null;
+    }
+    const rawId = sceneEventRootNodeId(detail);
     if (!rawId) {
         return null;
     }
@@ -10254,6 +10378,12 @@ function imageRefKey(imageRef) {
 }
 
 function appendSceneSavePreview(detail) {
+    if (typeof sceneEventTargetsActiveWorkflow === "function" && !sceneEventTargetsActiveWorkflow(detail)) {
+        if (typeof removeForeignSceneEventImages === "function") {
+            removeForeignSceneEventImages(detail);
+        }
+        return;
+    }
     const node = sceneNodeFromEvent(detail);
     const images = detail?.output?.images || [];
     if (!node || !SCENE_SAVE_IMAGE_NODE_NAMES.has(node.type) || !images.length) {
@@ -10314,6 +10444,41 @@ function appendSceneSavePreview(detail) {
     app.canvas?.setDirty?.(true, true);
 }
 
+function sceneImageMatchesRef(image, imageRef) {
+    const source = String(image?.src || "");
+    if (!source || !imageRef?.filename) {
+        return false;
+    }
+    try {
+        const url = new URL(source, globalThis.location?.href || "http://localhost/");
+        return url.searchParams.get("filename") === String(imageRef.filename)
+            && url.searchParams.get("subfolder") === String(imageRef.subfolder || "")
+            && url.searchParams.get("type") === String(imageRef.type || "output");
+    } catch {
+        return source.includes(encodeURIComponent(String(imageRef.filename)));
+    }
+}
+
+function removeForeignSceneEventImages(detail) {
+    const rawId = sceneEventRootNodeId(detail);
+    const node = rawId
+        ? app.graph?.getNodeById?.(Number(rawId)) || app.graph?.getNodeById?.(rawId) || null
+        : null;
+    const images = detail?.output?.images || [];
+    if (!node || !NODE_NAMES.has(node.type) || !Array.isArray(node.imgs) || !images.length) {
+        return;
+    }
+    const kept = node.imgs.filter((image) => !images.some((imageRef) => sceneImageMatchesRef(image, imageRef)));
+    if (kept.length === node.imgs.length) {
+        return;
+    }
+    node.imgs = kept;
+    node.imageIndex = Math.max(0, kept.length - 1);
+    node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+    app.canvas?.setDirty?.(true, true);
+}
+
 function trimSceneSavePreviews(node) {
     if (!Array.isArray(node?.imgs) || node.imgs.length <= SCENE_SAVE_PREVIEW_LIMIT) {
         return;
@@ -10330,7 +10495,12 @@ function trimSceneSavePreviews(node) {
     node.imageIndex = Math.max(0, node.imgs.length - 1);
 }
 
-function clearSceneSavePreviews() {
+function clearSceneSavePreviews(workflow = null) {
+    const activeWorkflow = typeof sceneActiveWorkflow === "function" ? sceneActiveWorkflow() : null;
+    if (workflow && activeWorkflow && typeof sceneWorkflowsMatch === "function"
+        && !sceneWorkflowsMatch(workflow, activeWorkflow)) {
+        return;
+    }
     for (const node of app.graph?._nodes || []) {
         if (!SCENE_SAVE_IMAGE_NODE_NAMES.has(node?.type)) {
             continue;
@@ -10341,6 +10511,60 @@ function clearSceneSavePreviews() {
         node.imageIndex = 0;
         node.setDirtyCanvas?.(true, true);
     }
+}
+
+function sceneProgressNodeIds(detail) {
+    const ids = new Set();
+    for (const [nodeId, state] of Object.entries(detail?.nodes || {})) {
+        const rawId = String(state?.display_node_id || state?.node_id || nodeId).split(":")[0];
+        if (rawId) {
+            ids.add(rawId);
+        }
+    }
+    return ids;
+}
+
+function clearForeignSceneProgressState(detail = null) {
+    const promptId = scenePromptIdFromValue(detail) || sceneExecutingPromptId;
+    const submission = scenePromptSubmissionsById.get(promptId);
+    const activeWorkflow = sceneActiveWorkflow();
+    if (!submission?.workflow || !activeWorkflow || sceneWorkflowsMatch(submission.workflow, activeWorkflow)) {
+        return;
+    }
+    const ids = detail ? sceneProgressNodeIds(detail) : sceneProgressNodeIdsByPromptId.get(promptId) || new Set();
+    const nodes = ids.size
+        ? [...ids].map((nodeId) => app.graph?.getNodeById?.(Number(nodeId)) || app.graph?.getNodeById?.(nodeId) || null)
+        : app.graph?._nodes || [];
+    for (const node of nodes) {
+        if (node) {
+            node.progress = undefined;
+            node.execute_triggered = 0;
+            node.setDirtyCanvas?.(true, true);
+        }
+    }
+    app.graph?.setDirtyCanvas?.(true, true);
+    app.canvas?.setDirty?.(true, true);
+}
+
+function receiveSceneProgressState(detail) {
+    const promptId = scenePromptIdFromValue(detail);
+    if (promptId) {
+        sceneExecutingPromptId = promptId;
+        sceneProgressNodeIdsByPromptId.set(promptId, sceneProgressNodeIds(detail));
+    }
+    clearForeignSceneProgressState(detail);
+}
+
+function forgetScenePromptSubmission(detail) {
+    const promptId = scenePromptIdFromValue(detail);
+    if (!promptId) {
+        return;
+    }
+    if (sceneExecutingPromptId === promptId) {
+        sceneExecutingPromptId = "";
+    }
+    sceneProgressNodeIdsByPromptId.delete(promptId);
+    setTimeout(() => scenePromptSubmissionsById.delete(promptId), 0);
 }
 
 function acknowledgeSceneDesktopNotification(requestId, success, error = "") {
@@ -10411,29 +10635,39 @@ app.registerExtension({
         installSceneWorkflowLoadGuard();
         window.addEventListener("pagehide", releaseSceneRunsOnPageHide);
         api.addEventListener("scene_prompt_desktop_notification", ({ detail }) => receiveSceneDesktopNotification(detail));
-        api.addEventListener("execution_start", () => {
-            if (!sceneBatchRun) {
-                clearSceneSavePreviews();
+        api.addEventListener("execution_start", ({ detail }) => {
+            const promptId = scenePromptIdFromValue(detail);
+            if (promptId) {
+                sceneExecutingPromptId = promptId;
             }
+            const submission = sceneEventSubmission(detail);
+            if (!submission?.runId && !sceneBatchRun) {
+                clearSceneSavePreviews(submission?.workflow || sceneActiveWorkflow());
+            }
+            clearForeignSceneProgressState(detail);
         });
+        api.addEventListener("progress_state", ({ detail }) => receiveSceneProgressState(detail));
         api.addEventListener("executed", ({ detail }) => appendSceneSavePreview(detail));
         api.addEventListener("execution_success", ({ detail }) => {
             rememberSceneBatchTerminalEvent("success", detail);
             continueSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
             releaseCompletedSceneRun(detail);
+            forgetScenePromptSubmission(detail);
         });
         api.addEventListener("execution_error", ({ detail }) => {
             rememberSceneBatchTerminalEvent("error", detail);
             failSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
             releaseCompletedSceneRun(detail);
+            forgetScenePromptSubmission(detail);
         });
         api.addEventListener("execution_interrupted", ({ detail }) => {
             rememberSceneBatchTerminalEvent("interrupted", detail);
             failSceneBatchRun(detail);
             releasePendingSceneBatchPlan(detail);
             releaseCompletedSceneRun(detail);
+            forgetScenePromptSubmission(detail);
         });
     },
 
