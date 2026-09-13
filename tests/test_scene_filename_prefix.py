@@ -345,6 +345,18 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         result = saver.save_images([image], "", scene_info={"use_run_dir": False, "file_index": 1})
         self.assertEqual(Path(result["result"][1]).name, "00001.png")
 
+    def test_explicit_file_index_is_not_reused_after_output_is_deleted(self):
+        saver = self.nodes.SceneSaveImage()
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        scene_info = {"use_run_dir": False, "file_index": 1}
+
+        first = Path(saver.save_images([image], "", scene_info=scene_info)["result"][1])
+        first.unlink()
+        second = Path(saver.save_images([image], "", scene_info=scene_info)["result"][1])
+
+        self.assertEqual(first.name, "00001.png")
+        self.assertEqual(second.name, "00002.png")
+
     def test_next_index_cache_is_bounded_and_keeps_recent_roots(self):
         with self.nodes._NEXT_INDEX_CACHE_LOCK:
             self.nodes._NEXT_INDEX_CACHE.clear()

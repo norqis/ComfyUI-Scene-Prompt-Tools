@@ -2192,7 +2192,11 @@ class SceneSaveImage:
         os.makedirs(output_dir, exist_ok=True)
 
         if info.get("file_index"):
-            counter = max(1, int(info["file_index"]))
+            counter = max(
+                1,
+                int(info["file_index"]),
+                _cached_next_index(run_root, extension, padding, filename_prefix),
+            )
         else:
             counter = _cached_next_index(run_root, extension, padding, filename_prefix)
 
