@@ -48,6 +48,8 @@ When a KSampler's `seed` or `noise_seed` is unconnected and its after-generate c
 
 Continuous runs, progress highlights, and Scene image previews stay with the workflow tab that started them. Switching tabs does not transfer an active run or its preview to nodes with the same numeric ID. Stopping a continuous run lets its current image finish, shows `停止処理中`, and then advances the waiting FIFO without allowing a stale Stop button to enqueue the workflow again.
 
+Normal Queue submissions use the latest Scene Matrix enabled state and row order. Scene Save Image also avoids reusing deleted output filenames during the current ComfyUI session, and execution-path-only PNG metadata keeps reroute references consistent so the saved workflow can be reopened safely.
+
 ## Prompt Data
 
 Prompt candidates live outside the custom-node directory:

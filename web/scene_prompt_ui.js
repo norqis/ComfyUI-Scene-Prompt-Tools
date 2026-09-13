@@ -7907,6 +7907,21 @@ function scenePromptSamplerSeedTargets(prompt) {
     return hasExpand ? captureRandomizedSamplerSeedTargets(app.graph) : [];
 }
 
+function syncSceneMatrixPromptInputs(prompt) {
+    for (const [nodeId, promptNode] of Object.entries(prompt?.output || {})) {
+        if (promptNode?.class_type !== "SceneMatrix") {
+            continue;
+        }
+        const node = sceneNodeById(nodeId);
+        if (!node || (node.type !== "SceneMatrix" && node.type !== "Scene Matrix")) {
+            continue;
+        }
+        promptNode.inputs = promptNode.inputs || {};
+        promptNode.inputs.matrix_json = serializeMatrixState(readMatrixState(node));
+    }
+    return prompt;
+}
+
 function installSceneBatchPromptCapture() {
     if (api.__ScenePromptBatchCaptureInstalled || typeof api.queuePrompt !== "function") {
         return;
@@ -7916,6 +7931,9 @@ function installSceneBatchPromptCapture() {
         const submissionRun = typeof sceneBatchRunFromPrompt === "function" ? sceneBatchRunFromPrompt(prompt) : null;
         const submissionWorkflow = submissionRun?.workflow
             || (typeof sceneWorkflowFromPrompt === "function" ? sceneWorkflowFromPrompt(prompt) : null);
+        if (!submissionRun) {
+            syncSceneMatrixPromptInputs(prompt);
+        }
         const samplerSeedTargets = scenePromptSamplerSeedTargets(prompt);
         applySceneSourceNodeNames(prompt, { onlyMissing: true });
         randomizeStandardSceneSeeds(prompt);
