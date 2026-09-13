@@ -190,7 +190,7 @@ Choose the metadata mode on **Scene Save Image**:
 | Mode | PNG contents |
 | --- | --- |
 | Full workflow | The complete workflow, including its canvas layout. |
-| Execution path nodes only | The Scene branch and image-generation nodes used for that image, with their original layout. |
+| Execution path nodes only | The Scene branch and image-generation nodes used for that image, with their original layout. Bypassed nodes are omitted and their active upstream/downstream connections are restored. |
 | Prompt only | No ComfyUI prompt graph or workflow. When メタ情報 is connected, Scene prompt text and seed are retained. |
 
 Dragging a PNG back into ComfyUI can restore a workflow for the first two modes. **Prompt only** cannot restore a workflow.

@@ -733,6 +733,62 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(prompt, original_prompt)
         self.assertEqual(extra_pnginfo, original_extra)
 
+    def test_execution_path_reconnects_around_bypassed_workflow_node(self):
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "3": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
+            "4": {"class_type": "SceneSaveImage", "inputs": {"images": ["3", 0]}},
+        }
+        workflow = {
+            "last_link_id": 12,
+            "nodes": [
+                {
+                    "id": 1, "type": "CheckpointLoaderSimple", "mode": 0,
+                    "inputs": [],
+                    "outputs": [{"name": "MODEL", "type": "MODEL", "links": [10]}],
+                },
+                {
+                    "id": 2, "type": "ModelPassthrough", "mode": 4,
+                    "inputs": [{"name": "model", "type": "MODEL", "link": 10}],
+                    "outputs": [{"name": "MODEL", "type": "MODEL", "links": [11]}],
+                },
+                {
+                    "id": 3, "type": "KSampler", "mode": 0,
+                    "inputs": [{"name": "model", "type": "MODEL", "link": 11}],
+                    "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [12]}],
+                },
+                {
+                    "id": 4, "type": "SceneSaveImage", "mode": 0,
+                    "inputs": [{"name": "images", "type": "IMAGE", "link": 12}],
+                    "outputs": [],
+                },
+            ],
+            "links": [
+                [10, 1, 0, 2, 0, "MODEL"],
+                [11, 2, 0, 3, 0, "MODEL"],
+                [12, 3, 0, 4, 0, "IMAGE"],
+            ],
+            "groups": [],
+        }
+
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "4",
+            self.nodes.SAVE_METADATA_EXECUTION_PATH,
+        )
+
+        self.assertEqual(set(saved_prompt), {"1", "3", "4"})
+        saved_workflow = saved_extra["workflow"]
+        self.assertEqual({str(node["id"]) for node in saved_workflow["nodes"]}, {"1", "3", "4"})
+        self.assertNotIn("2", {str(node["id"]) for node in saved_workflow["nodes"]})
+        self.assertIn([13, 1, 0, 3, 0, "MODEL"], saved_workflow["links"])
+        sampler = next(node for node in saved_workflow["nodes"] if str(node["id"]) == "3")
+        loader = next(node for node in saved_workflow["nodes"] if str(node["id"]) == "1")
+        self.assertEqual(sampler["inputs"][0]["link"], 13)
+        self.assertEqual(loader["outputs"][0]["links"], [13])
+        self.assertEqual(saved_workflow["last_link_id"], 13)
+
     def test_non_full_metadata_excludes_only_lowercase_reserved_extra_keys(self):
         prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {}}}
         extra_pnginfo = {

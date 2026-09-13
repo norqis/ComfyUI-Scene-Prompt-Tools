@@ -276,6 +276,19 @@ def _workflow_link_id(link):
     return None
 
 
+def _workflow_link_parts(link):
+    if isinstance(link, (list, tuple)) and len(link) >= 6:
+        return link[0], str(link[1]), link[2], str(link[3]), link[4], link[5]
+    if isinstance(link, dict):
+        required = {"id", "origin_id", "origin_slot", "target_id", "target_slot", "type"}
+        if required.issubset(link):
+            return (
+                link["id"], str(link["origin_id"]), link["origin_slot"],
+                str(link["target_id"]), link["target_slot"], link["type"],
+            )
+    return None
+
+
 def _prune_workflow_node_links(nodes, link_ids):
     for node in nodes:
         for input_slot in node.get("inputs", []) if isinstance(node, dict) else []:
@@ -285,6 +298,73 @@ def _prune_workflow_node_links(nodes, link_ids):
             if not isinstance(output_slot, dict) or not isinstance(output_slot.get("links"), list):
                 continue
             output_slot["links"] = [link_id for link_id in output_slot["links"] if link_id in link_ids]
+
+
+def _rewire_workflow_links_from_prompt(workflow, prompt):
+    """Restore execution links that ComfyUI rewired around bypassed nodes."""
+    if not isinstance(prompt, dict):
+        return
+    nodes = workflow["nodes"]
+    links = workflow["links"]
+    nodes_by_id = {_workflow_node_id(node): node for node in nodes}
+    existing = {
+        (parts[1], parts[2], parts[3], parts[4])
+        for link in links
+        if (parts := _workflow_link_parts(link)) is not None
+    }
+    numeric_link_ids = [
+        link_id for link in links
+        if isinstance((link_id := _workflow_link_id(link)), int) and not isinstance(link_id, bool)
+    ]
+    if isinstance(workflow.get("last_link_id"), int) and not isinstance(workflow["last_link_id"], bool):
+        numeric_link_ids.append(workflow["last_link_id"])
+    next_link_id = max(numeric_link_ids, default=0) + 1
+
+    for target_id, prompt_node in prompt.items():
+        target = nodes_by_id.get(str(target_id))
+        if not isinstance(target, dict) or not isinstance(prompt_node, dict):
+            continue
+        target_inputs = target.get("inputs", [])
+        if not isinstance(target_inputs, list):
+            continue
+        for input_name, value in prompt_node.get("inputs", {}).items():
+            source_id = _prompt_link_source(value, target_id, input_name)
+            if source_id is None or source_id not in nodes_by_id:
+                continue
+            source_slot = value[1]
+            target_slot = next((
+                index for index, slot in enumerate(target_inputs)
+                if isinstance(slot, dict) and slot.get("name") == input_name
+            ), None)
+            if target_slot is None:
+                continue
+            key = (source_id, source_slot, str(target_id), target_slot)
+            if key in existing:
+                continue
+
+            source = nodes_by_id[source_id]
+            source_outputs = source.get("outputs", [])
+            if not isinstance(source_outputs, list) or source_slot >= len(source_outputs):
+                continue
+            source_output = source_outputs[source_slot]
+            target_input = target_inputs[target_slot]
+            if not isinstance(source_output, dict) or not isinstance(target_input, dict):
+                continue
+            link_type = target_input.get("type") or source_output.get("type") or "*"
+            links.append([
+                next_link_id, source.get("id"), source_slot,
+                target.get("id"), target_slot, link_type,
+            ])
+            if not isinstance(source_output.get("links"), list):
+                source_output["links"] = []
+            source_output["links"].append(next_link_id)
+            target_input["link"] = next_link_id
+            existing.add(key)
+            next_link_id += 1
+    previous_last_link_id = workflow.get("last_link_id", 0)
+    if not isinstance(previous_last_link_id, int) or isinstance(previous_last_link_id, bool):
+        previous_last_link_id = 0
+    workflow["last_link_id"] = max(next_link_id - 1, previous_last_link_id)
 
 
 def _workflow_group_intersects_node(group, node):
@@ -313,7 +393,7 @@ def _workflow_group_intersects_node(group, node):
     )
 
 
-def _slice_workflow_for_output(workflow, ancestor_ids):
+def _slice_workflow_for_output(workflow, ancestor_ids, prompt=None):
     if not isinstance(workflow, dict):
         raise ValueError("Scene Save Image の生成経路を保存できません: workflow がノード定義ではありません。")
     workflow_nodes = workflow.get("nodes")
@@ -351,6 +431,7 @@ def _slice_workflow_for_output(workflow, ancestor_ids):
     ]
     link_ids = {_workflow_link_id(link) for link in result["links"]}
     _prune_workflow_node_links(result["nodes"], link_ids)
+    _rewire_workflow_links_from_prompt(result, prompt)
 
     workflow_groups = workflow.get("groups", [])
     if not isinstance(workflow_groups, list):
@@ -599,7 +680,7 @@ def _metadata_for_save_mode(
             for key, value in expanded_extra.items()
             if key not in {"prompt", "workflow"}
         }
-        saved_extra["workflow"] = _slice_workflow_for_output(expanded_workflow, ancestor_ids)
+        saved_extra["workflow"] = _slice_workflow_for_output(expanded_workflow, ancestor_ids, saved_prompt)
         _apply_replay_expand_values(
             saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
         )
@@ -620,7 +701,7 @@ def _metadata_for_save_mode(
         }
         if "workflow" in extra_pnginfo:
             saved_extra["workflow"] = _slice_workflow_for_output(
-                extra_pnginfo["workflow"], ancestor_ids
+                extra_pnginfo["workflow"], ancestor_ids, saved_prompt
             )
     _apply_replay_expand_values(
         saved_prompt,
