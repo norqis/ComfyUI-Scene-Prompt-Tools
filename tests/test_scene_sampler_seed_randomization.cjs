@@ -124,6 +124,7 @@ async function testSubmissionWrapper() {
         sceneBatchDetachedRuns: new Map(),
         sceneBatchSeedBase() { return nextSeed++; },
         applySceneSourceNodeNames() {},
+        syncSceneMatrixPromptInputs() {},
         sceneRunTargetNodes() { return []; },
         scenePromptIdFromValue(value) { return value.prompt_id; },
         buildSceneBatchCachedPrompt(value) { return structuredClone(value); },

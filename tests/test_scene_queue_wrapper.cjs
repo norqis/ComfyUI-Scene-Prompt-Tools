@@ -39,6 +39,10 @@ const context = {
     prepared: 0,
     queued: 0,
     released: [],
+    nodesById: new Map(),
+    sceneNodeById(nodeId) { return context.nodesById.get(String(nodeId)) || null; },
+    readMatrixState(node) { return node.matrixState; },
+    serializeMatrixState(state) { return JSON.stringify(state); },
     api: {
         async queuePrompt(_number, prompt) {
             if (prompt.output?.["3"]) throw new Error("queue failed");
@@ -92,6 +96,7 @@ for (const name of [
     "randomSamplerSeed",
     "applyRandomizedSamplerSeeds",
     "scenePromptSamplerSeedTargets",
+    "syncSceneMatrixPromptInputs",
     "installSceneBatchPromptCapture",
 ]) {
     vm.runInContext(functionSource(name), context);
@@ -115,6 +120,29 @@ context.installSceneBatchPromptCapture();
     await context.api.queuePrompt(0, { output: { "2": { class_type: "KSampler", inputs: {} } } });
     assert.equal(context.prepared, 1, "non-Scene graph skips preparation");
     assert.equal(context.queued, 2, "normal queue remains unchanged");
+
+    context.nodesById.set("7", {
+        type: "SceneMatrix",
+        matrixState: { version: 1, sets: [{ row_id: "new-first", enabled: true }] },
+    });
+    const staleMatrix = await context.api.queuePrompt(0, { output: {
+        "7": {
+            class_type: "SceneMatrix",
+            inputs: {
+                matrix_json: JSON.stringify({ version: 1, sets: [{ row_id: "old", enabled: false }] }),
+                run_handle: "existing-handle",
+            },
+        },
+        "8": {
+            class_type: "ScenePrompterExpand",
+            inputs: { scene_prompt: ["7", 0], run_id: "", run_handle: "existing-handle" },
+        },
+    } });
+    assert.deepEqual(
+        JSON.parse(staleMatrix.received.output["7"].inputs.matrix_json),
+        context.nodesById.get("7").matrixState,
+        "normal Queue submits the current Matrix enabled state and row order",
+    );
 
     await assert.rejects(
         () => context.api.queuePrompt(0, { output: { "3": { class_type: "ScenePrompter", inputs: {} } } }),
