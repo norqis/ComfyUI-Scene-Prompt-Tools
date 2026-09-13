@@ -46,6 +46,8 @@ Set the positive and negative base prompts on **Scene Prompt**. Set width, heigh
 
 When a KSampler's `seed` or `noise_seed` is unconnected and its after-generate control is `randomize`, Scene Prompt refreshes it for every normal or continuous queue send. Fixed seeds are retained. Connect **Scene Prompt Expand.シード** when the sampler must use the planned Scene seed.
 
+Continuous runs, progress highlights, and Scene image previews stay with the workflow tab that started them. Switching tabs does not transfer an active run or its preview to nodes with the same numeric ID. Stopping a continuous run lets its current image finish, shows `停止処理中`, and then advances the waiting FIFO without allowing a stale Stop button to enqueue the workflow again.
+
 ## Prompt Data
 
 Prompt candidates live outside the custom-node directory:
