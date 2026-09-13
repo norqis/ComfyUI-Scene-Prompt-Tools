@@ -676,6 +676,13 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 ],
                 "groups": [],
                 "reroutes": [{"id": 99, "pos": [0, 0]}],
+                "extra": {
+                    "reroutes": [{"id": 1, "pos": [150, 75], "linkIds": [10, 11]}],
+                    "linkExtensions": [
+                        {"id": 10, "parentId": 1},
+                        {"id": 11, "parentId": 1},
+                    ],
+                },
             },
             "custom": {"keep": ["this", "value"]},
         }
@@ -723,6 +730,14 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(sliced_workflow["nodes"][1]["widgets_values_named"], {"selected": "selection-json"})
         self.assertEqual(sliced_workflow["nodes"][1]["pos"], [200, 100])
         self.assertEqual(sliced_workflow["reroutes"], [])
+        self.assertEqual(
+            sliced_workflow["extra"]["reroutes"],
+            [{"id": 1, "pos": [150, 75], "linkIds": [10]}],
+        )
+        self.assertEqual(
+            sliced_workflow["extra"]["linkExtensions"],
+            [{"id": 10, "parentId": 1}],
+        )
         self.assertEqual(json.loads(execution_path["custom"]), extra_pnginfo["custom"])
 
         for metadata in saved.values():
@@ -788,6 +803,46 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(sampler["inputs"][0]["link"], 13)
         self.assertEqual(loader["outputs"][0]["links"], [13])
         self.assertEqual(saved_workflow["last_link_id"], 13)
+
+    def test_execution_path_removes_reroutes_for_excluded_links(self):
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "2": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
+            "3": {"class_type": "SceneSaveImage", "inputs": {"images": ["2", 0]}},
+        }
+        workflow = {
+            "version": 0.4,
+            "nodes": [
+                {"id": 1, "type": "CheckpointLoaderSimple", "inputs": [], "outputs": [{"links": [10, 11]}]},
+                {"id": 2, "type": "KSampler", "inputs": [{"name": "model", "link": 10}], "outputs": [{"links": [12]}]},
+                {"id": 3, "type": "SceneSaveImage", "inputs": [{"name": "images", "link": 12}], "outputs": []},
+                {"id": 4, "type": "Unused", "inputs": [{"name": "model", "link": 11}], "outputs": []},
+            ],
+            "links": [
+                [10, 1, 0, 2, 0, "MODEL"],
+                [11, 1, 0, 4, 0, "MODEL"],
+                [12, 2, 0, 3, 0, "IMAGE"],
+            ],
+            "groups": [],
+            "extra": {
+                "reroutes": [{"id": 1, "pos": [0, 0], "linkIds": [10, 11]}],
+                "linkExtensions": [
+                    {"id": 10, "parentId": 1},
+                    {"id": 11, "parentId": 1},
+                ],
+            },
+        }
+
+        _saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "3",
+            self.nodes.SAVE_METADATA_EXECUTION_PATH,
+        )
+
+        saved_workflow = saved_extra["workflow"]
+        self.assertEqual(saved_workflow["extra"]["reroutes"][0]["linkIds"], [10])
+        self.assertEqual(saved_workflow["extra"]["linkExtensions"], [{"id": 10, "parentId": 1}])
 
     def test_non_full_metadata_excludes_only_lowercase_reserved_extra_keys(self):
         prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {}}}

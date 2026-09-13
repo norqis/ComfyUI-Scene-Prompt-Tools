@@ -300,6 +300,56 @@ def _prune_workflow_node_links(nodes, link_ids):
             output_slot["links"] = [link_id for link_id in output_slot["links"] if link_id in link_ids]
 
 
+def _prune_workflow_reroutes(workflow):
+    """Remove reroute metadata that refers to links excluded from a workflow slice."""
+    link_ids = {_workflow_link_id(link) for link in workflow.get("links", [])}
+    extra = workflow.get("extra")
+    link_extensions = extra.get("linkExtensions") if isinstance(extra, dict) else None
+    valid_extensions = [
+        extension for extension in link_extensions
+        if isinstance(extension, dict) and extension.get("id") in link_ids
+    ] if isinstance(link_extensions, list) else []
+
+    reroute_lists = []
+    if isinstance(workflow.get("reroutes"), list):
+        reroute_lists.append((workflow, "reroutes"))
+    if isinstance(extra, dict) and isinstance(extra.get("reroutes"), list):
+        reroute_lists.append((extra, "reroutes"))
+
+    retained_reroute_ids = set()
+    for container, key in reroute_lists:
+        reroutes = copy.deepcopy(container[key])
+        by_id = {
+            reroute.get("id"): reroute
+            for reroute in reroutes
+            if isinstance(reroute, dict) and reroute.get("id") is not None
+        }
+        needed = {
+            extension.get("parentId")
+            for extension in valid_extensions
+            if extension.get("parentId") in by_id
+        }
+        for reroute in by_id.values():
+            if isinstance(reroute.get("linkIds"), list):
+                reroute["linkIds"] = [link_id for link_id in reroute["linkIds"] if link_id in link_ids]
+                if reroute["linkIds"]:
+                    needed.add(reroute["id"])
+        pending = list(needed)
+        while pending:
+            parent_id = by_id[pending.pop()].get("parentId")
+            if parent_id in by_id and parent_id not in needed:
+                needed.add(parent_id)
+                pending.append(parent_id)
+        container[key] = [reroute for reroute in reroutes if reroute.get("id") in needed]
+        retained_reroute_ids.update(needed)
+
+    if isinstance(link_extensions, list):
+        extra["linkExtensions"] = [
+            extension for extension in valid_extensions
+            if extension.get("parentId") in retained_reroute_ids
+        ]
+
+
 def _rewire_workflow_links_from_prompt(workflow, prompt):
     """Restore execution links that ComfyUI rewired around bypassed nodes."""
     if not isinstance(prompt, dict):
@@ -432,6 +482,9 @@ def _slice_workflow_for_output(workflow, ancestor_ids, prompt=None):
     link_ids = {_workflow_link_id(link) for link in result["links"]}
     _prune_workflow_node_links(result["nodes"], link_ids)
     _rewire_workflow_links_from_prompt(result, prompt)
+    if "reroutes" in workflow:
+        result["reroutes"] = copy.deepcopy(workflow["reroutes"]) if isinstance(workflow["reroutes"], list) else []
+    _prune_workflow_reroutes(result)
 
     workflow_groups = workflow.get("groups", [])
     if not isinstance(workflow_groups, list):
@@ -441,8 +494,6 @@ def _slice_workflow_for_output(workflow, ancestor_ids, prompt=None):
         for group in workflow_groups
         if any(_workflow_group_intersects_node(group, node) for node in included_nodes)
     ]
-    if "reroutes" in workflow:
-        result["reroutes"] = []
     return result
 
 
