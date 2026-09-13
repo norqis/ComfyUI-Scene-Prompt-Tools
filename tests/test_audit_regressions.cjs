@@ -55,6 +55,25 @@ function presetListRaceContext(...requests) {
     return context;
 }
 
+function testPresetReferenceCandidatesAreSortedByDisplayName() {
+    const context = { Array, String };
+    vm.createContext(context);
+    vm.runInContext(functionSource("sortedScenePresetCandidates"), context);
+    const presets = [
+        { preset_id: "z-id", name: "シーン10" },
+        { preset_id: "fallback-name" },
+        { preset_id: "a-id", name: "シーン2" },
+        { preset_id: "b-id", name: "Alpha" },
+        { preset_id: "a2-id", name: "alpha" },
+    ];
+    const sorted = context.sortedScenePresetCandidates(presets);
+    assert.deepEqual(
+        Array.from(sorted, (preset) => preset.preset_id),
+        ["a2-id", "b-id", "fallback-name", "a-id", "z-id"],
+    );
+    assert.deepEqual(Array.from(presets, (preset) => preset.preset_id), ["z-id", "fallback-name", "a-id", "b-id", "a2-id"]);
+}
+
 async function testPresetListRaceInNormalResponseOrder() {
     const first = deferred();
     const second = deferred();
@@ -626,6 +645,7 @@ async function testPopupRequestsUseOneIntentAcrossNodes() {
 }
 
 Promise.resolve()
+    .then(testPresetReferenceCandidatesAreSortedByDisplayName)
     .then(testPresetListRaceInNormalResponseOrder)
     .then(testPresetListRaceInReverseResponseOrder)
     .then(testPresetListFailureInNormalResponseOrder)

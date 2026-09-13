@@ -9840,6 +9840,15 @@ async function refreshScenePresetReferenceList(node, force = false) {
     return presets;
 }
 
+function sortedScenePresetCandidates(presets) {
+    const displayName = (preset) => String(preset?.name || preset?.preset_id || "");
+    const presetId = (preset) => String(preset?.preset_id || "");
+    return [...(Array.isArray(presets) ? presets : [])].sort((left, right) => (
+        displayName(left).localeCompare(displayName(right), "ja", { numeric: true, sensitivity: "base" })
+        || presetId(left).localeCompare(presetId(right), "ja", { numeric: true, sensitivity: "base" })
+    ));
+}
+
 async function openScenePresetPicker(node) {
     const presets = await loadPopupRequest(
         node,
@@ -9879,7 +9888,7 @@ async function openScenePresetPicker(node) {
         warning.textContent = `読み込めないPreset ${scenePresetListErrors.length}件: ${scenePresetListErrors.map((item) => item.preset_id).join(", ")}`;
         list.appendChild(warning);
     }
-    for (const preset of presets) {
+    for (const preset of sortedScenePresetCandidates(presets)) {
         const button = createButton(preset.name || preset.preset_id);
         button.title = `Preset ID: ${preset.preset_id}`;
         if (selectedScenePreset(node, presets)?.preset_id === preset.preset_id) {
