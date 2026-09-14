@@ -148,4 +148,59 @@ handleListeners.get("pointerdown")({ button: 0, clientX: 30, clientY: 40, preven
 disposeDrag();
 assert.equal(documentListeners.size, 0, "closing a popup during drag cleans every document listener");
 
+const expandContext = {
+    Set,
+    INTERNAL_INPUT_NAMES: new Set(["current_index", "run_id", "seed_base", "seed_base_literal"]),
+    VISIBLE_INPUT_NAMES: new Set(["scene_prompt"]),
+    app: { graph: { links: {}, setDirtyCanvas() {} }, canvas: { setDirty() {} } },
+    injectStyle() {}, applySceneWidgetLabels() {}, installSceneConnectionWatcher() {},
+    isSceneExpandNodeName: (name) => name === "ScenePrompterExpand",
+    rebindSceneBatchRunNode() { return null; }, setWidgetValue() {}, ensureSceneExpandControls() {},
+    SCENE_EMPTY_LATENT_NODE_NAMES: new Set(), SCENE_PROMPT_REVERSE_NODE_NAMES: new Set(),
+    installSceneEmptyLatentWidgetSyncHandlers() {}, installScenePromptReverseWidgetSyncHandlers() {},
+    hideSceneUtilityWidgets() {}, scheduleHideInternalDomWidgets() {}, refreshSceneExpandNode() {},
+};
+vm.createContext(expandContext);
+for (const name of ["removeInternalInputSockets", "syncInputLinkTargetSlots", "attachSceneUtilityNode"]) {
+    vm.runInContext(functionSource(name), expandContext);
+}
+const expandNode = {
+    id: 41,
+    graph: expandContext.app.graph,
+    inputs: [
+        { name: "current_index", link: null },
+        { name: "run_id", link: null },
+        { name: "seed_base", link: null },
+        { name: "timestamp_dir", link: null },
+        { name: "prefix", link: null },
+        { name: "scene_prompt", link: 101 },
+        { name: "model_mode", link: null },
+        { name: "callback_first", link: 102 },
+        { name: "callback_each", link: 103 },
+        { name: "callback_last", link: 104 },
+        { name: "callback_timeout_seconds", link: null },
+        { name: "callback_failure_mode", link: null },
+        { name: "seed_base_literal", link: null },
+    ],
+    removeInput(index) { this.inputs.splice(index, 1); },
+};
+for (const linkId of [101, 102, 103, 104]) {
+    expandContext.app.graph.links[linkId] = { target_id: 41, target_slot: -1 };
+}
+expandContext.attachSceneUtilityNode(expandNode, "ScenePrompterExpand");
+assert.deepEqual(
+    Array.from(expandNode.inputs, (input) => input.name),
+    [
+        "timestamp_dir", "prefix", "scene_prompt", "model_mode",
+        "callback_first", "callback_each", "callback_last",
+        "callback_timeout_seconds", "callback_failure_mode",
+    ],
+    "Expand removes internal sockets while preserving Scene, Callback, and public widget inputs",
+);
+assert.deepEqual(
+    [101, 102, 103, 104].map((linkId) => expandContext.app.graph.links[linkId].target_slot),
+    [2, 4, 5, 6],
+    "Expand resynchronizes existing Scene and Callback links after internal socket removal",
+);
+
 console.log("Scene Prompt UI audit behavior tests passed.");

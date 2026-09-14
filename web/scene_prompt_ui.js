@@ -10206,6 +10206,8 @@ function attachSceneUtilityNode(node, nodeName) {
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
     if (isSceneExpandNodeName(nodeName)) {
+        removeInternalInputSockets(node);
+        syncInputLinkTargetSlots(node);
         const run = rebindSceneBatchRunNode(node);
         if (!run) {
             setWidgetValue(node, "run_id", "", { silent: true });
