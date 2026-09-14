@@ -32,9 +32,7 @@ from .prompt import (
     _split_prompt,
 )
 from .plan import (
-    MAX_BATCH_SIZE,
     MAX_SAFE_INTEGER,
-    MAX_DIMENSION,
     MIN_BATCH_SIZE,
     MIN_DIMENSION,
     ScenePlanError,
@@ -93,7 +91,6 @@ SAVE_METADATA_CHOICES = (
     SAVE_METADATA_PROMPT_ONLY,
 )
 DEFAULT_LATENT = {"width": 512, "height": 512, "batch_size": 1}
-MAX_RESOLUTION = MAX_DIMENSION
 
 PATH_DIRECTORY = "フォルダに分ける"
 PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
@@ -787,19 +784,15 @@ def _latent_dimension(value, default=512):
     number = default if value is None else value
     if type(number) is not int:
         raise ScenePlanError("Scene Empty Latent width and height must be integers.")
-    if not MIN_DIMENSION <= number <= MAX_RESOLUTION or number % 8:
-        raise ScenePlanError(
-            f"Scene Empty Latent width and height must be multiples of 8 between {MIN_DIMENSION} and {MAX_RESOLUTION}."
-        )
+    if number < MIN_DIMENSION or number % 8:
+        raise ScenePlanError(f"Scene Empty Latent width and height must be multiples of 8 at least {MIN_DIMENSION}.")
     return number
 
 
 def _latent_batch_size(value, default=1):
     number = default if value is None else value
-    if type(number) is not int or not MIN_BATCH_SIZE <= number <= MAX_BATCH_SIZE:
-        raise ScenePlanError(
-            f"Scene Empty Latent batch_size must be an integer between {MIN_BATCH_SIZE} and {MAX_BATCH_SIZE}."
-        )
+    if type(number) is not int or number < MIN_BATCH_SIZE:
+        raise ScenePlanError(f"Scene Empty Latent batch_size must be an integer at least {MIN_BATCH_SIZE}.")
     return number
 
 
@@ -1653,7 +1646,6 @@ class SceneEmptyLatent:
                     {
                         "default": DEFAULT_LATENT["width"],
                         "min": 16,
-                        "max": MAX_RESOLUTION,
                         "step": 8,
                         "display_name": "width",
                         "label": "width",
@@ -1665,7 +1657,6 @@ class SceneEmptyLatent:
                     {
                         "default": DEFAULT_LATENT["height"],
                         "min": 16,
-                        "max": MAX_RESOLUTION,
                         "step": 8,
                         "display_name": "height",
                         "label": "height",
@@ -1677,7 +1668,6 @@ class SceneEmptyLatent:
                     {
                         "default": DEFAULT_LATENT["batch_size"],
                         "min": 1,
-                        "max": 4096,
                         "display_name": "batch_size",
                         "label": "batch_size",
                         "tooltip": "The number of latent images in the batch.",
@@ -1784,7 +1774,7 @@ class ScenePromptCallback:
     def INPUT_TYPES(cls):
         return {"required": {
             "frequency": ([CALLBACK_FREQUENCY_FIRST, CALLBACK_FREQUENCY_EVERY], {"default": CALLBACK_FREQUENCY_FIRST, "display_name": "送信頻度"}),
-            "timeout_seconds": ("INT", {"default": 10, "min": 1, "max": 120, "display_name": "タイムアウト秒"}),
+            "timeout_seconds": ("INT", {"default": 10, "min": 1, "display_name": "タイムアウト秒"}),
             "failure_mode": ([CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP], {"default": CALLBACK_FAILURE_CONTINUE, "display_name": "失敗時"}),
         }, "optional": {
             "callback": (SCENE_CALLBACK_TYPE, {"display_name": "callback"}),
@@ -1980,7 +1970,7 @@ class ScenePromptExpand:
                 "callback_first": (SCENE_CALLBACK_TYPE, {"display_name": "callback_first"}),
                 "callback_each": (SCENE_CALLBACK_TYPE, {"display_name": "callback_each"}),
                 "callback_last": (SCENE_CALLBACK_TYPE, {"display_name": "callback_last"}),
-                "callback_timeout_seconds": ("INT", {"default": 10, "min": 1, "max": 120, "display_name": "callback_timeout_seconds"}),
+                "callback_timeout_seconds": ("INT", {"default": 10, "min": 1, "display_name": "callback_timeout_seconds"}),
                 "callback_failure_mode": ([CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP], {"default": CALLBACK_FAILURE_CONTINUE, "display_name": "callback_failure_mode"}),
                 "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
             },

@@ -709,7 +709,6 @@ class ScenePresetTests(unittest.TestCase):
         continue_resolve = threading.Event()
         result = {}
         original = self.module._resolve_preset_tree
-        original_limit = self.module._CANCELLED_RUNS_MAX_ENTRIES
 
         def delayed_resolve(*args, **kwargs):
             started.set()
@@ -717,7 +716,6 @@ class ScenePresetTests(unittest.TestCase):
             return original(*args, **kwargs)
 
         self.module._resolve_preset_tree = delayed_resolve
-        self.module._CANCELLED_RUNS_MAX_ENTRIES = 1
         try:
             def resolve_snapshot():
                 try:
@@ -729,8 +727,8 @@ class ScenePresetTests(unittest.TestCase):
             resolver.start()
             self.assertTrue(started.wait(2))
             self.module.release_scene_preset_snapshot("protected-run")
-            self.module.release_scene_preset_snapshot("other-run-1")
-            self.module.release_scene_preset_snapshot("other-run-2")
+            for index in range(300):
+                self.module.release_scene_preset_snapshot(f"other-run-{index}")
             self.assertIn(("default", "protected-run"), self.module._CANCELLED_RUNS)
             continue_resolve.set()
             resolver.join(2)
@@ -738,13 +736,12 @@ class ScenePresetTests(unittest.TestCase):
             result["error"] = exc
         finally:
             self.module._resolve_preset_tree = original
-            self.module._CANCELLED_RUNS_MAX_ENTRIES = original_limit
         self.assertFalse(resolver.is_alive())
         self.assertNotIn(("default", "protected-run"), self.module._RUN_SNAPSHOTS)
         self.assertNotIn("value", result)
         self.assertIsInstance(result.get("error"), self.module.ScenePresetError)
 
-    def test_preset_reference_limit_counts_sibling_expansions(self):
+    def test_preset_reference_supports_large_sibling_expansions(self):
         def sized_nodes(positive):
             nodes = basic_nodes(positive)
             previous = "2"
@@ -769,9 +766,8 @@ class ScenePresetTests(unittest.TestCase):
             },
             "40": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["30", 0]}},
         })
-        with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "累積ノード数") as error:
-            self.module.snapshot_presets_for_run("siblings-over-limit", api_graph, "40")
-        self.assertEqual(error.exception.node_id, "20")
+        snapshot = self.module.snapshot_presets_for_run("large-siblings", api_graph, "40")
+        self.assertEqual([preset["preset_id"] for preset in snapshot["presets"]], ["left", "right"])
 
     def test_preset_output_link_rejects_boolean_and_float_indexes(self):
         for name, invalid_index in (("boolean", False), ("float", 0.0)):
@@ -1003,7 +999,7 @@ class ScenePresetTests(unittest.TestCase):
             self.save("invalid-latent-width", nodes)
         self.assertEqual(error.exception.node_id, "4")
 
-    def test_nested_counter_chain_has_a_controlled_resolution_limit(self):
+    def test_nested_counter_chain_has_no_plugin_resolution_limit(self):
         previous_preset_id = None
         def counter_preset_nodes(nested_preset_id, counter_count=20):
             nodes = {"1": {"class_type": "ScenePresetInput", "inputs": {}}}
@@ -1024,36 +1020,46 @@ class ScenePresetTests(unittest.TestCase):
             nodes["3"] = {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": source}}
             return nodes
 
-        self.assertEqual(self.module.MAX_PRESET_REFERENCE_NODE_DEPTH, self.module.MAX_PRESET_NODES)
         for preset_index in range(5):
             nodes = counter_preset_nodes(previous_preset_id)
             preset_id = f"nested-{preset_index}"
             self.write_preset_without_runtime_validation(preset_id, nodes)
             previous_preset_id = preset_id
 
-        at_limit_nodes = counter_preset_nodes(previous_preset_id, counter_count=11)
-        saved = self.save("nested-at-limit", at_limit_nodes)
-        self.assertEqual(saved["metadata"]["preset_id"], "nested-at-limit")
+        large_nodes = counter_preset_nodes(previous_preset_id, counter_count=30)
+        saved = self.save("nested-large", large_nodes)
+        self.assertEqual(saved["metadata"]["preset_id"], "nested-large")
 
-        final_nodes = counter_preset_nodes("nested-at-limit", counter_count=1)
-        with self.assertRaisesRegex(
-            self.module.ScenePresetResolutionError,
-            "累積ノード数",
-        ) as error:
-            self.save("nested-over-limit", final_nodes)
-        self.assertEqual(error.exception.node_id, "2")
-
-        self.write_preset_without_runtime_validation("nested-runtime-final", final_nodes)
         api_graph = graph({
-            "100": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "nested-runtime-final"}},
+            "100": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "nested-large"}},
             "101": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["100", 0]}},
         })
-        with self.assertRaisesRegex(
-            self.module.ScenePresetResolutionError,
-            "累積ノード数",
-        ) as error:
-            self.module.snapshot_presets_for_run("too-deep-run", api_graph, "101")
-        self.assertEqual(error.exception.node_id, "100")
+        snapshot = self.module.snapshot_presets_for_run("nested-large-run", api_graph, "101")
+        self.assertEqual(snapshot["presets"][-1]["preset_id"], "nested-large")
+
+    def test_more_than_64_nested_presets_resolve(self):
+        previous_preset_id = None
+        for index in range(100):
+            nodes = {
+                "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["1", 0]}},
+            }
+            if previous_preset_id is not None:
+                nodes["2"] = {
+                    "class_type": "ScenePresetReference",
+                    "inputs": {"preset_id": previous_preset_id, "scene_prompt": ["1", 0]},
+                }
+                nodes["3"]["inputs"]["scene_prompt"] = ["2", 0]
+            preset_id = f"deep-{index}"
+            self.write_preset_without_runtime_validation(preset_id, nodes)
+            previous_preset_id = preset_id
+
+        api_graph = graph({
+            "100": {"class_type": "ScenePresetReference", "inputs": {"preset_id": previous_preset_id}},
+            "101": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["100", 0]}},
+        })
+        snapshot = self.module.snapshot_presets_for_run("deep-reference-run", api_graph, "101")
+        self.assertEqual(len(snapshot["presets"]), 100)
 
     def test_snapshot_counts_outer_scene_nodes_with_nested_preset(self):
         self.save("nested-small", basic_nodes("nested"))
@@ -1078,17 +1084,10 @@ class ScenePresetTests(unittest.TestCase):
             }
             return graph(nodes)
 
-        at_limit = self.module.snapshot_presets_for_run(
-            "outer-at-limit", outer_graph(124), "outer-expand"
+        large = self.module.snapshot_presets_for_run(
+            "outer-large", outer_graph(300), "outer-expand"
         )
-        self.assertEqual([preset["preset_id"] for preset in at_limit["presets"]], ["nested-small"])
-
-        with self.assertRaisesRegex(
-            self.module.ScenePresetResolutionError,
-            "累積ノード数",
-        ) as error:
-            self.module.snapshot_presets_for_run("outer-over-limit", outer_graph(125), "outer-expand")
-        self.assertEqual(error.exception.node_id, "outer-reference")
+        self.assertEqual([preset["preset_id"] for preset in large["presets"]], ["nested-small"])
 
     def test_nested_presets_resolve_with_the_request_user(self):
         inner = basic_nodes("alice-inner")
@@ -1137,10 +1136,10 @@ class ScenePresetTests(unittest.TestCase):
             runs.release_run_context(handle, "alice")
             self.module.release_scene_preset_snapshot(handle, "alice")
 
-    def test_preset_graph_limit_is_a_controlled_error(self):
+    def test_preset_graph_accepts_more_than_128_nodes(self):
         nodes = basic_nodes()
         previous = "2"
-        for index in range(self.module.MAX_PRESET_NODES - len(nodes) + 1):
+        for index in range(200):
             node_id = str(10 + index)
             nodes[node_id] = {
                 "class_type": "ScenePromptCounter",
@@ -1148,14 +1147,13 @@ class ScenePresetTests(unittest.TestCase):
             }
             previous = node_id
         nodes["3"]["inputs"]["scene_prompt"] = [previous, 0]
-        with self.assertRaisesRegex(self.module.ScenePresetError, "ノード数"):
-            self.save("too-deep", nodes)
+        saved = self.save("large-graph", nodes)
+        self.assertEqual(saved["metadata"]["preset_id"], "large-graph")
 
-    def test_long_linear_preset_at_limit_does_not_overflow_python_stack(self):
-        self.assertEqual(self.module.MAX_PRESET_NODES, 128)
+    def test_long_linear_preset_has_no_plugin_node_limit(self):
         nodes = basic_nodes()
         previous = "2"
-        counter_count = self.module.MAX_PRESET_NODES - len(nodes)
+        counter_count = 300
         for index in range(counter_count):
             node_id = str(10 + index)
             nodes[node_id] = {
@@ -1165,8 +1163,8 @@ class ScenePresetTests(unittest.TestCase):
             previous = node_id
         nodes["3"]["inputs"]["scene_prompt"] = [previous, 0]
 
-        saved = self.save("linear-at-limit", nodes)
-        self.assertEqual(saved["metadata"]["preset_id"], "linear-at-limit")
+        saved = self.save("linear-large", nodes)
+        self.assertEqual(saved["metadata"]["preset_id"], "linear-large")
 
     def test_repeated_resolve_keeps_the_first_snapshot_and_response(self):
         self.save("fixed", basic_nodes("first"))
@@ -1248,6 +1246,12 @@ class ScenePresetTests(unittest.TestCase):
             ["alpha", "zeta"],
         )
         self.assertEqual(listed["errors"], [])
+
+    def test_preset_id_has_no_plugin_fixed_character_limit(self):
+        preset_id = "preset_" + ("a" * 120)
+        saved = self.save(preset_id, basic_nodes("long"))
+        self.assertEqual(saved["metadata"]["preset_id"], preset_id)
+        self.assertEqual(self.module.load_preset(preset_id)["metadata"]["preset_id"], preset_id)
 
     def test_list_skips_corrupt_preset_and_keeps_valid_entries(self):
         self.save("valid", basic_nodes(), "Valid")
@@ -1460,8 +1464,6 @@ class ScenePresetTests(unittest.TestCase):
     def test_snapshot_cache_keeps_active_entries_until_release(self):
         self.module._RUN_SNAPSHOTS.clear()
         self.module._CANCELLED_RUNS.clear()
-        original_cancel_limit = self.module._CANCELLED_RUNS_MAX_ENTRIES
-        self.module._CANCELLED_RUNS_MAX_ENTRIES = 2
         try:
             graph_data = graph({"11": {"class_type": "ScenePrompterExpand", "inputs": {}}})
             self.module.snapshot_presets_for_run("one", graph_data, "11")
@@ -1473,9 +1475,10 @@ class ScenePresetTests(unittest.TestCase):
             self.assertIn(("default", "three"), self.module._RUN_SNAPSHOTS)
             for run_id in ("cancel-one", "cancel-two", "cancel-three"):
                 self.module.release_scene_preset_snapshot(run_id)
-            self.assertEqual(list(self.module._CANCELLED_RUNS), [("default", "cancel-two"), ("default", "cancel-three")])
+            self.assertEqual(list(self.module._CANCELLED_RUNS), [
+                ("default", "cancel-one"), ("default", "cancel-two"), ("default", "cancel-three")
+            ])
         finally:
-            self.module._CANCELLED_RUNS_MAX_ENTRIES = original_cancel_limit
             self.module._RUN_SNAPSHOTS.clear()
             self.module._CANCELLED_RUNS.clear()
 

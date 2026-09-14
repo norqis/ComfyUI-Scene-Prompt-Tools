@@ -1,4 +1,5 @@
 import json
+import math
 import random
 import re
 from collections import OrderedDict
@@ -18,9 +19,6 @@ SELECTION_ITEM_KNOWN_KEYS = (
 )
 SELECTED_PART_REQUIRED_KEYS = {"index", "text"}
 SELECTED_PART_OPTIONAL_KEYS = {"weight", "missing"}
-MIN_WEIGHT = 0.05
-MAX_WEIGHT = 3.0
-
 CHOICE_RE = re.compile(r"\{([^{}]+)\}")
 WEIGHTED_PART_RE = re.compile(r"^\((.*):\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\)$")
 
@@ -55,7 +53,7 @@ def _prompt_key(part):
 
 def _prompt_override_key(part):
     text = str(part or "").strip()
-    for _index in range(8):
+    while True:
         match = WEIGHTED_PART_RE.match(text)
         if not match:
             break
@@ -67,8 +65,8 @@ def _item_weight(item):
     if "weight" not in item:
         return 1.0
     weight = item["weight"]
-    if type(weight) not in (int, float) or isinstance(weight, bool) or not MIN_WEIGHT <= weight <= MAX_WEIGHT:
-        raise ValueError("Scene Prompt selection weight must be a number between 0.05 and 3.")
+    if type(weight) not in (int, float) or isinstance(weight, bool) or not math.isfinite(weight):
+        raise ValueError("Scene Prompt selection weight must be a finite number.")
     return float(weight)
 
 
@@ -129,9 +127,9 @@ def _expand_choices(text, rng):
         return ""
 
     result = text
-    guard = 0
-    while guard < 100:
-        guard += 1
+    seen = set()
+    while result not in seen:
+        seen.add(result)
         match = CHOICE_RE.search(result)
         if not match:
             break
@@ -192,8 +190,8 @@ def _require_nonempty_string(value, label):
 
 
 def _validate_weight(value, label):
-    if type(value) not in (int, float) or isinstance(value, bool) or not MIN_WEIGHT <= value <= MAX_WEIGHT:
-        raise ValueError(f"{label} must be a number between 0.05 and 3.")
+    if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(value):
+        raise ValueError(f"{label} must be a finite number.")
     return float(value)
 
 

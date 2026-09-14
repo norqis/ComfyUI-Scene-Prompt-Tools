@@ -11,9 +11,7 @@ SCENE_PROMPT_TYPE = "SCENE_PROMPT"
 PLAN_VERSION = 3
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MIN_DIMENSION = 16
-MAX_DIMENSION = 16_384
 MIN_BATCH_SIZE = 1
-MAX_BATCH_SIZE = 4_096
 
 PLAN_KEYS = {"type", "version", "rows", "total_batches", "total_images", "sources", "change_key"}
 PLAN_BUILD_ITEM_KEYS = {"row", "count"}
@@ -45,10 +43,12 @@ def _require_exact_keys(value, keys, label):
         raise ScenePlanError(f"{label} has unsupported or missing fields.")
 
 
-def _require_int(value, label, minimum, maximum):
+def _require_int(value, label, minimum, maximum=None):
     if type(value) is not int:
         raise ScenePlanError(f"{label} must be an integer.")
-    if not minimum <= value <= maximum:
+    if value < minimum or (maximum is not None and value > maximum):
+        if maximum is None:
+            raise ScenePlanError(f"{label} must be at least {minimum}.")
         raise ScenePlanError(f"{label} must be between {minimum} and {maximum}.")
     return value
 
@@ -78,9 +78,9 @@ def _clone_latent(value):
     if not isinstance(value, dict):
         raise ScenePlanError("Scene Prompt row latent must be an object.")
     _require_exact_keys(value, LATENT_KEYS, "Scene Prompt row latent")
-    width = _require_int(value["width"], "Scene Prompt latent width", MIN_DIMENSION, MAX_DIMENSION)
-    height = _require_int(value["height"], "Scene Prompt latent height", MIN_DIMENSION, MAX_DIMENSION)
-    batch_size = _require_int(value["batch_size"], "Scene Prompt latent batch_size", MIN_BATCH_SIZE, MAX_BATCH_SIZE)
+    width = _require_int(value["width"], "Scene Prompt latent width", MIN_DIMENSION)
+    height = _require_int(value["height"], "Scene Prompt latent height", MIN_DIMENSION)
+    batch_size = _require_int(value["batch_size"], "Scene Prompt latent batch_size", MIN_BATCH_SIZE)
     if width % 8 or height % 8:
         raise ScenePlanError("Scene Prompt latent width and height must be divisible by 8.")
     return {"width": width, "height": height, "batch_size": batch_size}
@@ -137,7 +137,7 @@ def _clone_row(row):
             "callback_node_id": _require_string(callback["callback_node_id"], "Scene Prompt callback node id", allow_empty=False),
             "config": copy.deepcopy(config),
             "frequency": _require_string(callback["frequency"], "Scene Prompt callback frequency", allow_empty=False),
-            "timeout_seconds": _require_int(callback["timeout_seconds"], "Scene Prompt callback timeout_seconds", 1, 120),
+            "timeout_seconds": _require_int(callback["timeout_seconds"], "Scene Prompt callback timeout_seconds", 1),
             "failure_mode": _require_string(callback["failure_mode"], "Scene Prompt callback failure_mode", allow_empty=False),
             "current_positive_parts": _require_string_list(callback["current_positive_parts"], "Scene Prompt callback current_positive_parts"),
             "current_negative_parts": _require_string_list(callback["current_negative_parts"], "Scene Prompt callback current_negative_parts"),
@@ -376,7 +376,7 @@ def append_callback(plan, callback_node_id, config, frequency, timeout_seconds, 
     node_id = _require_string(str(callback_node_id or "").strip(), "Scene Prompt callback node id", allow_empty=False)
     if not isinstance(config, dict):
         raise ScenePlanError("Scene Prompt callback config must be an object.")
-    timeout = _require_int(timeout_seconds, "Scene Prompt callback timeout_seconds", 1, 120)
+    timeout = _require_int(timeout_seconds, "Scene Prompt callback timeout_seconds", 1)
     frequency = _require_string(frequency, "Scene Prompt callback frequency", allow_empty=False)
     failure_mode = _require_string(failure_mode, "Scene Prompt callback failure_mode", allow_empty=False)
     def add(row, _item):

@@ -111,6 +111,10 @@ def test_selection_entries_are_strict():
     }
     state = {"version": 1, "categories": {"Category": [item]}}
     assert _parse_selection_json(json.dumps(state))["Category"][0]["selected_parts"][0]["weight"] == 1.2
+    for weight in (-20, 50):
+        weighted = {**item, "selected_parts": [{"index": 0, "text": "alpha", "weight": weight}]}
+        parsed = _parse_selection_json(json.dumps({"version": 1, "categories": {"Category": [weighted]}}))
+        assert parsed["Category"][0]["selected_parts"][0]["weight"] == weight
     for invalid_item in (
         {**item, "weight": "bad"},
         {key: value for key, value in item.items() if key != "prompt"},

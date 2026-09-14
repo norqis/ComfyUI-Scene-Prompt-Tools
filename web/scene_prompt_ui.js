@@ -219,7 +219,6 @@ const sceneProgressNodeIdsByPromptId = new Map();
 let sceneExecutingPromptId = "";
 const sceneDesktopNotificationRequests = new Map();
 const SCENE_DETACHED_RETRY_MS = 30 * 1000;
-const SCENE_DETACHED_MAX_RETRIES = 20;
 let chipMeasureContext = null;
 let sceneDownstreamRefreshTimer = null;
 let sceneQueuePromptSyncPaused = 0;
@@ -246,11 +245,8 @@ const sceneRunHandlesByPromptId = new Map();
 const sceneRunTerminalPromptIds = new Map();
 const sceneRunHandleReconcileTimers = new Map();
 const sceneRunReleaseStates = new Map();
-const SCENE_RUN_TERMINAL_MAX = 256;
 const SCENE_RUN_TERMINAL_RETENTION_MS = 10 * 60 * 1000;
 const SCENE_CALLBACK_FINALIZE_POLL_MS = 250;
-const SCENE_CALLBACK_FINALIZE_MAX_POLLS = 480;
-let sceneRunTerminalOverflowUntil = 0;
 
 const VISIBLE_INPUT_NAMES = new Set(["scene_prompt"]);
 const INTERNAL_INPUT_NAMES = new Set([
@@ -817,8 +813,8 @@ function itemKey(item) {
 
 function normalizeWeight(value) {
     const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? "").trim());
-    if (!Number.isFinite(number) || number < 0.05 || number > 3) {
-        throw new Error("強度は 0.05 から 3 の数値で指定してください。");
+    if (!Number.isFinite(number)) {
+        throw new Error("強度は有限の数値で指定してください。");
     }
     return number;
 }
@@ -860,7 +856,7 @@ function splitPromptParts(text) {
 
 function promptOverrideKey(part) {
     let text = String(part ?? "").trim();
-    for (let index = 0; index < 8; index += 1) {
+    while (true) {
         const match = text.match(/^\((.*):\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\)$/u);
         if (!match) {
             break;
@@ -2406,8 +2402,6 @@ function createWeightControl(node, item, selectedItem, onUpdate, options = {}) {
     const input = document.createElement("input");
     input.className = "pc-weight-input";
     input.type = "number";
-    input.min = "0.05";
-    input.max = "3";
     input.step = "0.05";
     input.value = formatWeight(itemWeight(selectedItem));
     input.disabled = !!options.disabled;
@@ -2454,8 +2448,6 @@ function createPartWeightInput(value, disabled, onChange) {
     const input = document.createElement("input");
     input.className = "pc-weight-input";
     input.type = "number";
-    input.min = "0.05";
-    input.max = "3";
     input.step = "0.05";
     input.value = formatWeight(value);
     input.disabled = !!disabled;
@@ -3608,10 +3600,10 @@ async function openSearchPopup(node, options = {}) {
         }
         const selected = selectedKeys(state);
         const query = input.value.trim().toLowerCase();
-        const matchedCategories = query ? searchCategoryPaths(data, query, 1).slice(0, 80) : [];
-        const matchedSubcategories = query ? searchCategoryPaths(data, query, 2).slice(0, 160) : [];
+        const matchedCategories = query ? searchCategoryPaths(data, query, 1) : [];
+        const matchedSubcategories = query ? searchCategoryPaths(data, query, 2) : [];
         const matchedItems = query
-            ? data.filter((item) => itemSearchHaystack(item).includes(query)).slice(0, 240)
+            ? data.filter((item) => itemSearchHaystack(item).includes(query))
             : [];
 
         list.innerHTML = "";
@@ -6575,10 +6567,9 @@ function scenePromptCounterCount(node) {
 }
 
 function sceneEmptyLatentConfig(node) {
-    const dimension = (name) => clamp(
-        Number.parseInt(String(findWidget(node, name)?.value ?? 512), 10) || 512,
+    const dimension = (name) => Math.max(
         16,
-        16384,
+        Number.parseInt(String(findWidget(node, name)?.value ?? 512), 10) || 512,
     );
     return {
         width: dimension("width"),
@@ -6592,12 +6583,11 @@ function scenePromptInputSource(node) {
     return source && isScenePromptSourceNode(source) ? source : null;
 }
 
-function scenePromptLineageKey(node, limit = 80) {
+function scenePromptLineageKey(node) {
     const parts = [];
     const seen = new Set();
     let current = node;
-    let depth = 0;
-    while (current && depth < limit) {
+    while (current) {
         if (seen.has(current.id)) {
             parts.push(`cycle:${current.id}`);
             break;
@@ -6634,10 +6624,6 @@ function scenePromptLineageKey(node, limit = 80) {
             break;
         }
         current = scenePromptInputSource(current);
-        depth += 1;
-    }
-    if (current && depth >= limit) {
-        parts.push("limit");
     }
     return parts.join("|");
 }
@@ -8073,16 +8059,6 @@ function pruneSceneRunTerminalPromptIds(now = Date.now()) {
             sceneRunTerminalPromptIds.delete(promptId);
         }
     }
-    while (sceneRunTerminalPromptIds.size > SCENE_RUN_TERMINAL_MAX) {
-        sceneRunTerminalPromptIds.delete(sceneRunTerminalPromptIds.keys().next().value);
-        sceneRunTerminalOverflowUntil = Math.max(
-            sceneRunTerminalOverflowUntil,
-            now + SCENE_RUN_TERMINAL_RETENTION_MS,
-        );
-    }
-    if (sceneRunTerminalOverflowUntil <= now) {
-        sceneRunTerminalOverflowUntil = 0;
-    }
 }
 
 function rememberSceneRunTerminalPromptId(promptId, now = Date.now()) {
@@ -8179,9 +8155,6 @@ function registerQueuedSceneRunHandle(promptId, runHandle) {
             return;
         }
         sceneRunHandlesByPromptId.set(key, runHandle);
-        if (sceneRunTerminalOverflowUntil > Date.now()) {
-            reconcileQueuedSceneRunHandle(key, runHandle);
-        }
     }).catch((error) => {
         releaseSceneRunHandle(runHandle);
         console.warn("[Scene Prompt] 実行コンテキストの開始に失敗しました。", error);
@@ -8329,11 +8302,6 @@ function scheduleDetachedSceneBatchReconcile(run, delay = SCENE_DETACHED_RETRY_M
     if (!run?.runId || run.detachedReleased || run.detachedTimer) {
         return;
     }
-    const retryCount = Number(run.detachedRetryCount || 0);
-    // A confirmed or potentially queued prompt must keep its server-side run
-    // context. Retry count is bounded, but uncertainty is never treated as
-    // completion because that would break a legitimate long-running queue.
-    run.detachedRetryCount = Math.min(retryCount + 1, SCENE_DETACHED_MAX_RETRIES);
     run.detachedTimer = setTimeout(() => {
         run.detachedTimer = null;
         if (sceneBatchDetachedRuns.get(run.runId) === run) {
@@ -8479,7 +8447,6 @@ function rememberDetachedSceneBatchRun(run) {
         clearTimeout(run.detachedTimer);
     }
     sceneBatchDetachedRuns.set(run.runId, run);
-    run.detachedRetryCount = 0;
     scheduleDetachedSceneBatchReconcile(run);
 }
 
@@ -8492,7 +8459,6 @@ function clearDetachedSceneBatchRun(run) {
         clearTimeout(run.detachedTimer);
         run.detachedTimer = null;
     }
-    run.detachedRetryCount = 0;
     if (run.controlsResetPending) {
         const node = sceneNodeForRun(run);
         if (String(findSceneWidget(node, "run_id")?.value || "") === run.runId) {
@@ -8520,34 +8486,25 @@ function releasePendingSceneBatchPlan(detail) {
     activateNextSceneBatchRun();
 }
 
-function scenePromptIdFromValue(value, depth = 0) {
-    if (value == null || depth > 3) {
-        return "";
-    }
-    if (typeof value === "string" || typeof value === "number") {
-        return String(value);
-    }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            const found = scenePromptIdFromValue(item, depth + 1);
-            if (found) {
-                return found;
-            }
+function scenePromptIdFromValue(value) {
+    const pending = [value];
+    const seen = new Set();
+    while (pending.length) {
+        const current = pending.pop();
+        if (current == null) continue;
+        if (typeof current === "string" || typeof current === "number") {
+            return String(current);
         }
-        return "";
-    }
-    if (typeof value === "object") {
+        if (typeof current !== "object" || seen.has(current)) continue;
+        seen.add(current);
         for (const key of ["prompt_id", "promptId"]) {
-            if (value[key] != null) {
-                return String(value[key]);
-            }
+            if (current[key] != null) return String(current[key]);
         }
-        for (const key of ["data", "prompt", "response"]) {
-            const found = scenePromptIdFromValue(value[key], depth + 1);
-            if (found) {
-                return found;
-            }
+        if (Array.isArray(current)) {
+            for (let index = current.length - 1; index >= 0; index -= 1) pending.push(current[index]);
+            continue;
         }
+        for (const key of ["response", "prompt", "data"]) pending.push(current[key]);
     }
     return "";
 }
@@ -9048,7 +9005,7 @@ async function finalizeSceneBatchRun(run, promptId) {
                 prompt_id: String(promptId),
             }),
         };
-        for (let attempt = 0; attempt < SCENE_CALLBACK_FINALIZE_MAX_POLLS; attempt += 1) {
+        while (true) {
             const response = await api.fetchApi("/scene_prompt/runs/finalize", request);
             const data = await readApiJson(response, "完了時Callbackの実行に失敗しました");
             if (!response.ok) {
@@ -9071,7 +9028,6 @@ async function finalizeSceneBatchRun(run, promptId) {
             await completeFinalSceneBatchRun(run);
             return;
         }
-        throw new Error("完了時Callbackの完了確認がタイムアウトしました");
     } catch (error) {
         await completeFinalSceneBatchRun(run, { activateNext: false });
         showSceneBatchError("完了時Callbackに失敗したため、後続の連続生成は開始しません。", error);

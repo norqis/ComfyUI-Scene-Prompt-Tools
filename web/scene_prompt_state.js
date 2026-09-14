@@ -88,8 +88,8 @@ function requireExactKeys(value, required, optional, label) {
 }
 
 function requireWeight(value, label) {
-    if (typeof value !== "number" || !Number.isFinite(value) || value < 0.05 || value > 3) {
-        throw new Error(`${label} must be a number between 0.05 and 3.`);
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new Error(`${label} must be a finite number.`);
     }
     return value;
 }
