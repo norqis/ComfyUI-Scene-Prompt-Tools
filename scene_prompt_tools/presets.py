@@ -870,27 +870,60 @@ def _scene_node_value(
     memo=None,
     preset_stack=(),
 ):
-    try:
-        return _scene_node_value_impl(
-            nodes,
-            node_id,
-            resolved,
-            stack,
-            input_values,
-            user_id,
-            run_handle,
-            memo,
-            preset_stack,
-        )
-    except ScenePresetResolutionError:
-        raise
-    except (ScenePresetError, TypeError, ValueError, KeyError) as exc:
-        node = nodes.get(str(node_id), {}) if isinstance(nodes, dict) else {}
-        message = str(exc).strip() or "入力が不正です。"
-        raise ScenePresetResolutionError(
-            f"{_node_label(node_id, node)}: {message}",
-            node_id,
-        ) from exc
+    target_id = str(node_id)
+    values = {} if memo is None else memo
+    if input_values and target_id in input_values:
+        return input_values[target_id]
+    if target_id in values:
+        return values[target_id]
+
+    visiting = {str(item) for item in (stack or set())}
+    frames = [(target_id, False)]
+    while frames:
+        current_id, exiting = frames.pop()
+        if (input_values and current_id in input_values) or current_id in values:
+            continue
+        node = nodes.get(current_id) if isinstance(nodes, dict) else None
+        if not isinstance(node, dict):
+            raise ScenePresetResolutionError(
+                f"Sceneノード #{current_id}: Sceneノード #{current_id} が見つかりません。",
+                current_id,
+            )
+        if exiting:
+            visiting.remove(current_id)
+            try:
+                _scene_node_value_impl(
+                    nodes,
+                    current_id,
+                    resolved,
+                    set(),
+                    input_values,
+                    user_id,
+                    run_handle,
+                    values,
+                    preset_stack,
+                )
+            except ScenePresetResolutionError:
+                raise
+            except (ScenePresetError, TypeError, ValueError, KeyError) as exc:
+                message = str(exc).strip() or "入力が不正です。"
+                raise ScenePresetResolutionError(
+                    f"{_node_label(current_id, node)}: {message}",
+                    current_id,
+                ) from exc
+            continue
+        if current_id in visiting:
+            raise ScenePresetResolutionError(
+                f"{_node_label(current_id, node)}: Sceneグラフが循環しています: #{current_id}",
+                current_id,
+            )
+        visiting.add(current_id)
+        frames.append((current_id, True))
+        for linked_id in reversed(list(_linked_nodes(node))):
+            linked_id = str(linked_id)
+            if (not input_values or linked_id not in input_values) and linked_id not in values:
+                frames.append((linked_id, False))
+    return values[target_id]
 
 
 def _evaluate_preset_scene(
