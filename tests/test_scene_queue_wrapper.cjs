@@ -33,9 +33,7 @@ const context = {
     sceneRunHandlesByPromptId: new Map(),
     sceneRunTerminalPromptIds: new Map(),
     sceneRunHandleReconcileTimers: new Map(),
-    SCENE_RUN_TERMINAL_MAX: 256,
     SCENE_RUN_TERMINAL_RETENTION_MS: 10 * 60 * 1000,
-    sceneRunTerminalOverflowUntil: 0,
     prepared: 0,
     queued: 0,
     released: [],
@@ -177,22 +175,13 @@ context.installSceneBatchPromptCapture();
     assert.equal(context.sceneRunTerminalPromptIds.size, 0, "early completion markers expire after ten minutes");
 
     context.sceneRunTerminalPromptIds.clear();
-    for (let index = 0; index < 257; index += 1) {
+    for (let index = 0; index < 300; index += 1) {
         context.releaseCompletedSceneRun({ prompt_id: `overflow-${index}` });
     }
-    assert.equal(context.sceneRunTerminalPromptIds.size, 256);
-    assert.ok(context.sceneRunTerminalOverflowUntil > Date.now());
-    context.api.fetchApi = async (url) => {
-        if (url === "/scene_prompt/runs/claim") return { ok: true, payload: { claimed: true } };
-        if (url === "/history/overflow-0") {
-            return { ok: true, payload: { "overflow-0": { status: { status_str: "success", completed: true } } } };
-        }
-        throw new Error(`unexpected request: ${url}`);
-    };
+    assert.equal(context.sceneRunTerminalPromptIds.size, 300, "early completion markers are not evicted by count");
     context.registerQueuedSceneRunHandle("overflow-0", "overflow-handle");
     await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(context.released.at(-1), "overflow-handle", "overflow history reconciliation prevents a leaked handle");
+    assert.equal(context.released.at(-1), "overflow-handle", "the earliest retained marker releases its handle");
     assert.equal(context.sceneRunHandlesByPromptId.has("overflow-0"), false);
 
     const standardScene = await context.api.queuePrompt(0, { output: {

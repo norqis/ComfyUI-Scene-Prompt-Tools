@@ -76,6 +76,13 @@ class ScenePlanTests(unittest.TestCase):
                 with self.assertRaises(ScenePlanError):
                     make_plan([{"row": {**empty_row(), "latent": latent}, "count": 1}])
 
+    def test_latent_and_callback_have_no_plugin_fixed_upper_limit(self):
+        latent = {"width": 32_768, "height": 65_536, "batch_size": 8_192}
+        large = make_plan([{"row": {**empty_row(), "latent": latent}, "count": 1}])
+        self.assertEqual(large["rows"][0]["row"]["latent"], latent)
+        callback = plan_module.append_callback(large, "callback", {}, "毎回", 3_600, "続行")
+        self.assertEqual(callback["rows"][0]["row"]["callbacks"][0]["timeout_seconds"], 3_600)
+
     def test_count_is_multiplicative(self):
         plan = multiply_count(multiply_count(prompt_plan("A"), 10), 2)
         self.assertEqual(plan["rows"][0]["count"], 20)

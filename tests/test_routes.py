@@ -197,16 +197,17 @@ class PromptDataRouteTests(unittest.TestCase):
                     self.routes._create_prompt_item(payload, "alice")
         self.assertFalse((self.routes._data_dir("alice") / "A").exists())
 
-    def test_new_category_components_reject_names_over_80_characters(self):
+    def test_new_category_components_preserve_distinct_names_over_80_characters(self):
         shared_prefix = "A" * 80
         for suffix in ("1", "2"):
-            with self.subTest(suffix=suffix), self.assertRaisesRegex(ValueError, "80 characters"):
+            with self.subTest(suffix=suffix):
                 self.routes._create_prompt_item({
                     "category": f"{shared_prefix}{suffix}",
                     "label": "One",
                     "prompt": "girl",
                 }, "alice")
-        self.assertFalse((self.routes._data_dir("alice") / shared_prefix).exists())
+        self.assertTrue((self.routes._data_dir("alice") / f"{shared_prefix}1").exists())
+        self.assertTrue((self.routes._data_dir("alice") / f"{shared_prefix}2").exists())
 
     def test_force_reload_discards_the_user_cache(self):
         path = self.routes._data_dir("alice") / "People" / "prompt.json"
@@ -695,7 +696,7 @@ class PromptDataRouteTests(unittest.TestCase):
             self.assertEqual(presets._RUN_SNAPSHOTS, {})
             self.assertCountEqual(released, handles)
             self.assertEqual(len(released), len(set(released)))
-            self.assertLessEqual(len(presets._CANCELLED_RUNS), presets._CANCELLED_RUNS_MAX_ENTRIES)
+            self.assertEqual(len(presets._CANCELLED_RUNS), len(handles))
         finally:
             store.clear()
             presets._RUN_SNAPSHOTS.clear()

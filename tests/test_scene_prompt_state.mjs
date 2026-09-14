@@ -22,6 +22,10 @@ const selectionItem = {
     selected_parts: [{ index: 0, text: "alpha", weight: 1.2 }],
 };
 assert.equal(parseSelectionState({ version: 1, categories: { Category: [selectionItem] } }).categories.Category[0].label, "A");
+for (const weight of [-20, 50]) {
+    const weighted = { ...selectionItem, selected_parts: [{ index: 0, text: "alpha", weight }] };
+    assert.equal(parseSelectionState({ version: 1, categories: { Category: [weighted] } }).categories.Category[0].selected_parts[0].weight, weight);
+}
 assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{ ...selectionItem, weight: "bad" }] } }), /weight/u);
 const { prompt, ...missingPrompt } = selectionItem;
 assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [missingPrompt] } }), /missing/u);

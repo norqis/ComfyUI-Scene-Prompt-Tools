@@ -35,7 +35,7 @@ PRESET_SCHEMA_VERSION = 1
 PRESET_FILE_SUFFIX = ".json"
 PRESET_DIRECTORY_NAME = "scene_presets"
 SAVE_METADATA_WORKFLOW = "ワークフロー全体"
-PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,80}$")
+PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
 _PRESET_LOCK = threading.RLock()
 _PRESET_LIST_CACHE_LOCK = threading.RLock()
 _PRESET_LIST_CACHE = OrderedDict()
@@ -44,13 +44,6 @@ _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
 _RESOLVING_RUNS = {}
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
-_CANCELLED_RUNS_MAX_ENTRIES = 256
-# Scene plan evaluation is intentionally direct and recursive. Keep the
-# accepted graph size comfortably below the depth where coverage tracing can
-# exhaust Python's stack, so the save-time limit remains a reliable contract.
-MAX_PRESET_NODES = 128
-MAX_PRESET_REFERENCE_DEPTH = 64
-MAX_PRESET_REFERENCE_NODE_DEPTH = MAX_PRESET_NODES
 
 SAFE_NODE_CLASSES = {
     "ScenePrompter": ScenePrompt,
@@ -374,8 +367,6 @@ def _connected_preset_workflow(workflow, node_ids):
 def _validate_preset_graph(nodes):
     if not isinstance(nodes, dict) or not nodes:
         raise ScenePresetError("Presetの実行グラフがありません。")
-    if len(nodes) > MAX_PRESET_NODES:
-        raise ScenePresetError(f"Presetのノード数は{MAX_PRESET_NODES}個までです。")
 
     inputs = [(node_id, node) for node_id, node in nodes.items()
               if isinstance(node, dict) and node.get("class_type") == BOUNDARY_INPUT]
@@ -509,10 +500,9 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
             "metadata": {"preset_id": clean_preset_id, "name": clean_preset_id},
             "api_graph": {"output": nodes},
         }
-    node_budget = {"total": len(nodes)}
     for reference_node_id, preset_id, _node in _find_references(nodes):
         try:
-            _resolve_preset_tree(preset_id, resolved, [], user_id, node_budget=node_budget)
+            _resolve_preset_tree(preset_id, resolved, [], user_id)
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
     _scene_node_value(nodes, validation["output_link"][0], resolved, set(), user_id=user_id)
@@ -683,23 +673,24 @@ def _needs_workflow_preset_snapshots(nodes, expand_node_id):
 def _scene_prompt_closure(nodes, source_id):
     closure = {}
     visiting = set()
-
-    def visit(node_id):
-        node_id = str(node_id)
+    frames = [(str(source_id), False)]
+    while frames:
+        node_id, exiting = frames.pop()
         if node_id in closure:
-            return
+            continue
+        if exiting:
+            visiting.remove(node_id)
+            closure[node_id] = nodes[node_id]
+            continue
         if node_id in visiting:
             raise ScenePresetError(f"生成グラフのScene接続が循環しています: #{node_id}")
         node = nodes.get(node_id)
         if not isinstance(node, dict):
             raise ScenePresetError(f"Sceneノード #{node_id} が見つかりません。")
         visiting.add(node_id)
-        for linked_id in _linked_nodes(node):
-            visit(linked_id)
-        visiting.remove(node_id)
-        closure[node_id] = node
-
-    visit(source_id)
+        frames.append((node_id, True))
+        for linked_id in reversed(list(_linked_nodes(node))):
+            frames.append((str(linked_id), False))
     return closure
 
 
@@ -720,31 +711,47 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     return _scene_prompt_closure(nodes, source[0]), source
 
 
-def _resolve_preset_tree(preset_id, resolved, stack, user_id="default", node_depth=0, node_budget=None):
-    preset_id = _clean_preset_id(preset_id)
-    if len(stack) >= MAX_PRESET_REFERENCE_DEPTH:
-        raise ScenePresetError(f"Preset参照の深さは{MAX_PRESET_REFERENCE_DEPTH}個までです。")
-    if preset_id in stack:
-        cycle = " -> ".join([*stack, preset_id])
-        raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
-    preset = resolved.get(preset_id)
-    if preset is None:
-        preset = load_preset(preset_id, user_id)
-    preset_name = str(preset["metadata"].get("name") or preset_id)
-    budget = node_budget if node_budget is not None else {"total": node_depth}
-    next_node_depth = budget["total"] + len(_preset_nodes(preset))
-    if next_node_depth > MAX_PRESET_REFERENCE_NODE_DEPTH:
-        raise ScenePresetError(
-            f"Preset参照内の累積ノード数は{MAX_PRESET_REFERENCE_NODE_DEPTH}個までです。"
-        )
-    budget["total"] = next_node_depth
-    next_stack = [*stack, preset_id]
-    for _node_id, nested_id, _node in _find_references(_preset_nodes(preset)):
-        try:
-            _resolve_preset_tree(nested_id, resolved, next_stack, user_id, next_node_depth, budget)
-        except ScenePresetError as exc:
-            raise ScenePresetError(f"Preset「{preset_name}」: {exc}") from exc
-    resolved[preset_id] = preset
+def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
+    """Resolve an arbitrarily large Preset DAG without Python recursion limits."""
+    root_id = _clean_preset_id(preset_id)
+    path = [_clean_preset_id(item) for item in stack]
+    path_set = set(path)
+    frames = [{"preset_id": root_id, "entered": False}]
+    try:
+        while frames:
+            frame = frames[-1]
+            current_id = frame["preset_id"]
+            if current_id in resolved:
+                frames.pop()
+                continue
+            if not frame["entered"]:
+                if current_id in path_set:
+                    cycle = " -> ".join([*path, current_id])
+                    raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
+                preset = load_preset(current_id, user_id)
+                frame.update({
+                    "entered": True,
+                    "preset": preset,
+                    "name": str(preset["metadata"].get("name") or current_id),
+                    "references": iter(_find_references(_preset_nodes(preset))),
+                })
+                path.append(current_id)
+                path_set.add(current_id)
+            try:
+                _node_id, nested_id, _node = next(frame["references"])
+            except StopIteration:
+                resolved[current_id] = frame["preset"]
+                frames.pop()
+                path_set.remove(path.pop())
+                continue
+            nested_id = _clean_preset_id(nested_id)
+            if nested_id not in resolved:
+                frames.append({"preset_id": nested_id, "entered": False})
+    except ScenePresetError as exc:
+        for frame in reversed(frames):
+            if frame.get("entered"):
+                exc = ScenePresetError(f"Preset「{frame['name']}」: {exc}")
+        raise exc
 
 
 def _purge_run_snapshots(now=None):
@@ -752,11 +759,6 @@ def _purge_run_snapshots(now=None):
     for key in [key for key, cancelled_at in _CANCELLED_RUNS.items()
                 if key not in _RESOLVING_RUNS and current - cancelled_at >= _CANCELLED_RUNS_TTL_SECONDS]:
         _CANCELLED_RUNS.pop(key, None)
-    while len(_CANCELLED_RUNS) > _CANCELLED_RUNS_MAX_ENTRIES:
-        removable = next((key for key in _CANCELLED_RUNS if key not in _RESOLVING_RUNS), None)
-        if removable is None:
-            break
-        _CANCELLED_RUNS.pop(removable, None)
 
 
 def _run_cache_key(run_id, user_id="default"):
@@ -868,27 +870,60 @@ def _scene_node_value(
     memo=None,
     preset_stack=(),
 ):
-    try:
-        return _scene_node_value_impl(
-            nodes,
-            node_id,
-            resolved,
-            stack,
-            input_values,
-            user_id,
-            run_handle,
-            memo,
-            preset_stack,
-        )
-    except ScenePresetResolutionError:
-        raise
-    except (ScenePresetError, TypeError, ValueError, KeyError) as exc:
-        node = nodes.get(str(node_id), {}) if isinstance(nodes, dict) else {}
-        message = str(exc).strip() or "入力が不正です。"
-        raise ScenePresetResolutionError(
-            f"{_node_label(node_id, node)}: {message}",
-            node_id,
-        ) from exc
+    target_id = str(node_id)
+    values = {} if memo is None else memo
+    if input_values and target_id in input_values:
+        return input_values[target_id]
+    if target_id in values:
+        return values[target_id]
+
+    visiting = {str(item) for item in (stack or set())}
+    frames = [(target_id, False)]
+    while frames:
+        current_id, exiting = frames.pop()
+        if (input_values and current_id in input_values) or current_id in values:
+            continue
+        node = nodes.get(current_id) if isinstance(nodes, dict) else None
+        if not isinstance(node, dict):
+            raise ScenePresetResolutionError(
+                f"Sceneノード #{current_id}: Sceneノード #{current_id} が見つかりません。",
+                current_id,
+            )
+        if exiting:
+            visiting.remove(current_id)
+            try:
+                _scene_node_value_impl(
+                    nodes,
+                    current_id,
+                    resolved,
+                    set(),
+                    input_values,
+                    user_id,
+                    run_handle,
+                    values,
+                    preset_stack,
+                )
+            except ScenePresetResolutionError:
+                raise
+            except (ScenePresetError, TypeError, ValueError, KeyError) as exc:
+                message = str(exc).strip() or "入力が不正です。"
+                raise ScenePresetResolutionError(
+                    f"{_node_label(current_id, node)}: {message}",
+                    current_id,
+                ) from exc
+            continue
+        if current_id in visiting:
+            raise ScenePresetResolutionError(
+                f"{_node_label(current_id, node)}: Sceneグラフが循環しています: #{current_id}",
+                current_id,
+            )
+        visiting.add(current_id)
+        frames.append((current_id, True))
+        for linked_id in reversed(list(_linked_nodes(node))):
+            linked_id = str(linked_id)
+            if (not input_values or linked_id not in input_values) and linked_id not in values:
+                frames.append((linked_id, False))
+    return values[target_id]
 
 
 def _evaluate_preset_scene(
@@ -946,11 +981,10 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             if _needs_workflow_preset_snapshots(nodes, expand_node_id)
             else []
         )
-        node_budget = {"total": len(scene_nodes) + len(workflow_references)}
         references = [*_find_references(scene_nodes), *workflow_references]
         for reference_node_id, preset_id, _node in references:
             try:
-                _resolve_preset_tree(preset_id, resolved, [], user_id, node_budget=node_budget)
+                _resolve_preset_tree(preset_id, resolved, [], user_id)
             except ScenePresetError as exc:
                 raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
         plan = (

@@ -169,7 +169,7 @@ def _dispatch_callback(config, values, timeout_seconds, *, desktop_context=None)
         timeout = int(timeout_seconds)
     except (TypeError, ValueError) as exc:
         raise SceneCallbackError("Callback timeout is invalid.") from exc
-    if not 1 <= timeout <= 120:
+    if timeout < 1:
         raise SceneCallbackError("Callback timeout is invalid.")
     kind = config.get("kind")
     if kind == "discord":

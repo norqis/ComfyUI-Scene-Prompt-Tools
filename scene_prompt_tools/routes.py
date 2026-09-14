@@ -259,8 +259,6 @@ def _folder_component(value, field):
         raise ValueError(f"{field} contains unsupported path characters")
     if text != text.strip(" ."):
         raise ValueError(f"{field} cannot start or end with a dot or space")
-    if len(text) > 80:
-        raise ValueError(f"{field} must be 80 characters or fewer")
     return text
 
 
@@ -268,7 +266,7 @@ def _safe_id(name):
     value = re.sub(r"\s+", "_", str(name or "").strip().lower())
     value = re.sub(r"[^0-9a-zA-Z_\-\u3040-\u30ff\u3400-\u9fff]+", "_", value)
     value = value.strip("_")
-    return value[:80] or "prompt"
+    return value or "prompt"
 
 
 def _existing_ids(data, exclude_index=None):

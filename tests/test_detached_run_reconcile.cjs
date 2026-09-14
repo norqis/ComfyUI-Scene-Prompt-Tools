@@ -40,7 +40,6 @@ function reconcileContext(responses) {
         sceneBatchPendingRuns: [],
         sceneBatchRun: null,
         SCENE_DETACHED_RETRY_MS: 30_000,
-        SCENE_DETACHED_MAX_RETRIES: 20,
         scheduled: [],
         setTimeout(callback, delay) {
             const timer = { callback, delay };
@@ -115,12 +114,10 @@ async function testStillQueuedAndFetchFailureRemainBlocked() {
     assert.equal(queued.scheduled.length, 1);
     assert.equal(queued.scheduled[0].delay, 30_000);
     queuedRun.detachedTimer = null;
-    queuedRun.detachedRetryCount = 20;
     queuedRun.nodeRemoved = true;
     queued.scheduled.length = 0;
     queued.scheduleDetachedSceneBatchReconcile(queuedRun);
     assert.equal(queued.scheduled.length, 1, "a removed node keeps a safe recovery check after retry saturation");
-    assert.equal(queuedRun.detachedRetryCount, 20, "the retry counter remains bounded");
     assert.deepEqual(queued.released, [], "a still-queued run is never released because its node was removed");
 
     const failed = reconcileContext([new Error("offline")]);

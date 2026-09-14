@@ -39,7 +39,6 @@ function lifecycleContext(response) {
         clearTimeout,
         console: { warn() {} },
         SCENE_CALLBACK_FINALIZE_POLL_MS: 0,
-        SCENE_CALLBACK_FINALIZE_MAX_POLLS: 4,
         sceneBatchRun: null,
         sceneBatchRunsById: new Map(),
         sceneBatchDetachedRuns: new Map(),
