@@ -1042,7 +1042,12 @@ def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, s
         return item_for_normalized_plan(plan, current_index)
     except IndexError:
         if strict:
-            raise IndexError("生成計画に生成対象がありません。") from None
+            if plan["total_batches"] == 0:
+                raise IndexError("生成計画に生成対象がありません。") from None
+            raise IndexError(
+                f"生成番号 {current_index} は生成計画の範囲外です。"
+                "停止後の状態が残っている場合は、ワークフローを再実行してください。"
+            ) from None
         return {"row": {}, "count": 0, "total_batches": 0, "total_images": 0}
 
 

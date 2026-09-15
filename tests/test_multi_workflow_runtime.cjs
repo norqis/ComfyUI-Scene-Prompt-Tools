@@ -50,6 +50,16 @@ function testRunRebindStaysInItsWorkflow() {
     assert.equal(context.sceneNodeForRun(run), replacementA);
     assert.equal(run.node, replacementA);
 
+    context.sceneBatchRunsById.delete(run.runId);
+    context.sceneBatchDetachedRuns.set(run.runId, run);
+    replacementA.widgets[0].value = "";
+    assert.equal(
+        context.sceneBatchRunForNode(replacementA),
+        run,
+        "a stopped run remains visible after its queue-only controls are cleared",
+    );
+    assert.equal(context.sceneNodeForRun(run), replacementA);
+
     const graphB = {};
     const sameIdB = { id: 41, graph: graphB, widgets: [runWidget("run-a")] };
     graphB.getNodeById = () => sameIdB;
@@ -75,6 +85,58 @@ function testStaleStopLabelCannotRequeue() {
     context.startSceneBatchRun({});
     assert.equal(resetCount, 1);
     assert.equal(createCount, 0);
+}
+
+function testStoppingRunClearsQueueControlsImmediately() {
+    const node = {
+        id: 67,
+        graph: {},
+        widgets: [
+            { name: "current_index", value: 19 },
+            { name: "run_id", value: "stopped-run" },
+        ],
+    };
+    const run = {
+        runId: "stopped-run",
+        nodeId: 67,
+        node,
+        graph: node.graph,
+        waiting: true,
+        currentPromptId: "prompt-running",
+    };
+    const context = {
+        Map, Set, String, Object,
+        sceneBatchRun: run,
+        sceneBatchRunsById: new Map([[run.runId, run]]),
+        sceneBatchDetachedRuns: new Map(),
+        sceneBatchFinalizingRuns: new Set(),
+        sceneBatchPendingReleases: new Map(),
+        sceneBatchPendingRuns: [],
+        findWidget(target, name) { return target?.widgets?.find((widget) => widget.name === name); },
+        sceneNodeForRun() { return node; },
+        cancelSceneBatchRunPreparation() {},
+        rememberDetachedSceneBatchRun(target) { context.sceneBatchDetachedRuns.set(target.runId, target); },
+        rememberPendingSceneBatchRelease() {},
+        clearPendingSceneBatchReleasesForRun() {},
+        releaseSceneBatchPlan() {},
+        activateNextSceneBatchRun() {},
+        resetSceneExpandRunControls(target) {
+            target.widgets.find((widget) => widget.name === "current_index").value = 0;
+            target.widgets.find((widget) => widget.name === "run_id").value = "";
+        },
+        statuses: [],
+        updateSceneExpandButton(target) {
+            context.statuses.push(context.sceneBatchRunStatus(context.sceneBatchRunForNode(target)));
+        },
+    };
+    install(context, ["sceneBatchNodeRunId", "sceneBatchRunForNode", "sceneBatchRunStatus", "stopSceneBatchRun"]);
+    context.stopSceneBatchRun();
+    assert.equal(node.widgets[0].value, 0, "Stop clears the stale selected index before normal Queue can serialize it");
+    assert.equal(node.widgets[1].value, "", "Stop clears the continuous run marker before normal Queue");
+    assert.equal(context.sceneBatchDetachedRuns.get(run.runId), run, "the submitted backend prompt stays tracked for safe cleanup");
+    assert.equal(context.statuses.at(-1), "stopping", "clearing queue controls does not hide the stopping state");
+    run.releaseBlocked = true;
+    assert.equal(context.sceneBatchRunStatus(run), "blocked", "a failed stop reconciliation can be retried from the button");
 }
 
 function testForeignPreviewIsRemovedFromActiveTab() {
@@ -132,6 +194,7 @@ function testForeignProgressCannotLightActiveTab() {
 
 testRunRebindStaysInItsWorkflow();
 testStaleStopLabelCannotRequeue();
+testStoppingRunClearsQueueControlsImmediately();
 testForeignPreviewIsRemovedFromActiveTab();
 testForeignProgressCannotLightActiveTab();
 console.log("Scene Prompt multi-workflow runtime tests passed.");
