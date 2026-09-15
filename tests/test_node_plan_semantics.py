@@ -250,8 +250,21 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(plan["total_images"], 6)
         output = self.nodes.ScenePromptExpand().expand(current_index=1, timestamp_dir=False, scene_prompt=plan)
         self.assertEqual(output[4]["samples"].shape[0], 3)
-        with self.assertRaises(IndexError):
+        with self.assertRaisesRegex(IndexError, "生成番号 2 は生成計画の範囲外"):
             self.nodes.ScenePromptExpand().expand(current_index=2, timestamp_dir=False, scene_prompt=plan)
+
+    def test_expand_distinguishes_an_empty_plan_from_a_stale_index(self):
+        empty = self.nodes.SceneMatrix().build(json.dumps({
+            "version": 1,
+            "sets": [{
+                "row_id": "disabled",
+                "name": "Disabled",
+                "path_label": "Disabled",
+                "enabled": False,
+            }],
+        }))[0]
+        with self.assertRaisesRegex(IndexError, "生成計画に生成対象がありません"):
+            self.nodes.ScenePromptExpand().expand(current_index=0, timestamp_dir=False, scene_prompt=empty)
 
     def test_nested_maximum_counts_keep_the_exact_derived_total(self):
         first = self.nodes.ScenePromptCounter().count(count=10_000)[0]

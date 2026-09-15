@@ -7094,7 +7094,13 @@ function sceneBatchRunFromPrompt(prompt) {
 
 function sceneBatchRunForNode(node) {
     const runId = sceneBatchNodeRunId(node);
-    const run = sceneBatchRunsById.get(runId) || sceneBatchDetachedRuns.get(runId) || null;
+    let run = sceneBatchRunsById.get(runId) || sceneBatchDetachedRuns.get(runId) || null;
+    if (!run && !runId) {
+        run = [...sceneBatchDetachedRuns.values()].find((candidate) => (
+            String(candidate?.nodeId) === String(node?.id)
+            && (candidate.node === node || candidate.graph === node?.graph)
+        )) || null;
+    }
     if (!run) {
         return null;
     }
@@ -7113,6 +7119,9 @@ function sceneBatchRunStatus(run) {
     if (sceneBatchRun === run) {
         return "active";
     }
+    if (run.releaseBlocked) {
+        return "blocked";
+    }
     if (sceneBatchDetachedRuns.get(run.runId) === run) {
         return "stopping";
     }
@@ -7121,9 +7130,6 @@ function sceneBatchRunStatus(run) {
     }
     if (sceneBatchFinalizingRuns.has(run)) {
         return "finalizing";
-    }
-    if (run.releaseBlocked) {
-        return "blocked";
     }
     return "idle";
 }
@@ -7134,14 +7140,20 @@ function sceneNodeForRun(run) {
     if (run?.workflow && activeWorkflow && typeof sceneWorkflowsMatch === "function"
         && sceneWorkflowsMatch(run.workflow, activeWorkflow)) {
         const current = app.graph?.getNodeById?.(Number(run.nodeId)) || app.graph?.getNodeById?.(run.nodeId) || null;
-        if (current && sceneBatchNodeRunId(current) === run.runId) {
+        const currentRunId = current ? sceneBatchNodeRunId(current) : "";
+        if (current && (currentRunId === run.runId
+            || (!currentRunId && sceneBatchDetachedRuns.get(run.runId) === run))) {
             run.node = current;
             run.graph = current.graph || app.graph;
             return current;
         }
     }
     if (node && node.graph === run.graph && String(node.id) === String(run.nodeId)) {
-        return sceneBatchNodeRunId(node) === run.runId ? node : null;
+        const nodeRunId = sceneBatchNodeRunId(node);
+        return nodeRunId === run.runId
+            || (!nodeRunId && sceneBatchDetachedRuns.get(run.runId) === run)
+            ? node
+            : null;
     }
     return null;
 }
@@ -8550,7 +8562,7 @@ function stopSceneBatchRun(options = {}) {
     }
     const deferRelease = options.forceRelease !== true && !!run?.waiting;
     if (deferRelease) {
-        run.controlsResetPending = true;
+        run.controlsResetPending = !previousNode;
         rememberDetachedSceneBatchRun(run);
     }
     if (deferRelease && run.currentPromptId) {
@@ -8563,9 +8575,7 @@ function stopSceneBatchRun(options = {}) {
         sceneBatchRunsById.delete(run?.runId);
     }
     if (previousNode) {
-        if (!deferRelease) {
-            resetSceneExpandRunControls(previousNode, { mark: false });
-        }
+        resetSceneExpandRunControls(previousNode, { mark: false });
         updateSceneExpandButton(previousNode);
     }
     if (!deferRelease) {
