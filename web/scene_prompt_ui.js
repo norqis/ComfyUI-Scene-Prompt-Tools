@@ -8640,6 +8640,68 @@ function installScenePromptQueueSync() {
     app.__ScenePromptQueueSyncInstalled = true;
 }
 
+async function sceneCompressedPngWorkflow(file) {
+    const png = new Uint8Array(await file.arrayBuffer());
+    if (png.length < 8 || new DataView(png.buffer, png.byteOffset, png.byteLength).getUint32(0) !== 0x89504e47) {
+        return "";
+    }
+    const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+    let offset = 8;
+    while (offset + 12 <= png.length) {
+        const length = view.getUint32(offset);
+        const dataStart = offset + 8;
+        const dataEnd = dataStart + length;
+        if (dataEnd + 4 > png.length) {
+            return "";
+        }
+        const type = String.fromCharCode(...png.subarray(offset + 4, offset + 8));
+        if (type === "zTXt") {
+            const keywordEnd = png.indexOf(0, dataStart);
+            if (keywordEnd >= dataStart && keywordEnd < dataEnd) {
+                const keyword = new TextDecoder("latin1").decode(png.subarray(dataStart, keywordEnd));
+                const compressionMethod = png[keywordEnd + 1];
+                if (keyword === "workflow" && compressionMethod === 0) {
+                    const compressed = png.subarray(keywordEnd + 2, dataEnd);
+                    const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate"));
+                    const inflated = await new Response(stream).arrayBuffer();
+                    return new TextDecoder("utf-8").decode(inflated);
+                }
+            }
+        }
+        offset = dataEnd + 4;
+    }
+    return "";
+}
+
+function installSceneCompressedPngWorkflowLoader() {
+    if (app.__SceneCompressedPngWorkflowLoaderInstalled || typeof app.handleFile !== "function") {
+        return;
+    }
+    const originalHandleFile = app.handleFile.bind(app);
+    app.handleFile = async function (file, openSource, options) {
+        const isPng = file?.type === "image/png" || /\.png$/i.test(String(file?.name || ""));
+        if (isPng) {
+            try {
+                const savedWorkflow = await sceneCompressedPngWorkflow(file);
+                if (savedWorkflow) {
+                    const workflow = JSON.parse(savedWorkflow);
+                    if (workflow && typeof workflow === "object" && !Array.isArray(workflow)) {
+                        const fileName = String(file.name || "workflow").replace(/\.\w+$/, "");
+                        return app.loadGraphData(workflow, true, true, fileName, {
+                            openSource,
+                            deferWarnings: options?.deferWarnings,
+                        });
+                    }
+                }
+            } catch (error) {
+                console.warn("[Scene Prompt] 圧縮PNGメタデータを読み込めませんでした。", error);
+            }
+        }
+        return originalHandleFile(...arguments);
+    };
+    app.__SceneCompressedPngWorkflowLoaderInstalled = true;
+}
+
 function scheduleScenePromptQueueSyncInstall() {
     installScenePromptQueueSync();
     installSceneBatchPromptCapture();
@@ -10627,6 +10689,7 @@ app.registerExtension({
         }
         window.__ScenePromptUISetupInstalled = true;
         scheduleScenePromptQueueSyncInstall();
+        installSceneCompressedPngWorkflowLoader();
         installSceneWorkflowLoadGuard();
         window.addEventListener("pagehide", releaseSceneRunsOnPageHide);
         api.addEventListener("scene_prompt_desktop_notification", ({ detail }) => receiveSceneDesktopNotification(detail));

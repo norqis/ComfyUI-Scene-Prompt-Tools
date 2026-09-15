@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chromium } from "playwright";
 
 if (process.env.RUN_REAL_COMFYUI_BROWSER_SMOKE !== "1") {
@@ -72,6 +72,8 @@ try {
 
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.stack || error.message));
     const seedRequests = [];
     await page.route("**/prompt", async (route) => {
         if (route.request().method() !== "POST") return route.continue();
@@ -113,6 +115,66 @@ window.__sceneSeedRuntimeTest = {
         null,
         { timeout: 30_000 },
     );
+    await page.keyboard.press("Escape");
+    if (process.env.COMFYUI_WORKFLOW_PNG) {
+        const extracted = spawnSync(python, [
+            "-c",
+            "from PIL import Image; import sys; im=Image.open(sys.argv[1]); sys.stdout.write(im.text['workflow'])",
+            process.env.COMFYUI_WORKFLOW_PNG,
+        ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+        assert.equal(extracted.status, 0, extracted.stderr || "Could not extract workflow metadata from PNG.");
+        const workflow = JSON.parse(extracted.stdout);
+        const pngBase64 = (await readFile(process.env.COMFYUI_WORKFLOW_PNG)).toString("base64");
+        const dropResult = await page.evaluate(async ({ content, name, expectedNodes }) => {
+            const bytes = Uint8Array.from(atob(content), (character) => character.charCodeAt(0));
+            const file = new File([bytes], name, { type: "image/png" });
+            if (typeof window.app.handleFile !== "function") {
+                return {
+                    error: "window.app.handleFile is unavailable",
+                    fileMethods: Object.keys(window.app).filter((key) => key.toLowerCase().includes("file")),
+                };
+            }
+            try {
+                let settled = false;
+                Promise.resolve(window.app.handleFile(file)).finally(() => { settled = true; });
+                const deadline = Date.now() + 15_000;
+                while ((window.app.graph?._nodes?.length || 0) !== expectedNodes && Date.now() < deadline) {
+                    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+                }
+                return { nodes: window.app.graph?._nodes?.length || 0, settled };
+            } catch (error) {
+                return {
+                    error: error?.stack || error?.message || String(error),
+                    bodyText: document.body.innerText.slice(0, 5000),
+                    dialogs: [...document.querySelectorAll('[role="dialog"], .p-dialog, .p-confirmdialog')].map((element) => ({
+                        className: element.className,
+                        text: element.innerText,
+                    })),
+                    overlays: [...document.querySelectorAll('.p-component-overlay, .p-dialog-mask')].map((element) => element.className),
+                };
+            }
+        }, { content: pngBase64, name: basename(process.env.COMFYUI_WORKFLOW_PNG), expectedNodes: workflow.nodes.length });
+        assert.equal(dropResult.error, undefined, `${dropResult.error}\n${JSON.stringify(dropResult, null, 2)}`);
+        assert.equal(dropResult.nodes, workflow.nodes.length, "drag-style PNG loading must restore every node");
+        assert.deepEqual(pageErrors, [], `PNG handling raised browser errors:\n${pageErrors.join("\n")}`);
+        console.log(`real ComfyUI PNG handleFile passed (${dropResult.nodes} nodes)`);
+
+        const loadResult = await page.evaluate(async (savedWorkflow) => {
+            try {
+                await Promise.race([
+                    window.app.loadGraphData(savedWorkflow),
+                    new Promise((_resolve, reject) => setTimeout(() => reject(new Error("loadGraphData timed out")), 15_000)),
+                ]);
+                return { nodes: window.app.graph?._nodes?.length || 0 };
+            } catch (error) {
+                return { error: error?.stack || error?.message || String(error) };
+            }
+        }, workflow);
+        assert.equal(loadResult.error, undefined, loadResult.error);
+        assert.equal(loadResult.nodes, workflow.nodes.length, "the PNG workflow must load every serialized node");
+        assert.deepEqual(pageErrors, [], `workflow load raised browser errors:\n${pageErrors.join("\n")}`);
+        console.log(`real ComfyUI PNG workflow load passed (${loadResult.nodes} nodes)`);
+    }
     const result = await page.evaluate(() => {
         const names = ["filename_enabled", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "randomize", "run_handle"];
         const values = [true, "positive, {A|B}", '{"version":1,"categories":{"Outfit":[{"id":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"id":"calm","label":"Calm"}]}}', "Outfit", 99, false, "new run"];
