@@ -125,6 +125,8 @@ window.__sceneSeedRuntimeTest = {
         assert.equal(extracted.status, 0, extracted.stderr || "Could not extract workflow metadata from PNG.");
         const workflow = JSON.parse(extracted.stdout);
         const pngBase64 = (await readFile(process.env.COMFYUI_WORKFLOW_PNG)).toString("base64");
+        const savedExpand = workflow.nodes.find((node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand");
+        const expectedModelMode = savedExpand?.widgets_values?.[5];
         const dropResult = await page.evaluate(async ({ content, name, expectedNodes }) => {
             const bytes = Uint8Array.from(atob(content), (character) => character.charCodeAt(0));
             const file = new File([bytes], name, { type: "image/png" });
@@ -141,7 +143,14 @@ window.__sceneSeedRuntimeTest = {
                 while ((window.app.graph?._nodes?.length || 0) !== expectedNodes && Date.now() < deadline) {
                     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
                 }
-                return { nodes: window.app.graph?._nodes?.length || 0, settled };
+                const expandNode = window.app.graph?._nodes?.find(
+                    (node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand",
+                );
+                return {
+                    nodes: window.app.graph?._nodes?.length || 0,
+                    settled,
+                    modelMode: expandNode?.widgets?.find((widget) => widget.name === "model_mode")?.value,
+                };
             } catch (error) {
                 return {
                     error: error?.stack || error?.message || String(error),
@@ -156,6 +165,10 @@ window.__sceneSeedRuntimeTest = {
         }, { content: pngBase64, name: basename(process.env.COMFYUI_WORKFLOW_PNG), expectedNodes: workflow.nodes.length });
         assert.equal(dropResult.error, undefined, `${dropResult.error}\n${JSON.stringify(dropResult, null, 2)}`);
         assert.equal(dropResult.nodes, workflow.nodes.length, "drag-style PNG loading must restore every node");
+        if (typeof expectedModelMode === "string") {
+            assert.equal(dropResult.modelMode, expectedModelMode, "drag-style PNG loading must preserve the Expand model mode");
+            console.log(`real ComfyUI PNG Expand model mode passed (${dropResult.modelMode})`);
+        }
         assert.deepEqual(pageErrors, [], `PNG handling raised browser errors:\n${pageErrors.join("\n")}`);
         console.log(`real ComfyUI PNG handleFile passed (${dropResult.nodes} nodes)`);
 
