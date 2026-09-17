@@ -310,6 +310,53 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(conversionRoundTrips.original[5], "Anima", "legacy input is never mutated");
     assert.equal(conversionRoundTrips.modelExists, false);
     console.log("real ComfyUI Expand options and legacy Callback/replay widget migration passed");
+    const bypassPreset = await page.evaluate(async () => {
+        const app = window.app;
+        app.graph.clear();
+        const create = (type) => {
+            const node = window.LiteGraph.createNode(type);
+            app.graph.add(node);
+            return node;
+        };
+        const input = create("ScenePresetInput");
+        const prompt = create("ScenePrompter");
+        const reverse = create("ScenePromptReverse");
+        const output = create("ScenePresetOutput");
+        const connect = (source, target) => source.connect(0, target, target.inputs.findIndex((slot) => slot.name === "scene_prompt"));
+        connect(input, prompt);
+        connect(prompt, reverse);
+        connect(reverse, output);
+        reverse.mode = 4;
+        output.widgets.find((widget) => widget.name === "preset_id").value = "runtime-bypass";
+        const apiGraph = await app.graphToPrompt();
+        if (apiGraph.output[String(reverse.id)]) throw new Error("ComfyUI should bypass Reverse in API graph");
+        const workflow = app.graph.serialize();
+        const response = await fetch("/scene_presets/save", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset_id: "runtime-bypass", name: "Runtime Bypass", output_node_id: String(output.id), api_graph: apiGraph, workflow }),
+        });
+        const saved = await response.json();
+        if (!response.ok) throw new Error(saved.error);
+        const loadedResponse = await fetch("/scene_presets/load?preset_id=runtime-bypass");
+        const loaded = await loadedResponse.json();
+        if (!loadedResponse.ok) throw new Error(loaded.error);
+        await app.loadGraphData(loaded.workflow, true, true);
+        const restored = app.graph.getNodeById(reverse.id);
+        const restoredApi = await app.graphToPrompt();
+        return {
+            bypassMode: restored?.mode,
+            links: Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]),
+            expectedLinks: [[input.id, prompt.id], [prompt.id, reverse.id], [reverse.id, output.id]],
+            apiContainsReverse: Boolean(restoredApi.output[String(reverse.id)]),
+            outputSource: restoredApi.output[String(output.id)].inputs.scene_prompt,
+            expectedSource: [String(prompt.id), 0],
+        };
+    });
+    assert.equal(bypassPreset.bypassMode, 4);
+    assert.deepEqual(bypassPreset.links, bypassPreset.expectedLinks);
+    assert.equal(bypassPreset.apiContainsReverse, false);
+    assert.deepEqual(bypassPreset.outputSource, bypassPreset.expectedSource);
+    console.log("real ComfyUI bypass Preset save/load preserves mode, physical links and execution routing");
     const seedNodes = await page.evaluate(async () => {
         window.app.graph.clear();
         const add = (type) => {
