@@ -245,6 +245,10 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
     workflow["nodes"] = [node for node in outer_nodes if str(node.get("id")) != reference_id]
     workflow["nodes"].extend(_clone_preset_workflow_nodes(preset, mapping, workflow_reference))
     state["inserted"].update(mapping.values())
+    templates = _workflow_template_index(_workflow_nodes(preset))
+    for original_id, copied_id in mapping.items():
+        if original_id not in nodes and templates[original_id].get("type") == PRESET_REFERENCE:
+            state["display_only_references"].add(copied_id)
     physical_entries, physical_output = _preset_physical_boundaries(preset, mapping, input_id, _output_id)
     state["references"][reference_id] = {
         "entry_targets": entry_targets,
@@ -302,18 +306,6 @@ def _output_slot(node, index):
     while len(outputs) <= index:
         outputs.append({"name": "output", "type": "*", "links": []})
     return outputs[index]
-
-
-def _resolve_reference_output(reference_id, state):
-    output = state["references"][reference_id]["output"]
-    seen = set()
-    while str(output[0]) in state["references"]:
-        current = str(output[0])
-        if current in seen:
-            raise ValueError("Preset参照の出力接続が循環しています。")
-        seen.add(current)
-        output = state["references"][current]["output"]
-    return str(output[0]), output[1]
 
 
 def _resolve_reference_physical_output(reference_id, state):
@@ -635,7 +627,8 @@ def _expand_workflow_only_reference(workflow, reference_id, preset):
     workflow["last_link_id"] = next_link_id - 1
 
 
-def _expand_workflow_only_references(workflow, preset_snapshots):
+def _expand_workflow_only_references(workflow, preset_snapshots, display_only_references=()):
+    display_only_references = set(display_only_references)
     while True:
         reference = next(
             (
@@ -643,7 +636,8 @@ def _expand_workflow_only_references(workflow, preset_snapshots):
                 if (
                     isinstance(node, dict)
                     and node.get("type") == PRESET_REFERENCE
-                    and node.get("mode") != 4
+                    and node.get("mode") not in {2, 4}
+                    and str(node.get("id")) not in display_only_references
                 )
             ),
             None,
@@ -666,7 +660,7 @@ def expand_preset_references(prompt, workflow, preset_snapshots, expand_workflow
     expanded_prompt = copy.deepcopy(prompt)
     expanded_workflow = copy.deepcopy(workflow)
     source_ids = {str(node_id): str(node_id) for node_id in expanded_prompt}
-    state = {"inserted": set(), "references": {}, "physical_links": []}
+    state = {"inserted": set(), "references": {}, "physical_links": [], "display_only_references": set()}
     while True:
         reference_id = next(
             (
@@ -686,5 +680,5 @@ def expand_preset_references(prompt, workflow, preset_snapshots, expand_workflow
         _inline_reference(expanded_prompt, expanded_workflow, reference_id, preset, source_ids, state)
     _rebuild_expanded_workflow_links(expanded_prompt, expanded_workflow, state)
     if expand_workflow_references:
-        _expand_workflow_only_references(expanded_workflow, preset_snapshots)
+        _expand_workflow_only_references(expanded_workflow, preset_snapshots, state["display_only_references"])
     return expanded_prompt, expanded_workflow, source_ids

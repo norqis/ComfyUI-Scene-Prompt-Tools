@@ -136,6 +136,22 @@ def bypassed_preset(preset_id, placement):
     elif placement == "last":
         nodes[output_id]["inputs"]["scene_prompt"] = [active_id, 0]
         edges = [(input_id, active_id), (active_id, bypass_id), (bypass_id, output_id)]
+    elif placement == "all":
+        output_id = "14"
+        nodes = {
+            input_id: {"class_type": "ScenePresetInput", "inputs": {}},
+            output_id: {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": [input_id, 0]}},
+        }
+        workflow = [
+            workflow_node(input_id, "ScenePresetInput", [0, 0]),
+            workflow_node(bypass_id, "ScenePromptCounter", [80, 0], ("scene_prompt",)),
+            workflow_node("13", "ScenePromptReverse", [160, 0], ("scene_prompt",)),
+            workflow_node(output_id, "ScenePresetOutput", [240, 0], ("scene_prompt",)),
+        ]
+        workflow_by_id = {str(node["id"]): node for node in workflow}
+        workflow_by_id[bypass_id]["mode"] = 4
+        workflow_by_id["13"]["mode"] = 4
+        edges = [(input_id, bypass_id), (bypass_id, "13"), ("13", output_id)]
     else:
         raise ValueError(placement)
     links = []
@@ -228,7 +244,7 @@ class PresetMetadataTests(unittest.TestCase):
         self.assertTrue(all(str(link[1]) in workflow_by_id and str(link[3]) in workflow_by_id for link in workflow["links"]))
 
     def test_png_expansion_keeps_bypassed_preset_boundary_links(self):
-        for placement in ("first", "last"):
+        for placement in ("first", "last", "all"):
             with self.subTest(placement=placement):
                 snapshot = bypassed_preset("bypass", placement)
                 prompt = {
@@ -257,8 +273,83 @@ class PresetMetadataTests(unittest.TestCase):
                 outgoing = next(link for link in expanded["links"] if str(link[1]) == str(cloned["id"]))
                 if placement == "first":
                     self.assertEqual(str(incoming[1]), "1")
-                else:
+                elif placement == "last":
                     self.assertEqual(str(outgoing[3]), "3")
+                else:
+                    bypass_nodes = [node for node in expanded["nodes"] if node.get("mode") == 4]
+                    self.assertEqual(len(bypass_nodes), 2)
+                    self.assertEqual(str(incoming[1]), "1")
+                    last_bypass = next(node for node in bypass_nodes if node.get("type") == "ScenePromptReverse")
+                    self.assertEqual(
+                        str(next(link for link in expanded["links"] if str(link[1]) == str(last_bypass["id"]))[3]),
+                        "3",
+                    )
+
+    def test_full_metadata_leaves_muted_and_bypassed_references_without_a_context(self):
+        prompt = {"1": scene_prompt("outside")}
+        workflow = outer_workflow(prompt)
+        workflow["nodes"].extend([
+            {"id": 20, "type": "ScenePresetReference", "mode": 2, "widgets_values": ["missing-muted"]},
+            {"id": 21, "type": "ScenePresetReference", "mode": 4, "widgets_values": ["missing-bypass"]},
+        ])
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": workflow},
+            "1",
+            self.nodes.SAVE_METADATA_WORKFLOW,
+            {"run_handle": "missing"},
+            True,
+        )
+        self.assertIs(saved_prompt, prompt)
+        self.assertEqual(saved_extra["workflow"]["nodes"][-2:], workflow["nodes"][-2:])
+
+    def test_full_metadata_keeps_a_cloned_display_only_reference_without_snapshotting_it(self):
+        outer = simple_preset("outer")
+        display_only = workflow_node("99", "ScenePresetReference", [450, 0], ("scene_prompt",))
+        display_only["widgets_values"] = ["missing-display-only"]
+        outer["workflow"]["nodes"].append(display_only)
+        outer["workflow"]["links"] = [[1, 11, 0, 99, 0, "SCENE_PROMPT"]]
+        prompt = {
+            "1": scene_prompt("outside"),
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "outer", "scene_prompt": ["1", 0]}},
+            "3": scene_prompt("after", ["2", 0]),
+        }
+        workflow = outer_workflow(prompt)
+        _prompt, expanded, _aliases = self.metadata_module.expand_preset_references(
+            prompt, workflow, {"outer": outer}, expand_workflow_references=True
+        )
+        retained = next(node for node in expanded["nodes"] if node.get("type") == "ScenePresetReference")
+        self.assertEqual(retained["widgets_values"], ["missing-display-only"])
+
+    def test_execution_path_keeps_a_terminal_bypass_without_restoring_an_unselected_queue_input(self):
+        workflow = {
+            "nodes": [
+                {"id": 1, "inputs": [], "outputs": [{"links": [1]}]},
+                {"id": 2, "inputs": [], "outputs": [{"links": [2]}]},
+                {"id": 3, "inputs": [{"link": 1}, {"link": 2}], "outputs": [{"links": [3]}]},
+                {"id": 4, "mode": 4, "inputs": [{"link": 3}], "outputs": [{"links": [4]}]},
+                {"id": 5, "inputs": [{"link": 4}], "outputs": []},
+            ],
+            "links": [
+                [1, 1, 0, 3, 0, "SCENE_PROMPT"],
+                [2, 2, 0, 3, 1, "SCENE_PROMPT"],
+                [3, 3, 0, 4, 0, "SCENE_PROMPT"],
+                [4, 4, 0, 5, 0, "SCENE_PROMPT"],
+            ],
+        }
+        sliced = self.nodes._slice_workflow_for_output(
+            workflow, {"1", "3", "5"}, preserve_physical_ancestors=True,
+            physical_prompt_ids={"1", "2", "3", "5"},
+        )
+        self.assertSetEqual({str(node["id"]) for node in sliced["nodes"]}, {"1", "3", "4", "5"})
+        self.assertEqual(next(node for node in sliced["nodes"] if node["id"] == 4)["mode"], 4)
+        self.assertTrue(all(str(link[1]) != "2" for link in sliced["links"]))
+        link_ids = {link[0] for link in sliced["links"]}
+        for node in sliced["nodes"]:
+            for slot in node.get("inputs", []):
+                self.assertTrue(slot.get("link") is None or slot["link"] in link_ids)
+            for slot in node.get("outputs", []):
+                self.assertTrue(set(slot.get("links", ())).issubset(link_ids))
 
     def test_full_expansion_preserves_unrelated_workflow_branch_byte_for_byte(self):
         self.put_snapshots({"one": simple_preset("one")})
