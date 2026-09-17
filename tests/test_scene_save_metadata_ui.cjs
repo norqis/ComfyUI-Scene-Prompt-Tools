@@ -51,11 +51,33 @@ assert.equal(widgets[3].hidden, true);
 const expandWidgets = [
     { name: "timestamp_dir" },
     { name: "prefix" },
-    { name: "model_mode" },
+    { name: "replace_underscores" },
+    { name: "convert_anima_weights" },
     { name: "current_index" },
 ];
 context.hideSceneUtilityWidgets({ widgets: expandWidgets }, "ScenePrompterExpand");
 assert.equal(expandWidgets[0].hidden, false);
 assert.equal(expandWidgets[1].hidden, false);
 assert.equal(expandWidgets[2].hidden, false);
-assert.equal(expandWidgets[3].hidden, true);
+assert.equal(expandWidgets[3].hidden, false);
+assert.equal(expandWidgets[4].hidden, true);
+
+vm.runInContext(functionSource("sceneExpandConfigureValues"), context);
+const legacyAnima = {
+    widgets_values: [0, "", 7, true, "prefix", "Anima", 13, "停止", true],
+};
+const migratedAnima = context.sceneExpandConfigureValues(legacyAnima);
+assert.deepEqual(JSON.parse(JSON.stringify(migratedAnima.widgets_values)), [
+    0, "", 7, true, "prefix", true, true, 13, "停止", true,
+]);
+assert.deepEqual(legacyAnima.widgets_values, [0, "", 7, true, "prefix", "Anima", 13, "停止", true]);
+assert.deepEqual(
+    JSON.parse(JSON.stringify(context.sceneExpandConfigureValues(migratedAnima).widgets_values)),
+    JSON.parse(JSON.stringify(migratedAnima.widgets_values)),
+    "migration is idempotent",
+);
+assert.deepEqual(
+    JSON.parse(JSON.stringify(context.sceneExpandConfigureValues({ widgets_values: [0, "", 7, true, "prefix"] }).widgets_values)),
+    [0, "", 7, true, "prefix", false, false],
+    "pre-model workflows receive explicit false conversion options",
+);

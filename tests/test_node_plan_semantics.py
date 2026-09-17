@@ -85,62 +85,90 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         result = self.nodes.ScenePromptExpand().expand(current_index=0, timestamp_dir=False, scene_prompt=plan)
         self.assertEqual(result[0], "alpha")
 
-    def test_expand_model_mode_only_changes_final_prompt_text(self):
+    def test_expand_conversion_options_are_independent_and_do_not_mutate_the_plan(self):
         plan = self.prompt.ScenePrompt().build(
             "A", "blue_hair, score_7", '{"version":1,"categories":{}}', "bad_hands", '{"version":1,"categories":{}}', "", 0, True,
         )[0]
         expander = self.nodes.ScenePromptExpand()
 
-        illustrious = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=plan)
-        anima = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=plan, model_mode="Anima")
-
-        self.assertEqual(illustrious[0], "blue_hair, score_7")
-        self.assertEqual(illustrious[1], "bad_hands")
-        self.assertEqual(anima[0], "blue hair, score 7")
-        self.assertEqual(anima[1], "bad hands")
+        expected = {
+            (False, False): ("blue_hair, score_7", "bad_hands"),
+            (True, False): ("blue hair, score 7", "bad hands"),
+            (False, True): ("blue_hair, score_7", "bad_hands"),
+            (True, True): ("blue hair, score 7", "bad hands"),
+        }
+        for flags, prompts in expected.items():
+            with self.subTest(flags=flags):
+                expanded = expander.expand(
+                    current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=plan,
+                    replace_underscores=flags[0], convert_anima_weights=flags[1],
+                )
+                self.assertEqual(expanded[:2], prompts)
+                self.assertEqual(expanded[2]["positive"], expanded[0])
+                self.assertEqual(expanded[2]["negative"], expanded[1])
 
         weighted = self.prompt.ScenePrompt().build(
-            "W", "(blue_hair:1.4), ((eyes:1.2):0.8)", '{"version":1,"categories":{}}',
-            "(bad_hands:3)", '{"version":1,"categories":{}}', "", 0, True,
+            "W", "(one:1), (one_one:1.1), (blue_hair:1.4), (one_five:1.5), ((eyes:1.2):0.8), (already:2), (three:3), (four:4), (negative:-1.2), (low:0.8), version 2.0",
+            '{"version":1,"categories":{}}', "(bad_hands:1.2), (bad_keep:3)", '{"version":1,"categories":{}}', "", 0, True,
         )[0]
-        weighted_anima = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=weighted, model_mode="Anima")
-        weighted_illustrious = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=weighted, model_mode="Illustrious")
-        self.assertEqual(weighted_anima[0], "(blue hair:3), ((eyes:2):0.8)")
-        self.assertEqual(weighted_anima[1], "(bad hands:3)")
-        self.assertEqual(weighted_illustrious[1], "(bad_hands:1.4)")
+        expected_weighted = {
+            (False, False): "(one:1), (one_one:1.1), (blue_hair:1.4), (one_five:1.5), ((eyes:1.2):0.8), (already:2), (three:3), (four:4), (negative:-1.2), (low:0.8), version 2.0",
+            (True, False): "(one:1), (one one:1.1), (blue hair:1.4), (one five:1.5), ((eyes:1.2):0.8), (already:2), (three:3), (four:4), (negative:-1.2), (low:0.8), version 2.0",
+            (False, True): "(one:1), (one_one:1.5), (blue_hair:3), (one_five:3), ((eyes:2):0.8), (already:2), (three:3), (four:4), (negative:-1.2), (low:0.8), version 2.0",
+            (True, True): "(one:1), (one one:1.5), (blue hair:3), (one five:3), ((eyes:2):0.8), (already:2), (three:3), (four:4), (negative:-1.2), (low:0.8), version 2.0",
+        }
+        for flags, positive in expected_weighted.items():
+            with self.subTest(weighted_flags=flags):
+                expanded = expander.expand(
+                    current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=weighted,
+                    replace_underscores=flags[0], convert_anima_weights=flags[1],
+                )
+                self.assertEqual(expanded[0], positive)
+                expected_negative = "(bad_hands:2), (bad_keep:3)" if flags[1] else "(bad_hands:1.2), (bad_keep:3)"
+                self.assertEqual(expanded[1], expected_negative.replace("_", " ") if flags[0] else expected_negative)
 
-        boundary = self.prompt.ScenePrompt().build(
-            "B", "(low:0.8), (already_anima:2), (high:4), (negative:-1.2), version 2.0",
-            '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
-        )[0]
-        boundary_anima = expander.expand(current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=boundary, model_mode="Anima")
-        self.assertEqual(
-            boundary_anima[0],
-            "(low:0.8), (already anima:2), (high:4), (negative:-1.2), version 2.0",
-        )
-
-        self.assertEqual(anima[2]["positive"], anima[0])
-        self.assertEqual(anima[2]["negative"], anima[1])
-        self.assertEqual(anima[2]["filename_prefix"], illustrious[2]["filename_prefix"])
-        self.assertEqual(anima[3], illustrious[3])
-        self.assertEqual(anima[4]["samples"].shape, illustrious[4]["samples"].shape)
         self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["blue_hair", "score_7"])
         self.assertEqual(plan["rows"][0]["row"]["negative_parts"], ["bad_hands"])
 
-    def test_expand_model_mode_is_an_optional_trailing_widget_and_changes_cache_key(self):
+    def test_expand_conversion_options_are_optional_widgets_and_change_cache_key(self):
         input_types = self.nodes.ScenePromptExpand.INPUT_TYPES()
-        self.assertEqual(input_types["optional"]["model_mode"][0], ["Illustrious", "Anima"])
-        self.assertEqual(input_types["optional"]["model_mode"][1]["default"], "Illustrious")
-        self.assertEqual(input_types["optional"]["model_mode"][1]["label"], "モデル")
+        self.assertEqual(input_types["optional"]["replace_underscores"][0], "BOOLEAN")
+        self.assertFalse(input_types["optional"]["replace_underscores"][1]["default"])
+        self.assertEqual(input_types["optional"]["convert_anima_weights"][0], "BOOLEAN")
+        self.assertFalse(input_types["optional"]["convert_anima_weights"][1]["default"])
+        self.assertNotIn("model_mode", input_types["optional"])
         plan = self.prompt.ScenePrompt().build(
             "A", "blue_hair", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
         )[0]
         self.assertNotEqual(
-            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, model_mode="Illustrious"),
-            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, model_mode="Anima"),
+            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, replace_underscores=False, convert_anima_weights=False),
+            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, replace_underscores=True, convert_anima_weights=False),
         )
+        cache_keys = {
+            self.nodes.ScenePromptExpand.IS_CHANGED(
+                scene_prompt=plan, replace_underscores=replace_underscores,
+                convert_anima_weights=convert_anima_weights,
+            )
+            for replace_underscores, convert_anima_weights in ((False, False), (True, False), (False, True), (True, True))
+        }
+        self.assertEqual(len(cache_keys), 4)
 
-    def test_expand_anima_mode_converts_matrix_parts_without_mutating_the_plan(self):
+        legacy_anima = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, scene_prompt=plan, model_mode="Anima",
+        )
+        explicit_off = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, scene_prompt=plan, model_mode="Anima",
+            replace_underscores=False, convert_anima_weights=False,
+        )
+        legacy_prompt_input = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, scene_prompt=plan, unique_id="expand",
+            prompt={"expand": {"inputs": {"model_mode": "Anima"}}},
+        )
+        self.assertEqual(legacy_anima[0], "blue hair")
+        self.assertEqual(explicit_off[0], "blue_hair")
+        self.assertEqual(legacy_prompt_input[0], "blue hair")
+
+    def test_expand_conversion_options_transform_matrix_parts_without_mutating_the_plan(self):
         source = self.prompt.ScenePrompt().build(
             "Source", "source_hair", '{"version":1,"categories":{}}', "source_hands", '{"version":1,"categories":{}}', "", 0, True,
         )[0]
@@ -160,7 +188,7 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
             seed_base=7,
             timestamp_dir=False,
             scene_prompt=matrix,
-            model_mode="Anima",
+            replace_underscores=True,
         )
 
         self.assertEqual(expanded[0], "source hair, matrix hair")

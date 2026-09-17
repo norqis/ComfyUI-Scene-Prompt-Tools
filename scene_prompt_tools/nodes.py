@@ -96,7 +96,6 @@ PATH_DIRECTORY = "フォルダに分ける"
 PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
 MODEL_MODE_ILLUSTRIOUS = "Illustrious"
 MODEL_MODE_ANIMA = "Anima"
-MODEL_MODE_CHOICES = (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
 REVERSE_SCOPE_ALL = "全てのノード"
 REVERSE_SCOPE_PREVIOUS = "直前のノード"
 REVERSE_SCOPE_CHOICES = (REVERSE_SCOPE_ALL, REVERSE_SCOPE_PREVIOUS)
@@ -142,30 +141,51 @@ def _normalize_model_mode(value):
     return MODEL_MODE_ANIMA if str(value or "").strip() == MODEL_MODE_ANIMA else MODEL_MODE_ILLUSTRIOUS
 
 
-def _model_prompt_weight(weight, model_mode):
-    # The ranges overlap, so values already inside the selected model's distinct
-    # range are left alone to avoid double conversion.  For Anima, Illustrious
-    # 1.0..1.5 is scaled by 5x around 1.0 and clamped at 3.0 (1.4 -> 3.0).
-    # For Illustrious, Anima-only >1.5..3.0 uses the inverse mapping. Values
-    # below 1.0, above 3.0, and negative weights are intentionally unchanged.
+def _expand_conversion_options(model_mode=None, replace_underscores=None, convert_anima_weights=None):
+    """Resolve new explicit options, retaining API-only compatibility with v0.4.12."""
+    legacy_anima = _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA
+    return (
+        legacy_anima if replace_underscores is None else _scene_bool(replace_underscores, default=False),
+        legacy_anima if convert_anima_weights is None else _scene_bool(convert_anima_weights, default=False),
+    )
+
+
+def _legacy_expand_model_mode(model_mode, prompt, unique_id):
+    """Read the removed v0.4.12 widget from a persisted API graph when needed."""
+    if model_mode is not None or not isinstance(prompt, dict) or unique_id is None:
+        return model_mode
+    node = prompt.get(str(unique_id), prompt.get(unique_id))
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    return inputs.get("model_mode") if isinstance(inputs, dict) else None
+
+
+def _model_prompt_weight(weight):
+    # Anima's forward conversion scales Illustrious 1.0..1.5 weights by 5x
+    # around 1.0 and clamps at 3.0. Turning the option off never reverses text.
     value = float(weight)
-    mode = _normalize_model_mode(model_mode)
-    if mode == MODEL_MODE_ANIMA and 1.0 <= value <= 1.5:
+    if 1.0 <= value <= 1.5:
         return min(3.0, 1.0 + ((value - 1.0) * 5.0))
-    if mode == MODEL_MODE_ILLUSTRIOUS and 1.5 < value <= 3.0:
-        return 1.0 + ((value - 1.0) / 5.0)
     return value
 
 
-def _convert_model_prompt_weights(text, model_mode):
+def _convert_anima_prompt_weights(text):
     def replace(match):
         raw = float(match.group(2))
-        converted = _model_prompt_weight(raw, model_mode)
+        converted = _model_prompt_weight(raw)
         if abs(converted - raw) < 0.0005:
             return match.group(0)
         return f"{match.group(1)}{converted:.3f}".rstrip("0").rstrip(".")
 
     return MODEL_WEIGHT_RE.sub(replace, str(text or ""))
+
+
+def _format_expand_prompt(text, replace_underscores, convert_anima_weights):
+    result = str(text or "")
+    if convert_anima_weights:
+        result = _convert_anima_prompt_weights(result)
+    if replace_underscores:
+        result = result.replace("_", " ")
+    return result
 
 
 def _normalize_reverse_scope(value):
@@ -512,9 +532,7 @@ def _scene_source_ids(scene_info):
 _EXPAND_WORKFLOW_WIDGET_INDEX = {
     "current_index": 0,
     "seed_base": 2,
-    # ``seed_base_literal`` is an internal optional widget, appended after the
-    # existing Expand widgets so old workflow positions stay stable.
-    "seed_base_literal": 8,
+    "seed_base_literal": 9,
 }
 
 
@@ -595,7 +613,12 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
         widgets = node.get("widgets_values")
         if not isinstance(widgets, list):
             continue
-        for name, index in _EXPAND_WORKFLOW_WIDGET_INDEX.items():
+        # v0.4.12 stored model_mode at index 5. Its seed_base_literal follows
+        # callbacks at index 8; the two conversion booleans move it to index 9.
+        indexes = dict(_EXPAND_WORKFLOW_WIDGET_INDEX)
+        if len(widgets) > 5 and isinstance(widgets[5], str):
+            indexes["seed_base_literal"] = 8
+        for name, index in indexes.items():
             if index < len(widgets):
                 widgets[index] = values[name]
     return prompt, workflow
@@ -1818,7 +1841,7 @@ class ScenePromptCallback:
         return (with_source_node(plan, source_node_id or unique_id),)
 
 
-def _callback_prompts(positive_parts, negative_parts, seed, model_mode):
+def _callback_prompts(positive_parts, negative_parts, seed, model_mode=None, replace_underscores=None, convert_anima_weights=None):
     positive_parts, negative_parts = _merge_positive_negative_parts(
         _expand_prompt_parts(positive_parts, seed, "positive"),
         _expand_prompt_parts(negative_parts, seed, "negative"),
@@ -1826,9 +1849,13 @@ def _callback_prompts(positive_parts, negative_parts, seed, model_mode):
     )
     positive = _join_unique(positive_parts, ", ")
     negative = _join_unique(negative_parts, ", ")
-    if _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA:
-        return positive.replace("_", " "), negative.replace("_", " ")
-    return positive, negative
+    replace_underscores, convert_anima_weights = _expand_conversion_options(
+        model_mode, replace_underscores, convert_anima_weights,
+    )
+    return (
+        _format_expand_prompt(positive, replace_underscores, convert_anima_weights),
+        _format_expand_prompt(negative, replace_underscores, convert_anima_weights),
+    )
 
 
 def _callback_names(row, source_ids):
@@ -1838,7 +1865,13 @@ def _callback_names(row, source_ids):
     return "_".join(str(names.get(str(node_id), "")).strip() for node_id in source_ids if str(names.get(str(node_id), "")).strip())
 
 
-def _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, all_positive, all_negative, desktop_context=None):
+def _dispatch_row_callbacks(
+    row, item, seed, model_mode, run_handle, all_positive, all_negative,
+    desktop_context=None, replace_underscores=None, convert_anima_weights=None,
+):
+    replace_underscores, convert_anima_weights = _expand_conversion_options(
+        model_mode, replace_underscores, convert_anima_weights,
+    )
     callbacks = row.get("callbacks", [])
     seen = set()
     for descriptor in callbacks if isinstance(callbacks, list) else []:
@@ -1857,6 +1890,8 @@ def _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, all_positiv
             descriptor.get("current_negative_parts", []),
             seed,
             model_mode,
+            replace_underscores,
+            convert_anima_weights,
         )
         values = {
             "current_positive": current_positive,
@@ -1867,7 +1902,9 @@ def _dispatch_row_callbacks(row, item, seed, model_mode, run_handle, all_positiv
             "all_node_names": _callback_names(row, row.get("source_node_ids", [])),
             "exec_current_count": int(item.get("global_index", 0)) + 1,
             "exec_total_count": int(item.get("total_batches", 0)),
-            "exec_model": _normalize_model_mode(model_mode),
+            "exec_model": "",
+            "exec_replace_underscores": str(replace_underscores).lower(),
+            "exec_anima_weights": str(convert_anima_weights).lower(),
             "exec_seed": seed,
         }
         try:
@@ -1964,12 +2001,20 @@ class ScenePromptExpand:
                     SCENE_PROMPT_TYPE,
                     {"display_name": "scene_prompt", "label": "scene_prompt"},
                 ),
-                "model_mode": (
-                    list(MODEL_MODE_CHOICES),
+                "replace_underscores": (
+                    "BOOLEAN",
                     {
-                        "default": MODEL_MODE_ILLUSTRIOUS,
-                        "display_name": "モデル",
-                        "label": "モデル",
+                        "default": False,
+                        "display_name": "_を空白に変換",
+                        "label": "_を空白に変換",
+                    },
+                ),
+                "convert_anima_weights": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "強調値をAnima向けに変換",
+                        "label": "強調値をAnima向けに変換",
                     },
                 ),
                 "callback_first": (SCENE_CALLBACK_TYPE, {"display_name": "callback_first"}),
@@ -1995,7 +2040,9 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
-        model_mode=MODEL_MODE_ILLUSTRIOUS,
+        model_mode=None,
+        replace_underscores=None,
+        convert_anima_weights=None,
         run_handle="",
         unique_id=None,
         prompt=None,
@@ -2006,6 +2053,7 @@ class ScenePromptExpand:
         callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
         seed_base_literal=False,
     ):
+        model_mode = _legacy_expand_model_mode(model_mode, prompt, unique_id)
         return "|".join(
             [
                 _scene_prompt_change_key(scene_prompt),
@@ -2015,7 +2063,7 @@ class ScenePromptExpand:
                 str(_scene_bool(seed_base_literal)),
                 str(_scene_bool(timestamp_dir)),
                 _safe_filename_prefix(prefix),
-                _normalize_model_mode(model_mode),
+                str(_expand_conversion_options(model_mode, replace_underscores, convert_anima_weights)),
             ]
         )
 
@@ -2027,7 +2075,9 @@ class ScenePromptExpand:
         timestamp_dir=True,
         prefix="",
         scene_prompt=None,
-        model_mode=MODEL_MODE_ILLUSTRIOUS,
+        model_mode=None,
+        replace_underscores=None,
+        convert_anima_weights=None,
         run_handle="",
         unique_id=None,
         prompt=None,
@@ -2038,6 +2088,7 @@ class ScenePromptExpand:
         callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
         seed_base_literal=False,
     ):
+        model_mode = _legacy_expand_model_mode(model_mode, prompt, unique_id)
         separator = ", "
         if run_handle and unique_id is not None and isinstance(prompt, dict):
             set_run_prompt_reference(run_handle, unique_id, prompt)
@@ -2057,12 +2108,11 @@ class ScenePromptExpand:
         )
         positive = _join_unique(positive_parts, separator)
         negative = _join_unique(negative_parts, separator)
-        normalized_model = _normalize_model_mode(model_mode)
-        positive = _convert_model_prompt_weights(positive, normalized_model)
-        negative = _convert_model_prompt_weights(negative, normalized_model)
-        if normalized_model == MODEL_MODE_ANIMA:
-            positive = positive.replace("_", " ")
-            negative = negative.replace("_", " ")
+        replace_underscores, convert_anima_weights = _expand_conversion_options(
+            model_mode, replace_underscores, convert_anima_weights,
+        )
+        positive = _format_expand_prompt(positive, replace_underscores, convert_anima_weights)
+        negative = _format_expand_prompt(negative, replace_underscores, convert_anima_weights)
         callback_values = {
             "current_positive": positive, "current_negative": negative,
             "all_positive": positive, "all_negative": negative,
@@ -2070,13 +2120,21 @@ class ScenePromptExpand:
             "all_node_names": _callback_names(row, row.get("source_node_ids", [])),
             "exec_current_count": global_index + 1,
             "exec_total_count": int(item.get("total_batches", 0)),
-            "exec_model": normalized_model, "exec_seed": seed,
+            "exec_model": "",
+            "exec_replace_underscores": str(replace_underscores).lower(),
+            "exec_anima_weights": str(convert_anima_weights).lower(),
+            "exec_seed": seed,
         }
         callback_id = str(unique_id or "")
         desktop_context = get_run_delivery_context(run_handle)
         _dispatch_expand_callback(callback_first, f"{callback_id}:first", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, once=True, desktop_context=desktop_context)
         _dispatch_expand_callback(callback_each, f"{callback_id}:each", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, desktop_context=desktop_context)
-        _dispatch_row_callbacks(row, item, seed, normalized_model, run_handle, positive, negative, desktop_context=desktop_context)
+        _dispatch_row_callbacks(
+            row, item, seed, model_mode, run_handle, positive, negative,
+            desktop_context=desktop_context,
+            replace_underscores=replace_underscores,
+            convert_anima_weights=convert_anima_weights,
+        )
         if callback_last is not None and run_handle and global_index + 1 == int(item.get("total_batches", 0)):
             prompt_id = _current_prompt_id()
             register_last_callback(run_handle, callback_id, callback_last, callback_values, callback_timeout_seconds, callback_failure_mode, prompt_id, desktop_context)

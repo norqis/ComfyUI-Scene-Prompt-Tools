@@ -174,7 +174,8 @@ const expandNode = {
         { name: "timestamp_dir", link: null },
         { name: "prefix", link: null },
         { name: "scene_prompt", link: 101 },
-        { name: "model_mode", link: null },
+        { name: "replace_underscores", link: null },
+        { name: "convert_anima_weights", link: null },
         { name: "callback_first", link: 102 },
         { name: "callback_each", link: 103 },
         { name: "callback_last", link: 104 },
@@ -191,7 +192,7 @@ expandContext.attachSceneUtilityNode(expandNode, "ScenePrompterExpand");
 assert.deepEqual(
     Array.from(expandNode.inputs, (input) => input.name),
     [
-        "timestamp_dir", "prefix", "scene_prompt", "model_mode",
+        "timestamp_dir", "prefix", "scene_prompt", "replace_underscores", "convert_anima_weights",
         "callback_first", "callback_each", "callback_last",
         "callback_timeout_seconds", "callback_failure_mode",
     ],
@@ -199,7 +200,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
     [101, 102, 103, 104].map((linkId) => expandContext.app.graph.links[linkId].target_slot),
-    [2, 4, 5, 6],
+    [2, 5, 6, 7],
     "Expand resynchronizes existing Scene and Callback links after internal socket removal",
 );
 

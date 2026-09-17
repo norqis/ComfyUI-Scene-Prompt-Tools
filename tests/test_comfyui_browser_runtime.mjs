@@ -126,7 +126,10 @@ window.__sceneSeedRuntimeTest = {
         const workflow = JSON.parse(extracted.stdout);
         const pngBase64 = (await readFile(process.env.COMFYUI_WORKFLOW_PNG)).toString("base64");
         const savedExpand = workflow.nodes.find((node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand");
-        const expectedModelMode = savedExpand?.widgets_values?.[5];
+        const savedWidgets = savedExpand?.widgets_values || [];
+        const expectedConversionOptions = typeof savedWidgets[5] === "string"
+            ? [savedWidgets[5] === "Anima", savedWidgets[5] === "Anima"]
+            : [savedWidgets[5], savedWidgets[6]];
         const dropResult = await page.evaluate(async ({ content, name, expectedNodes }) => {
             const bytes = Uint8Array.from(atob(content), (character) => character.charCodeAt(0));
             const file = new File([bytes], name, { type: "image/png" });
@@ -149,6 +152,10 @@ window.__sceneSeedRuntimeTest = {
                 return {
                     nodes: window.app.graph?._nodes?.length || 0,
                     settled,
+                    conversionOptions: [
+                        expandNode?.widgets?.find((widget) => widget.name === "replace_underscores")?.value,
+                        expandNode?.widgets?.find((widget) => widget.name === "convert_anima_weights")?.value,
+                    ],
                     modelMode: expandNode?.widgets?.find((widget) => widget.name === "model_mode")?.value,
                 };
             } catch (error) {
@@ -165,10 +172,10 @@ window.__sceneSeedRuntimeTest = {
         }, { content: pngBase64, name: basename(process.env.COMFYUI_WORKFLOW_PNG), expectedNodes: workflow.nodes.length });
         assert.equal(dropResult.error, undefined, `${dropResult.error}\n${JSON.stringify(dropResult, null, 2)}`);
         assert.equal(dropResult.nodes, workflow.nodes.length, "drag-style PNG loading must restore every node");
-        if (typeof expectedModelMode === "string") {
-            assert.equal(dropResult.modelMode, expectedModelMode, "drag-style PNG loading must preserve the Expand model mode");
-            console.log(`real ComfyUI PNG Expand model mode passed (${dropResult.modelMode})`);
+        if (expectedConversionOptions.every((value) => typeof value === "boolean")) {
+            assert.deepEqual(dropResult.conversionOptions, expectedConversionOptions, "drag-style PNG loading must preserve Expand conversion options");
         }
+        assert.equal(dropResult.modelMode, undefined, "Expand no longer exposes a model selector");
         assert.deepEqual(pageErrors, [], `PNG handling raised browser errors:\n${pageErrors.join("\n")}`);
         console.log(`real ComfyUI PNG handleFile passed (${dropResult.nodes} nodes)`);
 
@@ -259,6 +266,50 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(result.legacyAfterFirst, result.legacy, "a second configure must not alter v0.3 values");
     assert.equal(result.legacyFilename, false);
     console.log("real ComfyUI LGraphNode legacy choice widget round-trip passed");
+    const conversionRoundTrips = await page.evaluate(() => {
+        const make = () => {
+            const node = window.LiteGraph.createNode("ScenePrompterExpand");
+            window.app.graph.add(node);
+            return node;
+        };
+        const read = (node) => Object.fromEntries([
+            "replace_underscores", "convert_anima_weights", "callback_timeout_seconds",
+            "callback_failure_mode", "seed_base_literal",
+        ].map((name) => [name, node.widgets.find((widget) => widget.name === name)?.value]));
+        const results = [];
+        for (const underscores of [false, true]) {
+            for (const weights of [false, true]) {
+                const node = make();
+                node.widgets.find((widget) => widget.name === "replace_underscores").value = underscores;
+                node.widgets.find((widget) => widget.name === "convert_anima_weights").value = weights;
+                const restored = make();
+                restored.configure(node.serialize());
+                results.push({ expected: [underscores, weights], actual: read(restored) });
+            }
+        }
+        const old = make();
+        const serialized = old.serialize();
+        const legacy = { ...serialized, widgets_values: [0, "", 7, true, "prefix", "Anima", 13, "停止", true] };
+        old.configure(legacy);
+        const migrated = read(old);
+        old.configure(legacy);
+        const repeated = read(old);
+        const restoredLegacy = make();
+        restoredLegacy.configure(old.serialize());
+        return { results, migrated, repeated, reloaded: read(restoredLegacy), original: legacy.widgets_values,
+            modelExists: old.widgets.some((widget) => widget.name === "model_mode") };
+    });
+    for (const result of conversionRoundTrips.results) {
+        assert.deepEqual([result.actual.replace_underscores, result.actual.convert_anima_weights], result.expected);
+    }
+    const migratedOptions = { replace_underscores: true, convert_anima_weights: true,
+        callback_timeout_seconds: 13, callback_failure_mode: "停止", seed_base_literal: true };
+    assert.deepEqual(conversionRoundTrips.migrated, migratedOptions);
+    assert.deepEqual(conversionRoundTrips.repeated, migratedOptions);
+    assert.deepEqual(conversionRoundTrips.reloaded, migratedOptions);
+    assert.equal(conversionRoundTrips.original[5], "Anima", "legacy input is never mutated");
+    assert.equal(conversionRoundTrips.modelExists, false);
+    console.log("real ComfyUI Expand options and legacy Callback/replay widget migration passed");
     const seedNodes = await page.evaluate(async () => {
         window.app.graph.clear();
         const add = (type) => {

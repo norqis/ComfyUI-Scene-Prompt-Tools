@@ -570,9 +570,9 @@ class ScenePresetTests(unittest.TestCase):
         prompt = next(value for value in fresh["expand"].values() if value["class_type"] == "ScenePrompter")
         self.assertEqual(prompt["inputs"]["positive_base"], "second")
 
-    def test_expand_anima_mode_converts_preset_prompt_without_mutating_the_snapshot(self):
-        preset_nodes = basic_nodes("preset_hair")
-        preset_nodes["2"]["inputs"]["negative_base"] = "preset_hands"
+    def test_expand_conversion_options_transform_preset_prompt_without_mutating_the_snapshot(self):
+        preset_nodes = basic_nodes("preset_hair, (preset_weight:1.4)")
+        preset_nodes["2"]["inputs"]["negative_base"] = "preset_hands, (bad_weight:1.2)"
         self.save("model-mode", preset_nodes)
         api_graph = graph({
             "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "model-mode"}},
@@ -587,20 +587,25 @@ class ScenePresetTests(unittest.TestCase):
             expanded_reference, "__scene_preset_source", {}, set(), run_handle=run_handle
         )
 
-        expanded = self.nodes.ScenePromptExpand().expand(
-            current_index=0,
-            seed_base=7,
-            timestamp_dir=False,
-            scene_prompt=plan,
-            model_mode="Anima",
-        )
-
-        self.assertEqual(expanded[0], "preset hair")
-        self.assertEqual(expanded[1], "preset hands")
-        self.assertEqual(expanded[2]["positive"], "preset hair")
-        self.assertEqual(expanded[2]["negative"], "preset hands")
-        self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["preset_hair"])
-        self.assertEqual(plan["rows"][0]["row"]["negative_parts"], ["preset_hands"])
+        expected = {
+            (False, False): ("preset_hair, (preset_weight:1.4)", "preset_hands, (bad_weight:1.2)"),
+            (True, False): ("preset hair, (preset weight:1.4)", "preset hands, (bad weight:1.2)"),
+            (False, True): ("preset_hair, (preset_weight:3)", "preset_hands, (bad_weight:2)"),
+            (True, True): ("preset hair, (preset weight:3)", "preset hands, (bad weight:2)"),
+        }
+        for flags, prompts in expected.items():
+            with self.subTest(flags=flags):
+                expanded = self.nodes.ScenePromptExpand().expand(
+                    current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=plan,
+                    replace_underscores=flags[0], convert_anima_weights=flags[1],
+                )
+                self.assertEqual(expanded[:2], prompts)
+                self.assertEqual(expanded[2]["positive"], expanded[0])
+                self.assertEqual(expanded[2]["negative"], expanded[1])
+        self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["preset_hair", "(preset_weight:1.4)"])
+        self.assertEqual(plan["rows"][0]["row"]["negative_parts"], ["preset_hands", "(bad_weight:1.2)"])
+        self.assertEqual(preset_nodes["2"]["inputs"]["positive_base"], "preset_hair, (preset_weight:1.4)")
+        self.assertEqual(preset_nodes["2"]["inputs"]["negative_base"], "preset_hands, (bad_weight:1.2)")
         self.module.release_scene_preset_snapshot(run_handle)
 
     def test_reverse_previous_treats_preset_reference_as_one_structural_node(self):

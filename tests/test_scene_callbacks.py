@@ -275,6 +275,38 @@ class SceneCallbackTests(unittest.TestCase):
         self.assertEqual(calls[0]["current_positive"], "before")
         self.assertEqual(calls[0]["all_node_names"], "First_Second")
 
+    def test_expand_and_path_callbacks_share_both_conversion_options(self):
+        nodes = _nodes_module()
+        before = append_callback(
+            with_source_node(make_plan([{"row": {
+                **empty_row(),
+                "positive_parts": ["before_tag, (before_weight:1.4)"],
+                "negative_parts": ["before_negative"],
+            }, "count": 1}]), "before", "Before"),
+            "path-callback", {"kind": "request"}, "毎回", 10, "続行",
+        )
+        after = with_source_node(make_plan([{"row": {
+            **empty_row(), "positive_parts": ["after_tag"], "negative_parts": ["after_negative"],
+        }, "count": 1}]), "after", "After")
+        plan = merge(before, after)
+        dispatched = []
+        with mock.patch.object(nodes, "dispatch_callback", side_effect=lambda _config, values, _timeout, **_kwargs: dispatched.append(values)):
+            output = nodes.ScenePromptExpand().expand(
+                current_index=0, timestamp_dir=False, scene_prompt=plan, unique_id="expand",
+                callback_first={"kind": "request"}, callback_each={"kind": "request"},
+                replace_underscores=True, convert_anima_weights=True,
+            )
+        self.assertEqual(output[:2], ("before tag, (before weight:3), after tag", "before negative, after negative"))
+        self.assertEqual(len(dispatched), 3)
+        for values in dispatched[:2]:
+            self.assertEqual(values["all_positive"], output[0])
+            self.assertEqual(values["current_positive"], output[0])
+            self.assertEqual(values["exec_model"], "")
+            self.assertEqual(values["exec_replace_underscores"], "true")
+            self.assertEqual(values["exec_anima_weights"], "true")
+        self.assertEqual(dispatched[2]["current_positive"], "before tag, (before weight:3)")
+        self.assertEqual(dispatched[2]["all_positive"], output[0])
+
     def test_callback_failures_do_not_reach_latent_and_continue_runs_next(self):
         nodes = _nodes_module()
         base = make_plan([{"row": {**empty_row(), "positive_parts": ["prompt"]}, "count": 1}])
