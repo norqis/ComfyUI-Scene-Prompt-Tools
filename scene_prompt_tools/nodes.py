@@ -460,21 +460,47 @@ def _workflow_group_intersects_node(group, node):
     )
 
 
-def _slice_workflow_for_output(workflow, ancestor_ids, prompt=None):
+def _slice_workflow_for_output(
+    workflow, ancestor_ids, prompt=None, preserve_physical_ancestors=False, physical_prompt_ids=None,
+):
     if not isinstance(workflow, dict):
         raise ValueError("Scene Save Image の生成経路を保存できません: workflow がノード定義ではありません。")
     workflow_nodes = workflow.get("nodes")
     if not isinstance(workflow_nodes, list):
         raise ValueError("Scene Save Image の生成経路を保存できません: workflow の nodes が不正です。")
 
+    included_ids = set(ancestor_ids)
+    if preserve_physical_ancestors:
+        reverse_links = {}
+        for link in workflow.get("links", []):
+            parts = _workflow_link_parts(link)
+            if parts is not None:
+                reverse_links.setdefault(parts[3], []).append(parts[1])
+        known_prompt_ids = set(physical_prompt_ids) if physical_prompt_ids is not None else set(ancestor_ids)
+        pending = [(node_id, False) for node_id in included_ids]
+        visited = set()
+        while pending:
+            node_id, through_physical_only = pending.pop()
+            if (node_id, through_physical_only) in visited:
+                continue
+            visited.add((node_id, through_physical_only))
+            for source_id in reverse_links.get(node_id, []):
+                source_is_physical_only = source_id not in known_prompt_ids
+                if source_is_physical_only:
+                    if source_id not in included_ids:
+                        included_ids.add(source_id)
+                    pending.append((source_id, True))
+                elif through_physical_only:
+                    included_ids.add(source_id)
+
     included_nodes = [
         node
         for node in workflow_nodes
-        if _workflow_node_id(node) in ancestor_ids
+        if _workflow_node_id(node) in included_ids
     ]
-    included_ids = {_workflow_node_id(node) for node in included_nodes}
-    if included_ids != ancestor_ids:
-        missing = ", ".join(sorted(ancestor_ids - included_ids))
+    found_ids = {_workflow_node_id(node) for node in included_nodes}
+    if not set(ancestor_ids).issubset(found_ids):
+        missing = ", ".join(sorted(set(ancestor_ids) - found_ids))
         raise ValueError(
             "Scene Save Image の生成経路を保存できません: workflow にノードIDがありません: " + missing
         )
@@ -498,7 +524,8 @@ def _slice_workflow_for_output(workflow, ancestor_ids, prompt=None):
     ]
     link_ids = {_workflow_link_id(link) for link in result["links"]}
     _prune_workflow_node_links(result["nodes"], link_ids)
-    _rewire_workflow_links_from_prompt(result, prompt)
+    if not preserve_physical_ancestors:
+        _rewire_workflow_links_from_prompt(result, prompt)
     if "reroutes" in workflow:
         result["reroutes"] = copy.deepcopy(workflow["reroutes"]) if isinstance(workflow["reroutes"], list) else []
     _prune_workflow_reroutes(result)
@@ -704,7 +731,11 @@ def _metadata_for_save_mode(
             metadata_mode == SAVE_METADATA_WORKFLOW
             and isinstance(workflow, dict)
             and any(
-                isinstance(node, dict) and node.get("type") == "ScenePresetReference"
+                (
+                    isinstance(node, dict)
+                    and node.get("type") == "ScenePresetReference"
+                    and node.get("mode") not in {2, 4}
+                )
                 for node in workflow.get("nodes", [])
             )
         )
@@ -751,7 +782,13 @@ def _metadata_for_save_mode(
             for key, value in expanded_extra.items()
             if key not in {"prompt", "workflow"}
         }
-        saved_extra["workflow"] = _slice_workflow_for_output(expanded_workflow, ancestor_ids, saved_prompt)
+        saved_extra["workflow"] = _slice_workflow_for_output(
+            expanded_workflow,
+            ancestor_ids,
+            saved_prompt,
+            preserve_physical_ancestors=True,
+            physical_prompt_ids=set(expanded_prompt),
+        )
         _apply_replay_expand_values(
             saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
         )

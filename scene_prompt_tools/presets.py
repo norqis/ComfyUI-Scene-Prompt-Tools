@@ -305,13 +305,19 @@ def _validate_workflow_nodes(workflow, api_nodes):
         node_id = node.get("id")
         node_type = str(node.get("type") or "不明なノード")
         normalized_id = str(node_id)
-        if node_id is None or normalized_id not in api_by_id:
+        if node_id is None:
             raise ScenePresetError(
-                f"編集用ワークフローの {node_type} #{node_id} は実行グラフに含まれていません。"
+                f"編集用ワークフローの {node_type} #{node_id} のIDが不正です。"
             )
         if normalized_id in workflow_by_id:
             raise ScenePresetError(f"編集用ワークフローのノードID #{normalized_id} が重複しています。")
         workflow_by_id.add(normalized_id)
+        if normalized_id not in api_by_id:
+            if node_type not in SAFE_NODE_CLASSES and node_type not in BOUNDARY_CLASSES:
+                raise ScenePresetError(
+                    f"編集用ワークフローの {node_type} #{node_id} はPreset内で使えません。"
+                )
+            continue
         api_type = str(api_by_id[normalized_id].get("class_type") or "不明なノード")
         if node_type != api_type:
             raise ScenePresetError(
@@ -341,11 +347,53 @@ def _connected_preset_nodes(nodes, output_node_id):
     return {node_id: copy.deepcopy(node) for node_id, node in nodes.items() if str(node_id) in connected}
 
 
-def _connected_preset_workflow(workflow, node_ids):
+def _workflow_link_parts(link):
+    if not isinstance(link, list) or len(link) < 4:
+        return None
+    return str(link[1]), str(link[3])
+
+
+def _workflow_physical_ancestors(workflow, output_node_id):
+    links = workflow.get("links")
+    if not isinstance(links, list):
+        return set()
+    reverse_links = {}
+    for link in links:
+        parts = _workflow_link_parts(link)
+        if parts is None:
+            continue
+        source_id, target_id = parts
+        reverse_links.setdefault(target_id, []).append(source_id)
+    connected = set()
+    stack = [str(output_node_id)]
+    while stack:
+        node_id = stack.pop()
+        if node_id in connected:
+            continue
+        connected.add(node_id)
+        stack.extend(reverse_links.get(node_id, ()))
+    return connected
+
+
+def _prune_workflow_node_links(nodes, links):
+    link_ids = {link[0] for link in links if isinstance(link, list) and link}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        for slot in node.get("inputs", []) if isinstance(node.get("inputs"), list) else []:
+            if isinstance(slot, dict) and slot.get("link") not in link_ids:
+                slot["link"] = None
+        for slot in node.get("outputs", []) if isinstance(node.get("outputs"), list) else []:
+            if isinstance(slot, dict) and isinstance(slot.get("links"), list):
+                slot["links"] = [link_id for link_id in slot["links"] if link_id in link_ids]
+
+
+def _connected_preset_workflow(workflow, node_ids, output_node_id):
     result = copy.deepcopy(workflow)
     if not isinstance(result.get("nodes"), list):
         raise ScenePresetError("Presetの編集用ワークフローが不正です。")
     connected = {str(node_id) for node_id in node_ids}
+    connected.update(_workflow_physical_ancestors(result, output_node_id))
     result["nodes"] = [
         node for node in result["nodes"]
         if isinstance(node, dict) and (
@@ -361,6 +409,7 @@ def _connected_preset_workflow(workflow, node_ids):
             and str(link[1]) in connected
             and str(link[3]) in connected
         ]
+        _prune_workflow_node_links(result["nodes"], result["links"])
     return result
 
 
@@ -576,7 +625,7 @@ def save_preset(payload, user_id="default"):
     if not isinstance(workflow, dict):
         raise ScenePresetError("Presetの編集用ワークフローがありません。")
     connected_nodes = _connected_preset_nodes(api_graph["output"], output_node_id)
-    workflow = _connected_preset_workflow(workflow, connected_nodes)
+    workflow = _connected_preset_workflow(workflow, connected_nodes, output_node_id)
     api_graph = _api_graph_with_titles({**api_graph, "output": connected_nodes}, workflow)
     with _PRESET_LOCK:
         try:
@@ -642,7 +691,11 @@ def _workflow_references(workflow):
         return []
     references = []
     for node in nodes:
-        if not isinstance(node, dict) or node.get("type") != "ScenePresetReference":
+        if (
+            not isinstance(node, dict)
+            or node.get("type") != "ScenePresetReference"
+            or node.get("mode") in {2, 4}
+        ):
             continue
         values = node.get("widgets_values")
         preset_id = str(values[0] or "").strip() if isinstance(values, list) and values else ""
