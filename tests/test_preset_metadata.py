@@ -427,6 +427,34 @@ class PresetMetadataTests(unittest.TestCase):
         bypass = next(node for node in expanded["nodes"] if node.get("type") == "ScenePromptCounter")
         self.assertTrue(any(str(link[1]) == str(bypass["id"]) and str(link[3]) == "3" for link in expanded["links"]))
 
+    def test_top_level_passthrough_reference_uses_its_physical_input(self):
+        passthrough = {
+            "schema_version": 1,
+            "metadata": {"preset_id": "pass", "name": "pass", "revision": 1, "sha256": "snapshot"},
+            "api_graph": {"output": {
+                "10": {"class_type": "ScenePresetInput", "inputs": {}},
+                "12": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["10", 0]}},
+            }},
+            "workflow": {"nodes": [
+                workflow_node("10", "ScenePresetInput", [0, 0]),
+                workflow_node("12", "ScenePresetOutput", [120, 0], ("scene_prompt",)),
+            ], "links": [[1, 10, 0, 12, 0, "SCENE_PROMPT"]]},
+        }
+        prompt = {
+            "1": scene_prompt("outside"),
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "pass", "scene_prompt": ["1", 0]}},
+            "3": scene_prompt("after", ["2", 0]),
+        }
+        workflow = outer_workflow(prompt)
+        workflow["nodes"].append(workflow_node("4", "ScenePromptCounter", [120, 80], ("scene_prompt",)))
+        workflow["nodes"][-1]["mode"] = 4
+        by_id = {str(node["id"]): node for node in workflow["nodes"]}
+        ref_slot = next(index for index, slot in enumerate(by_id["2"]["inputs"]) if slot["name"] == "scene_prompt")
+        after_slot = next(index for index, slot in enumerate(by_id["3"]["inputs"]) if slot["name"] == "scene_prompt")
+        workflow["links"] = [[1, 1, 0, 4, 0, "SCENE_PROMPT"], [2, 4, 0, 2, ref_slot, "SCENE_PROMPT"], [3, 2, 0, 3, after_slot, "SCENE_PROMPT"]]
+        _prompt, expanded, _aliases = self.metadata_module.expand_preset_references(prompt, workflow, {"pass": passthrough})
+        self.assertIn([4, 4, 0, 3, after_slot, "SCENE_PROMPT"], expanded["links"])
+
     def test_full_expansion_preserves_unrelated_workflow_branch_byte_for_byte(self):
         self.put_snapshots({"one": simple_preset("one")})
         prompt = {

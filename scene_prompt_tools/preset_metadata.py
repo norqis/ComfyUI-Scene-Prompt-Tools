@@ -449,11 +449,17 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
         (str(target_id), target_slot)
         for _source_id, _source_slot, target_id, target_slot, _link_type in state["physical_links"]
     }
-    physical_reference_inputs = {
-        str(target_id): (source_id, source_slot)
-        for source_id, source_slot, target_id, _target_slot, _link_type in state["physical_links"]
-        if str(target_id) in reference_ids
-    }
+    physical_reference_inputs = {}
+    for source_id, source_slot, target_id, _target_slot, _link_type in state["physical_links"]:
+        if str(target_id) in reference_ids:
+            physical_reference_inputs[str(target_id)] = (source_id, source_slot)
+    for link in original_links:
+        parts = _workflow_link_parts(link)
+        if parts is None:
+            continue
+        _link_id, source_id, source_slot, target_id, _target_slot, _link_type = parts
+        if target_id in reference_ids:
+            physical_reference_inputs[target_id] = (source_id, source_slot)
     for _source_id, _source_slot, target_id, _target_slot, _link_type in state["physical_links"]:
         if str(target_id) in reference_ids:
             physical_targets.update(_resolve_reference_entry_slots(str(target_id), state, by_id))
