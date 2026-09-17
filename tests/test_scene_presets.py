@@ -341,6 +341,97 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual([node["id"] for node in saved["workflow"]["nodes"]], [1, 2, 3])
         self.assertEqual([link[0] for link in saved["workflow"]["links"]], [1, 2])
 
+    def test_save_keeps_consecutive_bypassed_nodes_and_cleans_excluded_slot_links(self):
+        nodes = basic_nodes()
+        nodes["5"] = nodes.pop("3")
+        nodes["5"]["inputs"]["scene_prompt"] = ["2", 0]
+        workflow = {
+            "nodes": [
+                {"id": 1, "type": "ScenePresetInput", "mode": 0, "inputs": [], "outputs": [{"links": [1]}]},
+                {"id": 2, "type": "ScenePrompter", "mode": 0, "widgets_values": ["kept"], "inputs": [{"link": 1}], "outputs": [{"links": [2, 99]}]},
+                {"id": 3, "type": "ScenePromptCounter", "mode": 4, "widgets_values": [7], "inputs": [{"link": 2}], "outputs": [{"links": [3]}]},
+                {"id": 4, "type": "ScenePromptReverse", "mode": 4, "widgets_values": ["all"], "inputs": [{"link": 3}], "outputs": [{"links": [4]}]},
+                {"id": 5, "type": "ScenePresetOutput", "mode": 0, "inputs": [{"link": 4}], "outputs": []},
+                {"id": 99, "type": "KSampler", "inputs": [{"link": 99}], "outputs": []},
+            ],
+            "links": [
+                [1, 1, 0, 2, 0, "SCENE_PROMPT"],
+                [2, 2, 0, 3, 0, "SCENE_PROMPT"],
+                [3, 3, 0, 4, 0, "SCENE_PROMPT"],
+                [4, 4, 0, 5, 0, "SCENE_PROMPT"],
+                [99, 2, 0, 99, 0, "SCENE_PROMPT"],
+            ],
+        }
+        saved = self.save("bypass-chain", nodes, workflow=workflow, output_node_id="5")
+        saved_nodes = {str(node["id"]): node for node in saved["workflow"]["nodes"]}
+        self.assertSetEqual(set(saved_nodes), {"1", "2", "3", "4", "5"})
+        self.assertEqual(saved_nodes["3"]["mode"], 4)
+        self.assertEqual(saved_nodes["4"]["widgets_values"], ["all"])
+        self.assertEqual([link[0] for link in saved["workflow"]["links"]], [1, 2, 3, 4])
+        self.assertEqual(saved_nodes["2"]["outputs"][0]["links"], [2])
+
+        resaved = self.save(
+            "bypass-chain", saved["api_graph"]["output"], workflow=saved["workflow"], output_node_id="5",
+            expected_revision=saved["metadata"]["revision"],
+        )
+        restored = {str(node["id"]): node for node in resaved["workflow"]["nodes"]}
+        self.assertEqual(restored["3"]["mode"], 4)
+        self.assertEqual(restored["4"]["widgets_values"], ["all"])
+
+    def test_save_keeps_active_merge_inputs_behind_a_bypass(self):
+        nodes = basic_nodes()
+        nodes["5"] = nodes.pop("3")
+        nodes["5"]["inputs"]["scene_prompt"] = ["2", 0]
+        workflow = {
+            "nodes": [
+                {"id": 1, "type": "ScenePresetInput"},
+                {"id": 2, "type": "ScenePrompter"},
+                {"id": 3, "type": "ScenePrompter", "mode": 0, "widgets_values": ["second input"]},
+                {"id": 4, "type": "ScenePrompterMerge", "mode": 4},
+                {"id": 5, "type": "ScenePresetOutput"},
+            ],
+            "links": [
+                [1, 1, 0, 2, 0, "SCENE_PROMPT"],
+                [2, 1, 0, 3, 0, "SCENE_PROMPT"],
+                [3, 2, 0, 4, 0, "SCENE_PROMPT"],
+                [4, 3, 0, 4, 1, "SCENE_PROMPT"],
+                [5, 4, 0, 5, 0, "SCENE_PROMPT"],
+            ],
+        }
+        saved = self.save("bypass-merge", nodes, workflow=workflow, output_node_id="5")
+        self.assertSetEqual(
+            {str(node["id"]) for node in saved["workflow"]["nodes"]}, {"1", "2", "3", "4", "5"}
+        )
+        self.assertNotIn("3", saved["api_graph"]["output"])
+        self.assertEqual(next(node for node in saved["workflow"]["nodes"] if node["id"] == 4)["mode"], 4)
+
+    def test_save_rejects_unsafe_workflow_only_node(self):
+        nodes = basic_nodes()
+        workflow = {
+            "nodes": [
+                {"id": 1, "type": "ScenePresetInput"},
+                {"id": 2, "type": "ScenePrompter"},
+                {"id": 3, "type": "ScenePresetOutput"},
+                {"id": 4, "type": "KSampler", "mode": 4},
+            ],
+            "links": [
+                [1, 1, 0, 2, 0, "SCENE_PROMPT"],
+                [2, 2, 0, 4, 0, "SCENE_PROMPT"],
+                [3, 4, 0, 3, 0, "SCENE_PROMPT"],
+            ],
+        }
+        with self.assertRaisesRegex(self.module.ScenePresetError, "Preset内で使えません"):
+            self.save("unsafe-bypass", nodes, workflow=workflow)
+
+    def test_workflow_snapshot_ignores_muted_and_bypassed_references(self):
+        workflow = {
+            "nodes": [
+                {"id": 10, "type": "ScenePresetReference", "mode": 4, "widgets_values": ["missing-bypass"]},
+                {"id": 11, "type": "ScenePresetReference", "mode": 2, "widgets_values": ["missing-muted"]},
+            ],
+        }
+        self.assertEqual(self.module._workflow_references(workflow), [])
+
     def test_save_uses_the_output_node_that_requested_the_save(self):
         nodes = basic_nodes("first")
         nodes["4"] = {

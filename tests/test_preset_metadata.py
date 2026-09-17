@@ -116,6 +116,38 @@ def simple_preset(preset_id, prompt_id="11", output_id="12", input_id="10", name
     return preset(preset_id, nodes, workflow)
 
 
+def bypassed_preset(preset_id, placement):
+    input_id, active_id, bypass_id, output_id = "10", "11", "12", "13"
+    nodes = {
+        input_id: {"class_type": "ScenePresetInput", "inputs": {}},
+        active_id: scene_prompt("inside", [input_id, 0]),
+        output_id: {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": [active_id, 0]}},
+    }
+    workflow = [
+        workflow_node(input_id, "ScenePresetInput", [0, 0]),
+        workflow_node(active_id, "ScenePrompter", [160, 0], ("scene_prompt",)),
+        workflow_node(bypass_id, "ScenePromptCounter", [80, 0], ("scene_prompt",)),
+        workflow_node(output_id, "ScenePresetOutput", [320, 0], ("scene_prompt",)),
+    ]
+    workflow_by_id = {str(node["id"]): node for node in workflow}
+    workflow_by_id[bypass_id]["mode"] = 4
+    if placement == "first":
+        edges = [(input_id, bypass_id), (bypass_id, active_id), (active_id, output_id)]
+    elif placement == "last":
+        nodes[output_id]["inputs"]["scene_prompt"] = [active_id, 0]
+        edges = [(input_id, active_id), (active_id, bypass_id), (bypass_id, output_id)]
+    else:
+        raise ValueError(placement)
+    links = []
+    for link_id, (source_id, target_id) in enumerate(edges, start=1):
+        workflow_by_id[source_id]["outputs"][0]["links"] = [link_id]
+        workflow_by_id[target_id]["inputs"][0]["link"] = link_id
+        links.append([link_id, int(source_id), 0, int(target_id), 0, "SCENE_PROMPT"])
+    result = preset(preset_id, nodes, workflow)
+    result["workflow"]["links"] = links
+    return result
+
+
 class PresetMetadataTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -194,6 +226,39 @@ class PresetMetadataTests(unittest.TestCase):
         self.assertEqual(workflow["last_node_id"], max(node["id"] for node in workflow["nodes"]))
         self.assertEqual(workflow["last_link_id"], len(workflow["links"]))
         self.assertTrue(all(str(link[1]) in workflow_by_id and str(link[3]) in workflow_by_id for link in workflow["links"]))
+
+    def test_png_expansion_keeps_bypassed_preset_boundary_links(self):
+        for placement in ("first", "last"):
+            with self.subTest(placement=placement):
+                snapshot = bypassed_preset("bypass", placement)
+                prompt = {
+                    "1": scene_prompt("outside"),
+                    "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "bypass", "scene_prompt": ["1", 0]}},
+                    "3": scene_prompt("after", ["2", 0]),
+                }
+                workflow = outer_workflow(prompt)
+                workflow_by_id = {str(node["id"]): node for node in workflow["nodes"]}
+                workflow["links"] = [
+                    [1, 1, 0, 2, 0, "SCENE_PROMPT"],
+                    [2, 2, 0, 3, 0, "SCENE_PROMPT"],
+                ]
+                workflow_by_id["1"]["outputs"][0]["links"] = [1]
+                workflow_by_id["2"]["inputs"][0]["link"] = 1
+                workflow_by_id["2"]["outputs"][0]["links"] = [2]
+                workflow_by_id["3"]["inputs"][0]["link"] = 2
+                _prompt, expanded, _aliases = self.metadata_module.expand_preset_references(
+                    prompt, workflow, {"bypass": snapshot}
+                )
+                cloned = next(node for node in expanded["nodes"] if node.get("type") == "ScenePromptCounter")
+                self.assertEqual(cloned["mode"], 4)
+                target_slots = [(str(link[3]), link[4]) for link in expanded["links"]]
+                self.assertEqual(len(target_slots), len(set(target_slots)))
+                incoming = next(link for link in expanded["links"] if str(link[3]) == str(cloned["id"]))
+                outgoing = next(link for link in expanded["links"] if str(link[1]) == str(cloned["id"]))
+                if placement == "first":
+                    self.assertEqual(str(incoming[1]), "1")
+                else:
+                    self.assertEqual(str(outgoing[3]), "3")
 
     def test_full_expansion_preserves_unrelated_workflow_branch_byte_for_byte(self):
         self.put_snapshots({"one": simple_preset("one")})
