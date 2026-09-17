@@ -240,6 +240,8 @@ def _callback_payload_template(marker):
         "exec_current_count": "{exec_current_count}",
         "exec_total_count": "{exec_total_count}",
         "exec_model": "{exec_model}",
+        "exec_replace_underscores": "{exec_replace_underscores}",
+        "exec_anima_weights": "{exec_anima_weights}",
         "exec_seed": "{exec_seed}",
     }, ensure_ascii=False)
 
@@ -1148,7 +1150,9 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["all_positive"], "before, after")
             self.assertEqual(payload["all_negative"], "before-negative, after-negative")
             self.assertEqual(payload["exec_total_count"], "2")
-            self.assertEqual(payload["exec_model"], "Illustrious")
+            self.assertEqual(payload["exec_model"], "")
+            self.assertEqual(payload["exec_replace_underscores"], "false")
+            self.assertEqual(payload["exec_anima_weights"], "false")
             self.assertEqual(payload["current_node_names"], "Callback source")
             self.assertEqual(
                 payload["all_node_names"],

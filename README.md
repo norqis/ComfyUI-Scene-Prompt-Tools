@@ -154,7 +154,9 @@ Text fields support these variables. `all` is the completed prompt for the curre
 | `{current_node_names}` | Scene node display names used before this Callback, joined with `_`. Callback nodes, their configuration nodes, and Expand are excluded. |
 | `{all_node_names}` | Scene node display names used by the complete current path, joined with `_`. Callback nodes, their configuration nodes, and Expand are excluded. |
 | `{exec_current_count}` / `{exec_total_count}` | Current batch number (starting at 1) and total batches in this continuous run. |
-| `{exec_model}` | Model mode selected on Scene Prompt Expand. |
+| `{exec_replace_underscores}` | `true` when Scene Prompt Expand replaces `_` with spaces. |
+| `{exec_anima_weights}` | `true` when Scene Prompt Expand applies the Anima emphasis-weight conversion. |
+| `{exec_model}` | Deprecated compatibility placeholder. Its value is empty. |
 | `{exec_seed}` | Seed for the current batch. |
 
 Unknown variables stay unchanged, so a literal placeholder is never silently removed.
@@ -179,7 +181,7 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Save Image | Saves PNGs using the Scene output path, filename information, and selected metadata mode. |
 | Scene Preset Input / Output / Reference | Save, reuse, and edit Scene plan fragments. |
 
-`Scene Prompt Expand` uses **Illustrious** mode by default. Select **Anima** to replace ASCII underscores in the final positive and negative prompts with spaces before they reach CLIP or PNG metadata.
+`Scene Prompt Expand` has two independent conversion options, both off by default. **_を空白に変換** replaces ASCII underscores in final positive and negative prompts before they reach CLIP, PNG metadata, and Callback variables. **強調値をAnima向けに変換** converts only forward-compatible emphasis weights from 1.0–1.5 to Anima's range; turning it off never reverses existing values. Existing workflows saved with the former Anima model selection load with both options on, and former Illustrious selections load with both off.
 
 **Scene Prompt Reverse** swaps positive and negative prompt content without changing row order, generation counts, paths, latent settings, or callbacks. Select **全てのノード** to swap the complete prompt accumulated so far. Select **直前のノード** to swap only the prompt contribution of the immediately preceding Scene node. If the preceding node is Path, Count, Empty Latent, or Callback, it has no prompt contribution and the operation is a no-op. Merge, Queue, Preset Reference, and Reverse treat each complete output row as their contribution.
 

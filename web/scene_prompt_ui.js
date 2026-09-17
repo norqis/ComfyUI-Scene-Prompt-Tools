@@ -3809,7 +3809,7 @@ function hideSceneUtilityWidgets(node, nodeName) {
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : isSceneExpandNodeName(nodeName)
             ? new Set([
-                "timestamp_dir", "prefix", "model_mode",
+                "timestamp_dir", "prefix", "replace_underscores", "convert_anima_weights",
                 "callback_first", "callback_each", "callback_last",
                 "callback_timeout_seconds", "callback_failure_mode",
             ])
@@ -4653,6 +4653,21 @@ function isScenePromptMergeNode(node) {
 
 function isSceneExpandNodeName(nodeName) {
     return SCENE_PROMPT_EXPAND_NODE_NAMES.has(nodeName);
+}
+
+function sceneExpandConfigureValues(config) {
+    const values = config?.widgets_values;
+    if (!Array.isArray(values)) {
+        return config;
+    }
+    const converted = [...values];
+    if (typeof converted[5] === "string") {
+        const enabled = converted[5] === "Anima";
+        converted.splice(5, 1, enabled, enabled);
+    } else if (converted.length === 5) {
+        converted.push(false, false);
+    }
+    return { ...config, widgets_values: converted };
 }
 
 function isSceneExpandNode(node) {
@@ -10761,6 +10776,14 @@ app.registerExtension({
             nodeType.prototype.serialize = function (...args) {
                 const serialized = serialize?.apply(this, args);
                 return serialized ? { ...serialized, widgets_values: scenePromptSerializedWidgetValues(this) } : serialized;
+            };
+        }
+
+        if (nodeData.name === "ScenePrompterExpand") {
+            const configure = nodeType.prototype.configure;
+            nodeType.prototype.configure = function (...args) {
+                args[0] = sceneExpandConfigureValues(args[0]);
+                return configure?.apply(this, args);
             };
         }
 
