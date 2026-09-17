@@ -160,8 +160,13 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
             current_index=0, timestamp_dir=False, scene_prompt=plan, model_mode="Anima",
             replace_underscores=False, convert_anima_weights=False,
         )
+        legacy_prompt_input = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, scene_prompt=plan, unique_id="expand",
+            prompt={"expand": {"inputs": {"model_mode": "Anima"}}},
+        )
         self.assertEqual(legacy_anima[0], "blue hair")
         self.assertEqual(explicit_off[0], "blue_hair")
+        self.assertEqual(legacy_prompt_input[0], "blue hair")
 
     def test_expand_conversion_options_transform_matrix_parts_without_mutating_the_plan(self):
         source = self.prompt.ScenePrompt().build(

@@ -1060,6 +1060,30 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             finally:
                 self._request("/scene_prompt/runs/release", {"run_handle": failed_handle})
 
+    def test_http_legacy_anima_input_respects_explicit_conversion_options(self):
+        cases = (
+            ("legacy-anima", {"model_mode": "Anima"}, "true", "true", "before tag, (before weight:3)"),
+            ("legacy-anima-off", {"model_mode": "Anima", "replace_underscores": False, "convert_anima_weights": False}, "false", "false", "before_tag, (before_weight:1.4)"),
+        )
+        with _CallbackReceiver() as receiver:
+            for path, expand_inputs, expected_underscores, expected_weights, expected_current in cases:
+                received_count = len(receiver.requests)
+                graph = _callback_graph(receiver.url, path, batch_size=1, count=1)
+                graph["1"]["inputs"]["positive_base"] = "before_tag, (before_weight:1.4)"
+                graph["6"]["inputs"]["positive_base"] = "after_tag, (after_weight:1.2)"
+                graph["10"]["inputs"].update(expand_inputs)
+                handle, workflow = self._prepare_callback_run(graph)
+                try:
+                    self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                    payloads = [json.loads(request["body"]) for request in receiver.wait_for(received_count + 2)][received_count:]
+                    self.assertEqual(len(payloads), 2)
+                    for payload in payloads:
+                        self.assertEqual(payload["current_positive"], expected_current)
+                        self.assertEqual(payload["exec_replace_underscores"], expected_underscores)
+                        self.assertEqual(payload["exec_anima_weights"], expected_weights)
+                finally:
+                    self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+
     def test_http_callbacks_dispatch_final_values_once_per_run_and_reuse_cached_plan(self):
         with _CallbackReceiver() as receiver:
             graph = _callback_graph(receiver.url, "callback-runtime")

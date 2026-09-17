@@ -150,6 +150,15 @@ def _expand_conversion_options(model_mode=None, replace_underscores=None, conver
     )
 
 
+def _legacy_expand_model_mode(model_mode, prompt, unique_id):
+    """Read the removed v0.4.12 widget from a persisted API graph when needed."""
+    if model_mode is not None or not isinstance(prompt, dict) or unique_id is None:
+        return model_mode
+    node = prompt.get(str(unique_id), prompt.get(unique_id))
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    return inputs.get("model_mode") if isinstance(inputs, dict) else None
+
+
 def _model_prompt_weight(weight):
     # Anima's forward conversion scales Illustrious 1.0..1.5 weights by 5x
     # around 1.0 and clamps at 3.0. Turning the option off never reverses text.
@@ -2044,6 +2053,7 @@ class ScenePromptExpand:
         callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
         seed_base_literal=False,
     ):
+        model_mode = _legacy_expand_model_mode(model_mode, prompt, unique_id)
         return "|".join(
             [
                 _scene_prompt_change_key(scene_prompt),
@@ -2078,6 +2088,7 @@ class ScenePromptExpand:
         callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
         seed_base_literal=False,
     ):
+        model_mode = _legacy_expand_model_mode(model_mode, prompt, unique_id)
         separator = ", "
         if run_handle and unique_id is not None and isinstance(prompt, dict):
             set_run_prompt_reference(run_handle, unique_id, prompt)
