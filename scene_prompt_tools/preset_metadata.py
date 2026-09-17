@@ -308,9 +308,13 @@ def _output_slot(node, index):
     return outputs[index]
 
 
-def _resolve_reference_physical_output(reference_id, state):
+def _resolve_reference_physical_output(reference_id, state, physical_inputs=None):
+    physical_inputs = physical_inputs or {}
     reference = state["references"][reference_id]
-    output = reference.get("physical_output") or reference["output"]
+    output = reference.get("physical_output")
+    if output is None and not reference.get("physical_entries"):
+        output = physical_inputs.get(reference_id)
+    output = output or reference["output"]
     if output is None:
         raise ValueError("Presetの入力が未接続のため展開できません。")
     seen = set()
@@ -320,7 +324,10 @@ def _resolve_reference_physical_output(reference_id, state):
             raise ValueError("Preset参照の出力接続が循環しています。")
         seen.add(current)
         nested = state["references"][current]
-        output = nested.get("physical_output") or nested["output"]
+        output = nested.get("physical_output")
+        if output is None and not nested.get("physical_entries"):
+            output = physical_inputs.get(current)
+        output = output or nested["output"]
         if output is None:
             raise ValueError("Presetの入力が未接続のため展開できません。")
     return str(output[0]), output[1]
@@ -442,6 +449,14 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
         (str(target_id), target_slot)
         for _source_id, _source_slot, target_id, target_slot, _link_type in state["physical_links"]
     }
+    physical_reference_inputs = {
+        str(target_id): (source_id, source_slot)
+        for source_id, source_slot, target_id, _target_slot, _link_type in state["physical_links"]
+        if str(target_id) in reference_ids
+    }
+    for _source_id, _source_slot, target_id, _target_slot, _link_type in state["physical_links"]:
+        if str(target_id) in reference_ids:
+            physical_targets.update(_resolve_reference_entry_slots(str(target_id), state, by_id))
     for reference in state["references"].values():
         physical_targets.update((str(node_id), slot) for node_id, slot in reference.get("physical_entries", ()))
     for link in original_links:
@@ -476,7 +491,7 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
             continue
         _link_id, source_id, source_slot, target_id, target_slot, link_type = parts
         if source_id in reference_ids and target_id in by_id:
-            output_id, output_slot = _resolve_reference_physical_output(source_id, state)
+            output_id, output_slot = _resolve_reference_physical_output(source_id, state, physical_reference_inputs)
             next_link_id = _add_workflow_link(
                 links, by_id, next_link_id, output_id, output_slot, target_id, target_slot, link_type, added
             )
@@ -496,7 +511,7 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
     for source_id, source_slot, target_id, target_slot, link_type in state["physical_links"]:
         source_ids = [(source_id, source_slot)]
         if str(source_id) in reference_ids:
-            source_ids = [_resolve_reference_physical_output(str(source_id), state)]
+            source_ids = [_resolve_reference_physical_output(str(source_id), state, physical_reference_inputs)]
         target_ids = [(target_id, target_slot)]
         if str(target_id) in reference_ids:
             target_ids = _resolve_reference_entry_slots(str(target_id), state, by_id)
@@ -625,6 +640,7 @@ def _expand_workflow_only_reference(workflow, reference_id, preset):
     numeric_ids = [int(node_id) for node_id in by_id if node_id.isdigit()]
     workflow["last_node_id"] = max(numeric_ids, default=0)
     workflow["last_link_id"] = next_link_id - 1
+    return mapping
 
 
 def _expand_workflow_only_references(workflow, preset_snapshots, display_only_references=()):
@@ -648,7 +664,16 @@ def _expand_workflow_only_references(workflow, preset_snapshots, display_only_re
         preset = preset_snapshots.get(preset_id) if isinstance(preset_snapshots, Mapping) else None
         if not isinstance(preset, dict):
             raise ValueError(f"Preset「{preset_id}」の実行開始時スナップショットがありません。")
-        _expand_workflow_only_reference(workflow, str(reference.get("id")), preset)
+        reference_id = str(reference.get("id"))
+        mapping = _expand_workflow_only_reference(workflow, reference_id, preset)
+        templates = _workflow_template_index(_workflow_nodes(preset))
+        api_nodes = _nodes(preset)
+        for original_id, copied_id in mapping.items():
+            if (
+                original_id not in api_nodes
+                and templates[original_id].get("type") == PRESET_REFERENCE
+            ):
+                display_only_references.add(copied_id)
 
 
 def expand_preset_references(prompt, workflow, preset_snapshots, expand_workflow_references=False):
