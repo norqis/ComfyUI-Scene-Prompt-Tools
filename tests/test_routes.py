@@ -337,7 +337,7 @@ class PromptDataRouteTests(unittest.TestCase):
         broken.write_text("{broken", encoding="utf-8")
         self.assertEqual(asyncio.run(load_preset(Request("alice", {"preset_id": "broken"})))["status"], 400)
 
-    def test_preset_save_route_returns_conflict_for_stale_revision(self):
+    def test_preset_save_route_ignores_stale_revision_and_keeps_last_content(self):
         class Request:
             user_id = "alice"
 
@@ -363,7 +363,15 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertEqual(asyncio.run(save(Request(payload)))["status"], 200)
         payload["expected_revision"] = 1
         self.assertEqual(asyncio.run(save(Request(payload)))["status"], 200)
-        self.assertEqual(asyncio.run(save(Request(payload)))["status"], 409)
+        payload["api_graph"]["output"]["2"]["inputs"]["positive_base"] = "last"
+        last = asyncio.run(save(Request(payload)))
+        self.assertEqual(last["status"], 200)
+        self.assertNotIn("revision", last["payload"]["metadata"])
+        presets = sys.modules[f"{self.routes.__package__}.presets"]
+        self.assertEqual(
+            presets.load_preset("conflict", "alice")["api_graph"]["output"]["2"]["inputs"]["positive_base"],
+            "last",
+        )
 
     def test_async_item_route_keeps_the_event_loop_responsive(self):
         handler = self.routes._test_routes[("GET", "/scene_prompt/items")]

@@ -554,7 +554,7 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
         syncAllScenePromptNames() {},
         applySceneSourceNodeNames(prompt) { return prompt; },
         findWidget(target, name) { return target.widgets.find((widget) => widget.name === name); },
-        api: { async fetchApi() { return { ok: true, payload: { metadata: { name: "Preset A", revision: 1 } } }; } },
+        api: { async fetchApi() { return { ok: true, payload: { metadata: { name: "Preset A" } } }; } },
         async readApiJson(response) { return response.payload; },
         async loadScenePresetList() { throw new Error("refresh offline"); },
         refreshAllScenePresetReferences() { throw new Error("must not refresh stale data"); },
@@ -564,8 +564,6 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
     };
     node.graph = context.app.graph;
     vm.createContext(context);
-    vm.runInContext(functionSource("scenePresetEditorRevision"), context);
-    vm.runInContext(functionSource("setScenePresetEditorRevision"), context);
     vm.runInContext(functionSource("saveScenePreset"), context);
     await context.saveScenePreset(node);
     assert.deepEqual(notices, []);

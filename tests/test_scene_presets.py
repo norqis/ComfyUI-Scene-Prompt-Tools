@@ -178,28 +178,71 @@ class ScenePresetTests(unittest.TestCase):
             },
         }, ensure_ascii=False)
 
-    def test_save_is_atomic_and_revision_hash_increase(self):
+    def test_save_is_atomic_and_last_save_wins(self):
         first = self.save("preset_a", basic_nodes("first"))
         path = self.module._preset_path("preset_a")
         self.assertTrue(path.exists())
-        self.assertEqual(first["metadata"]["revision"], 1)
+        self.assertNotIn("revision", first["metadata"])
         self.assertEqual(len(first["metadata"]["sha256"]), 64)
         self.assertFalse(list(path.parent.glob("*.tmp")))
 
         second = self.save("preset_a", basic_nodes("second"), "Renamed")
-        self.assertEqual(second["metadata"]["revision"], 2)
+        self.assertNotIn("revision", second["metadata"])
         self.assertNotEqual(first["metadata"]["sha256"], second["metadata"]["sha256"])
         with path.open("r", encoding="utf-8") as handle:
-            self.assertEqual(json.load(handle)["metadata"]["name"], "Renamed")
+            on_disk = json.load(handle)
+        self.assertEqual(on_disk["metadata"]["name"], "Renamed")
+        self.assertNotIn("revision", on_disk["metadata"])
 
-    def test_save_rejects_a_stale_editor_revision_without_mutation(self):
-        first = self.save("revision", basic_nodes("first"))
-        second = self.save("revision", basic_nodes("second"), expected_revision=first["metadata"]["revision"])
-        with self.assertRaisesRegex(self.module.ScenePresetConflictError, "別のタブ"):
-            self.save("revision", basic_nodes("stale"), expected_revision=first["metadata"]["revision"])
+    def test_save_ignores_stale_and_invalid_expected_revision(self):
+        self.save("revision", basic_nodes("first"))
+        self.save("revision", basic_nodes("second"), expected_revision=1)
+        self.save("revision", basic_nodes("stale"), expected_revision=1)
+        self.save("revision", basic_nodes("final"), expected_revision="not-a-revision")
         saved = self.module.load_preset("revision")
-        self.assertEqual(saved["metadata"]["revision"], second["metadata"]["revision"])
+        self.assertNotIn("revision", saved["metadata"])
+        self.assertEqual(saved["api_graph"]["output"]["2"]["inputs"]["positive_base"], "final")
+
+    def test_save_recreates_a_deleted_preset_when_expected_revision_is_stale(self):
+        self.save("deleted", basic_nodes("first"))
+        path = self.module._preset_path("deleted")
+        path.unlink()
+        saved = self.save("deleted", basic_nodes("second"), expected_revision=1)
+        self.assertTrue(path.exists())
         self.assertEqual(saved["api_graph"]["output"]["2"]["inputs"]["positive_base"], "second")
+        self.assertNotIn("revision", saved["metadata"])
+
+    def test_concurrent_saves_all_succeed_without_temp_files(self):
+        barrier = threading.Barrier(4)
+        results = []
+        errors = []
+
+        def save_after_barrier(content):
+            try:
+                barrier.wait(2)
+                results.append(self.save("shared", basic_nodes(content), expected_revision=1))
+            except Exception as exc:
+                errors.append(exc)
+
+        workers = [threading.Thread(target=save_after_barrier, args=(f"content-{index}",)) for index in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 4)
+        loaded = self.module.load_preset("shared")
+        self.assertIn(
+            loaded["api_graph"]["output"]["2"]["inputs"]["positive_base"],
+            {f"content-{index}" for index in range(4)},
+        )
+        self.assertEqual(
+            loaded["metadata"]["sha256"],
+            self.module._content_hash(loaded["api_graph"], loaded["workflow"]),
+        )
+        self.assertFalse(list(path for path in self.module._preset_path("shared").parent.glob("*.tmp")))
 
     def test_preset_requires_connected_input_and_single_output(self):
         missing_input = basic_nodes()
@@ -283,31 +326,33 @@ class ScenePresetTests(unittest.TestCase):
 
     def test_atomic_save_validates_temp_before_replace(self):
         first = self.save("atomic", basic_nodes("first"))
+        path = self.module._preset_path("atomic")
+        original_bytes = path.read_bytes()
         original_validator = self.module._validate_preset_payload
 
-        def reject_second_revision(payload):
-            if payload["metadata"]["revision"] == 2:
+        def reject_second_content(payload):
+            if payload["api_graph"]["output"]["2"]["inputs"]["positive_base"] == "second":
                 raise self.module.ScenePresetError("一時ファイルの検証に失敗しました。")
             return original_validator(payload)
 
-        self.module._validate_preset_payload = reject_second_revision
+        self.module._validate_preset_payload = reject_second_content
         try:
             with self.assertRaisesRegex(self.module.ScenePresetError, "一時ファイル"):
                 self.save("atomic", basic_nodes("second"))
         finally:
             self.module._validate_preset_payload = original_validator
 
-        with self.module._preset_path("atomic").open("r", encoding="utf-8") as handle:
-            self.assertEqual(json.load(handle)["metadata"]["revision"], first["metadata"]["revision"])
+        self.assertEqual(path.read_bytes(), original_bytes)
+        with path.open("r", encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["metadata"]["sha256"], first["metadata"]["sha256"])
 
-    def test_overwrite_rejects_a_corrupt_existing_preset_without_mutation(self):
+    def test_overwrite_replaces_a_corrupt_existing_preset(self):
         self.save("corrupt", basic_nodes("first"))
         path = self.module._preset_path("corrupt")
         path.write_text('{"schema_version":0}', encoding="utf-8")
-        original = path.read_text(encoding="utf-8")
-        with self.assertRaises(self.module.ScenePresetError):
-            self.save("corrupt", basic_nodes("second"))
-        self.assertEqual(path.read_text(encoding="utf-8"), original)
+        saved = self.save("corrupt", basic_nodes("second"))
+        self.assertEqual(saved["api_graph"]["output"]["2"]["inputs"]["positive_base"], "second")
+        self.assertEqual(self.module.load_preset("corrupt")["metadata"]["sha256"], saved["metadata"]["sha256"])
 
     def test_validation_rejects_missing_output_and_ignores_disconnected_nodes(self):
         nodes = basic_nodes()
@@ -372,7 +417,6 @@ class ScenePresetTests(unittest.TestCase):
 
         resaved = self.save(
             "bypass-chain", saved["api_graph"]["output"], workflow=saved["workflow"], output_node_id="5",
-            expected_revision=saved["metadata"]["revision"],
         )
         restored = {str(node["id"]): node for node in resaved["workflow"]["nodes"]}
         self.assertEqual(restored["3"]["mode"], 4)
@@ -1226,6 +1270,8 @@ class ScenePresetTests(unittest.TestCase):
             first = self.module.ScenePresetReference.IS_CHANGED("fixed", run_handle=handle)
             second = self.module.ScenePresetReference.IS_CHANGED("fixed", run_handle=handle)
             self.assertEqual(first, second)
+            sha256 = self.module._snapshot_preset(handle, "fixed", "alice")["metadata"]["sha256"]
+            self.assertEqual(first, f"fixed:{sha256}:{handle}")
             self.assertEqual(runs.RUN_CONTEXTS._entries, before_runs)
             self.assertEqual(self.module._RUN_SNAPSHOTS, before_snapshots)
         finally:
@@ -1269,11 +1315,19 @@ class ScenePresetTests(unittest.TestCase):
             "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         })
         first = self.module.snapshot_presets_for_run("same-run", api_graph, "11")
+        self.assertNotIn("revision", first["presets"][0])
         self.save("fixed", basic_nodes("second"))
         second = self.module.snapshot_presets_for_run("same-run", api_graph, "11")
         self.assertEqual(second, first)
         snapshot = self.module._snapshot_preset("same-run", "fixed")
-        self.assertEqual(snapshot["metadata"]["revision"], 1)
+        self.assertNotIn("revision", snapshot["metadata"])
+        self.assertEqual(snapshot["metadata"]["sha256"], first["presets"][0]["sha256"])
+        self.assertEqual(snapshot["api_graph"]["output"]["2"]["inputs"]["positive_base"], "first")
+        next_run = self.module.snapshot_presets_for_run("next-run", api_graph, "11")
+        self.assertEqual(
+            next_run["preset_graphs"]["fixed"]["api_graph"]["output"]["2"]["inputs"]["positive_base"],
+            "second",
+        )
 
     def test_concurrent_resolve_publishes_one_valid_snapshot(self):
         self.save("fixed", basic_nodes("first"))

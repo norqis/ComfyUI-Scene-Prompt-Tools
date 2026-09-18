@@ -27,7 +27,6 @@ from .runs import (
 )
 from .callbacks import CALLBACK_FAILURE_STOP, SceneCallbackError, acknowledge_desktop_callback, dispatch_callback
 from .presets import (
-    ScenePresetConflictError,
     ScenePresetError,
     ScenePresetNotFoundError,
     ScenePresetResolutionError,
@@ -783,8 +782,6 @@ def define_routes():
             return web.json_response({"metadata": saved["metadata"]})
         except ScenePresetResolutionError as exc:
             return web.json_response({"error": str(exc), "node_id": exc.node_id}, status=400)
-        except ScenePresetConflictError as exc:
-            return web.json_response({"error": str(exc)}, status=409)
         except ScenePresetError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:

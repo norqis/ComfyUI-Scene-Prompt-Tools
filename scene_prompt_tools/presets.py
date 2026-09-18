@@ -103,10 +103,6 @@ class ScenePresetNotFoundError(ScenePresetError):
     pass
 
 
-class ScenePresetConflictError(ScenePresetError):
-    pass
-
-
 class ScenePresetResolutionError(ScenePresetError):
     def __init__(self, message, node_id=None):
         super().__init__(message)
@@ -573,9 +569,6 @@ def _validate_preset_payload(preset):
     if preset.get("schema_version") != PRESET_SCHEMA_VERSION:
         raise ScenePresetError("Presetの形式が対応していません。")
     _clean_preset_id(metadata.get("preset_id"))
-    revision = metadata.get("revision")
-    if not isinstance(revision, int) or revision < 1:
-        raise ScenePresetError("Presetのrevisionが不正です。")
     expected_hash = _content_hash(preset.get("api_graph"), preset.get("workflow"))
     if str(metadata.get("sha256") or "") != expected_hash:
         raise ScenePresetError("Presetの内容が壊れているか、hashが一致しません。")
@@ -584,6 +577,12 @@ def _validate_preset_payload(preset):
     normalized_metadata = normalized.get("metadata")
     if not isinstance(normalized_metadata, dict):
         raise ScenePresetError("Presetのメタデータが不正です。")
+    normalized_metadata.pop("revision", None)
+    workflow = normalized.get("workflow")
+    if isinstance(workflow, dict):
+        extra = workflow.get("extra")
+        if isinstance(extra, dict):
+            extra.pop("scene_preset_editor", None)
     normalized_metadata["sha256"] = _content_hash(
         normalized.get("api_graph"),
         normalized.get("workflow"),
@@ -613,11 +612,6 @@ def save_preset(payload, user_id="default"):
     preset_id = _clean_preset_id(payload.get("preset_id"))
     name = str(payload.get("name") or preset_id).strip() or preset_id
     output_node_id = str(payload.get("output_node_id") or "").strip()
-    expected_revision = payload.get("expected_revision")
-    if expected_revision is not None and (
-        type(expected_revision) is not int or expected_revision < 1
-    ):
-        raise ScenePresetError("expected_revision は1以上の整数で指定してください。")
     api_graph = payload.get("api_graph")
     workflow = payload.get("workflow")
     if not isinstance(api_graph, dict) or not isinstance(api_graph.get("output"), dict):
@@ -626,6 +620,9 @@ def save_preset(payload, user_id="default"):
         raise ScenePresetError("Presetの編集用ワークフローがありません。")
     connected_nodes = _connected_preset_nodes(api_graph["output"], output_node_id)
     workflow = _connected_preset_workflow(workflow, connected_nodes, output_node_id)
+    extra = workflow.get("extra")
+    if isinstance(extra, dict):
+        extra.pop("scene_preset_editor", None)
     api_graph = _api_graph_with_titles({**api_graph, "output": connected_nodes}, workflow)
     with _PRESET_LOCK:
         try:
@@ -638,22 +635,12 @@ def save_preset(payload, user_id="default"):
             raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
 
         path = _preset_path(preset_id, user_id)
-        revision = 1
-        if path.exists():
-            existing = _read_json(path)
-            _validate_preset_payload(existing)
-            if expected_revision is not None and existing["metadata"]["revision"] != expected_revision:
-                raise ScenePresetConflictError("Presetは別のタブで更新されています。再度開いてください。")
-            revision = existing["metadata"]["revision"] + 1
-        elif expected_revision is not None:
-            raise ScenePresetConflictError("Presetは別のタブで削除されています。再度開いてください。")
         digest = _content_hash(api_graph, workflow)
         saved = {
             "schema_version": PRESET_SCHEMA_VERSION,
             "metadata": {
                 "preset_id": preset_id,
                 "name": name,
-                "revision": revision,
                 "sha256": digest,
             },
             "workflow": copy.deepcopy(workflow),
@@ -1049,7 +1036,6 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
                 {
                     "preset_id": preset_id,
                     "name": preset["metadata"]["name"],
-                    "revision": preset["metadata"]["revision"],
                     "sha256": preset["metadata"]["sha256"],
                 }
                 for preset_id, preset in resolved.items()
@@ -1329,7 +1315,7 @@ class ScenePresetOutput:
 
 
 class ScenePresetReference:
-    DESCRIPTION = """保存済みのScene Presetを参照します。画像生成を開始した時点で最新のPresetを検証して固定し、その実行中は同じrevisionを使います。Preset内のScene Matrix、Queue、Mergeなどは元のノードとして展開・実行されます。"""
+    DESCRIPTION = """保存済みのScene Presetを参照します。画像生成を開始した時点のPreset内容を検証して固定し、その実行中は同じ内容を使います。Preset内のScene Matrix、Queue、Mergeなどは元のノードとして展開・実行されます。"""
     CATEGORY = "Scene/preset"
     RETURN_TYPES = (SCENE_PROMPT_TYPE,)
     RETURN_NAMES = ("scene_prompt",)
@@ -1358,7 +1344,7 @@ class ScenePresetReference:
         user_id = get_run_user_id(run_handle)
         preset = _peek_snapshot_preset(run_handle, _clean_preset_id(preset_id), user_id)
         metadata = preset["metadata"]
-        return f"{metadata['preset_id']}:{metadata['revision']}:{metadata['sha256']}:{run_handle}"
+        return f"{metadata['preset_id']}:{metadata['sha256']}:{run_handle}"
 
     def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id="", source_node_name=""):
         return expand_preset_reference(
