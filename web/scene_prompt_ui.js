@@ -9663,6 +9663,7 @@ function openSceneMatrixLinesPopup(node) {
         drafts.forEach((draft, index) => {
             const row = document.createElement("div");
             row.className = "pc-candidate";
+            row.style.display = "flex";
             row.style.flexDirection = "column";
             row.style.alignItems = "stretch";
             row.style.gap = "7px";

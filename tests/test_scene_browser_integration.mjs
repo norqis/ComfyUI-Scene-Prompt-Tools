@@ -819,6 +819,45 @@ try {
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), matrixState.writes, "closing an unchanged Matrix editor does not write again");
 
+    await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode;
+        const widget = node.widgets.find((item) => item.name === "matrix_json");
+        window.__matrixOverflowOriginal = { value: widget.value, property: node.properties.scene_matrix_json, writes: node.matrixWriteCount };
+        const state = JSON.parse(widget.value);
+        state.sets[0].positive_base = "long_prompt_".repeat(400);
+        state.sets[0].negative_base = "negative prompt, ".repeat(400);
+        widget.value = JSON.stringify(state);
+        node.properties.scene_matrix_json = widget.value;
+        node.widgets.find((item) => item.sceneRole === "matrix_rows").callback();
+    });
+    for (const width of [420, 556, 760]) {
+        const bounds = await page.evaluate((width) => {
+            const popup = document.querySelector(".pc-popup");
+            popup.style.width = `${width}px`;
+            const list = popup.querySelector(".pc-popup-list");
+            const row = list.querySelector(".pc-candidate");
+            const rect = row.getBoundingClientRect();
+            return {
+                scrollWidth: list.scrollWidth, clientWidth: list.clientWidth,
+                controls: [...row.querySelectorAll("button")].map((button) => {
+                    const buttonRect = button.getBoundingClientRect();
+                    return { text: button.textContent, inside: buttonRect.left >= rect.left && buttonRect.right <= rect.right, width: buttonRect.width };
+                }),
+            };
+        }, width);
+        assert.ok(bounds.scrollWidth <= bounds.clientWidth, `long Matrix prompts must not create horizontal overflow at ${width}px`);
+        assert.equal(bounds.controls.length, 6);
+        assert.ok(bounds.controls.every((button) => button.inside && button.width > 0), `all Matrix buttons fit at ${width}px: ${JSON.stringify(bounds.controls)}`);
+    }
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode;
+        const original = window.__matrixOverflowOriginal;
+        node.widgets.find((item) => item.name === "matrix_json").value = original.value;
+        node.properties.scene_matrix_json = original.property;
+        node.matrixWriteCount = original.writes;
+    });
+
     await page.evaluate(async () => {
         class ScenePresetReferenceNode {
             constructor() {
