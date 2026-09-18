@@ -1270,7 +1270,7 @@ class ScenePresetTests(unittest.TestCase):
             first = self.module.ScenePresetReference.IS_CHANGED("fixed", run_handle=handle)
             second = self.module.ScenePresetReference.IS_CHANGED("fixed", run_handle=handle)
             self.assertEqual(first, second)
-            sha256 = self.module._snapshot_preset(handle, "fixed", "alice")["metadata"]["sha256"]
+            sha256 = before_snapshots[("alice", handle)]["presets"]["fixed"]["metadata"]["sha256"]
             self.assertEqual(first, f"fixed:{sha256}:{handle}")
             self.assertEqual(runs.RUN_CONTEXTS._entries, before_runs)
             self.assertEqual(self.module._RUN_SNAPSHOTS, before_snapshots)
