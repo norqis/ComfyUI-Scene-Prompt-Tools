@@ -87,6 +87,10 @@ class OpenIssueRegressionTests(unittest.TestCase):
             "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
         }
         workflow = workflow_for(nodes)
+        workflow["extra"] = {
+            "stored": True,
+            "scene_preset_editor": {"preset_id": "legacy", "revision": 1},
+        }
         api_graph = {"output": nodes}
         return {
             "schema_version": 1,
@@ -107,6 +111,8 @@ class OpenIssueRegressionTests(unittest.TestCase):
         self.assertEqual(payload["api_graph"]["output"]["2"]["class_type"], "ScenePrompter")
         self.assertEqual(payload["workflow"]["nodes"][1]["type"], "ScenePrompter")
         self.assertEqual(payload["workflow"]["nodes"][1]["properties"]["Node name for S&R"], "ScenePrompter")
+        self.assertNotIn("revision", payload["metadata"])
+        self.assertEqual(payload["workflow"]["extra"], {"stored": True})
         self.assertNotEqual(payload["metadata"]["sha256"], original_hash)
         self.assertEqual(
             payload["metadata"]["sha256"],
@@ -118,7 +124,7 @@ class OpenIssueRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(self.presets.ScenePresetError, "hash"):
             self.presets._validate_preset_payload(corrupted)
 
-    def test_legacy_file_load_is_read_only_and_same_id_overwrite_bumps_revision(self):
+    def test_legacy_file_load_is_read_only_and_same_id_overwrite_removes_legacy_metadata(self):
         raw = self.legacy_payload()
         path = self.presets._preset_path("legacy", "default")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,6 +133,8 @@ class OpenIssueRegressionTests(unittest.TestCase):
 
         loaded = self.presets.load_preset("legacy", "default")
         self.assertEqual(loaded["api_graph"]["output"]["2"]["class_type"], "ScenePrompter")
+        self.assertNotIn("revision", loaded["metadata"])
+        self.assertEqual(loaded["workflow"]["extra"], {"stored": True})
         self.assertEqual(path.read_bytes(), original_bytes)
 
         current_graph = loaded["api_graph"]
@@ -134,14 +142,14 @@ class OpenIssueRegressionTests(unittest.TestCase):
         saved = self.presets.save_preset({
             "preset_id": "legacy",
             "name": "Legacy",
-            "expected_revision": 1,
             "output_node_id": "3",
             "api_graph": current_graph,
             "workflow": current_workflow,
         }, "default")
-        self.assertEqual(saved["metadata"]["revision"], 2)
         on_disk = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(on_disk["metadata"]["revision"], 2)
+        self.assertNotIn("revision", saved["metadata"])
+        self.assertNotIn("revision", on_disk["metadata"])
+        self.assertEqual(on_disk["workflow"]["extra"], {"stored": True})
         self.assertEqual(on_disk["api_graph"]["output"]["2"]["class_type"], "ScenePrompter")
         self.assertEqual(on_disk["workflow"]["nodes"][1]["type"], "ScenePrompter")
         self.assertEqual(

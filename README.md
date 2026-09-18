@@ -199,7 +199,7 @@ Choose the metadata mode on **Scene Save Image**:
 
 Dragging a PNG back into ComfyUI can restore a workflow for the first two modes. **Prompt only** cannot restore a workflow.
 
-**Presetの中身を展開** is optional and off by default, so existing workflows can omit it. Enable it to replace Scene Preset Reference nodes with the connected Scene nodes from the Preset revision fixed when generation started, including nested Presets. In **Full workflow**, this also expands disconnected Reference nodes visible on the canvas. In **Execution path nodes only**, only the Reference branch used for that image is expanded. This setting has no effect in **Prompt only** mode.
+**Presetの中身を展開** is optional and off by default, so existing workflows can omit it. Enable it to replace Scene Preset Reference nodes with the connected Scene nodes from the Preset contents fixed when generation started, including nested Presets. In **Full workflow**, this also expands disconnected Reference nodes visible on the canvas. In **Execution path nodes only**, only the Reference branch used for that image is expanded. This setting has no effect in **Prompt only** mode.
 
 Version 0.4.14 preserves bypassed Scene nodes and their physical workflow links when a Preset is saved or expanded into PNG metadata. The API prompt still contains only ComfyUI's executable graph, so reopening the Preset restores the bypass layout and can queue it again.
 

@@ -240,7 +240,6 @@ let scenePresetListPromise = null;
 let scenePresetListLatestPromise = null;
 let scenePresetListCacheCurrent = false;
 let scenePresetNotificationTimer = null;
-const SCENE_PRESET_EDITOR_KEY = "scene_preset_editor";
 const sceneRunHandlesByPromptId = new Map();
 const sceneRunTerminalPromptIds = new Map();
 const sceneRunHandleReconcileTimers = new Map();
@@ -9824,33 +9823,12 @@ function selectedScenePreset(node, presets = scenePresetList || []) {
     return presets.find((preset) => String(preset?.preset_id || "") === presetId) || null;
 }
 
-function scenePresetEditorRevision(workflow, presetId) {
-    const editor = workflow?.extra?.[SCENE_PRESET_EDITOR_KEY];
-    if (!editor || String(editor.preset_id || "") !== String(presetId || "")) {
-        return null;
-    }
-    return Number.isInteger(editor.revision) && editor.revision > 0 ? editor.revision : null;
-}
-
-function setScenePresetEditorRevision(graph, metadata) {
-    if (!graph || !metadata?.preset_id || !Number.isInteger(metadata.revision)) {
-        return;
-    }
-    graph.extra = graph.extra && typeof graph.extra === "object" ? graph.extra : {};
-    graph.extra[SCENE_PRESET_EDITOR_KEY] = {
-        preset_id: String(metadata.preset_id),
-        revision: metadata.revision,
-    };
-}
-
 function presetEditorWorkflow(preset) {
     const workflow = JSON.parse(JSON.stringify(preset.workflow));
     workflow.id = crypto.randomUUID();
-    workflow.extra = workflow.extra && typeof workflow.extra === "object" ? workflow.extra : {};
-    workflow.extra[SCENE_PRESET_EDITOR_KEY] = {
-        preset_id: String(preset.metadata.preset_id),
-        revision: preset.metadata.revision,
-    };
+    if (workflow.extra && typeof workflow.extra === "object") {
+        delete workflow.extra.scene_preset_editor;
+    }
     return workflow;
 }
 
@@ -9972,7 +9950,7 @@ async function openScenePresetEditor(node) {
         if (!response.ok) {
             throw new Error(preset.error || "Presetを読み込めませんでした");
         }
-        if (!preset?.metadata?.preset_id || !preset?.workflow || !Number.isInteger(preset.metadata.revision)) {
+        if (!preset?.metadata?.preset_id || !preset?.workflow) {
             throw new Error("Presetの応答形式が不正です。");
         }
         const workflow = presetEditorWorkflow(preset);
@@ -10008,7 +9986,9 @@ async function saveScenePreset(node) {
         const apiGraph = await graphToPrompt();
         applySceneSourceNodeNames(apiGraph);
         const workflow = app.graph.serialize();
-        const expectedRevision = scenePresetEditorRevision(workflow, presetId);
+        if (workflow.extra && typeof workflow.extra === "object") {
+            delete workflow.extra.scene_preset_editor;
+        }
         const payload = {
             preset_id: presetId,
             name,
@@ -10016,9 +9996,6 @@ async function saveScenePreset(node) {
             api_graph: apiGraph,
             workflow,
         };
-        if (expectedRevision !== null) {
-            payload.expected_revision = expectedRevision;
-        }
         const response = await api.fetchApi("/scene_presets/save", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -10029,9 +10006,6 @@ async function saveScenePreset(node) {
             throw new Error(data.error || "Presetの保存に失敗しました");
         }
         const metadata = data.metadata || {};
-        if (expectedRevision !== null && String(metadata.preset_id || "") === presetId) {
-            setScenePresetEditorRevision(app.graph, metadata);
-        }
         scenePresetList = null;
         try {
             refreshAllScenePresetReferences(await loadScenePresetList(true));
@@ -10040,7 +10014,7 @@ async function saveScenePreset(node) {
             showSceneBatchError("Presetは保存しましたが、一覧を更新できませんでした。", listError);
             return;
         }
-        showSceneNotification(`Preset「${metadata.name || name}」を保存しました。revision ${metadata.revision || 1}`);
+        showSceneNotification(`Preset「${metadata.name || name}」を保存しました。`);
     } catch (error) {
         showSceneBatchError("Presetを保存できませんでした。", error);
     }

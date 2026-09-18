@@ -126,12 +126,12 @@ export const api = {
     if (url.includes("/runs/claim")) payload = { claimed: true };
     if (url.includes("/runs/release")) payload = { released: true };
     if (url.includes("saved_prompts")) payload = { saved_prompts: [savedPrompt], saved_prompt: savedPrompt };
-    if (url.includes("/scene_presets/list")) payload = { presets: [{ metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 3 } }], errors: [] };
+    if (url.includes("/scene_presets/list")) payload = { presets: [{ metadata: { preset_id: "browser-preset", name: "Browser Preset" } }], errors: [] };
     if (url.includes("/scene_presets/load")) payload = {
-      metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 3 },
-      workflow: { id: "stored-workflow", version: 1, nodes: [{ id: 1, type: "ScenePresetInput" }], extra: { stored: true } },
+      metadata: { preset_id: "browser-preset", name: "Browser Preset" },
+      workflow: { id: "stored-workflow", version: 1, nodes: [{ id: 1, type: "ScenePresetInput" }], extra: { stored: true, scene_preset_editor: { preset_id: "browser-preset", revision: 3 } } },
     };
-    if (url.includes("/scene_presets/save")) payload = { metadata: { preset_id: "browser-preset", name: "Browser Preset", revision: 4 } };
+    if (url.includes("/scene_presets/save")) payload = { metadata: { preset_id: "browser-preset", name: "Browser Preset" } };
     return new Response(JSON.stringify(payload), { status });
   },
   queuePrompt: async () => ({ prompt_id: "browser-prompt" }),
@@ -898,10 +898,7 @@ try {
     assert.deepEqual(editor.loads[0].args, [true, true, "Preset - Browser Preset"]);
     assert.notEqual(editor.loads[0].workflow.id, "stored-workflow");
     assert.match(editor.loads[0].workflow.id, /^[0-9a-f-]{36}$/i);
-    assert.deepEqual(editor.loads[0].workflow.extra, {
-        stored: true,
-        scene_preset_editor: { preset_id: "browser-preset", revision: 3 },
-    });
+    assert.deepEqual(editor.loads[0].workflow.extra, { stored: true });
     assert.deepEqual(editor.originalGraph, { original_tab: true });
 
     await page.evaluate(async () => {
@@ -939,10 +936,11 @@ try {
     });
     const savedEditor = await page.evaluate(() => {
         const save = window.__scenePromptCalls.findLast((call) => call.url.includes("/scene_presets/save"));
-        return { request: JSON.parse(save.options.body), editor: window.app.graph.extra.scene_preset_editor };
+        return { request: JSON.parse(save.options.body), extra: window.app.graph.extra };
     });
-    assert.equal(savedEditor.request.expected_revision, 3);
-    assert.deepEqual(savedEditor.editor, { preset_id: "browser-preset", revision: 4 });
+    assert.equal(savedEditor.request.expected_revision, undefined);
+    assert.equal(savedEditor.request.workflow.extra.scene_preset_editor, undefined);
+    assert.deepEqual(savedEditor.extra, { scene_preset_editor: { preset_id: "browser-preset", revision: 3 } });
 
     const callbackUi = await page.evaluate(async () => {
         class CallbackNode {

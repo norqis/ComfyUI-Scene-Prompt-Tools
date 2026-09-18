@@ -327,7 +327,7 @@ async function testScenePresetResolution() {
             assert.equal(expandNodeId, "10");
             return {
                 run_handle: "opaque-run-handle",
-                presets: [{ preset_id: "preset-a", revision: 2 }],
+                presets: [{ preset_id: "preset-a" }],
                 preset_graphs: {
                     "preset-a": {
                         metadata: { sha256: "abc" },
@@ -352,7 +352,7 @@ async function testScenePresetResolution() {
                 const request = JSON.parse(options.body);
                 assert.equal(request.run_id, "run-a");
                 return presetContext.apiResponse({
-                    presets: [{ preset_id: "preset-a", revision: 2 }],
+                    presets: [{ preset_id: "preset-a" }],
                     preset_graphs: {
                         "preset-a": {
                             metadata: { sha256: "abc" },
@@ -405,7 +405,7 @@ async function testScenePresetResolution() {
     const run = { runId: "run-a" };
     await presetContext.resolveScenePresetsForRun(run, snapshot, "10");
     assert.equal(run.runHandle, "opaque-run-handle");
-    assert.equal(run.presetSnapshots[0].revision, 2);
+    assert.equal(run.presetSnapshots[0].preset_id, "preset-a");
     presetContext.scenePresetDisplayGraphs = run.presetGraphs;
     const presetStats = presetContext.scenePresetStats("preset-a", null);
     assert.equal(presetStats.rows, 2);
@@ -838,8 +838,8 @@ async function testPresetDisplayCacheStaysPerReference() {
         findSceneWidget(node) { return node.widgets.find((widget) => widget.sceneRole === "scene_preset_select"); },
         findWidget(node, name) { return node.widgets.find((widget) => widget.name === name); },
         scenePresetDisplayGraphs: new Map([
-            ["A", { metadata: { preset_id: "A", revision: 1, sha256: "a" }, api_graph: { output: {} } }],
-            ["B", { metadata: { preset_id: "B", revision: 4, sha256: "b" }, api_graph: { output: {} } }],
+            ["A", { metadata: { preset_id: "A", sha256: "a" }, api_graph: { output: {} } }],
+            ["B", { metadata: { preset_id: "B", sha256: "b" }, api_graph: { output: {} } }],
         ]),
     };
     vm.createContext(displayContext);
