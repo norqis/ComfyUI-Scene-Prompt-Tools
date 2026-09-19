@@ -135,6 +135,63 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(result["total_batches"], 1)
         self.assertEqual(result["rows"][0]["row"]["latent"]["width"], 832)
 
+    def test_model_and_lora_before_scene_prompt_survive_to_expand(self):
+        plan = self.nodes.SceneApplyModel().apply_model(
+            ["checkpoint", 0], ["checkpoint", 1], ["checkpoint", 2],
+        )[0]
+        plan = self.nodes.SceneApplyLora().apply_lora(
+            "style/example.safetensors", 0.8, 0.7, plan,
+        )[0]
+        plan = self.prompt.ScenePrompt().build(
+            "A", "alpha", '{"version":1,"categories":{}}',
+            "", '{"version":1,"categories":{}}', "", 0, True, plan,
+        )[0]
+
+        row = plan["rows"][0]["row"]
+        self.assertEqual(row["model_links"], {
+            "model": ["checkpoint", 0], "clip": ["checkpoint", 1], "vae": ["checkpoint", 2],
+        })
+        self.assertEqual(row["loras"], [{
+            "name": "style/example.safetensors", "strength_model": 0.8, "strength_clip": 0.7,
+        }])
+        expanded = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, scene_prompt=plan,
+        )
+        self.assertEqual(expanded["expand"]["1"]["inputs"]["model"], ["checkpoint", 0])
+        self.assertEqual(expanded["result"][7], ["checkpoint", 2])
+
+    def test_lora_can_be_the_first_scene_node_before_scene_prompt(self):
+        plan = self.nodes.SceneApplyLora().apply_lora(
+            "style/example.safetensors", 0.8, 0.7,
+        )[0]
+        plan = self.prompt.ScenePrompt().build(
+            "A", "alpha", '{"version":1,"categories":{}}',
+            "", '{"version":1,"categories":{}}', "", 0, True, plan,
+        )[0]
+
+        self.assertEqual(plan["rows"][0]["row"]["loras"], [{
+            "name": "style/example.safetensors", "strength_model": 0.8, "strength_clip": 0.7,
+        }])
+
+    def test_scene_prompt_before_model_and_lora_reaches_expand(self):
+        plan = self.prompt.ScenePrompt().build(
+            "A", "alpha", '{"version":1,"categories":{}}',
+            "", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        plan = self.nodes.SceneApplyModel().apply_model(
+            ["checkpoint", 0], ["checkpoint", 1], ["checkpoint", 2], plan,
+        )[0]
+        plan = self.nodes.SceneApplyLora().apply_lora(
+            "style/example.safetensors", 0.8, 0.7, plan,
+        )[0]
+
+        expanded = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, scene_prompt=plan,
+        )
+        self.assertEqual(expanded["expand"]["1"]["inputs"]["model"], ["checkpoint", 0])
+        self.assertEqual(expanded["expand"]["1"]["inputs"]["lora_name"], "style/example.safetensors")
+        self.assertEqual(expanded["result"][7], ["checkpoint", 2])
+
     def test_scene_prompt_and_expand_can_start_without_an_input_plan(self):
         plan = self.prompt.ScenePrompt().build(
             "A", "alpha", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
