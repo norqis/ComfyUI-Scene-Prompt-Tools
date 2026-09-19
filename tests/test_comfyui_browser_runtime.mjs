@@ -149,6 +149,7 @@ window.__sceneSeedRuntimeTest = {
                 const expandNode = window.app.graph?._nodes?.find(
                     (node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand",
                 );
+                const prompt = await window.app.graphToPrompt();
                 return {
                     nodes: window.app.graph?._nodes?.length || 0,
                     settled,
@@ -157,6 +158,8 @@ window.__sceneSeedRuntimeTest = {
                         expandNode?.widgets?.find((widget) => widget.name === "convert_anima_weights")?.value,
                     ],
                     modelMode: expandNode?.widgets?.find((widget) => widget.name === "model_mode")?.value,
+                    currentIndex: expandNode?.widgets?.find((widget) => widget.name === "current_index")?.value,
+                    promptCurrentIndex: prompt.output?.[String(expandNode?.id)]?.inputs?.current_index,
                 };
             } catch (error) {
                 return {
@@ -176,6 +179,8 @@ window.__sceneSeedRuntimeTest = {
             assert.deepEqual(dropResult.conversionOptions, expectedConversionOptions, "drag-style PNG loading must preserve Expand conversion options");
         }
         assert.equal(dropResult.modelMode, undefined, "Expand no longer exposes a model selector");
+        assert.equal(dropResult.currentIndex, 0, "PNG loading resets a transient Expand cursor to its first Scene row");
+        assert.equal(dropResult.promptCurrentIndex, 0, "normal Queue after PNG loading serializes the first Scene row");
         assert.deepEqual(pageErrors, [], `PNG handling raised browser errors:\n${pageErrors.join("\n")}`);
         console.log(`real ComfyUI PNG handleFile passed (${dropResult.nodes} nodes)`);
 
@@ -185,13 +190,23 @@ window.__sceneSeedRuntimeTest = {
                     window.app.loadGraphData(savedWorkflow),
                     new Promise((_resolve, reject) => setTimeout(() => reject(new Error("loadGraphData timed out")), 15_000)),
                 ]);
-                return { nodes: window.app.graph?._nodes?.length || 0 };
+                const expandNode = window.app.graph?._nodes?.find(
+                    (node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand",
+                );
+                const prompt = await window.app.graphToPrompt();
+                return {
+                    nodes: window.app.graph?._nodes?.length || 0,
+                    currentIndex: expandNode?.widgets?.find((widget) => widget.name === "current_index")?.value,
+                    promptCurrentIndex: prompt.output?.[String(expandNode?.id)]?.inputs?.current_index,
+                };
             } catch (error) {
                 return { error: error?.stack || error?.message || String(error) };
             }
         }, workflow);
         assert.equal(loadResult.error, undefined, loadResult.error);
         assert.equal(loadResult.nodes, workflow.nodes.length, "the PNG workflow must load every serialized node");
+        assert.equal(loadResult.currentIndex, 0, "JSON workflow loading resets a transient Expand cursor to its first Scene row");
+        assert.equal(loadResult.promptCurrentIndex, 0, "normal Queue after JSON workflow loading serializes the first Scene row");
         assert.deepEqual(pageErrors, [], `workflow load raised browser errors:\n${pageErrors.join("\n")}`);
         console.log(`real ComfyUI PNG workflow load passed (${loadResult.nodes} nodes)`);
     }
@@ -343,19 +358,60 @@ window.__sceneSeedRuntimeTest = {
         await app.loadGraphData(loaded.workflow, true, true);
         const restored = app.graph.getNodeById(reverse.id);
         const restoredApi = await app.graphToPrompt();
+        const restoredLinks = Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]);
+        app.graph.clear();
+        const nestedInput = create("ScenePresetInput");
+        const reference = create("ScenePresetReference");
+        const nestedOutput = create("ScenePresetOutput");
+        reference.widgets.find((widget) => widget.name === "preset_id").value = "runtime-bypass";
+        connect(nestedInput, reference);
+        connect(reference, nestedOutput);
+        reference.mode = 4;
+        nestedOutput.widgets.find((widget) => widget.name === "preset_id").value = "runtime-bypass-reference";
+        const referenceApi = await app.graphToPrompt();
+        if (referenceApi.output[String(reference.id)]) throw new Error("ComfyUI should bypass Preset Reference in API graph");
+        const referenceWorkflow = app.graph.serialize();
+        const referenceResponse = await fetch("/scene_presets/save", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset_id: "runtime-bypass-reference", name: "Runtime Bypass Reference", output_node_id: String(nestedOutput.id), api_graph: referenceApi, workflow: referenceWorkflow }),
+        });
+        const referenceSaved = await referenceResponse.json();
+        if (!referenceResponse.ok) throw new Error(referenceSaved.error);
+        const referenceLoadedResponse = await fetch("/scene_presets/load?preset_id=runtime-bypass-reference");
+        const referenceLoaded = await referenceLoadedResponse.json();
+        if (!referenceLoadedResponse.ok) throw new Error(referenceLoaded.error);
+        await app.loadGraphData(referenceLoaded.workflow, true, true);
+        const restoredReference = app.graph.getNodeById(reference.id);
+        const restoredReferenceApi = await app.graphToPrompt();
+        const restoredReferenceMode = restoredReference?.mode;
+        restoredReference.mode = 0;
+        const unbypassedReferenceApi = await app.graphToPrompt();
         return {
             bypassMode: restored?.mode,
-            links: Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]),
+            links: restoredLinks,
             expectedLinks: [[input.id, prompt.id], [prompt.id, reverse.id], [reverse.id, output.id]],
             apiContainsReverse: Boolean(restoredApi.output[String(reverse.id)]),
             outputSource: restoredApi.output[String(output.id)].inputs.scene_prompt,
             expectedSource: [String(prompt.id), 0],
+            reference: {
+                mode: restoredReferenceMode,
+                presetId: restoredReference?.widgets?.find((widget) => widget.name === "preset_id")?.value,
+                links: Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]),
+                expectedLinks: [[nestedInput.id, reference.id], [reference.id, nestedOutput.id]],
+                bypassed: Boolean(restoredReferenceApi.output[String(reference.id)]),
+                unbypassed: Boolean(unbypassedReferenceApi.output[String(reference.id)]),
+            },
         };
     });
     assert.equal(bypassPreset.bypassMode, 4);
     assert.deepEqual(bypassPreset.links, bypassPreset.expectedLinks);
     assert.equal(bypassPreset.apiContainsReverse, false);
     assert.deepEqual(bypassPreset.outputSource, bypassPreset.expectedSource);
+    assert.equal(bypassPreset.reference.mode, 4);
+    assert.equal(bypassPreset.reference.presetId, "runtime-bypass");
+    assert.deepEqual(bypassPreset.reference.links, bypassPreset.reference.expectedLinks);
+    assert.equal(bypassPreset.reference.bypassed, false);
+    assert.equal(bypassPreset.reference.unbypassed, true);
     console.log("real ComfyUI bypass Preset save/load preserves mode, physical links and execution routing");
     const seedNodes = await page.evaluate(async () => {
         window.app.graph.clear();

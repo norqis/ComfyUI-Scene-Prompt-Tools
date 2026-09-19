@@ -1,5 +1,6 @@
 import json
 import asyncio
+import hashlib
 import os
 import re
 import tempfile
@@ -106,7 +107,7 @@ def _cache_for(caches, user_id):
     user_key = str(user_id or "default")
     cache = caches.get(user_key)
     if cache is None:
-        cache = {"expires": 0.0, "signature": None, "value": None}
+        cache = {"expires": 0.0, "signature": None, "content_hash": None, "value": None}
         caches[user_key] = cache
         if len(caches) > _CACHE_MAX_USERS:
             caches.popitem(last=False)
@@ -132,8 +133,24 @@ def _prompt_file_signature(root):
     return tuple(signature)
 
 
-def _cache_get(cache, signature):
-    if cache.get("signature") == signature:
+def _prompt_file_content_hash(root):
+    digest = hashlib.sha256()
+    if not root.exists():
+        return digest.hexdigest()
+    for prompt_file in sorted(root.rglob(PROMPT_FILE_NAME)):
+        try:
+            digest.update(str(prompt_file.relative_to(root)).encode("utf-8"))
+            digest.update(b"\0")
+            with prompt_file.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+        except OSError:
+            continue
+    return digest.hexdigest()
+
+
+def _cache_get(cache, signature, content_hash):
+    if cache.get("signature") == signature and cache.get("content_hash") == content_hash:
         value = cache.get("value")
         if value is not None:
             cache["expires"] = time.monotonic() + _CACHE_TTL_SECONDS
@@ -148,8 +165,9 @@ def _cache_get_unexpired(cache):
     return value if value is not None else None
 
 
-def _cache_set(cache, signature, value):
+def _cache_set(cache, signature, content_hash, value):
     cache["signature"] = signature
+    cache["content_hash"] = content_hash
     cache["value"] = value
     cache["expires"] = time.monotonic() + _CACHE_TTL_SECONDS
     return value
@@ -222,10 +240,11 @@ def _load_items(user_id="default", force=False, with_errors=False):
                 return _cache_value(cached, "items", with_errors)
 
         signature = _prompt_file_signature(data_dir)
+        content_hash = _prompt_file_content_hash(data_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            cached = None if force else _cache_get(cache, signature)
+            cached = None if force else _cache_get(cache, signature, content_hash)
             if cached is not None:
                 return _cache_value(cached, "items", with_errors)
 
@@ -241,13 +260,14 @@ def _load_items(user_id="default", force=False, with_errors=False):
                         errors.append({"file": prompt_file.relative_to(data_dir).as_posix(), "error": str(exc)})
 
         refreshed_signature = _prompt_file_signature(data_dir)
+        refreshed_content_hash = _prompt_file_content_hash(data_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            if signature != refreshed_signature:
+            if signature != refreshed_signature or content_hash != refreshed_content_hash:
                 continue
             value = {"items": items, "errors": errors}
-            return _cache_value(_cache_set(cache, refreshed_signature, value), "items", with_errors)
+            return _cache_value(_cache_set(cache, refreshed_signature, refreshed_content_hash, value), "items", with_errors)
 
 
 def _folder_component(value, field):
@@ -533,10 +553,11 @@ def _load_saved_prompts(user_id="default", force=False, with_errors=False):
                 return _cache_value(cached, "saved_prompts", with_errors)
 
         signature = _prompt_file_signature(saved_prompts_dir)
+        content_hash = _prompt_file_content_hash(saved_prompts_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            cached = None if force else _cache_get(cache, signature)
+            cached = None if force else _cache_get(cache, signature, content_hash)
             if cached is not None:
                 return _cache_value(cached, "saved_prompts", with_errors)
 
@@ -550,13 +571,14 @@ def _load_saved_prompts(user_id="default", force=False, with_errors=False):
                     errors.append({"file": prompt_file.relative_to(saved_prompts_dir).as_posix(), "error": str(exc)})
 
         refreshed_signature = _prompt_file_signature(saved_prompts_dir)
+        refreshed_content_hash = _prompt_file_content_hash(saved_prompts_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            if signature != refreshed_signature:
+            if signature != refreshed_signature or content_hash != refreshed_content_hash:
                 continue
             value = {"saved_prompts": saved, "errors": errors}
-            return _cache_value(_cache_set(cache, refreshed_signature, value), "saved_prompts", with_errors)
+            return _cache_value(_cache_set(cache, refreshed_signature, refreshed_content_hash, value), "saved_prompts", with_errors)
 
 
 def _save_prompt_payload(payload, user_id="default"):

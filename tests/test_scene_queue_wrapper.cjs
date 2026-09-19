@@ -29,6 +29,7 @@ const context = {
     clearTimeout,
     app: { graph: { serialize() { return { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] }; } } },
     sceneBatchRun: null,
+    activePopupContext: null,
     sceneBatchDetachedRuns: new Map(),
     sceneRunHandlesByPromptId: new Map(),
     sceneRunTerminalPromptIds: new Map(),
@@ -94,6 +95,7 @@ for (const name of [
     "randomSamplerSeed",
     "applyRandomizedSamplerSeeds",
     "scenePromptSamplerSeedTargets",
+    "commitActiveMatrixLineDraft",
     "syncSceneMatrixPromptInputs",
     "installSceneBatchPromptCapture",
 ]) {
@@ -123,6 +125,11 @@ context.installSceneBatchPromptCapture();
         type: "SceneMatrix",
         matrixState: { version: 1, sets: [{ row_id: "new-first", enabled: true }] },
     });
+    context.activePopupContext = {
+        node: { sceneMatrixLineDraftContext: { commitDrafts() {
+            context.nodesById.get("7").matrixState = { version: 1, sets: [{ row_id: "weight-draft", enabled: true, weight: 1.2 }] };
+        } } },
+    };
     const staleMatrix = await context.api.queuePrompt(0, { output: {
         "7": {
             class_type: "SceneMatrix",
@@ -141,6 +148,7 @@ context.installSceneBatchPromptCapture();
         context.nodesById.get("7").matrixState,
         "normal Queue submits the current Matrix enabled state and row order",
     );
+    assert.equal(JSON.parse(staleMatrix.received.output["7"].inputs.matrix_json).sets[0].weight, 1.2, "normal Queue commits an open Matrix weight draft before serializing it");
 
     await assert.rejects(
         () => context.api.queuePrompt(0, { output: { "3": { class_type: "ScenePrompter", inputs: {} } } }),

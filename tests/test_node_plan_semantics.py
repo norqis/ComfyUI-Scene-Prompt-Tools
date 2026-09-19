@@ -143,6 +143,29 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         result = self.nodes.ScenePromptExpand().expand(current_index=0, timestamp_dir=False, scene_prompt=plan)
         self.assertEqual(result[0], "alpha")
 
+    def test_expand_reports_connected_resource_outputs_without_an_apply_model(self):
+        plan = self.prompt.ScenePrompt().build(
+            "A", "alpha", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        prompt = {
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+            "sink": {"class_type": "TestModelSink", "inputs": {"model": ["expand", 5]}},
+        }
+        with self.assertRaisesRegex(ValueError, "Scene Apply Model"):
+            self.nodes.ScenePromptExpand().expand(
+                current_index=0, timestamp_dir=False, scene_prompt=plan, unique_id="expand", prompt=prompt,
+            )
+
+    def test_expand_keeps_unconnected_resource_outputs_compatible(self):
+        plan = self.prompt.ScenePrompt().build(
+            "A", "alpha", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
+        )[0]
+        result = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, scene_prompt=plan,
+            unique_id="expand", prompt={"expand": {"class_type": "ScenePrompterExpand", "inputs": {}}},
+        )
+        self.assertEqual(result[5:], (None, None, None))
+
     def test_expand_conversion_options_are_independent_and_do_not_mutate_the_plan(self):
         plan = self.prompt.ScenePrompt().build(
             "A", "blue_hair, score_7", '{"version":1,"categories":{}}', "bad_hands", '{"version":1,"categories":{}}', "", 0, True,

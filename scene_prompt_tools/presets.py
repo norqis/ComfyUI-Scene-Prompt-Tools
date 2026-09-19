@@ -29,6 +29,7 @@ from .nodes import (
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
     ScenePromptCallbackDesktop,
+    _prune_workflow_reroutes,
 )
 from .runs import get_run_user_id, require_run_context
 
@@ -42,9 +43,11 @@ _PRESET_LOCK = threading.RLock()
 _PRESET_LIST_CACHE_LOCK = threading.RLock()
 _PRESET_LIST_CACHE = OrderedDict()
 _PRESET_LIST_CACHE_MAX_USERS = 64
+_PRESET_LIST_CACHE_TTL_SECONDS = 2.0
 _PRESET_FILE_CACHE_LOCK = threading.RLock()
 _PRESET_FILE_CACHE = OrderedDict()
 _PRESET_FILE_CACHE_MAX_ITEMS = 512
+_PRESET_FILE_CACHE_TTL_SECONDS = 2.0
 _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
 _RESOLVING_RUNS = {}
@@ -188,6 +191,15 @@ def _preset_file_signature(path):
     except OSError as exc:
         raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
     return stat.st_mtime_ns, stat.st_size, getattr(stat, "st_ino", 0)
+
+
+def _preset_file_content_hash(path):
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        raise ScenePresetNotFoundError(f"Presetが見つかりません: {path.stem}") from None
+    except OSError as exc:
+        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
 
 
 def _invalidate_preset_file_cache(preset_id, user_id="default"):
@@ -436,6 +448,7 @@ def _connected_preset_workflow(workflow, node_ids, output_node_id):
             and str(link[3]) in connected
         ]
         _prune_workflow_node_links(result["nodes"], result["links"])
+        _prune_workflow_reroutes(result)
     return result
 
 
@@ -635,13 +648,26 @@ def load_preset(preset_id, user_id="default"):
     signature = _preset_file_signature(path)
     with _PRESET_FILE_CACHE_LOCK:
         cached = _PRESET_FILE_CACHE.get(cache_key)
-        if cached is not None and cached[0] == signature:
+        if cached is not None and cached[0] == signature and cached[2] > time.monotonic():
             _PRESET_FILE_CACHE.move_to_end(cache_key)
-            return copy.deepcopy(cached[1])
+            return copy.deepcopy(cached[3])
+    content_hash = _preset_file_content_hash(path)
+    with _PRESET_FILE_CACHE_LOCK:
+        cached = _PRESET_FILE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == signature and cached[1] == content_hash:
+            cached = (cached[0], cached[1], time.monotonic() + _PRESET_FILE_CACHE_TTL_SECONDS, cached[3])
+            _PRESET_FILE_CACHE[cache_key] = cached
+            _PRESET_FILE_CACHE.move_to_end(cache_key)
+            return copy.deepcopy(cached[3])
     preset = _read_json(path)
     _validate_preset_payload(preset)
     with _PRESET_FILE_CACHE_LOCK:
-        _PRESET_FILE_CACHE[cache_key] = (signature, copy.deepcopy(preset))
+        _PRESET_FILE_CACHE[cache_key] = (
+            signature,
+            content_hash,
+            time.monotonic() + _PRESET_FILE_CACHE_TTL_SECONDS,
+            copy.deepcopy(preset),
+        )
         _PRESET_FILE_CACHE.move_to_end(cache_key)
         while len(_PRESET_FILE_CACHE) > _PRESET_FILE_CACHE_MAX_ITEMS:
             _PRESET_FILE_CACHE.popitem(last=False)
@@ -1202,32 +1228,26 @@ def list_presets(user_id="default"):
         signature = _preset_directory_signature(directory)
         with _PRESET_LIST_CACHE_LOCK:
             cached = _PRESET_LIST_CACHE.get(user_key)
-            if cached and cached.get("signature") == signature:
+            if cached and cached.get("signature") == signature and cached.get("expires", 0.0) > time.monotonic():
                 _PRESET_LIST_CACHE.move_to_end(user_key)
                 return copy.deepcopy(cached["value"])
-            previous_files = dict((cached or {}).get("files") or {})
 
         presets = []
         errors = []
         next_files = {}
         for filename, mtime_ns, size in signature:
             file_signature = (mtime_ns, size)
-            cached_file = previous_files.get(filename)
-            if cached_file and cached_file.get("signature") == file_signature:
-                entry = copy.deepcopy(cached_file.get("entry"))
-                error = copy.deepcopy(cached_file.get("error"))
-            else:
-                path = directory / filename
-                try:
-                    preset = load_preset(path.stem, user_id)
-                    entry = {
-                        "metadata": copy.deepcopy(preset["metadata"]),
-                        "api_graph": _compact_preset_list_graph(preset["api_graph"]),
-                    }
-                    error = None
-                except ScenePresetError as exc:
-                    entry = None
-                    error = {"preset_id": path.stem, "error": str(exc)}
+            path = directory / filename
+            try:
+                preset = load_preset(path.stem, user_id)
+                entry = {
+                    "metadata": copy.deepcopy(preset["metadata"]),
+                    "api_graph": _compact_preset_list_graph(preset["api_graph"]),
+                }
+                error = None
+            except ScenePresetError as exc:
+                entry = None
+                error = {"preset_id": path.stem, "error": str(exc)}
             next_files[filename] = {
                 "signature": file_signature,
                 "entry": copy.deepcopy(entry),
@@ -1244,6 +1264,7 @@ def list_presets(user_id="default"):
         with _PRESET_LIST_CACHE_LOCK:
             _PRESET_LIST_CACHE[user_key] = {
                 "signature": signature,
+                "expires": time.monotonic() + _PRESET_LIST_CACHE_TTL_SECONDS,
                 "files": next_files,
                 "value": copy.deepcopy(value),
             }

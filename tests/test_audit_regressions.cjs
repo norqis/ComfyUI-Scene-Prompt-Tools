@@ -543,18 +543,24 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
     };
     const errors = [];
     const notices = [];
+    const captureOrder = [];
+    let savedPayload = null;
     const context = {
         String,
         JSON,
         app: {
             graph: { serialize() { return { nodes: [] }; } },
-            async graphToPrompt() { return { output: {} }; },
+            async graphToPrompt() {
+                captureOrder.push("graphToPrompt");
+                return { output: { "matrix": { class_type: "SceneMatrix", inputs: { matrix_json: captureOrder[0] === "commit" ? "weight-draft" : "stale" } } } };
+            },
         },
+        activePopupContext: { node: { sceneMatrixLineDraftContext: { commitDrafts() { captureOrder.push("commit"); } } } },
         scenePresetList: [],
         syncAllScenePromptNames() {},
         applySceneSourceNodeNames(prompt) { return prompt; },
         findWidget(target, name) { return target.widgets.find((widget) => widget.name === name); },
-        api: { async fetchApi() { return { ok: true, payload: { metadata: { name: "Preset A" } } }; } },
+        api: { async fetchApi(_path, options) { savedPayload = JSON.parse(options.body); return { ok: true, payload: { metadata: { name: "Preset A" } } }; } },
         async readApiJson(response) { return response.payload; },
         async loadScenePresetList() { throw new Error("refresh offline"); },
         refreshAllScenePresetReferences() { throw new Error("must not refresh stale data"); },
@@ -564,8 +570,11 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
     };
     node.graph = context.app.graph;
     vm.createContext(context);
+    vm.runInContext(functionSource("commitActiveMatrixLineDraft"), context);
     vm.runInContext(functionSource("saveScenePreset"), context);
     await context.saveScenePreset(node);
+    assert.deepEqual(captureOrder, ["commit", "graphToPrompt"]);
+    assert.equal(savedPayload.api_graph.output.matrix.inputs.matrix_json, "weight-draft");
     assert.deepEqual(notices, []);
     assert.deepEqual(errors, [["Presetは保存しましたが、一覧を更新できませんでした。", "refresh offline"]]);
 }

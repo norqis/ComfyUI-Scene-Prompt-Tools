@@ -1,6 +1,7 @@
 import importlib
 import json
 import copy
+import os
 import sys
 import tempfile
 import threading
@@ -149,6 +150,28 @@ class ScenePresetTests(unittest.TestCase):
             "strength_clip": 0.7,
         }])
 
+    def test_save_prunes_root_and_extra_reroutes_for_removed_links(self):
+        workflow = {
+            "version": 1,
+            "nodes": [
+                {"id": 1, "type": "ScenePresetInput", "inputs": [], "outputs": [{"links": [10, 11]}]},
+                {"id": 2, "type": "ScenePrompter", "inputs": [{"name": "scene_prompt", "link": 10}], "outputs": [{"links": [12]}]},
+                {"id": 3, "type": "ScenePresetOutput", "inputs": [{"name": "scene_prompt", "link": 12}], "outputs": []},
+                {"id": 4, "type": "Unused", "inputs": [{"name": "scene_prompt", "link": 11}], "outputs": []},
+            ],
+            "links": [[10, 1, 0, 2, 0, "SCENE_PROMPT"], [11, 1, 0, 4, 0, "SCENE_PROMPT"], [12, 2, 0, 3, 0, "SCENE_PROMPT"]],
+            "reroutes": [{"id": 1, "linkIds": [10, 11]}],
+            "extra": {
+                "reroutes": [{"id": 2, "linkIds": [10, 11]}],
+                "linkExtensions": [{"id": 10, "parentId": 1}, {"id": 11, "parentId": 2}],
+            },
+        }
+        saved = self.save("reroutes", basic_nodes(), workflow=workflow)
+        saved_workflow = saved["workflow"]
+        self.assertEqual(saved_workflow["reroutes"][0]["linkIds"], [10])
+        self.assertEqual(saved_workflow["extra"]["reroutes"][0]["linkIds"], [10])
+        self.assertEqual(saved_workflow["extra"]["linkExtensions"], [{"id": 10, "parentId": 1}])
+
     def save(self, preset_id, nodes, name=None, workflow=None, user_id="default", output_node_id=None, expected_revision=None):
         if output_node_id is None:
             output_node_id = next((
@@ -239,6 +262,52 @@ class ScenePresetTests(unittest.TestCase):
             changed = self.module.load_preset("cached")
         self.assertEqual(read_json.call_count, 1)
         self.assertEqual(changed["api_graph"]["output"]["2"]["inputs"]["positive_base"], "second")
+
+    def test_expired_equal_signature_reloads_changed_preset_content(self):
+        self.save("cached-external", basic_nodes("first"))
+        path = self.module._preset_path("cached-external")
+        original_stat = path.stat()
+        with mock.patch.object(self.module.time, "monotonic", return_value=0):
+            self.assertEqual(self.module.load_preset("cached-external")["api_graph"]["output"]["2"]["inputs"]["positive_base"], "first")
+        original_text = path.read_text(encoding="utf-8")
+        original = json.loads(original_text)
+        changed = copy.deepcopy(original)
+        changed["api_graph"]["output"]["2"]["inputs"]["positive_base"] = "other"
+        changed["metadata"]["sha256"] = self.module._content_hash(changed["api_graph"], changed["workflow"])
+        changed_text = original_text.replace('"positive_base": "first"', '"positive_base": "other"', 1)
+        changed_text = changed_text.replace(
+            original["metadata"]["sha256"], changed["metadata"]["sha256"], 1,
+        )
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(changed_text)
+        self.assertEqual(path.stat().st_size, original_stat.st_size)
+        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        with mock.patch.object(self.module.time, "monotonic", return_value=999):
+            loaded = self.module.load_preset("cached-external")
+        self.assertEqual(loaded["api_graph"]["output"]["2"]["inputs"]["positive_base"], "other")
+
+    def test_expired_list_reloads_equal_signature_preset_content(self):
+        self.save("listed-external", basic_nodes("first"))
+        path = self.module._preset_path("listed-external")
+        original_stat = path.stat()
+        with mock.patch.object(self.module.time, "monotonic", return_value=0):
+            listed = self.module.list_presets()
+        first_hash = listed["presets"][0]["metadata"]["sha256"]
+        original_text = path.read_text(encoding="utf-8")
+        original = json.loads(original_text)
+        changed = copy.deepcopy(original)
+        changed["api_graph"]["output"]["2"]["inputs"]["positive_base"] = "other"
+        changed["metadata"]["sha256"] = self.module._content_hash(changed["api_graph"], changed["workflow"])
+        changed_text = original_text.replace('"positive_base": "first"', '"positive_base": "other"', 1)
+        changed_text = changed_text.replace(original["metadata"]["sha256"], changed["metadata"]["sha256"], 1)
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(changed_text)
+        self.assertEqual(path.stat().st_size, original_stat.st_size)
+        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        with mock.patch.object(self.module.time, "monotonic", return_value=999):
+            listed = self.module.list_presets()
+        self.assertEqual(listed["presets"][0]["metadata"]["sha256"], changed["metadata"]["sha256"])
+        self.assertNotEqual(listed["presets"][0]["metadata"]["sha256"], first_hash)
 
     def test_save_recreates_a_deleted_preset_when_expected_revision_is_stale(self):
         self.save("deleted", basic_nodes("first"))
@@ -1643,6 +1712,83 @@ class ScenePresetTests(unittest.TestCase):
         )
         runs.release_run_context(run_handle, "default")
         self.module.release_scene_preset_snapshot(run_handle)
+
+    def test_expanded_preset_keeps_last_sibling_model_and_physical_ancestor(self):
+        prompt_inputs = basic_nodes()["2"]["inputs"]
+        preset_nodes = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePrompter", "inputs": {**prompt_inputs, "prompt_name": "left", "scene_prompt": ["1", 0]}},
+            "3": {"class_type": "ScenePrompter", "inputs": {**prompt_inputs, "prompt_name": "right", "scene_prompt": ["1", 0]}},
+            "4": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "5": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "6": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["2", 0], "model": ["4", 0], "clip": ["4", 1], "vae": ["4", 2],
+            }},
+            "7": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["3", 0], "model": ["5", 0], "clip": ["5", 1], "vae": ["5", 2],
+            }},
+            "8": {"class_type": "ScenePrompterMerge", "inputs": {
+                "scene_prompt1": ["6", 0], "scene_prompt2": ["7", 0],
+            }},
+            "9": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["8", 0]}},
+        }
+        preset_workflow = {
+            "nodes": [
+                {"id": int(node_id), "type": node["class_type"], "inputs": [], "outputs": []}
+                for node_id, node in preset_nodes.items()
+            ] + [{"id": 10, "type": "Reroute", "inputs": [], "outputs": []}],
+            # This canvas-only bypass must survive path slicing, but must not restore Model A.
+            "links": [[1, 10, 0, 7, 0, "SCENE_PROMPT"]],
+            "groups": [],
+        }
+        snapshot = {"api_graph": graph(preset_nodes), "workflow": preset_workflow}
+        outer_prompt = {
+            "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "model-branches"}},
+            "21": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["20", 0]}},
+            "30": {"class_type": "EmptyImage", "inputs": {}},
+            "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["30", 0], "scene_info": ["21", 2]}},
+        }
+        outer_workflow = {
+            "nodes": [
+                {"id": int(node_id), "type": node["class_type"], "inputs": [], "outputs": []}
+                for node_id, node in outer_prompt.items()
+            ],
+            "links": [[1, 20, 0, 21, 0, "SCENE_PROMPT"], [2, 30, 0, 9, 0, "IMAGE"], [3, 21, 2, 9, 1, "SCENE_SAVE_INFO"]],
+            "groups": [],
+        }
+        _expanded_prompt, _expanded_workflow, aliases = self.preset_metadata.expand_preset_references(
+            outer_prompt, outer_workflow, {"model-branches": snapshot},
+        )
+        by_alias = {alias: node_id for node_id, alias in aliases.items()}
+        physical_id = str(next(node["id"] for node in _expanded_workflow["nodes"] if node.get("type") == "Reroute"))
+        runs = sys.modules[f"{self.module.__package__}.runs"]
+        run_handle = runs.create_run_context("default")
+        try:
+            with mock.patch.object(self.module, "snapshot_presets_for_metadata", return_value={"model-branches": snapshot}):
+                saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+                    outer_prompt,
+                    {"workflow": outer_workflow},
+                    "9",
+                    self.nodes.SAVE_METADATA_EXECUTION_PATH,
+                    {"run_handle": run_handle, "source_node_ids": ["20/2", "20/6", "20/3", "20/7", "20/8", "21"]},
+                    True,
+                )
+        finally:
+            runs.release_run_context(run_handle, "default")
+
+        self.assertNotIn(by_alias["20/4"], saved_prompt)
+        self.assertNotIn(by_alias["20/6"], saved_prompt)
+        self.assertIn(by_alias["20/5"], saved_prompt)
+        self.assertIn(by_alias["20/7"], saved_prompt)
+        self.assertEqual(saved_prompt[by_alias["20/8"]]["inputs"]["scene_prompt1"], [by_alias["20/2"], 0])
+        self.assertEqual(saved_prompt[by_alias["20/8"]]["inputs"]["scene_prompt2"], [by_alias["20/7"], 0])
+        saved_workflow = saved_extra["workflow"]
+        saved_ids = {str(node["id"]) for node in saved_workflow["nodes"]}
+        self.assertEqual(saved_ids, set(saved_prompt) | {physical_id})
+        self.assertTrue(all(
+            str(link[1]) in saved_ids and str(link[3]) in saved_ids
+            for link in saved_workflow["links"]
+        ))
 
     def test_snapshot_uses_real_scene_nodes_for_expand_total(self):
         nodes = basic_nodes()

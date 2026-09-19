@@ -202,6 +202,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
         Number,
         Math,
         structuredClone,
+        activePopupContext: null,
         app: {
             graph: graphB,
             async graphToPrompt() {
@@ -245,6 +246,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
         "promptDescendantIds",
         "promptAncestorIds",
         "sliceSceneBatchPrompt",
+        "commitActiveMatrixLineDraft",
         "createSceneBatchPromptSnapshot",
         "sceneBatchNodeRunId",
         "sceneNodeForRun",
@@ -335,8 +337,9 @@ async function testScenePresetResolution() {
                             output: {
                                 "1": { class_type: "ScenePresetInput", inputs: {} },
                                 "2": { class_type: "SceneMatrix", inputs: { matrix_json: "{\"version\":1,\"sets\":[{\"enabled\":true},{\"enabled\":true}]}", scene_prompt: ["1", 0] } },
-                                "3": { class_type: "ScenePromptCounter", inputs: { count: 3, scene_prompt: ["2", 0] } },
-                                "4": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["3", 0] } },
+                                "3": { class_type: "SceneApplyLora", inputs: { scene_prompt: ["2", 0] } },
+                                "4": { class_type: "ScenePromptCounter", inputs: { count: 3, scene_prompt: ["3", 0] } },
+                                "5": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
                             },
                         },
                     },
@@ -360,8 +363,9 @@ async function testScenePresetResolution() {
                                 output: {
                                     "1": { class_type: "ScenePresetInput", inputs: {} },
                                     "2": { class_type: "SceneMatrix", inputs: { matrix_json: "{\"version\":1,\"sets\":[{\"enabled\":true},{\"enabled\":true}]}", scene_prompt: ["1", 0] } },
-                                    "3": { class_type: "ScenePromptCounter", inputs: { count: 3, scene_prompt: ["2", 0] } },
-                                    "4": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["3", 0] } },
+                                    "3": { class_type: "SceneApplyLora", inputs: { scene_prompt: ["2", 0] } },
+                                "4": { class_type: "ScenePromptCounter", inputs: { count: 3, scene_prompt: ["3", 0] } },
+                                "5": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
                                 },
                             },
                         },
@@ -672,7 +676,12 @@ async function testPresetErrorMarksOnlyTargetReference() {
 }
 
 async function testSelectedExpandBranchOnlyQueues() {
-    const branchContext = { Map, Set, Object, String, Array, applySceneSourceNodeNames(prompt) { return prompt; } };
+    let snapshotDraftCommitted = false;
+    const branchContext = {
+        Map, Set, Object, String, Array,
+        activePopupContext: { node: { sceneMatrixLineDraftContext: { commitDrafts() { snapshotDraftCommitted = true; } } } },
+        applySceneSourceNodeNames(prompt) { return prompt; },
+    };
     vm.createContext(branchContext);
     for (const name of [
         "apiLink",
@@ -683,6 +692,7 @@ async function testSelectedExpandBranchOnlyQueues() {
         "promptDescendantIds",
         "promptAncestorIds",
         "sliceSceneBatchPrompt",
+        "commitActiveMatrixLineDraft",
         "createSceneBatchPromptSnapshot",
     ]) {
         vm.runInContext(functionSource(name), branchContext);
@@ -700,7 +710,10 @@ async function testSelectedExpandBranchOnlyQueues() {
             "13": { class_type: "SaveImage", inputs: { images: ["12", 0] } },
         },
     };
-    branchContext.app = { async graphToPrompt() { return fullPrompt; } };
+    branchContext.app = { async graphToPrompt() {
+        assert.equal(snapshotDraftCommitted, true, "continuous snapshot commits an open Matrix draft before graphToPrompt");
+        return fullPrompt;
+    } };
     const selected = await branchContext.createSceneBatchPromptSnapshot("2");
     assert.deepEqual(Object.keys(selected.output).sort(), ["1", "2", "3", "4", "5"]);
     branchContext.applySceneRunHandle(selected, "opaque-handle");

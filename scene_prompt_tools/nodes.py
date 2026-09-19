@@ -551,11 +551,15 @@ SCENE_NODE_TYPES = {
 }
 
 
-def _scene_source_ids(scene_info):
+def _scene_source_id_list(scene_info):
     if not isinstance(scene_info, dict):
-        return set()
+        return []
     values = scene_info.get("source_node_ids", [])
-    return {str(value) for value in values if str(value).strip()} if isinstance(values, list) else set()
+    return list(dict.fromkeys(str(value) for value in values if str(value).strip())) if isinstance(values, list) else []
+
+
+def _scene_source_ids(scene_info):
+    return set(_scene_source_id_list(scene_info))
 
 
 _EXPAND_WORKFLOW_WIDGET_INDEX = {
@@ -686,6 +690,150 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
     return included
 
 
+def _scene_prompt_input_names(node):
+    class_type = node.get("class_type") if isinstance(node, dict) else ""
+    if class_type == "ScenePrompterQueue":
+        return SCENE_PROMPT_INPUT_NAMES
+    if class_type == "ScenePrompterMerge":
+        return ("scene_prompt1", "scene_prompt2")
+    return ("scene_prompt",)
+
+
+def _scene_prompt_input_links(prompt, node_id):
+    node = prompt.get(str(node_id)) if isinstance(prompt, dict) else None
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict):
+        return ()
+    return tuple(
+        (name, source_id, value[1])
+        for name in _scene_prompt_input_names(node)
+        if (source_id := _prompt_link_source(inputs.get(name), str(node_id), name)) is not None
+        for value in (inputs[name],)
+    )
+
+
+def _contract_superseded_model_sources(prompt, selected_scene_ids):
+    """Keep the row-order effective Apply Model while preserving Scene routes."""
+    selected_order = list(dict.fromkeys(str(node_id) for node_id in selected_scene_ids if str(node_id).strip()))
+    selected = set(selected_order)
+    if not isinstance(prompt, dict):
+        return prompt, selected, {}
+
+    model_ids = [
+        node_id for node_id in selected_order
+        if isinstance(prompt.get(node_id), dict) and prompt[node_id].get("class_type") == "SceneApplyModel"
+    ]
+    superseded = set(model_ids[:-1])
+
+    replacements = {}
+
+    def upstream_link(node_id, seen=None):
+        if node_id in replacements:
+            return replacements[node_id]
+        seen = set() if seen is None else seen
+        if node_id in seen:
+            return None
+        seen.add(node_id)
+        links = _scene_prompt_input_links(prompt, node_id)
+        if not links:
+            replacements[node_id] = None
+            return None
+        _name, source_id, output_index = links[0]
+        replacement = upstream_link(source_id, seen) if source_id in superseded else [source_id, output_index]
+        replacements[node_id] = replacement
+        return replacement
+
+    for node_id in superseded:
+        upstream_link(node_id)
+
+    contracted = copy.deepcopy(prompt)
+    for node_id, node in contracted.items():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for name in _scene_prompt_input_names(node):
+            source_id = _prompt_link_source(inputs.get(name), node_id, name)
+            if source_id not in replacements:
+                continue
+            replacement = replacements[source_id]
+            if replacement is None:
+                inputs.pop(name, None)
+            else:
+                inputs[name] = replacement
+    return contracted, selected - superseded, replacements
+
+
+def _sync_workflow_node_links(workflow):
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    links = workflow.get("links") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list) or not isinstance(links, list):
+        return
+    sources = {}
+    targets = {}
+    for link in links:
+        parts = _workflow_link_parts(link)
+        if parts is None:
+            continue
+        link_id, source_id, source_slot, target_id, target_slot, _type = parts
+        sources.setdefault((source_id, source_slot), []).append(link_id)
+        targets[(target_id, target_slot)] = link_id
+    for node in nodes:
+        node_id = _workflow_node_id(node)
+        if node_id is None:
+            continue
+        for index, slot in enumerate(node.get("inputs", []) if isinstance(node.get("inputs"), list) else []):
+            if isinstance(slot, dict):
+                slot["link"] = targets.get((node_id, index))
+        for index, slot in enumerate(node.get("outputs", []) if isinstance(node.get("outputs"), list) else []):
+            if isinstance(slot, dict) and isinstance(slot.get("links"), list):
+                slot["links"] = list(sources.get((node_id, index), ()))
+
+
+def _contract_superseded_model_workflow(workflow, replacements):
+    if not replacements or not isinstance(workflow, dict):
+        return workflow
+    contracted = copy.deepcopy(workflow)
+    links = contracted.get("links")
+    if not isinstance(links, list):
+        return contracted
+    for link in links:
+        parts = _workflow_link_parts(link)
+        if parts is None or parts[1] not in replacements:
+            continue
+        replacement = replacements[parts[1]]
+        if replacement is None:
+            continue
+        source_id, source_slot = replacement
+        if isinstance(link, list):
+            link[1], link[2] = source_id, source_slot
+        elif isinstance(link, dict):
+            link["origin_id"], link["origin_slot"] = source_id, source_slot
+    _sync_workflow_node_links(contracted)
+    return contracted
+
+
+def _connected_expand_resource_outputs(prompt, unique_id):
+    """Return connected MODEL, CLIP, and VAE outputs for an Expand node."""
+    if not isinstance(prompt, dict) or unique_id is None:
+        return set()
+    source_id = str(unique_id)
+    outputs = set()
+    for node in prompt.values():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if (
+                isinstance(value, (list, tuple))
+                and len(value) == 2
+                and str(value[0]) == source_id
+                and type(value[1]) is int
+                and 5 <= value[1] <= 7
+            ):
+                outputs.add(value[1])
+    return outputs
+
+
 def _metadata_for_save_mode(
     prompt,
     extra_pnginfo,
@@ -768,28 +916,33 @@ def _metadata_for_save_mode(
         expanded_extra["workflow"] = expanded_workflow
         if metadata_mode == SAVE_METADATA_WORKFLOW:
             return expanded_prompt, expanded_extra
-        selected_sources = _scene_source_ids(scene_info)
+        selected_source_ids = _scene_source_id_list(scene_info)
         replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases)
-        selected_ids = {
+        selected_ids = [
             node_id
-            for node_id, source_id in source_aliases.items()
-            if source_id in selected_sources
-        }
-        ancestor_ids = _selected_ancestor_ids(
-            expanded_prompt, unique_id, scene_info, selected_ids
+            for source_id in selected_source_ids
+            for node_id, alias in source_aliases.items()
+            if alias == source_id
+        ]
+        contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
+            expanded_prompt, selected_ids,
         )
-        saved_prompt = _slice_prompt_to_ids(expanded_prompt, ancestor_ids)
+        contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements)
+        ancestor_ids = _selected_ancestor_ids(
+            contracted_prompt, unique_id, scene_info, selected_ids
+        )
+        saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
         saved_extra = {
             key: value
             for key, value in expanded_extra.items()
             if key not in {"prompt", "workflow"}
         }
         saved_extra["workflow"] = _slice_workflow_for_output(
-            expanded_workflow,
+            contracted_workflow,
             ancestor_ids,
             saved_prompt,
             preserve_physical_ancestors=True,
-            physical_prompt_ids=set(expanded_prompt),
+            physical_prompt_ids=set(contracted_prompt),
         )
         _apply_replay_expand_values(
             saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
@@ -799,8 +952,12 @@ def _metadata_for_save_mode(
     if metadata_mode == SAVE_METADATA_WORKFLOW:
         return prompt, extra_pnginfo
 
-    ancestor_ids = _selected_ancestor_ids(prompt, unique_id, scene_info)
-    saved_prompt = _slice_prompt_to_ids(prompt, ancestor_ids)
+    selected_source_ids = _scene_source_id_list(scene_info)
+    contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(
+        prompt, selected_source_ids,
+    )
+    ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)
+    saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
     replay_values = _replay_expand_values(scene_info, prompt)
     saved_extra = None
     if extra_pnginfo is not None:
@@ -811,7 +968,7 @@ def _metadata_for_save_mode(
         }
         if "workflow" in extra_pnginfo:
             saved_extra["workflow"] = _slice_workflow_for_output(
-                extra_pnginfo["workflow"], ancestor_ids, saved_prompt
+                _contract_superseded_model_workflow(extra_pnginfo["workflow"], replacements), ancestor_ids, saved_prompt
             )
     _apply_replay_expand_values(
         saved_prompt,
@@ -2207,6 +2364,10 @@ class ScenePromptExpand:
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
+        if row.get("model_links") is None and _connected_expand_resource_outputs(prompt, unique_id):
+            raise ValueError(
+                "Scene Prompt ExpandのMODEL、CLIP、VAE出力を使うには、同じScene経路にScene Apply Modelを接続してください。"
+            )
         global_index = int(item.get("global_index", 0) or 0)
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + global_index) % SEED_MODULO
@@ -2416,9 +2577,11 @@ class SceneSaveImage:
                 img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
 
                 with _FILENAME_RESERVATION_LOCK:
+                    counter = max(counter, _cached_next_index(run_root, extension, padding, filename_prefix))
                     output_path, reservation_path, filename, counter = _reserve_output_path(
                         output_dir, extension, padding, counter, filename_prefix
                     )
+                    _remember_next_index(run_root, extension, padding, counter + 1, filename_prefix)
                 reservation_paths.append(reservation_path)
                 descriptor, temp_path = tempfile.mkstemp(prefix=".scene-save-", suffix=".tmp", dir=output_dir)
                 os.close(descriptor)
