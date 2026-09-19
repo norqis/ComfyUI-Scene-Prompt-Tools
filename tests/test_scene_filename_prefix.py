@@ -1075,40 +1075,115 @@ class SceneFilenamePrefixTests(unittest.TestCase):
 
     def test_generation_path_metadata_drops_superseded_serial_model_loader(self):
         prompt = {
+            "scene": {"class_type": "ScenePrompter", "inputs": {}},
             "loader_a": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
             "loader_b": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
             "model_a": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["scene", 0],
                 "model": ["loader_a", 0], "clip": ["loader_a", 1], "vae": ["loader_a", 2],
             }},
+            "lora": {"class_type": "SceneApplyLora", "inputs": {"scene_prompt": ["model_a", 0]}},
             "model_b": {"class_type": "SceneApplyModel", "inputs": {
-                "scene_prompt": ["model_a", 0],
+                "scene_prompt": ["lora", 0],
                 "model": ["loader_b", 0], "clip": ["loader_b", 1], "vae": ["loader_b", 2],
             }},
             "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["model_b", 0]}},
             "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["expand", 4], "scene_info": ["expand", 2]}},
         }
+        workflow_nodes = [
+            {"id": node_id, "type": node["class_type"], "inputs": [], "outputs": []}
+            for node_id, node in prompt.items()
+        ]
+        workflow_by_id = {str(node["id"]): node for node in workflow_nodes}
+        links = []
+        for link_id, (target_id, input_name, value) in enumerate((
+            (target_id, input_name, value)
+            for target_id, node in prompt.items()
+            for input_name, value in node["inputs"].items()
+            if isinstance(value, list)
+        ), start=1):
+            source_id, source_slot = value
+            source = workflow_by_id[str(source_id)]
+            while len(source["outputs"]) <= source_slot:
+                source["outputs"].append({"links": []})
+            source["outputs"][source_slot]["links"].append(link_id)
+            target = workflow_by_id[target_id]
+            target_slot = len(target["inputs"])
+            target["inputs"].append({"name": input_name, "link": link_id})
+            links.append([link_id, source_id, source_slot, target_id, target_slot, "*"])
         workflow = {
-            "nodes": [{"id": node_id, "type": node["class_type"], "inputs": [], "outputs": []} for node_id, node in prompt.items()],
-            "links": [
-                [1, "loader_a", 0, "model_a", 0, "MODEL"], [2, "loader_a", 1, "model_a", 1, "CLIP"],
-                [3, "loader_a", 2, "model_a", 2, "VAE"], [4, "model_a", 0, "model_b", 0, "SCENE_PROMPT"],
-                [5, "loader_b", 0, "model_b", 1, "MODEL"], [6, "loader_b", 1, "model_b", 2, "CLIP"],
-                [7, "loader_b", 2, "model_b", 3, "VAE"], [8, "model_b", 0, "expand", 0, "SCENE_PROMPT"],
-                [9, "expand", 4, "save", 0, "LATENT"], [10, "expand", 2, "save", 1, "SCENE_SAVE_INFO"],
-            ],
+            "nodes": workflow_nodes, "links": links,
             "groups": [],
         }
         saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
             prompt, {"workflow": workflow}, "save", self.nodes.SAVE_METADATA_EXECUTION_PATH,
-            {"source_node_ids": ["model_a", "model_b", "expand"]},
+            {"source_node_ids": ["scene", "model_a", "lora", "model_b", "expand"]},
         )
-        self.assertEqual(set(saved_prompt), {"loader_b", "model_b", "expand", "save"})
-        self.assertNotIn("scene_prompt", saved_prompt["model_b"]["inputs"])
-        self.assertEqual({str(node["id"]) for node in saved_extra["workflow"]["nodes"]}, set(saved_prompt))
+        self.assertEqual(set(saved_prompt), {"scene", "loader_b", "lora", "model_b", "expand", "save"})
+        self.assertNotIn("loader_a", saved_prompt)
+        self.assertNotIn("model_a", saved_prompt)
+        self.assertEqual(saved_prompt["lora"]["inputs"]["scene_prompt"], ["scene", 0])
+        self.assertEqual(saved_prompt["model_b"]["inputs"]["scene_prompt"], ["lora", 0])
+        saved_workflow = saved_extra["workflow"]
+        self.assertEqual({str(node["id"]) for node in saved_workflow["nodes"]}, set(saved_prompt))
+        self.assertIn(["scene", 0, "lora"], [[str(link[1]), link[2], str(link[3])] for link in saved_workflow["links"]])
         for node in saved_prompt.values():
             for value in node["inputs"].values():
                 if isinstance(value, list) and len(value) == 2:
                     self.assertIn(str(value[0]), saved_prompt)
+        for link in saved_workflow["links"]:
+            self.assertIn(str(link[1]), saved_prompt)
+            self.assertIn(str(link[3]), saved_prompt)
+
+    def test_generation_path_metadata_contracts_models_behind_merge_and_queue(self):
+        prompt = {
+            "left": {"class_type": "ScenePrompter", "inputs": {}},
+            "right": {"class_type": "ScenePrompter", "inputs": {}},
+            "loader_a": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "loader_b": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "model_a": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["left", 0], "model": ["loader_a", 0], "clip": ["loader_a", 1], "vae": ["loader_a", 2],
+            }},
+            "merge": {"class_type": "ScenePrompterMerge", "inputs": {"scene_prompt1": ["model_a", 0], "scene_prompt2": ["right", 0]}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["merge", 0]}},
+            "model_b": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["queue", 0], "model": ["loader_b", 0], "clip": ["loader_b", 1], "vae": ["loader_b", 2],
+            }},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["model_b", 0]}},
+            "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["expand", 4], "scene_info": ["expand", 2]}},
+        }
+        workflow_nodes = [{"id": node_id, "type": node["class_type"], "inputs": [], "outputs": []} for node_id, node in prompt.items()]
+        by_id = {str(node["id"]): node for node in workflow_nodes}
+        links = []
+        for link_id, (target_id, input_name, value) in enumerate((
+            (target_id, input_name, value) for target_id, node in prompt.items()
+            for input_name, value in node["inputs"].items() if isinstance(value, list)
+        ), start=1):
+            source_id, source_slot = value
+            source = by_id[str(source_id)]
+            while len(source["outputs"]) <= source_slot:
+                source["outputs"].append({"links": []})
+            source["outputs"][source_slot]["links"].append(link_id)
+            target = by_id[target_id]
+            target_slot = len(target["inputs"])
+            target["inputs"].append({"name": input_name, "link": link_id})
+            links.append([link_id, source_id, source_slot, target_id, target_slot, "*"])
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt, {"workflow": {"nodes": workflow_nodes, "links": links, "groups": []}}, "save",
+            self.nodes.SAVE_METADATA_EXECUTION_PATH,
+            {"source_node_ids": ["left", "right", "model_a", "merge", "queue", "model_b", "expand"]},
+        )
+        self.assertNotIn("loader_a", saved_prompt)
+        self.assertNotIn("model_a", saved_prompt)
+        self.assertEqual(saved_prompt["merge"]["inputs"]["scene_prompt1"], ["left", 0])
+        self.assertEqual(saved_prompt["queue"]["inputs"]["scene_prompt1"], ["merge", 0])
+        self.assertEqual(saved_prompt["model_b"]["inputs"]["scene_prompt"], ["queue", 0])
+        saved_ids = set(saved_prompt)
+        self.assertEqual({str(node["id"]) for node in saved_extra["workflow"]["nodes"]}, saved_ids)
+        for node in saved_prompt.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and len(value) == 2:
+                    self.assertIn(str(value[0]), saved_ids)
 
     def test_execution_path_rebases_queue_second_branch_and_preserves_repeat(self):
         def branch(source_id, text, count):

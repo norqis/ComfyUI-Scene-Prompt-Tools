@@ -656,7 +656,6 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
 def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=None):
     """Keep ordinary image ancestors, but only selected Scene-plan branches."""
     selected_scene_ids = _scene_source_ids(scene_info) if selected_scene_ids is None else selected_scene_ids
-    selected_scene_ids = _without_superseded_model_sources(prompt, selected_scene_ids)
     if not selected_scene_ids:
         return _prompt_ancestor_ids(prompt, target_id)
 
@@ -687,35 +686,137 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
     return included
 
 
-def _without_superseded_model_sources(prompt, selected_scene_ids):
-    """Keep the final Scene Apply Model on a selected serial route.
+def _scene_prompt_input_names(node):
+    class_type = node.get("class_type") if isinstance(node, dict) else ""
+    if class_type == "ScenePrompterQueue":
+        return SCENE_PROMPT_INPUT_NAMES
+    if class_type == "ScenePrompterMerge":
+        return ("scene_prompt1", "scene_prompt2")
+    return ("scene_prompt",)
 
-    Earlier model bundles are overridden by the downstream Apply Model.  Dropping
-    just those model nodes leaves intervening Scene transforms (such as LoRAs)
-    connected and produces a compact, runnable metadata prompt.
-    """
-    if not isinstance(prompt, dict):
-        return set(selected_scene_ids)
+
+def _scene_prompt_input_links(prompt, node_id):
+    node = prompt.get(str(node_id)) if isinstance(prompt, dict) else None
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict):
+        return ()
+    return tuple(
+        (name, source_id, value[1])
+        for name in _scene_prompt_input_names(node)
+        if (source_id := _prompt_link_source(inputs.get(name), str(node_id), name)) is not None
+        for value in (inputs[name],)
+    )
+
+
+def _contract_superseded_model_sources(prompt, selected_scene_ids):
+    """Remove overridden Apply Model nodes while preserving their Scene routes."""
     selected = {str(node_id) for node_id in selected_scene_ids}
+    if not isinstance(prompt, dict):
+        return prompt, selected, {}
+
     superseded = set()
     for node_id in selected:
         node = prompt.get(node_id)
         if not isinstance(node, dict) or node.get("class_type") != "SceneApplyModel":
             continue
-        current_id = node_id
+        pending = [node_id]
         seen = set()
-        while current_id not in seen:
+        while pending:
+            current_id = str(pending.pop())
+            if current_id in seen:
+                continue
             seen.add(current_id)
-            current = prompt.get(current_id)
-            inputs = current.get("inputs") if isinstance(current, dict) else None
-            source_id = _prompt_link_source((inputs or {}).get("scene_prompt"), current_id, "scene_prompt")
-            if source_id is None:
-                break
-            current_id = str(source_id)
-            source = prompt.get(current_id)
-            if isinstance(source, dict) and source.get("class_type") == "SceneApplyModel" and current_id in selected:
-                superseded.add(current_id)
-    return selected - superseded
+            for _name, source_id, _slot in _scene_prompt_input_links(prompt, current_id):
+                source = prompt.get(source_id)
+                if isinstance(source, dict) and source.get("class_type") == "SceneApplyModel" and source_id in selected:
+                    superseded.add(source_id)
+                pending.append(source_id)
+
+    replacements = {}
+
+    def upstream_link(node_id, seen=None):
+        if node_id in replacements:
+            return replacements[node_id]
+        seen = set() if seen is None else seen
+        if node_id in seen:
+            return None
+        seen.add(node_id)
+        links = _scene_prompt_input_links(prompt, node_id)
+        if not links:
+            replacements[node_id] = None
+            return None
+        _name, source_id, output_index = links[0]
+        replacement = upstream_link(source_id, seen) if source_id in superseded else [source_id, output_index]
+        replacements[node_id] = replacement
+        return replacement
+
+    for node_id in superseded:
+        upstream_link(node_id)
+
+    contracted = copy.deepcopy(prompt)
+    for node_id, node in contracted.items():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for name in _scene_prompt_input_names(node):
+            source_id = _prompt_link_source(inputs.get(name), node_id, name)
+            if source_id not in replacements:
+                continue
+            replacement = replacements[source_id]
+            if replacement is None:
+                inputs.pop(name, None)
+            else:
+                inputs[name] = replacement
+    return contracted, selected - superseded, replacements
+
+
+def _sync_workflow_node_links(workflow):
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    links = workflow.get("links") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list) or not isinstance(links, list):
+        return
+    sources = {}
+    targets = {}
+    for link in links:
+        parts = _workflow_link_parts(link)
+        if parts is None:
+            continue
+        link_id, source_id, source_slot, target_id, target_slot, _type = parts
+        sources.setdefault((source_id, source_slot), []).append(link_id)
+        targets[(target_id, target_slot)] = link_id
+    for node in nodes:
+        node_id = _workflow_node_id(node)
+        if node_id is None:
+            continue
+        for index, slot in enumerate(node.get("inputs", []) if isinstance(node.get("inputs"), list) else []):
+            if isinstance(slot, dict):
+                slot["link"] = targets.get((node_id, index))
+        for index, slot in enumerate(node.get("outputs", []) if isinstance(node.get("outputs"), list) else []):
+            if isinstance(slot, dict) and isinstance(slot.get("links"), list):
+                slot["links"] = list(sources.get((node_id, index), ()))
+
+
+def _contract_superseded_model_workflow(workflow, replacements):
+    if not replacements or not isinstance(workflow, dict):
+        return workflow
+    contracted = copy.deepcopy(workflow)
+    links = contracted.get("links")
+    if not isinstance(links, list):
+        return contracted
+    for link in links:
+        parts = _workflow_link_parts(link)
+        if parts is None or parts[1] not in replacements:
+            continue
+        replacement = replacements[parts[1]]
+        if replacement is None:
+            continue
+        source_id, source_slot = replacement
+        if isinstance(link, list):
+            link[1], link[2] = source_id, source_slot
+        elif isinstance(link, dict):
+            link["origin_id"], link["origin_slot"] = source_id, source_slot
+    _sync_workflow_node_links(contracted)
+    return contracted
 
 
 def _connected_expand_resource_outputs(prompt, unique_id):
@@ -829,21 +930,25 @@ def _metadata_for_save_mode(
             for node_id, source_id in source_aliases.items()
             if source_id in selected_sources
         }
-        ancestor_ids = _selected_ancestor_ids(
-            expanded_prompt, unique_id, scene_info, selected_ids
+        contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
+            expanded_prompt, selected_ids,
         )
-        saved_prompt = _slice_prompt_to_ids(expanded_prompt, ancestor_ids)
+        contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements)
+        ancestor_ids = _selected_ancestor_ids(
+            contracted_prompt, unique_id, scene_info, selected_ids
+        )
+        saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
         saved_extra = {
             key: value
             for key, value in expanded_extra.items()
             if key not in {"prompt", "workflow"}
         }
         saved_extra["workflow"] = _slice_workflow_for_output(
-            expanded_workflow,
+            contracted_workflow,
             ancestor_ids,
             saved_prompt,
             preserve_physical_ancestors=True,
-            physical_prompt_ids=set(expanded_prompt),
+            physical_prompt_ids=set(contracted_prompt),
         )
         _apply_replay_expand_values(
             saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
@@ -853,8 +958,10 @@ def _metadata_for_save_mode(
     if metadata_mode == SAVE_METADATA_WORKFLOW:
         return prompt, extra_pnginfo
 
-    ancestor_ids = _selected_ancestor_ids(prompt, unique_id, scene_info)
-    saved_prompt = _slice_prompt_to_ids(prompt, ancestor_ids)
+    selected_sources = _scene_source_ids(scene_info)
+    contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(prompt, selected_sources)
+    ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)
+    saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
     replay_values = _replay_expand_values(scene_info, prompt)
     saved_extra = None
     if extra_pnginfo is not None:
@@ -865,7 +972,7 @@ def _metadata_for_save_mode(
         }
         if "workflow" in extra_pnginfo:
             saved_extra["workflow"] = _slice_workflow_for_output(
-                extra_pnginfo["workflow"], ancestor_ids, saved_prompt
+                _contract_superseded_model_workflow(extra_pnginfo["workflow"], replacements), ancestor_ids, saved_prompt
             )
     _apply_replay_expand_values(
         saved_prompt,

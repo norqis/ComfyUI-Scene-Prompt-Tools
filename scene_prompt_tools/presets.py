@@ -43,6 +43,7 @@ _PRESET_LOCK = threading.RLock()
 _PRESET_LIST_CACHE_LOCK = threading.RLock()
 _PRESET_LIST_CACHE = OrderedDict()
 _PRESET_LIST_CACHE_MAX_USERS = 64
+_PRESET_LIST_CACHE_TTL_SECONDS = 2.0
 _PRESET_FILE_CACHE_LOCK = threading.RLock()
 _PRESET_FILE_CACHE = OrderedDict()
 _PRESET_FILE_CACHE_MAX_ITEMS = 512
@@ -1227,32 +1228,26 @@ def list_presets(user_id="default"):
         signature = _preset_directory_signature(directory)
         with _PRESET_LIST_CACHE_LOCK:
             cached = _PRESET_LIST_CACHE.get(user_key)
-            if cached and cached.get("signature") == signature:
+            if cached and cached.get("signature") == signature and cached.get("expires", 0.0) > time.monotonic():
                 _PRESET_LIST_CACHE.move_to_end(user_key)
                 return copy.deepcopy(cached["value"])
-            previous_files = dict((cached or {}).get("files") or {})
 
         presets = []
         errors = []
         next_files = {}
         for filename, mtime_ns, size in signature:
             file_signature = (mtime_ns, size)
-            cached_file = previous_files.get(filename)
-            if cached_file and cached_file.get("signature") == file_signature:
-                entry = copy.deepcopy(cached_file.get("entry"))
-                error = copy.deepcopy(cached_file.get("error"))
-            else:
-                path = directory / filename
-                try:
-                    preset = load_preset(path.stem, user_id)
-                    entry = {
-                        "metadata": copy.deepcopy(preset["metadata"]),
-                        "api_graph": _compact_preset_list_graph(preset["api_graph"]),
-                    }
-                    error = None
-                except ScenePresetError as exc:
-                    entry = None
-                    error = {"preset_id": path.stem, "error": str(exc)}
+            path = directory / filename
+            try:
+                preset = load_preset(path.stem, user_id)
+                entry = {
+                    "metadata": copy.deepcopy(preset["metadata"]),
+                    "api_graph": _compact_preset_list_graph(preset["api_graph"]),
+                }
+                error = None
+            except ScenePresetError as exc:
+                entry = None
+                error = {"preset_id": path.stem, "error": str(exc)}
             next_files[filename] = {
                 "signature": file_signature,
                 "entry": copy.deepcopy(entry),
@@ -1269,6 +1264,7 @@ def list_presets(user_id="default"):
         with _PRESET_LIST_CACHE_LOCK:
             _PRESET_LIST_CACHE[user_key] = {
                 "signature": signature,
+                "expires": time.monotonic() + _PRESET_LIST_CACHE_TTL_SECONDS,
                 "files": next_files,
                 "value": copy.deepcopy(value),
             }

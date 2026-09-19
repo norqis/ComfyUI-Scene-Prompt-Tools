@@ -286,6 +286,29 @@ class ScenePresetTests(unittest.TestCase):
             loaded = self.module.load_preset("cached-external")
         self.assertEqual(loaded["api_graph"]["output"]["2"]["inputs"]["positive_base"], "other")
 
+    def test_expired_list_reloads_equal_signature_preset_content(self):
+        self.save("listed-external", basic_nodes("first"))
+        path = self.module._preset_path("listed-external")
+        original_stat = path.stat()
+        with mock.patch.object(self.module.time, "monotonic", return_value=0):
+            listed = self.module.list_presets()
+        first_hash = listed["presets"][0]["metadata"]["sha256"]
+        original_text = path.read_text(encoding="utf-8")
+        original = json.loads(original_text)
+        changed = copy.deepcopy(original)
+        changed["api_graph"]["output"]["2"]["inputs"]["positive_base"] = "other"
+        changed["metadata"]["sha256"] = self.module._content_hash(changed["api_graph"], changed["workflow"])
+        changed_text = original_text.replace('"positive_base": "first"', '"positive_base": "other"', 1)
+        changed_text = changed_text.replace(original["metadata"]["sha256"], changed["metadata"]["sha256"], 1)
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(changed_text)
+        self.assertEqual(path.stat().st_size, original_stat.st_size)
+        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        with mock.patch.object(self.module.time, "monotonic", return_value=999):
+            listed = self.module.list_presets()
+        self.assertEqual(listed["presets"][0]["metadata"]["sha256"], changed["metadata"]["sha256"])
+        self.assertNotEqual(listed["presets"][0]["metadata"]["sha256"], first_hash)
+
     def test_save_recreates_a_deleted_preset_when_expected_revision_is_stale(self):
         self.save("deleted", basic_nodes("first"))
         path = self.module._preset_path("deleted")
