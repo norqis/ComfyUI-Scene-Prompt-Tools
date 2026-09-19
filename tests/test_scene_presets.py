@@ -1,6 +1,7 @@
 import importlib
 import json
 import copy
+import os
 import sys
 import tempfile
 import threading
@@ -149,6 +150,28 @@ class ScenePresetTests(unittest.TestCase):
             "strength_clip": 0.7,
         }])
 
+    def test_save_prunes_root_and_extra_reroutes_for_removed_links(self):
+        workflow = {
+            "version": 1,
+            "nodes": [
+                {"id": 1, "type": "ScenePresetInput", "inputs": [], "outputs": [{"links": [10, 11]}]},
+                {"id": 2, "type": "ScenePrompter", "inputs": [{"name": "scene_prompt", "link": 10}], "outputs": [{"links": [12]}]},
+                {"id": 3, "type": "ScenePresetOutput", "inputs": [{"name": "scene_prompt", "link": 12}], "outputs": []},
+                {"id": 4, "type": "Unused", "inputs": [{"name": "scene_prompt", "link": 11}], "outputs": []},
+            ],
+            "links": [[10, 1, 0, 2, 0, "SCENE_PROMPT"], [11, 1, 0, 4, 0, "SCENE_PROMPT"], [12, 2, 0, 3, 0, "SCENE_PROMPT"]],
+            "reroutes": [{"id": 1, "linkIds": [10, 11]}],
+            "extra": {
+                "reroutes": [{"id": 2, "linkIds": [10, 11]}],
+                "linkExtensions": [{"id": 10, "parentId": 1}, {"id": 11, "parentId": 2}],
+            },
+        }
+        saved = self.save("reroutes", basic_nodes(), workflow=workflow)
+        saved_workflow = saved["workflow"]
+        self.assertEqual(saved_workflow["reroutes"][0]["linkIds"], [10])
+        self.assertEqual(saved_workflow["extra"]["reroutes"][0]["linkIds"], [10])
+        self.assertEqual(saved_workflow["extra"]["linkExtensions"], [{"id": 10, "parentId": 1}])
+
     def save(self, preset_id, nodes, name=None, workflow=None, user_id="default", output_node_id=None, expected_revision=None):
         if output_node_id is None:
             output_node_id = next((
@@ -239,6 +262,29 @@ class ScenePresetTests(unittest.TestCase):
             changed = self.module.load_preset("cached")
         self.assertEqual(read_json.call_count, 1)
         self.assertEqual(changed["api_graph"]["output"]["2"]["inputs"]["positive_base"], "second")
+
+    def test_expired_equal_signature_reloads_changed_preset_content(self):
+        self.save("cached-external", basic_nodes("first"))
+        path = self.module._preset_path("cached-external")
+        original_stat = path.stat()
+        with mock.patch.object(self.module.time, "monotonic", return_value=0):
+            self.assertEqual(self.module.load_preset("cached-external")["api_graph"]["output"]["2"]["inputs"]["positive_base"], "first")
+        original_text = path.read_text(encoding="utf-8")
+        original = json.loads(original_text)
+        changed = copy.deepcopy(original)
+        changed["api_graph"]["output"]["2"]["inputs"]["positive_base"] = "other"
+        changed["metadata"]["sha256"] = self.module._content_hash(changed["api_graph"], changed["workflow"])
+        changed_text = original_text.replace('"positive_base": "first"', '"positive_base": "other"', 1)
+        changed_text = changed_text.replace(
+            original["metadata"]["sha256"], changed["metadata"]["sha256"], 1,
+        )
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(changed_text)
+        self.assertEqual(path.stat().st_size, original_stat.st_size)
+        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        with mock.patch.object(self.module.time, "monotonic", return_value=999):
+            loaded = self.module.load_preset("cached-external")
+        self.assertEqual(loaded["api_graph"]["output"]["2"]["inputs"]["positive_base"], "other")
 
     def test_save_recreates_a_deleted_preset_when_expected_revision_is_stale(self):
         self.save("deleted", basic_nodes("first"))

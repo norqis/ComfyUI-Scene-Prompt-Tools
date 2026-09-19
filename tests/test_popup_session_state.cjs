@@ -31,6 +31,7 @@ vm.runInContext("let activePopupContext = null;", context);
 for (const name of [
     "activeStateWidgetName",
     "matrixLineDraftContextFor",
+    "clearMatrixLineDraftContext",
     "popupStateWidgetName",
     "createPopupSession",
     "popupSessionScopeKey",
@@ -131,6 +132,15 @@ assert.notEqual(reopened, first, "explicit close discards the popup session");
 assert.equal(reopened.searchQuery, "", "close and reopen starts fresh");
 assert.equal(JSON.stringify(reopened.list), JSON.stringify({ kind: "categories", path: [] }));
 assert.match(functionSource("closePopup"), /discardPopupSession\(closingContext\.node, closingContext\.popupSessionScopeKey\)/u, "explicit popup close discards the transient session");
+let draftCommits = 0;
+const closingMatrixNode = {
+    sceneMatrixLinePopupSecondary: true,
+    sceneMatrixLineDraftContext: { commitDrafts() { draftCommits += 1; } },
+};
+context.clearMatrixLineDraftContext(closingMatrixNode);
+assert.equal(draftCommits, 1, "closing the outer Matrix editor commits an open secondary draft");
+assert.equal(closingMatrixNode.sceneMatrixLineDraftContext, null);
+assert.equal(closingMatrixNode.sceneMatrixLinePopupSecondary, false);
 
 for (const marker of [
     'rememberPopupScroll(session, popupListScrollKey("categories", path), list)',

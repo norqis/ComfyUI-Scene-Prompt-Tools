@@ -353,9 +353,50 @@ try {
             }
         }
         window.__scenePromptFilenameRoundTrip = restoredValues;
+        class SceneApplyLoraNode extends LGraphNode {
+            constructor() {
+                super();
+                this.id = 2;
+                this.type = "SceneApplyLora";
+                this.comfyClass = "SceneApplyLora";
+                this.size = [300, 180];
+                this.inputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }];
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                this.graph = window.app.graph;
+                this.widgets = [
+                    { name: "lora_name", type: "combo", value: "style.safetensors", options: {} },
+                    { name: "strength_model", type: "number", value: 0.8, options: {} },
+                    { name: "strength_clip", type: "number", value: 0.7, options: {} },
+                ];
+                this.widgets_values = this.widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = [...size]; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(SceneApplyLoraNode, { name: "SceneApplyLora" });
+        const applyLora = new SceneApplyLoraNode();
+        applyLora.onNodeCreated();
+        const savedLora = applyLora.serialize();
+        const restoredLora = new SceneApplyLoraNode();
+        restoredLora.onNodeCreated();
+        restoredLora.configure(savedLora);
+        window.__sceneApplyLoraRoundTrip = {
+            visible: applyLora.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+            saved: savedLora.widgets_values,
+            restored: restoredLora.widgets.map((widget) => widget.value),
+        };
         window.__scenePromptTestNode = node;
         node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
     });
+    const loraRoundTrip = await page.evaluate(() => window.__sceneApplyLoraRoundTrip);
+    assert.deepEqual(loraRoundTrip.visible, ["lora_name", "strength_model", "strength_clip"]);
+    assert.deepEqual(loraRoundTrip.saved, ["style.safetensors", 0.8, 0.7]);
+    assert.deepEqual(loraRoundTrip.restored, ["style.safetensors", 0.8, 0.7]);
     await page.getByText("Outfit", { exact: false }).click();
     const candidate = page.getByTitle("summer dress", { exact: true });
     await candidate.click();
@@ -752,14 +793,19 @@ try {
     await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
     await page.getByText("Outfit", { exact: false }).click();
     await page.getByTitle("summer dress", { exact: true }).click();
-    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value.includes("summer")), false, "selecting a candidate does not write Matrix state during picker navigation");
-    await page.getByRole("button", { name: "行編集へ戻る" }).click();
-    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value.includes("summer")), true, "行編集へ戻る commits the positive Matrix candidate");
     assert.deepEqual(
         await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
         ["blue_hair / Summer", "bad_hands"],
         "a selected positive candidate follows its Matrix base prompt",
     );
+    const writesBeforeWeightCommit = await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount);
+    await page.locator(".pc-popup").last().locator(".pc-weight-input").first().fill("1.35");
+    await page.locator(".pc-popup").last().locator(".pc-weight-input").first().press("Tab");
+    assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[0].positive_json.includes('"weight":1.35')), true, "leaving a Matrix weight field commits the selected candidate and its weight");
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), writesBeforeWeightCommit + 1, "weight blur makes one effective Matrix state write");
+    await page.getByRole("button", { name: "行編集へ戻る" }).click();
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value.includes("summer")), true, "行編集へ戻る keeps the already committed positive Matrix candidate");
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), writesBeforeWeightCommit + 1, "secondary and outer close do not add a duplicate Matrix state write");
     await page.getByRole("button", { name: "ネガティブ候補" }).nth(1).click();
     await page.getByText("Outfit", { exact: false }).click();
     await page.getByTitle("summer dress", { exact: true }).click();
@@ -808,7 +854,7 @@ try {
     assert.equal(await page.getByPlaceholder("名前").nth(0).inputValue(), "Renamed One", "reopened Matrix rows show the saved row name");
     assert.deepEqual(
         await page.locator(".pc-popup .pc-popup-list > .pc-candidate").nth(0).locator(".pc-candidate-desc").allTextContents(),
-        ["blue_hair / Summer", "bad_hands"],
+        ["blue_hair / Summer:1.35", "bad_hands"],
         "saved Matrix base and candidate summaries reappear after reopening",
     );
     assert.deepEqual(

@@ -1,6 +1,7 @@
 import importlib
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -759,6 +760,19 @@ class PromptDataRouteTests(unittest.TestCase):
         with mock.patch.object(self.routes, "_read_items", side_effect=AssertionError("must reuse matching cache")):
             with mock.patch.object(self.routes.time, "monotonic", return_value=999):
                 self.assertEqual(self.routes._load_items()[0]["label"], "Cached")
+
+    def test_expired_equal_signature_reloads_changed_prompt_content(self):
+        path = self.data_dir / "Category" / "prompt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([{"label": "Cached", "prompt": "cached"}]), encoding="utf-8")
+        original_stat = path.stat()
+        with mock.patch.object(self.routes.time, "monotonic", return_value=0):
+            self.assertEqual(self.routes._load_items()[0]["label"], "Cached")
+        path.write_text(json.dumps([{"label": "Fresh!", "prompt": "fresh!"}]), encoding="utf-8")
+        self.assertEqual(path.stat().st_size, original_stat.st_size)
+        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        with mock.patch.object(self.routes.time, "monotonic", return_value=999):
+            self.assertEqual(self.routes._load_items()[0]["label"], "Fresh!")
 
 
 if __name__ == "__main__":

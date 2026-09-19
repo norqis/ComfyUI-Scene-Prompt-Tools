@@ -595,8 +595,13 @@ function clearMatrixLineDraftContext(node) {
     if (!node) {
         return;
     }
+    node.sceneMatrixLineDraftContext?.commitDrafts?.();
     node.sceneMatrixLineDraftContext = null;
     node.sceneMatrixLinePopupSecondary = false;
+}
+
+function commitActiveMatrixLineDraft() {
+    activePopupContext?.node?.sceneMatrixLineDraftContext?.commitDrafts?.();
 }
 
 function popupStateWidgetName(node, options = {}) {
@@ -2437,6 +2442,9 @@ function createWeightControl(node, item, selectedItem, onUpdate, options = {}) {
             if (options.notify) {
                 onUpdate?.();
             }
+            if (options.commit) {
+                matrixLineDraftContextFor(node, stateWidgetName)?.commitDrafts?.();
+            }
         } catch (error) {
             input.setCustomValidity(error?.message || "強度を保存できませんでした。");
             input.reportValidity?.();
@@ -2448,8 +2456,8 @@ function createWeightControl(node, item, selectedItem, onUpdate, options = {}) {
             storeWeight();
         }
     });
-    input.addEventListener("change", () => storeWeight({ normalize: true, notify: true }));
-    input.addEventListener("blur", () => storeWeight({ normalize: true }));
+    input.addEventListener("change", () => storeWeight({ normalize: true, notify: true, commit: true }));
+    input.addEventListener("blur", () => storeWeight({ normalize: true, commit: true }));
 
     wrap.appendChild(input);
     wrap.sceneWeightInput = input;
@@ -3819,6 +3827,8 @@ function hideNonSceneRoleWidgets(node) {
 function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
+        : SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)
+            ? new Set(["lora_name", "strength_model", "strength_clip"])
         : isSceneExpandNodeName(nodeName)
             ? new Set([
                 "timestamp_dir", "prefix", "replace_underscores", "convert_anima_weights",
@@ -4702,6 +4712,14 @@ function isScenePromptReverseNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PROMPT_REVERSE_NODE_NAMES.has(name));
 }
 
+function isSceneApplyModelNode(node) {
+    return nodeClassNames(node).some((name) => SCENE_APPLY_MODEL_NODE_NAMES.has(name));
+}
+
+function isSceneApplyLoraNode(node) {
+    return nodeClassNames(node).some((name) => SCENE_APPLY_LORA_NODE_NAMES.has(name));
+}
+
 function isScenePresetInputNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PRESET_INPUT_NODE_NAMES.has(name));
 }
@@ -4735,7 +4753,8 @@ function isScenePromptSourceNode(node) {
         || isScenePromptReverseNode(node)
         || isScenePromptQueueNode(node)
         || isSceneEmptyLatentNode(node)
-        || nodeClassNames(node).some((name) => SCENE_APPLY_MODEL_NODE_NAMES.has(name) || SCENE_APPLY_LORA_NODE_NAMES.has(name))
+        || isSceneApplyModelNode(node)
+        || isSceneApplyLoraNode(node)
         || isScenePresetReferenceNode(node)
         || isScenePromptCallbackNode(node);
 }
@@ -6129,6 +6148,15 @@ function scenePromptSourceLocalCacheKey(node) {
             callback: linkedInputKey(node, "callback"),
         });
     }
+    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node)) {
+        return JSON.stringify({
+            type: isSceneApplyModelNode(node) ? "apply_model" : "apply_lora",
+            id: node?.id ?? null,
+            mode: sceneNodeMode(node),
+            input: linkedInputKey(node, "scene_prompt"),
+            upstream: upstreamKey,
+        });
+    }
     return "";
 }
 
@@ -6241,6 +6269,8 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             result = sceneStatsQueue([result], hasSource);
         } else if (node.class_type === "ScenePresetReference") {
             result = scenePresetStats(String(apiInput(node, "preset_id") || ""), source("scene_prompt"), nextStack);
+        } else if (node.class_type === "SceneApplyModel" || node.class_type === "SceneApplyLora") {
+            result = source("scene_prompt") || sceneStatsSeed();
         } else if (node.class_type === "ScenePromptCallback") {
             result = source("scene_prompt") || sceneStatsSeed();
         }
@@ -6429,6 +6459,9 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
         return finish(scenePresetStats(presetId, base, new Set(), node.scenePresetGraph || null));
     }
     if (isScenePromptCallbackNode(node)) {
+        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
+    }
+    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node)) {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     return finish(emptyScenePromptStats());
@@ -6718,6 +6751,13 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
     }
 
     if (isScenePromptCallbackNode(node)) {
+        const upstream = scenePromptInputSource(node);
+        return finish(upstream
+            ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : [{ parts: [], count: 1, row: emptyMatrixRow() }]);
+    }
+
+    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node)) {
         const upstream = scenePromptInputSource(node);
         return finish(upstream
             ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
@@ -7435,6 +7475,7 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
     if (!graphToPrompt) {
         throw new Error("このComfyUIでは開始時点のプロンプトを安全に固定できません。");
     }
+    commitActiveMatrixLineDraft();
     const prompt = await graphToPrompt();
     applySceneSourceNodeNames(prompt);
     const snapshot = sliceSceneBatchPrompt(cloneScenePromptPayload(prompt || {}), expandNodeId);
@@ -7934,6 +7975,7 @@ function scenePromptSamplerSeedTargets(prompt) {
 }
 
 function syncSceneMatrixPromptInputs(prompt) {
+    commitActiveMatrixLineDraft();
     for (const [nodeId, promptNode] of Object.entries(prompt?.output || {})) {
         if (promptNode?.class_type !== "SceneMatrix") {
             continue;
@@ -9997,6 +10039,7 @@ async function saveScenePreset(node) {
             throw new Error("Preset保存に必要なComfyUI APIが見つかりません。");
         }
         syncAllScenePromptNames();
+        commitActiveMatrixLineDraft();
         const apiGraph = await graphToPrompt();
         applySceneSourceNodeNames(apiGraph);
         const workflow = app.graph.serialize();

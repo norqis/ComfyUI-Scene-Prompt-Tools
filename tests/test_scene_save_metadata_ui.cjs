@@ -27,6 +27,7 @@ function functionSource(name) {
 const context = {
     Set,
     SCENE_SAVE_IMAGE_NODE_NAMES: new Set(["SceneSaveImage"]),
+    SCENE_APPLY_LORA_NODE_NAMES: new Set(["SceneApplyLora"]),
     isSceneExpandNodeName(nodeName) { return nodeName === "ScenePrompterExpand"; },
     SCENE_EMPTY_LATENT_NODE_NAMES: new Set(),
     hideWidget(widget) { widget.hidden = true; },
@@ -61,6 +62,15 @@ assert.equal(expandWidgets[1].hidden, false);
 assert.equal(expandWidgets[2].hidden, false);
 assert.equal(expandWidgets[3].hidden, false);
 assert.equal(expandWidgets[4].hidden, true);
+
+const loraWidgets = [
+    { name: "lora_name" },
+    { name: "strength_model" },
+    { name: "strength_clip" },
+    { name: "scene_prompt" },
+];
+context.hideSceneUtilityWidgets({ widgets: loraWidgets }, "SceneApplyLora");
+assert.deepEqual(loraWidgets.map((widget) => widget.hidden), [false, false, false, true]);
 
 vm.runInContext(functionSource("sceneExpandConfigureValues"), context);
 const legacyAnima = {

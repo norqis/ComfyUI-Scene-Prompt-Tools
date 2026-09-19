@@ -25,6 +25,8 @@ const previewContext = {
     scenePromptInputSource(node) { return node.upstream || null; },
     isScenePromptNode(node) { return node.kind === "prompt"; },
     isScenePromptCallbackNode(node) { return node.kind === "callback"; },
+    isSceneApplyModelNode(node) { return node.kind === "apply_model"; },
+    isSceneApplyLoraNode(node) { return node.kind === "apply_lora"; },
     scenePromptTitle(node) { return node.title; },
     isPromptMatrixNode(node) { return node.kind === "matrix"; },
     matrixLinesForNode(node) { return node.rows || []; },

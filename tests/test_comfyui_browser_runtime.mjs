@@ -343,6 +343,33 @@ window.__sceneSeedRuntimeTest = {
         await app.loadGraphData(loaded.workflow, true, true);
         const restored = app.graph.getNodeById(reverse.id);
         const restoredApi = await app.graphToPrompt();
+        app.graph.clear();
+        const nestedInput = create("ScenePresetInput");
+        const reference = create("ScenePresetReference");
+        const nestedOutput = create("ScenePresetOutput");
+        reference.widgets.find((widget) => widget.name === "preset_id").value = "runtime-bypass";
+        connect(nestedInput, reference);
+        connect(reference, nestedOutput);
+        reference.mode = 4;
+        nestedOutput.widgets.find((widget) => widget.name === "preset_id").value = "runtime-bypass-reference";
+        const referenceApi = await app.graphToPrompt();
+        if (referenceApi.output[String(reference.id)]) throw new Error("ComfyUI should bypass Preset Reference in API graph");
+        const referenceWorkflow = app.graph.serialize();
+        const referenceResponse = await fetch("/scene_presets/save", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset_id: "runtime-bypass-reference", name: "Runtime Bypass Reference", output_node_id: String(nestedOutput.id), api_graph: referenceApi, workflow: referenceWorkflow }),
+        });
+        const referenceSaved = await referenceResponse.json();
+        if (!referenceResponse.ok) throw new Error(referenceSaved.error);
+        const referenceLoadedResponse = await fetch("/scene_presets/load?preset_id=runtime-bypass-reference");
+        const referenceLoaded = await referenceLoadedResponse.json();
+        if (!referenceLoadedResponse.ok) throw new Error(referenceLoaded.error);
+        await app.loadGraphData(referenceLoaded.workflow, true, true);
+        const restoredReference = app.graph.getNodeById(reference.id);
+        const restoredReferenceApi = await app.graphToPrompt();
+        const restoredReferenceMode = restoredReference?.mode;
+        restoredReference.mode = 0;
+        const unbypassedReferenceApi = await app.graphToPrompt();
         return {
             bypassMode: restored?.mode,
             links: Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]),
@@ -350,12 +377,25 @@ window.__sceneSeedRuntimeTest = {
             apiContainsReverse: Boolean(restoredApi.output[String(reverse.id)]),
             outputSource: restoredApi.output[String(output.id)].inputs.scene_prompt,
             expectedSource: [String(prompt.id), 0],
+            reference: {
+                mode: restoredReferenceMode,
+                presetId: restoredReference?.widgets?.find((widget) => widget.name === "preset_id")?.value,
+                links: Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]),
+                expectedLinks: [[nestedInput.id, reference.id], [reference.id, nestedOutput.id]],
+                bypassed: Boolean(restoredReferenceApi.output[String(reference.id)]),
+                unbypassed: Boolean(unbypassedReferenceApi.output[String(reference.id)]),
+            },
         };
     });
     assert.equal(bypassPreset.bypassMode, 4);
     assert.deepEqual(bypassPreset.links, bypassPreset.expectedLinks);
     assert.equal(bypassPreset.apiContainsReverse, false);
     assert.deepEqual(bypassPreset.outputSource, bypassPreset.expectedSource);
+    assert.equal(bypassPreset.reference.mode, 4);
+    assert.equal(bypassPreset.reference.presetId, "runtime-bypass");
+    assert.deepEqual(bypassPreset.reference.links, bypassPreset.reference.expectedLinks);
+    assert.equal(bypassPreset.reference.bypassed, false);
+    assert.equal(bypassPreset.reference.unbypassed, true);
     console.log("real ComfyUI bypass Preset save/load preserves mode, physical links and execution routing");
     const seedNodes = await page.evaluate(async () => {
         window.app.graph.clear();

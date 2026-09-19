@@ -656,6 +656,7 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
 def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=None):
     """Keep ordinary image ancestors, but only selected Scene-plan branches."""
     selected_scene_ids = _scene_source_ids(scene_info) if selected_scene_ids is None else selected_scene_ids
+    selected_scene_ids = _without_superseded_model_sources(prompt, selected_scene_ids)
     if not selected_scene_ids:
         return _prompt_ancestor_ids(prompt, target_id)
 
@@ -684,6 +685,59 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
                     )
                 pending.append(source_id)
     return included
+
+
+def _without_superseded_model_sources(prompt, selected_scene_ids):
+    """Keep the final Scene Apply Model on a selected serial route.
+
+    Earlier model bundles are overridden by the downstream Apply Model.  Dropping
+    just those model nodes leaves intervening Scene transforms (such as LoRAs)
+    connected and produces a compact, runnable metadata prompt.
+    """
+    if not isinstance(prompt, dict):
+        return set(selected_scene_ids)
+    selected = {str(node_id) for node_id in selected_scene_ids}
+    superseded = set()
+    for node_id in selected:
+        node = prompt.get(node_id)
+        if not isinstance(node, dict) or node.get("class_type") != "SceneApplyModel":
+            continue
+        current_id = node_id
+        seen = set()
+        while current_id not in seen:
+            seen.add(current_id)
+            current = prompt.get(current_id)
+            inputs = current.get("inputs") if isinstance(current, dict) else None
+            source_id = _prompt_link_source((inputs or {}).get("scene_prompt"), current_id, "scene_prompt")
+            if source_id is None:
+                break
+            current_id = str(source_id)
+            source = prompt.get(current_id)
+            if isinstance(source, dict) and source.get("class_type") == "SceneApplyModel" and current_id in selected:
+                superseded.add(current_id)
+    return selected - superseded
+
+
+def _connected_expand_resource_outputs(prompt, unique_id):
+    """Return connected MODEL, CLIP, and VAE outputs for an Expand node."""
+    if not isinstance(prompt, dict) or unique_id is None:
+        return set()
+    source_id = str(unique_id)
+    outputs = set()
+    for node in prompt.values():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if (
+                isinstance(value, (list, tuple))
+                and len(value) == 2
+                and str(value[0]) == source_id
+                and type(value[1]) is int
+                and 5 <= value[1] <= 7
+            ):
+                outputs.add(value[1])
+    return outputs
 
 
 def _metadata_for_save_mode(
@@ -2207,6 +2261,10 @@ class ScenePromptExpand:
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
+        if row.get("model_links") is None and _connected_expand_resource_outputs(prompt, unique_id):
+            raise ValueError(
+                "Scene Prompt ExpandのMODEL、CLIP、VAE出力を使うには、同じScene経路にScene Apply Modelを接続してください。"
+            )
         global_index = int(item.get("global_index", 0) or 0)
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + global_index) % SEED_MODULO
@@ -2416,9 +2474,11 @@ class SceneSaveImage:
                 img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
 
                 with _FILENAME_RESERVATION_LOCK:
+                    counter = max(counter, _cached_next_index(run_root, extension, padding, filename_prefix))
                     output_path, reservation_path, filename, counter = _reserve_output_path(
                         output_dir, extension, padding, counter, filename_prefix
                     )
+                    _remember_next_index(run_root, extension, padding, counter + 1, filename_prefix)
                 reservation_paths.append(reservation_path)
                 descriptor, temp_path = tempfile.mkstemp(prefix=".scene-save-", suffix=".tmp", dir=output_dir)
                 os.close(descriptor)

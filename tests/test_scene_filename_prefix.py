@@ -486,6 +486,28 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             file_indexes.append(scene_metadata["file_index"])
         self.assertEqual(len(file_indexes), len(set(file_indexes)))
 
+    def test_concurrent_scene_subfolders_share_one_run_root_sequence(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        barrier = threading.Barrier(2)
+        original_save = Image.Image.save
+
+        def wait_for_both_reservations(instance, *args, **kwargs):
+            barrier.wait(timeout=5)
+            return original_save(instance, *args, **kwargs)
+
+        def save_one(scene_path):
+            return self.nodes.SceneSaveImage().save_images(
+                [image], "", scene_info={
+                    "run_dir": "shared-run", "use_run_dir": True, "path": scene_path, "file_index": 1,
+                },
+            )["result"][1]
+
+        with mock.patch.object(Image.Image, "save", wait_for_both_reservations):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                paths = [Path(path) for path in pool.map(save_one, ("left", "right"))]
+        self.assertEqual({path.name for path in paths}, {"00001.png", "00002.png"})
+        self.assertEqual({path.parent.name for path in paths}, {"left", "right"})
+
     def test_failed_batch_leaves_no_placeholder_temp_or_partial_png(self):
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
         original_save = Image.Image.save
@@ -1050,6 +1072,43 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertNotIn("loader_b", saved_prompt)
         self.assertNotIn("model_b", saved_prompt)
         self.assertNotIn("lora_b", saved_prompt)
+
+    def test_generation_path_metadata_drops_superseded_serial_model_loader(self):
+        prompt = {
+            "loader_a": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "loader_b": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "model_a": {"class_type": "SceneApplyModel", "inputs": {
+                "model": ["loader_a", 0], "clip": ["loader_a", 1], "vae": ["loader_a", 2],
+            }},
+            "model_b": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["model_a", 0],
+                "model": ["loader_b", 0], "clip": ["loader_b", 1], "vae": ["loader_b", 2],
+            }},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["model_b", 0]}},
+            "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["expand", 4], "scene_info": ["expand", 2]}},
+        }
+        workflow = {
+            "nodes": [{"id": node_id, "type": node["class_type"], "inputs": [], "outputs": []} for node_id, node in prompt.items()],
+            "links": [
+                [1, "loader_a", 0, "model_a", 0, "MODEL"], [2, "loader_a", 1, "model_a", 1, "CLIP"],
+                [3, "loader_a", 2, "model_a", 2, "VAE"], [4, "model_a", 0, "model_b", 0, "SCENE_PROMPT"],
+                [5, "loader_b", 0, "model_b", 1, "MODEL"], [6, "loader_b", 1, "model_b", 2, "CLIP"],
+                [7, "loader_b", 2, "model_b", 3, "VAE"], [8, "model_b", 0, "expand", 0, "SCENE_PROMPT"],
+                [9, "expand", 4, "save", 0, "LATENT"], [10, "expand", 2, "save", 1, "SCENE_SAVE_INFO"],
+            ],
+            "groups": [],
+        }
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt, {"workflow": workflow}, "save", self.nodes.SAVE_METADATA_EXECUTION_PATH,
+            {"source_node_ids": ["model_a", "model_b", "expand"]},
+        )
+        self.assertEqual(set(saved_prompt), {"loader_b", "model_b", "expand", "save"})
+        self.assertNotIn("scene_prompt", saved_prompt["model_b"]["inputs"])
+        self.assertEqual({str(node["id"]) for node in saved_extra["workflow"]["nodes"]}, set(saved_prompt))
+        for node in saved_prompt.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and len(value) == 2:
+                    self.assertIn(str(value[0]), saved_prompt)
 
     def test_execution_path_rebases_queue_second_branch_and_preserves_repeat(self):
         def branch(source_id, text, count):
