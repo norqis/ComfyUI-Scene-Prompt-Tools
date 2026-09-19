@@ -54,16 +54,40 @@ const graph = {
   serialize() { return { version: 1, nodes: [], extra: structuredClone(this.extra) }; },
 };
 const loadedGraphs = [];
+const activeWorkflow = {
+  changeTracker: {
+    undoQueue: Array.from({ length: 240 }, (_value, index) => "active-undo-" + index),
+    redoQueue: Array.from({ length: 240 }, (_value, index) => "active-redo-" + index),
+  },
+};
+const inactiveWorkflow = {
+  changeTracker: {
+    undoQueue: Array.from({ length: 240 }, (_value, index) => "inactive-undo-" + index),
+    redoQueue: Array.from({ length: 240 }, (_value, index) => "inactive-redo-" + index),
+  },
+};
+const workflowWithoutTracker = {};
 export const app = {
   graph,
   canvas: {},
-  registerExtension(extension) { window.__scenePromptExtension = extension; },
+  extensionManager: { workflow: { activeWorkflow, openWorkflows: [activeWorkflow, inactiveWorkflow, workflowWithoutTracker] } },
+  registerExtension(extension) {
+    window.__scenePromptExtension = extension;
+    for (const setting of extension.settings || []) setting.onChange?.(setting.defaultValue);
+  },
   queuePrompt: async () => ({ prompt_id: "browser-test" }),
   graphToPrompt: async () => ({ output: {} }),
   async loadGraphData(workflow, ...args) { loadedGraphs.push({ workflow, args }); },
 };
 window.app = app;
 window.__scenePromptLoadedGraphs = loadedGraphs;
+window.__scenePromptUndoHistoryWorkflows = { activeWorkflow, inactiveWorkflow, workflowWithoutTracker };
+`;
+const changeTrackerModule = `
+export class ChangeTracker {
+  static MAX_HISTORY = 50;
+}
+window.__scenePromptChangeTracker = ChangeTracker;
 `;
 const apiModule = `
 const listeners = new Map();
@@ -205,9 +229,9 @@ const server = http.createServer(async (request, response) => {
         response.end(index);
         return;
     }
-    if (request.url === "/extensions/scripts/app.js" || request.url === "/extensions/scripts/api.js") {
+    if (request.url === "/extensions/scripts/app.js" || request.url === "/extensions/scripts/api.js" || request.url === "/extensions/scripts/changeTracker.js") {
         response.writeHead(200, { "content-type": "text/javascript" });
-        response.end(request.url.endsWith("app.js") ? appModule : apiModule);
+        response.end(request.url.endsWith("app.js") ? appModule : request.url.endsWith("api.js") ? apiModule : changeTrackerModule);
         return;
     }
     if (request.url === "/extensions/ComfyUI-Custom-Scripts/js/common/autocomplete.js") {
@@ -284,6 +308,91 @@ try {
     assert.equal(result.extension, "ScenePrompt.UI");
     assert.notEqual(result.externalDisplay, "none");
     assert.equal(result.ownedDisplay, "none");
+
+    const undoHistory = await page.evaluate(() => {
+        const setting = window.__scenePromptExtension.settings.find(({ id }) => id === "ScenePrompt.UndoHistoryLimit");
+        const { activeWorkflow, inactiveWorkflow } = window.__scenePromptUndoHistoryWorkflows;
+        const queue = (prefix, count) => Array.from({ length: count }, (_value, index) => `${prefix}-${index}`);
+        const snapshot = () => ({
+            limit: window.__scenePromptChangeTracker.MAX_HISTORY,
+            activeUndo: [...activeWorkflow.changeTracker.undoQueue],
+            activeRedo: [...activeWorkflow.changeTracker.redoQueue],
+            inactiveUndo: [...inactiveWorkflow.changeTracker.undoQueue],
+            inactiveRedo: [...inactiveWorkflow.changeTracker.redoQueue],
+        });
+        const initial = snapshot();
+        setting.onChange(49);
+        const lowerClamped = snapshot();
+        activeWorkflow.changeTracker.undoQueue = queue("active-next-undo", 600);
+        activeWorkflow.changeTracker.redoQueue = queue("active-next-redo", 600);
+        inactiveWorkflow.changeTracker.undoQueue = queue("inactive-next-undo", 600);
+        inactiveWorkflow.changeTracker.redoQueue = queue("inactive-next-redo", 600);
+        setting.onChange(550);
+        const upperClamped = snapshot();
+        setting.onChange(199.6);
+        const rounded = snapshot();
+        setting.onChange(Number.NaN);
+        const invalid = snapshot();
+        return {
+            schema: {
+                name: setting.name,
+                type: setting.type,
+                defaultValue: setting.defaultValue,
+                min: setting.attrs.min,
+                max: setting.attrs.max,
+                step: setting.attrs.step,
+                tooltip: setting.tooltip,
+            },
+            initial,
+            lowerClamped,
+            upperClamped,
+            rounded,
+            invalid,
+        };
+    });
+    assert.deepEqual(undoHistory.schema, {
+        name: "Scene Prompt Tools: Undo履歴数",
+        type: "number",
+        defaultValue: 200,
+        min: 50,
+        max: 500,
+        step: 50,
+        tooltip: "全ワークフロー共通です。増やすほど Ctrl+Z で戻せる回数は増えますが、ブラウザのメモリ使用量も増えます。",
+    });
+    assert.equal(undoHistory.initial.limit, 200, "the default is applied during extension registration");
+    for (const queue of [
+        undoHistory.initial.activeUndo,
+        undoHistory.initial.activeRedo,
+        undoHistory.initial.inactiveUndo,
+        undoHistory.initial.inactiveRedo,
+    ]) {
+        assert.equal(queue.length, 200, "the default trims every loaded workflow");
+        assert.match(queue.at(-1), /-239$/, "the newest undo state is retained");
+    }
+    assert.equal(undoHistory.lowerClamped.limit, 50);
+    for (const queue of [
+        undoHistory.lowerClamped.activeUndo,
+        undoHistory.lowerClamped.activeRedo,
+        undoHistory.lowerClamped.inactiveUndo,
+        undoHistory.lowerClamped.inactiveRedo,
+    ]) {
+        assert.equal(queue.length, 50, "lowering the limit trims each history queue in place");
+        assert.match(queue.at(-1), /-239$/, "lowering the limit keeps the newest entries");
+    }
+    assert.equal(undoHistory.upperClamped.limit, 500);
+    for (const queue of [
+        undoHistory.upperClamped.activeUndo,
+        undoHistory.upperClamped.activeRedo,
+        undoHistory.upperClamped.inactiveUndo,
+        undoHistory.upperClamped.inactiveRedo,
+    ]) {
+        assert.equal(queue.length, 500, "the maximum setting keeps the newest 500 entries");
+        assert.match(queue.at(-1), /-599$/);
+    }
+    assert.equal(undoHistory.rounded.limit, 200, "decimal values are rounded to an integer");
+    assert.equal(undoHistory.rounded.activeUndo.length, 200);
+    assert.match(undoHistory.rounded.inactiveRedo.at(-1), /-599$/);
+    assert.equal(undoHistory.invalid.limit, 200, "an invalid value restores the safe default");
 
     await page.evaluate(async () => {
         class LGraphNode {
