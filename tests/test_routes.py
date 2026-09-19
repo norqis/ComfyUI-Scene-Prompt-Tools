@@ -300,6 +300,42 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertTrue(asyncio.run(claim(Request({"run_handle": handle, "prompt_id": "route-prompt"})))["payload"]["claimed"])
         self.assertTrue(asyncio.run(release(Request({"run_handle": handle})))["payload"]["released"])
 
+    def test_preset_save_returns_empty_reference_node_id(self):
+        class Request:
+            user_id = "alice"
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        graph = {
+            "output": {
+                "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                "2": {
+                    "class_type": "ScenePresetReference",
+                    "_meta": {"title": "途中の参照"},
+                    "inputs": {"preset_id": "", "scene_prompt": ["1", 0]},
+                },
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            },
+        }
+        save_preset = self.routes._test_routes[("POST", "/scene_presets/save")]
+        response = asyncio.run(save_preset(Request({
+            "preset_id": "empty-reference",
+            "name": "Empty Reference",
+            "output_node_id": "3",
+            "api_graph": graph,
+            "workflow": {"nodes": []},
+        })))
+
+        self.assertEqual(response["status"], 400)
+        self.assertEqual(response["payload"], {
+            "error": "Preset「Empty Reference」: 途中の参照 #2 でPresetが選択されていません。",
+            "node_id": "2",
+        })
+
     def test_preset_load_route_is_user_scoped_and_has_clear_errors(self):
         class Request:
             def __init__(self, user_id, query):

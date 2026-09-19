@@ -589,6 +589,14 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
             "api_graph": {"output": nodes},
         }
     for reference_node_id, preset_id, _node in _find_references(nodes):
+        if not preset_id:
+            label = _node_label(reference_node_id, _node)
+            if label == f"ScenePresetReference #{reference_node_id}":
+                label = f"Scene Preset Reference #{reference_node_id}"
+            raise ScenePresetResolutionError(
+                f"{label} でPresetが選択されていません。",
+                reference_node_id,
+            )
         try:
             _resolve_preset_tree(preset_id, resolved, [], user_id)
         except ScenePresetError as exc:

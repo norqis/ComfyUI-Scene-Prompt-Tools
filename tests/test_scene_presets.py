@@ -1253,6 +1253,29 @@ class ScenePresetTests(unittest.TestCase):
             self.save("outer", outer_nodes)
         self.assertEqual(error.exception.node_id, "2")
 
+    def test_save_reports_empty_reference_with_node_label_and_node_id(self):
+        cases = (("custom", "参照先", "参照先 #4"), ("default", None, "Scene Preset Reference #4"))
+        for preset_id, title, expected_label in cases:
+            with self.subTest(title=title):
+                nodes = basic_nodes()
+                reference = {
+                    "class_type": "ScenePresetReference",
+                    "inputs": {"preset_id": "", "scene_prompt": ["2", 0]},
+                }
+                if title:
+                    reference["_meta"] = {"title": title}
+                nodes["4"] = reference
+                nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+
+                with self.assertRaises(self.module.ScenePresetResolutionError) as error:
+                    self.save(f"empty-reference-{preset_id}", nodes)
+
+                self.assertEqual(
+                    str(error.exception),
+                    f"Preset「empty-reference-{preset_id}」: {expected_label} でPresetが選択されていません。",
+                )
+                self.assertEqual(error.exception.node_id, "4")
+
     def test_save_rejects_runtime_invalid_count_with_node_id(self):
         nodes = basic_nodes()
         nodes["4"] = {
