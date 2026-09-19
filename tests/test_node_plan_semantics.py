@@ -120,6 +120,10 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(expanded["result"][7], ["checkpoint", 2])
 
     def test_apply_model_requires_three_raw_links(self):
+        inputs = self.nodes.SceneApplyModel.INPUT_TYPES()["required"]
+        for name in ("model", "clip", "vae"):
+            self.assertTrue(inputs[name][1]["rawLink"])
+            self.assertTrue(inputs[name][1]["lazy"])
         with self.assertRaisesRegex(ValueError, "すべて接続"):
             self.nodes.SceneApplyModel().apply_model(["checkpoint", 0], None, ["checkpoint", 2])
 

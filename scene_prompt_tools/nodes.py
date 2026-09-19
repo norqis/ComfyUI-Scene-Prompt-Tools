@@ -545,6 +545,7 @@ def _slice_workflow_for_output(
 SCENE_NODE_TYPES = {
     "ScenePrompter", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePrompterExpand",
     "ScenePromptCounter", "ScenePromptReverse", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
+    "SceneApplyModel", "SceneApplyLora",
     "ScenePromptCallback",
     "ScenePresetInput", "ScenePresetOutput", "ScenePresetReference",
 }
@@ -1777,9 +1778,9 @@ class SceneApplyModel:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL", {"rawLink": True}),
-                "clip": ("CLIP", {"rawLink": True}),
-                "vae": ("VAE", {"rawLink": True}),
+                "model": ("MODEL", {"rawLink": True, "lazy": True}),
+                "clip": ("CLIP", {"rawLink": True, "lazy": True}),
+                "vae": ("VAE", {"rawLink": True, "lazy": True}),
             },
             "optional": {"scene_prompt": (SCENE_PROMPT_TYPE,)},
             "hidden": {
