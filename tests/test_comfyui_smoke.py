@@ -78,6 +78,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
         expand = self.package.NODE_CLASS_MAPPINGS["ScenePrompterExpand"].INPUT_TYPES()
 
         self.assertEqual(callback["optional"]["callback"][0], "SCENE_CALLBACK")
+
         self.assertIn("frequency", callback["required"])
         self.assertIn("timeout_seconds", callback["required"])
         self.assertIn("failure_mode", callback["required"])
@@ -100,6 +101,22 @@ class RealComfyUISmokeTests(unittest.TestCase):
             self.assertEqual(expand["optional"][name][0], "SCENE_CALLBACK")
         self.assertIn("callback_timeout_seconds", expand["optional"])
         self.assertIn("callback_failure_mode", expand["optional"])
+
+    def test_scene_model_route_uses_real_graph_builder_links(self):
+        apply_model = self.package.NODE_CLASS_MAPPINGS["SceneApplyModel"]()
+        apply_lora = self.package.NODE_CLASS_MAPPINGS["SceneApplyLora"]()
+        expand = self.package.NODE_CLASS_MAPPINGS["ScenePrompterExpand"]()
+        plan = apply_model.apply_model(
+            ["checkpoint", 0], ["checkpoint", 1], ["checkpoint", 2],
+        )[0]
+        plan = apply_lora.apply_lora("style/example.safetensors", 0.8, 0.7, plan)[0]
+        result = expand.expand(current_index=0, timestamp_dir=False, scene_prompt=plan)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(len(result["expand"]), 1)
+        lora_node = next(iter(result["expand"].values()))
+        self.assertEqual(lora_node["class_type"], "LoraLoader")
+        self.assertEqual(lora_node["inputs"]["model"], ["checkpoint", 0])
+        self.assertEqual(result["result"][7], ["checkpoint", 2])
 
     def test_uses_established_scene_node_ids_without_aliases(self):
         self.assertNotIn("ScenePrompt", self.package.NODE_CLASS_MAPPINGS)

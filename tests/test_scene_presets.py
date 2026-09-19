@@ -25,6 +25,7 @@ def install_stubs(user_directory):
     folder_paths.get_user_directory = lambda: str(user_directory)
     folder_paths.get_public_user_directory = lambda user_id: str(user_directory / user_id)
     folder_paths.get_output_directory = lambda: str(user_directory / "output")
+    folder_paths.get_filename_list = lambda category: ["style/example.safetensors"] if category == "loras" else []
     sys.modules["folder_paths"] = folder_paths
 
     comfy = types.ModuleType("comfy")
@@ -128,6 +129,26 @@ class ScenePresetTests(unittest.TestCase):
             "kind": "desktop", "title": "Ready", "text": "{all_positive}",
         })
 
+    def test_lora_node_is_preset_safe(self):
+        nodes = basic_nodes()
+        nodes["4"] = {
+            "class_type": "SceneApplyLora",
+            "inputs": {
+                "scene_prompt": ["2", 0],
+                "lora_name": "style/example.safetensors",
+                "strength_model": 0.8,
+                "strength_clip": 0.7,
+            },
+        }
+        nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+        saved = self.save("lora", nodes)
+        plan = self.module._evaluate_preset_scene(saved, {}, None)
+        self.assertEqual(plan["rows"][0]["row"]["loras"], [{
+            "name": "style/example.safetensors",
+            "strength_model": 0.8,
+            "strength_clip": 0.7,
+        }])
+
     def save(self, preset_id, nodes, name=None, workflow=None, user_id="default", output_node_id=None, expected_revision=None):
         if output_node_id is None:
             output_node_id = next((
@@ -202,6 +223,22 @@ class ScenePresetTests(unittest.TestCase):
         saved = self.module.load_preset("revision")
         self.assertNotIn("revision", saved["metadata"])
         self.assertEqual(saved["api_graph"]["output"]["2"]["inputs"]["positive_base"], "final")
+
+    def test_load_reuses_validated_file_until_the_file_changes(self):
+        self.save("cached", basic_nodes("first"))
+        original_read = self.module._read_json
+        with mock.patch.object(self.module, "_read_json", wraps=original_read) as read_json:
+            first = self.module.load_preset("cached")
+            first["metadata"]["name"] = "mutated-copy"
+            second = self.module.load_preset("cached")
+        self.assertEqual(read_json.call_count, 1)
+        self.assertEqual(second["metadata"]["name"], "cached")
+
+        self.save("cached", basic_nodes("second"))
+        with mock.patch.object(self.module, "_read_json", wraps=original_read) as read_json:
+            changed = self.module.load_preset("cached")
+        self.assertEqual(read_json.call_count, 1)
+        self.assertEqual(changed["api_graph"]["output"]["2"]["inputs"]["positive_base"], "second")
 
     def test_save_recreates_a_deleted_preset_when_expected_revision_is_stale(self):
         self.save("deleted", basic_nodes("first"))
@@ -908,6 +945,39 @@ class ScenePresetTests(unittest.TestCase):
         })
         snapshot = self.module.snapshot_presets_for_run("large-siblings", api_graph, "40")
         self.assertEqual([preset["preset_id"] for preset in snapshot["presets"]], ["left", "right"])
+
+    def test_shared_nested_preset_is_evaluated_once_per_upstream_plan(self):
+        self.save("shared-child", basic_nodes("child"))
+        parent = basic_nodes()
+        parent["4"] = {
+            "class_type": "ScenePresetReference",
+            "inputs": {"preset_id": "shared-child", "scene_prompt": ["1", 0]},
+        }
+        parent["5"] = {
+            "class_type": "ScenePresetReference",
+            "inputs": {"preset_id": "shared-child", "scene_prompt": ["1", 0]},
+        }
+        parent["6"] = {
+            "class_type": "ScenePrompterQueue",
+            "inputs": {"scene_prompt1": ["4", 0], "scene_prompt2": ["5", 0]},
+        }
+        parent["3"]["inputs"]["scene_prompt"] = ["6", 0]
+        self.save("shared-parent", parent)
+        api_graph = graph({
+            "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "shared-parent"}},
+            "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
+        })
+
+        original_build = self.module.ScenePrompt.build
+        build_calls = []
+
+        def counted_build(instance, *args, **kwargs):
+            build_calls.append(args)
+            return original_build(instance, *args, **kwargs)
+
+        with mock.patch.object(self.module.ScenePrompt, "build", counted_build):
+            self.module.snapshot_presets_for_run("shared-evaluation", api_graph, "11")
+        self.assertEqual(len(build_calls), 1)
 
     def test_preset_output_link_rejects_boolean_and_float_indexes(self):
         for name, invalid_index in (("boolean", False), ("float", 0.0)):

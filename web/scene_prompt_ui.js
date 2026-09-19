@@ -22,6 +22,8 @@ const SCENE_PROMPT_COUNTER_NODE_NAMES = new Set(["ScenePromptCounter", "Scene Pr
 const SCENE_PROMPT_REVERSE_NODE_NAMES = new Set(["ScenePromptReverse", "Scene Prompt Reverse"]);
 const SCENE_PROMPT_QUEUE_NODE_NAMES = new Set(["ScenePrompterQueue", "Scene Prompt Queue"]);
 const SCENE_EMPTY_LATENT_NODE_NAMES = new Set(["SceneEmptyLatent", "Scene Empty Latent"]);
+const SCENE_APPLY_MODEL_NODE_NAMES = new Set(["SceneApplyModel", "Scene Apply Model"]);
+const SCENE_APPLY_LORA_NODE_NAMES = new Set(["SceneApplyLora", "Scene Apply LoRA"]);
 const SCENE_PROMPT_EXPAND_NODE_NAMES = new Set(["ScenePrompterExpand", "Scene Prompt Expand"]);
 const SCENE_SAVE_IMAGE_NODE_NAMES = new Set(["SceneSaveImage", "Scene Save Image"]);
 const SCENE_PRESET_INPUT_NODE_NAMES = new Set(["ScenePresetInput", "Scene Preset Input"]);
@@ -40,6 +42,8 @@ const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePromptReverse",
     "ScenePrompterQueue",
     "SceneEmptyLatent",
+    "SceneApplyModel",
+    "SceneApplyLora",
     "ScenePresetReference",
     "ScenePromptCallback",
     "ScenePromptCallbackDiscord",
@@ -55,6 +59,8 @@ const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
     "ScenePromptReverse",
     "ScenePrompterQueue",
     "SceneEmptyLatent",
+    "SceneApplyModel",
+    "SceneApplyLora",
     "ScenePresetReference",
 ]);
 const NODE_NAMES = new Set([
@@ -66,6 +72,8 @@ const NODE_NAMES = new Set([
     ...SCENE_PROMPT_REVERSE_NODE_NAMES,
     ...SCENE_PROMPT_QUEUE_NODE_NAMES,
     ...SCENE_EMPTY_LATENT_NODE_NAMES,
+    ...SCENE_APPLY_MODEL_NODE_NAMES,
+    ...SCENE_APPLY_LORA_NODE_NAMES,
     ...SCENE_PROMPT_EXPAND_NODE_NAMES,
     ...SCENE_SAVE_IMAGE_NODE_NAMES,
     ...SCENE_PRESET_INPUT_NODE_NAMES,
@@ -172,6 +180,9 @@ const SCENE_WIDGET_LABELS = {
     frequency: "実行頻度",
     timeout_seconds: "タイムアウト（秒）",
     failure_mode: "失敗時",
+    lora_name: "LoRA",
+    strength_model: "モデル強度",
+    strength_clip: "CLIP強度",
 };
 const SCENE_NODE_DISPLAY_NAMES = {
     ScenePrompter: "Scene Prompt",
@@ -182,6 +193,8 @@ const SCENE_NODE_DISPLAY_NAMES = {
     ScenePromptReverse: "Scene Prompt Reverse",
     ScenePrompterQueue: "Scene Prompt Queue",
     SceneEmptyLatent: "Scene Empty Latent",
+    SceneApplyModel: "Scene Apply Model",
+    SceneApplyLora: "Scene Apply LoRA",
     ScenePrompterExpand: "Scene Prompt Expand",
     SceneSaveImage: "Scene Save Image",
     ScenePresetInput: "Scene Preset Input",
@@ -4722,6 +4735,7 @@ function isScenePromptSourceNode(node) {
         || isScenePromptReverseNode(node)
         || isScenePromptQueueNode(node)
         || isSceneEmptyLatentNode(node)
+        || nodeClassNames(node).some((name) => SCENE_APPLY_MODEL_NODE_NAMES.has(name) || SCENE_APPLY_LORA_NODE_NAMES.has(name))
         || isScenePresetReferenceNode(node)
         || isScenePromptCallbackNode(node);
 }
@@ -10358,6 +10372,8 @@ function attachSceneNode(node, nodeName) {
         SCENE_PROMPT_EXPAND_NODE_NAMES.has(nodeName)
         || SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
         || SCENE_PROMPT_REVERSE_NODE_NAMES.has(nodeName)
+        || SCENE_APPLY_MODEL_NODE_NAMES.has(nodeName)
+        || SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)
         || SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
     ) {
         attachSceneUtilityNode(node, nodeName);

@@ -8,7 +8,7 @@ import json
 
 
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
-PLAN_VERSION = 3
+PLAN_VERSION = 4
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MIN_DIMENSION = 16
 MIN_BATCH_SIZE = 1
@@ -28,6 +28,8 @@ CALLBACK_KEYS = {
     "callback_node_id", "config", "frequency", "timeout_seconds", "failure_mode",
     "current_positive_parts", "current_negative_parts", "current_source_node_ids",
 }
+MODEL_LINK_KEYS = {"model", "clip", "vae"}
+LORA_KEYS = {"name", "strength_model", "strength_clip"}
 PROMPT_TRACE_KEYS = {
     "kind", "before_positive_parts", "before_negative_parts", "added_positive_parts", "added_negative_parts",
 }
@@ -36,6 +38,10 @@ PROMPT_TRACE_KINDS = {"delta", "passthrough", "whole"}
 
 class ScenePlanError(ValueError):
     """Raised when a value is not a current Scene Prompt plan."""
+
+
+class ScenePlan(dict):
+    """Validated process-local plan; callers treat instances as immutable."""
 
 
 def _require_exact_keys(value, keys, label):
@@ -101,10 +107,45 @@ def _clone_prompt_trace(value):
     return cloned
 
 
+def _clone_link(value, label):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ScenePlanError(f"{label} must be a node link.")
+    node_id, output_index = value
+    if not isinstance(node_id, (str, int)) or type(output_index) is not int or output_index < 0:
+        raise ScenePlanError(f"{label} must be a node link.")
+    return [str(node_id), output_index]
+
+
+def _clone_model_links(value):
+    if not isinstance(value, dict):
+        raise ScenePlanError("Scene Prompt row model_links must be an object.")
+    _require_exact_keys(value, MODEL_LINK_KEYS, "Scene Prompt row model_links")
+    return {key: _clone_link(value[key], f"Scene Prompt row model_links {key}") for key in MODEL_LINK_KEYS}
+
+
+def _clone_loras(value):
+    if not isinstance(value, list):
+        raise ScenePlanError("Scene Prompt row loras must be a list.")
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ScenePlanError("Scene Prompt row loras must contain objects.")
+        _require_exact_keys(item, LORA_KEYS, "Scene Prompt row lora")
+        name = _require_string(item["name"], "Scene Prompt row lora name", allow_empty=False)
+        strengths = {}
+        for key in ("strength_model", "strength_clip"):
+            strength = item[key]
+            if not isinstance(strength, (int, float)) or isinstance(strength, bool):
+                raise ScenePlanError(f"Scene Prompt row lora {key} must be a number.")
+            strengths[key] = float(strength)
+        result.append({"name": name, **strengths})
+    return result
+
+
 def _clone_row(row):
     if not isinstance(row, dict):
         raise ScenePlanError("Scene Prompt plan row must be an object.")
-    allowed_keys = ROW_KEYS | {"latent", "prompt_trace"}
+    allowed_keys = ROW_KEYS | {"latent", "prompt_trace", "model_links", "loras"}
     if not ROW_KEYS.issubset(row) or set(row) - allowed_keys:
         raise ScenePlanError("Scene Prompt plan row has unsupported or missing fields.")
     set_refs = row["set_refs"]
@@ -160,6 +201,10 @@ def _clone_row(row):
         cloned["latent"] = _clone_latent(row["latent"])
     if "prompt_trace" in row:
         cloned["prompt_trace"] = _clone_prompt_trace(row["prompt_trace"])
+    if "model_links" in row:
+        cloned["model_links"] = _clone_model_links(row["model_links"])
+    if "loras" in row:
+        cloned["loras"] = _clone_loras(row["loras"])
     return cloned
 
 
@@ -221,11 +266,11 @@ def _build_plan(items, sources):
             "row": row, "count": count, "start_index": batch_cursor - count, "row_index": index,
             "label": row_label(row), "queue_index": 0, "source_id": "", "source_title": "",
         })
-    return {
+    return ScenePlan({
         "type": SCENE_PROMPT_TYPE, "version": PLAN_VERSION, "rows": rows,
         "total_batches": batch_cursor, "total_images": total_images,
         "sources": _clone_sources(sources), "change_key": _fingerprint(rows),
-    }
+    })
 
 
 def make_plan(rows, *, sources=None):
@@ -252,6 +297,8 @@ def normalize_plan(value):
     """Validate a connected current-schema plan without rewriting it."""
     if value is None:
         return seed_plan()
+    if isinstance(value, ScenePlan):
+        return value
     if not isinstance(value, dict):
         raise ScenePlanError("A Scene Prompt input must receive a current Scene Prompt plan.")
     _require_exact_keys(value, PLAN_KEYS, "Scene Prompt plan")
@@ -441,6 +488,12 @@ def merge_rows(left, right):
     latent = right_row.get("latent") or left_row.get("latent")
     if latent is not None:
         row["latent"] = latent
+    model_links = right_row.get("model_links") or left_row.get("model_links")
+    if model_links is not None:
+        row["model_links"] = model_links
+    loras = [*left_row.get("loras", []), *right_row.get("loras", [])]
+    if loras:
+        row["loras"] = loras
     return row
 
 

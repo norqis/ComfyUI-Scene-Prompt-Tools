@@ -40,10 +40,10 @@ def install_comfy_execution_stub():
         )
 
     class GraphNode:
-        def __init__(self, class_type, node_id):
+        def __init__(self, class_type, node_id, inputs=None):
             self.class_type = class_type
             self.node_id = str(node_id)
-            self.inputs = {}
+            self.inputs = dict(inputs or {})
 
         def set_input(self, name, value):
             self.inputs[name] = value
@@ -55,8 +55,9 @@ def install_comfy_execution_stub():
         def __init__(self):
             self.nodes = {}
 
-        def node(self, class_type, node_id):
-            node = GraphNode(class_type, node_id)
+        def node(self, class_type, node_id=None, **kwargs):
+            node_id = str(node_id or len(self.nodes) + 1)
+            node = GraphNode(class_type, node_id, kwargs)
             self.nodes[node.node_id] = node
             return node
 

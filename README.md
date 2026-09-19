@@ -122,6 +122,18 @@ Each saved Preset requires one connected Input and one connected Output. Only Sc
 
 In a regular workflow, add **Scene Preset Reference**, choose the saved Preset, and connect its `scene_prompt` output to the next Scene node or to Scene Prompt Expand. Its **Preset編集 (Preset Edit)** button opens the saved fragment in a new workflow tab.
 
+## Per-scene models and LoRAs
+
+Use **Scene Apply Model** and **Scene Apply LoRA** before Expand when each Scene path needs different generation resources. Both nodes can begin an empty Scene plan or receive an existing `scene_prompt`.
+
+```text
+Checkpoint Loader (Simple) -> Scene Apply Model -> Scene Apply LoRA -> Scene Prompt Expand
+```
+
+Connect MODEL, CLIP, and VAE from a checkpoint loader to **Scene Apply Model**. Separate diffusion-model, CLIP, and VAE loaders can also be connected. Connect Expand's MODEL and CLIP outputs to the corresponding sampler and text-encode inputs, and its VAE output to VAE Decode. The loader nodes are evaluated only when their Scene path is selected.
+
+**Scene Apply LoRA** uses ComfyUI's standard `models/loras` list and stores its relative model path. LoRAs on the selected Scene path are applied in path order. If several **Scene Apply Model** nodes occur on one path, the last model bundle wins, then every LoRA on that path is applied to it. The nodes may therefore appear in either visual order while preserving the route's LoRA order. Scene Apply LoRA can be saved inside a Preset; Scene Apply Model stays in the outer workflow because its MODEL, CLIP, and VAE links point to external loader nodes.
+
 ## Callbacks
 
 Use a callback to notify another service for a Scene batch. A configuration node creates a `callback` value; **Scene Prompt Callback** decides when it runs and passes `scene_prompt` through unchanged.
@@ -173,11 +185,13 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Prompt Reverse | Swaps positive and negative prompts for the complete plan or only the immediately preceding Scene node. |
 | Scene Path | Adds output-folder parts without changing the prompt. |
 | Scene Empty Latent | Sets width, height, and batch size for the plan. |
+| Scene Apply Model | Selects the MODEL, CLIP, and VAE bundle for this Scene path. |
+| Scene Apply LoRA | Adds a LoRA and strengths to this Scene path. |
 | Scene Prompt Callback | Runs a configured callback at its position in a continuous Scene run. |
 | Scene Prompt Callback (Discord) | Configures a Discord webhook callback. |
 | Scene Prompt Callback (Request) | Configures a GET or POST callback. |
 | Scene Prompt Callback (Desktop) | Configures a desktop notification for the originating browser. |
-| Scene Prompt Expand | Produces one planned batch with prompt strings, seed, metadata, and latent image. |
+| Scene Prompt Expand | Produces one planned batch with prompt strings, seed, metadata, latent image, MODEL, CLIP, and VAE. |
 | Scene Save Image | Saves PNGs using the Scene output path, filename information, and selected metadata mode. |
 | Scene Preset Input / Output / Reference | Save, reuse, and edit Scene plan fragments. |
 

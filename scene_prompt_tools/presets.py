@@ -17,6 +17,8 @@ from .plan import mark_prompt_whole, seed_plan
 from .storage import public_user_directory
 from .nodes import (
     SceneEmptyLatent,
+    SceneApplyModel,
+    SceneApplyLora,
     SceneMatrix,
     ScenePath,
     ScenePromptMerge,
@@ -40,6 +42,9 @@ _PRESET_LOCK = threading.RLock()
 _PRESET_LIST_CACHE_LOCK = threading.RLock()
 _PRESET_LIST_CACHE = OrderedDict()
 _PRESET_LIST_CACHE_MAX_USERS = 64
+_PRESET_FILE_CACHE_LOCK = threading.RLock()
+_PRESET_FILE_CACHE = OrderedDict()
+_PRESET_FILE_CACHE_MAX_ITEMS = 512
 _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
 _RESOLVING_RUNS = {}
@@ -54,6 +59,7 @@ SAFE_NODE_CLASSES = {
     "ScenePromptReverse": ScenePromptReverse,
     "ScenePrompterQueue": ScenePromptQueue,
     "SceneEmptyLatent": SceneEmptyLatent,
+    "SceneApplyLora": SceneApplyLora,
     "ScenePromptCallback": ScenePromptCallback,
     "ScenePromptCallbackDiscord": ScenePromptCallbackDiscord,
     "ScenePromptCallbackRequest": ScenePromptCallbackRequest,
@@ -90,6 +96,8 @@ DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePromptReverse": "Scene Prompt Reverse",
     "ScenePrompterQueue": "Scene Prompt Queue",
     "SceneEmptyLatent": "Scene Empty Latent",
+    "SceneApplyModel": "Scene Apply Model",
+    "SceneApplyLora": "Scene Apply LoRA",
     "ScenePresetReference": "Scene Preset Reference",
     "ScenePromptCallbackDesktop": "Scene Prompt Callback (Desktop)",
 }
@@ -170,6 +178,21 @@ def _preset_directory_signature(directory):
 def _invalidate_preset_list_cache(user_id="default"):
     with _PRESET_LIST_CACHE_LOCK:
         _PRESET_LIST_CACHE.pop(str(user_id or "default"), None)
+
+
+def _preset_file_signature(path):
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        raise ScenePresetNotFoundError(f"Presetが見つかりません: {path.stem}") from None
+    except OSError as exc:
+        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
+    return stat.st_mtime_ns, stat.st_size, getattr(stat, "st_ino", 0)
+
+
+def _invalidate_preset_file_cache(preset_id, user_id="default"):
+    with _PRESET_FILE_CACHE_LOCK:
+        _PRESET_FILE_CACHE.pop((str(user_id or "default"), str(preset_id)), None)
 
 
 def _compact_matrix_json(value):
@@ -274,6 +297,13 @@ def _source_node_name(node):
 def _linked_nodes(node):
     for value in _node_inputs(node).values():
         if is_link(value):
+            yield str(value[0])
+
+
+def _linked_scene_nodes(node):
+    raw_inputs = {"model", "clip", "vae"} if node.get("class_type") == "SceneApplyModel" else set()
+    for name, value in _node_inputs(node).items():
+        if name not in raw_inputs and is_link(value):
             yield str(value[0])
 
 
@@ -601,8 +631,20 @@ def _validate_preset_payload(preset):
 
 def load_preset(preset_id, user_id="default"):
     path = _preset_path(preset_id, user_id)
+    cache_key = (str(user_id or "default"), str(preset_id))
+    signature = _preset_file_signature(path)
+    with _PRESET_FILE_CACHE_LOCK:
+        cached = _PRESET_FILE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            _PRESET_FILE_CACHE.move_to_end(cache_key)
+            return copy.deepcopy(cached[1])
     preset = _read_json(path)
     _validate_preset_payload(preset)
+    with _PRESET_FILE_CACHE_LOCK:
+        _PRESET_FILE_CACHE[cache_key] = (signature, copy.deepcopy(preset))
+        _PRESET_FILE_CACHE.move_to_end(cache_key)
+        while len(_PRESET_FILE_CACHE) > _PRESET_FILE_CACHE_MAX_ITEMS:
+            _PRESET_FILE_CACHE.popitem(last=False)
     return preset
 
 
@@ -657,6 +699,7 @@ def save_preset(payload, user_id="default"):
             _validate_preset_payload(_read_json(Path(temp_name)))
             os.replace(temp_name, path)
             _invalidate_preset_list_cache(user_id)
+            _invalidate_preset_file_cache(preset_id, user_id)
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
@@ -729,7 +772,7 @@ def _scene_prompt_closure(nodes, source_id):
             raise ScenePresetError(f"Sceneノード #{node_id} が見つかりません。")
         visiting.add(node_id)
         frames.append((node_id, True))
-        for linked_id in reversed(list(_linked_nodes(node))):
+        for linked_id in reversed(list(_linked_scene_nodes(node))):
             frames.append((str(linked_id), False))
     return closure
 
@@ -821,6 +864,7 @@ def _scene_node_value_impl(
     run_handle="",
     memo=None,
     preset_stack=(),
+    preset_value_memo=None,
 ):
     node_id = str(node_id)
     if input_values and node_id in input_values:
@@ -849,6 +893,7 @@ def _scene_node_value_impl(
             run_handle,
             memo,
             preset_stack,
+            preset_value_memo,
         )
 
     if class_type in SAFE_VALUE_NODE_CLASSES:
@@ -883,13 +928,20 @@ def _scene_node_value_impl(
             user_id,
             run_handle,
             preset_stack,
+            preset_value_memo,
         ))
         memo[node_id] = result
         return result
-    cls = SAFE_NODE_CLASSES.get(class_type)
+    cls = SceneApplyModel if class_type == "SceneApplyModel" else SAFE_NODE_CLASSES.get(class_type)
     if cls is None:
         raise ScenePresetError(f"{_node_label(node_id, node)} はScene計画を計算できません。")
-    kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
+    if class_type == "SceneApplyModel":
+        kwargs = {
+            name: (raw if name in {"model", "clip", "vae"} else value(raw))
+            for name, raw in _node_inputs(node).items()
+        }
+    else:
+        kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
     if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
     if class_type == "ScenePromptCallback":
@@ -909,6 +961,7 @@ def _scene_node_value(
     run_handle="",
     memo=None,
     preset_stack=(),
+    preset_value_memo=None,
 ):
     target_id = str(node_id)
     values = {} if memo is None else memo
@@ -942,6 +995,7 @@ def _scene_node_value(
                     run_handle,
                     values,
                     preset_stack,
+                    preset_value_memo,
                 )
             except ScenePresetResolutionError:
                 raise
@@ -959,7 +1013,7 @@ def _scene_node_value(
             )
         visiting.add(current_id)
         frames.append((current_id, True))
-        for linked_id in reversed(list(_linked_nodes(node))):
+        for linked_id in reversed(list(_linked_scene_nodes(node))):
             linked_id = str(linked_id)
             if (not input_values or linked_id not in input_values) and linked_id not in values:
                 frames.append((linked_id, False))
@@ -973,17 +1027,23 @@ def _evaluate_preset_scene(
     user_id="default",
     run_handle="",
     preset_stack=(),
+    preset_value_memo=None,
 ):
     preset_id = str(preset["metadata"]["preset_id"])
     if preset_id in preset_stack:
         cycle = " -> ".join([*preset_stack, preset_id])
         raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
+    preset_value_memo = {} if preset_value_memo is None else preset_value_memo
+    upstream_key = upstream.get("change_key") if isinstance(upstream, dict) else None
+    memo_key = (preset_id, upstream_key)
+    if memo_key in preset_value_memo:
+        return preset_value_memo[memo_key]
     validation = _validate_preset_payload(preset)
     nodes = _preset_nodes(preset)
     input_id = validation["input_id"]
     output_link = validation["output_link"]
     input_values = {input_id: upstream} if upstream is not None else None
-    return _scene_node_value(
+    result = _scene_node_value(
         nodes,
         output_link[0],
         resolved,
@@ -993,7 +1053,10 @@ def _evaluate_preset_scene(
         run_handle,
         {},
         (*preset_stack, preset_id),
+        preset_value_memo,
     )
+    preset_value_memo[memo_key] = result
+    return result
 
 
 def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="default", workflow=None):
@@ -1028,7 +1091,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             except ScenePresetError as exc:
                 raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
         plan = (
-            _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id)
+            _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id, preset_value_memo={})
             if source is not None else {"total_images": 1, "total_batches": 1}
         )
         response = {
