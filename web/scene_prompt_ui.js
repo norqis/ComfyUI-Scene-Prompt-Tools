@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { ChangeTracker } from "../../scripts/changeTracker.js";
 import {
     DEFAULT_SELECTED_JSON,
     MATRIX_DEFAULT_JSON,
@@ -33,6 +34,34 @@ const SCENE_PROMPT_CALLBACK_NODE_NAMES = new Set(["ScenePromptCallback", "Scene 
 const SCENE_PROMPT_CALLBACK_DISCORD_NODE_NAMES = new Set(["ScenePromptCallbackDiscord", "Scene Prompt Callback (Discord)"]);
 const SCENE_PROMPT_CALLBACK_REQUEST_NODE_NAMES = new Set(["ScenePromptCallbackRequest", "Scene Prompt Callback (Request)"]);
 const SCENE_PROMPT_CALLBACK_DESKTOP_NODE_NAMES = new Set(["ScenePromptCallbackDesktop", "Scene Prompt Callback (Desktop)"]);
+const SCENE_UNDO_HISTORY_LIMIT_MIN = 50;
+const SCENE_UNDO_HISTORY_LIMIT_MAX = 500;
+const SCENE_UNDO_HISTORY_LIMIT_DEFAULT = 200;
+
+function sceneUndoHistoryLimit(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return SCENE_UNDO_HISTORY_LIMIT_DEFAULT;
+    }
+    return Math.min(
+        SCENE_UNDO_HISTORY_LIMIT_MAX,
+        Math.max(SCENE_UNDO_HISTORY_LIMIT_MIN, Math.round(numeric)),
+    );
+}
+
+function setSceneUndoHistoryLimit(value) {
+    const limit = sceneUndoHistoryLimit(value);
+    ChangeTracker.MAX_HISTORY = limit;
+    for (const workflow of app.extensionManager?.workflow?.openWorkflows || []) {
+        const tracker = workflow?.changeTracker;
+        for (const queue of [tracker?.undoQueue, tracker?.redoQueue]) {
+            if (Array.isArray(queue) && queue.length > limit) {
+                queue.splice(0, queue.length - limit);
+            }
+        }
+    }
+    return limit;
+}
 const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePrompter",
     "SceneMatrix",
@@ -10770,6 +10799,22 @@ function receiveSceneDesktopNotification(detail) {
 
 app.registerExtension({
     name: "ScenePrompt.UI",
+
+    settings: [
+        {
+            id: "ScenePrompt.UndoHistoryLimit",
+            name: "Scene Prompt Tools: Undo履歴数",
+            type: "number",
+            defaultValue: SCENE_UNDO_HISTORY_LIMIT_DEFAULT,
+            tooltip: "全ワークフロー共通です。増やすほど Ctrl+Z で戻せる回数は増えますが、ブラウザのメモリ使用量も増えます。",
+            attrs: {
+                min: SCENE_UNDO_HISTORY_LIMIT_MIN,
+                max: SCENE_UNDO_HISTORY_LIMIT_MAX,
+                step: 50,
+            },
+            onChange: (value) => setSceneUndoHistoryLimit(value),
+        },
+    ],
 
     setup() {
         if (window.__ScenePromptUISetupInstalled) {
