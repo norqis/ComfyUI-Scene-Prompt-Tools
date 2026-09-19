@@ -513,18 +513,34 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         (nested / "run_00008.jpg").touch()
         self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), 11)
 
-    def test_fallback_uses_only_unambiguous_five_digit_counters(self):
-        root = Path(self.temp_dir.name) / "fallback"
-        root.mkdir()
-        (root / "run_00001123.png").touch()
-        (root / "run_suffix100000.png").touch()
-        (root / "run_12300001.png").touch()
-        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "run_", "先頭"), 1)
-        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "run_", "最後"), 1)
-        (root / "run_00009suffix.png").touch()
-        (root / "run_suffix00008.png").touch()
-        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "run_", "先頭"), 10)
-        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "run_", "最後"), 9)
+    def test_fallback_uses_five_digits_at_the_requested_position(self):
+        first_root = Path(self.temp_dir.name) / "fallback-first"
+        last_root = Path(self.temp_dir.name) / "fallback-last"
+        first_root.mkdir()
+        last_root.mkdir()
+        (first_root / "run_00001123.png").touch()
+        (last_root / "run_12300001.png").touch()
+        self.assertEqual(self.nodes._find_next_index(str(first_root), "png", 5, "run_", "先頭"), 2)
+        self.assertEqual(self.nodes._find_next_index(str(last_root), "png", 5, "run_", "最後"), 2)
+        (first_root / "run_00009suffix.png").touch()
+        (last_root / "run_suffix00008.png").touch()
+        self.assertEqual(self.nodes._find_next_index(str(first_root), "png", 5, "run_", "先頭"), 10)
+        self.assertEqual(self.nodes._find_next_index(str(last_root), "png", 5, "run_", "最後"), 9)
+
+    def test_missing_state_and_metadata_recover_the_prefix_wide_counter(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saver = self.nodes.SceneSaveImage()
+        first = Path(saver.save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": "run_", "filename_suffix": "123",
+        })["result"][1])
+        with Image.open(first) as saved_image:
+            saved_image.copy().save(first)
+        _lock_path, state_path, _key = self.nodes._counter_state_paths(self.temp_dir.name, "png", 5, "run_")
+        Path(state_path).unlink()
+        second = Path(saver.save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": "run_", "filename_suffix": "other",
+        })["result"][1])
+        self.assertEqual((first.name, second.name), ("run_12300001.png", "run_other00002.png"))
 
     def test_metadata_continues_large_current_and_legacy_counters(self):
         root = Path(self.temp_dir.name) / "metadata"
@@ -541,11 +557,24 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             "filename_suffix": "suffix",
             "counter_position": "最後",
         })
-        save_metadata("PromptArun_100001.png", {
+        save_metadata("PromptARUN_100001.png", {
             "file_index": 100001,
-            "filename_prefix": "PromptArun_",
+            "filename_prefix": "PromptARUN_",
         })
         self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "run_", "最後"), 100002)
+
+    def test_metadata_prefix_match_is_case_insensitive(self):
+        root = Path(self.temp_dir.name) / "metadata-casefold"
+        root.mkdir()
+        png_info = PngInfo()
+        png_info.add_text("scene_info", json.dumps({
+            "file_index": 100000,
+            "filename_prefix": "RUN_",
+            "filename_suffix": "suffix",
+            "counter_position": "最後",
+        }))
+        Image.new("RGB", (1, 1)).save(root / "RUN_suffix100000.PNG", pnginfo=png_info)
+        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "run_", "最後"), 100001)
 
     def test_empty_prefix_scans_legacy_default_png_names(self):
         root = Path(self.temp_dir.name) / "empty-prefix"
@@ -554,6 +583,49 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "", "最後"), 10)
         (root / "anything100001.png").touch()
         self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "", "最後"), 10)
+
+    def test_counter_state_paths_share_casefolded_prefixes(self):
+        root = Path(self.temp_dir.name) / "casefold-state"
+        root.mkdir()
+        upper_paths = self.nodes._counter_state_paths(str(root), "png", 5, "RUN_")
+        lower_paths = self.nodes._counter_state_paths(str(root), "png", 5, "run_")
+        self.assertEqual(upper_paths[:2], lower_paths[:2])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            counters = list(pool.map(
+                lambda prefix: self.nodes._allocate_output_index(str(root), "png", 5, prefix, 1),
+                ("RUN_", "run_"),
+            ))
+        self.assertEqual(sorted(counters), [1, 2])
+
+    def test_counter_state_allows_maximum_once_then_exhausts(self):
+        root = Path(self.temp_dir.name) / "maximum-state"
+        root.mkdir()
+        maximum = self.nodes.MAX_SAFE_INTEGER
+        _lock_path, state_path, _key = self.nodes._counter_state_paths(str(root), "png", 5, "run_")
+        Path(state_path).write_text(str(maximum), encoding="ascii")
+        self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), maximum)
+        self.assertIsNone(self.nodes._read_counter_state(state_path))
+        with self.assertRaisesRegex(ValueError, "上限"):
+            self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1)
+
+    def test_counter_allocation_rejects_requested_and_scanned_overflow(self):
+        root = Path(self.temp_dir.name) / "maximum-requested"
+        root.mkdir()
+        with self.assertRaisesRegex(ValueError, "上限"):
+            self.nodes._allocate_output_index(str(root), "png", 5, "run_", self.nodes.MAX_SAFE_INTEGER + 1)
+
+        scan_root = Path(self.temp_dir.name) / "maximum-scanned"
+        scan_root.mkdir()
+        png_info = PngInfo()
+        png_info.add_text("scene_info", json.dumps({
+            "file_index": self.nodes.MAX_SAFE_INTEGER,
+            "filename_prefix": "run_",
+            "filename_suffix": "suffix",
+            "counter_position": "最後",
+        }))
+        Image.new("RGB", (1, 1)).save(scan_root / "run_suffix99999.png", pnginfo=png_info)
+        with self.assertRaisesRegex(ValueError, "上限"):
+            self.nodes._allocate_output_index(str(scan_root), "png", 5, "run_", 1)
 
     def test_missing_or_invalid_state_forces_a_rescan_even_after_the_key_was_seen(self):
         root = Path(self.temp_dir.name) / "state-recovery"

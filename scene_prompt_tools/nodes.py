@@ -1444,8 +1444,10 @@ def _metadata_file_index(path, filename_prefix, counter_position):
     value = scene_info.get("file_index") if isinstance(scene_info, dict) else None
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_SAFE_INTEGER:
         return None
+    stored_prefix = scene_info.get("filename_prefix")
     if (
-        scene_info.get("filename_prefix") == filename_prefix
+        isinstance(stored_prefix, str)
+        and stored_prefix.casefold() == filename_prefix.casefold()
         and scene_info.get("counter_position") == counter_position
     ):
         return value
@@ -1453,8 +1455,8 @@ def _metadata_file_index(path, filename_prefix, counter_position):
         counter_position == COUNTER_POSITION_LAST
         and "filename_suffix" not in scene_info
         and "counter_position" not in scene_info
-        and isinstance(scene_info.get("filename_prefix"), str)
-        and scene_info["filename_prefix"].endswith(filename_prefix)
+        and isinstance(stored_prefix, str)
+        and stored_prefix.casefold().endswith(filename_prefix.casefold())
     ):
         return value
     return None
@@ -1466,11 +1468,9 @@ def _find_next_index(run_root, extension, padding, filename_prefix="", counter_p
     extension_pattern = re.escape(extension)
     prefix_pattern = re.escape(prefix)
     if counter_position == COUNTER_POSITION_FIRST:
-        patterns = [re.compile(rf"^{prefix_pattern}(\d{{5}})(?!\d).*\.{extension_pattern}$", re.IGNORECASE)]
+        patterns = [re.compile(rf"^{prefix_pattern}(\d{{5}}).*\.{extension_pattern}$", re.IGNORECASE)]
     else:
-        patterns = [re.compile(rf"^{prefix_pattern}.*(?<!\d)(\d{{5}})\.{extension_pattern}$", re.IGNORECASE)]
-        if prefix:
-            patterns.append(re.compile(rf"^.*{prefix_pattern}(\d{{5}})\.{extension_pattern}$", re.IGNORECASE))
+        patterns = [re.compile(rf"^.*(\d{{5}})\.{extension_pattern}$", re.IGNORECASE)]
     current_candidate = re.compile(rf"^{prefix_pattern}.*\.{extension_pattern}$", re.IGNORECASE)
     legacy_last_candidate = re.compile(rf"^.*{prefix_pattern}\d+\.{extension_pattern}$", re.IGNORECASE)
     highest = 0
@@ -1503,7 +1503,7 @@ _FILENAME_RESERVATION_LOCK = threading.Lock()
 
 
 def _counter_state_paths(run_root, extension, padding, filename_prefix, counter_position=COUNTER_POSITION_LAST):
-    key = "\0".join((str(extension).lower(), str(int(padding)), filename_prefix, _counter_position(counter_position)))
+    key = "\0".join((str(extension).lower(), str(int(padding)), str(filename_prefix).casefold(), _counter_position(counter_position)))
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return (
         os.path.join(run_root, f".scene-save-{digest}.lock"),
@@ -1539,7 +1539,15 @@ def _read_counter_state(state_path):
             next_index = int(state_file.read().strip())
     except (FileNotFoundError, ValueError, OSError):
         return None
-    return next_index if next_index >= 1 else None
+    return next_index if 1 <= next_index <= MAX_SAFE_INTEGER else None
+
+
+def _counter_state_is_exhausted(state_path):
+    try:
+        with open(state_path, "r", encoding="ascii") as state_file:
+            return int(state_file.read().strip()) == MAX_SAFE_INTEGER + 1
+    except (FileNotFoundError, ValueError, OSError):
+        return False
 
 
 def _write_counter_state(state_path, next_index):
@@ -1566,13 +1574,19 @@ def _allocate_output_index(run_root, extension, padding, filename_prefix, reques
         state_index = _read_counter_state(state_path)
         if state_index is not None:
             counter = max(1, int(requested_index or 1), state_index)
+            if counter > MAX_SAFE_INTEGER:
+                raise ValueError("画像連番が上限に達しました。")
             _write_counter_state(state_path, counter + 1)
             return counter
+        if _counter_state_is_exhausted(state_path):
+            raise ValueError("画像連番が上限に達しました。")
 
     scanned_index = _find_next_index(run_root, extension, padding, filename_prefix, counter_position)
     with _counter_state_lock(lock_path):
         state_index = _read_counter_state(state_path)
         counter = max(1, int(requested_index or 1), scanned_index, state_index or 1)
+        if counter > MAX_SAFE_INTEGER or _counter_state_is_exhausted(state_path):
+            raise ValueError("画像連番が上限に達しました。")
         _write_counter_state(state_path, counter + 1)
         return counter
 
