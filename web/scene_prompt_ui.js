@@ -156,6 +156,7 @@ const SCENE_WIDGET_LABELS = {
     seed_base: "開始シード",
     timestamp_dir: "タイムスタンプディレクトリ",
     prefix: "ファイル名プレフィックス",
+    counter_position: "連番の位置",
     width: "width",
     height: "height",
     batch_size: "batch_size",
@@ -3831,7 +3832,7 @@ function hideSceneUtilityWidgets(node, nodeName) {
             ? new Set(["lora_name", "strength_model", "strength_clip"])
         : isSceneExpandNodeName(nodeName)
             ? new Set([
-                "timestamp_dir", "prefix", "replace_underscores", "convert_anima_weights",
+                "timestamp_dir", "prefix", "counter_position", "replace_underscores", "convert_anima_weights",
                 "callback_first", "callback_each", "callback_last",
                 "callback_timeout_seconds", "callback_failure_mode",
             ])
@@ -4696,11 +4697,15 @@ function sceneExpandConfigureValues(config) {
         return config;
     }
     const converted = [...values];
-    if (typeof converted[5] === "string") {
+    if (converted[5] === "先頭" || converted[5] === "最後") {
+        // Already current: preserve the selected position and every later value.
+    } else if (typeof converted[5] === "string") {
         const enabled = converted[5] === "Anima";
-        converted.splice(5, 1, enabled, enabled);
-    } else if (converted.length === 5) {
-        converted.push(false, false);
+        converted.splice(5, 1, "最後", enabled, enabled);
+    } else if (typeof converted[5] === "boolean" && typeof converted[6] === "boolean") {
+        converted.splice(5, 0, "最後");
+    } else if (converted.length >= 5) {
+        converted.splice(5, 0, "最後", false, false);
     }
     if (converted.length) {
         converted[0] = 0;

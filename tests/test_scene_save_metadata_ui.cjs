@@ -8,6 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, "..", "web", "scene_prompt_u
 assert.match(source, /ScenePrompterExpand/u);
 assert.match(source, /current_index: "生成番号"/u);
 assert.match(source, /seed_base: "開始シード"/u);
+assert.match(source, /counter_position: "連番の位置"/u);
 
 function functionSource(name) {
     const start = source.indexOf(`function ${name}(`);
@@ -52,6 +53,7 @@ assert.equal(widgets[3].hidden, true);
 const expandWidgets = [
     { name: "timestamp_dir" },
     { name: "prefix" },
+    { name: "counter_position" },
     { name: "replace_underscores" },
     { name: "convert_anima_weights" },
     { name: "current_index" },
@@ -61,7 +63,8 @@ assert.equal(expandWidgets[0].hidden, false);
 assert.equal(expandWidgets[1].hidden, false);
 assert.equal(expandWidgets[2].hidden, false);
 assert.equal(expandWidgets[3].hidden, false);
-assert.equal(expandWidgets[4].hidden, true);
+assert.equal(expandWidgets[4].hidden, false);
+assert.equal(expandWidgets[5].hidden, true);
 
 const loraWidgets = [
     { name: "lora_name" },
@@ -78,7 +81,7 @@ const legacyAnima = {
 };
 const migratedAnima = context.sceneExpandConfigureValues(legacyAnima);
 assert.deepEqual(JSON.parse(JSON.stringify(migratedAnima.widgets_values)), [
-    0, "saved-run", 7, true, "prefix", true, true, 13, "停止", true,
+    0, "saved-run", 7, true, "prefix", "最後", true, true, 13, "停止", true,
 ]);
 assert.deepEqual(legacyAnima.widgets_values, [15, "saved-run", 7, true, "prefix", "Anima", 13, "停止", true]);
 assert.deepEqual(
@@ -88,8 +91,13 @@ assert.deepEqual(
 );
 assert.deepEqual(
     JSON.parse(JSON.stringify(context.sceneExpandConfigureValues({ widgets_values: [15, "saved-run", 7, true, "prefix"] }).widgets_values)),
-    [0, "saved-run", 7, true, "prefix", false, false],
+    [0, "saved-run", 7, true, "prefix", "最後", false, false],
     "pre-model workflows receive explicit false conversion options",
+);
+assert.deepEqual(
+    JSON.parse(JSON.stringify(context.sceneExpandConfigureValues({ widgets_values: [15, "saved-run", 7, true, "prefix", true, false, 13, "停止", true] }).widgets_values)),
+    [0, "saved-run", 7, true, "prefix", "最後", true, false, 13, "停止", true],
+    "existing conversion and callback values stay aligned",
 );
 assert.deepEqual(
     JSON.parse(JSON.stringify(context.sceneExpandConfigureValues({ widgets_values: [] }).widgets_values)),

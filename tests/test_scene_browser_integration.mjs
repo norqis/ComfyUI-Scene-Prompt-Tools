@@ -1048,6 +1048,7 @@ try {
                     { name: "seed_base", type: "number", value: seedBase, options: {} },
                     { name: "timestamp_dir", type: "toggle", value: true, options: {} },
                     { name: "prefix", type: "text", value: "", options: {} },
+                    { name: "counter_position", type: "combo", value: "最後", options: {} },
                     { name: "replace_underscores", type: "toggle", value: false, options: {} },
                     { name: "convert_anima_weights", type: "toggle", value: false, options: {} },
                     { name: "callback_timeout_seconds", type: "number", value: 10, options: {} },
@@ -1109,10 +1110,10 @@ try {
                 .filter((widget) => ["callback_timeout_seconds", "callback_failure_mode"].includes(widget.name))
                 .map((widget) => ({ name: widget.name, label: widget.label, hidden: !!widget.hidden })),
             loadedReplay: ["current_index", "seed_base", "seed_base_literal", "run_id"].map((name) => expand.widgets.find((widget) => widget.name === name).value),
-            loadedReplaySerialized: expand.serialize().widgets_values.slice(0, 3).concat(expand.serialize().widgets_values[9]),
+            loadedReplaySerialized: expand.serialize().widgets_values.slice(0, 3).concat(expand.serialize().widgets_values[10]),
             zeroReplay: ["current_index", "seed_base", "seed_base_literal", "run_id"].map((name) => zeroReplayExpand.widgets.find((widget) => widget.name === name).value),
             replaySeedLiteralHidden: zeroReplayExpand.widgets.find((widget) => widget.name === "seed_base_literal").hidden,
-            zeroReplaySerialized: zeroReplayExpand.serialize().widgets_values.slice(0, 3).concat(zeroReplayExpand.serialize().widgets_values[9]),
+            zeroReplaySerialized: zeroReplayExpand.serialize().widgets_values.slice(0, 3).concat(zeroReplayExpand.serialize().widgets_values[10]),
         };
         const method = request.widgets.find((widget) => widget.name === "method");
         method.value = "POST";

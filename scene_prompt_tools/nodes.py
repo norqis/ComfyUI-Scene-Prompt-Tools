@@ -77,6 +77,9 @@ from .callbacks import (
 
 
 MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE"
+COUNTER_POSITION_FIRST = "先頭"
+COUNTER_POSITION_LAST = "最後"
+COUNTER_POSITION_CHOICES = (COUNTER_POSITION_FIRST, COUNTER_POSITION_LAST)
 MATRIX_LINE_KEYS = {
     "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled", "filename_enabled",
     "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
@@ -1316,6 +1319,10 @@ def _safe_filename_prefix(value):
     return f"{''.join(kept)}~{digest}"
 
 
+def _counter_position(value):
+    return value if value in COUNTER_POSITION_CHOICES else COUNTER_POSITION_LAST
+
+
 def _sanitize_filename_text(value):
     return BAD_FILENAME_PREFIX_CHARS_RE.sub("_", unicodedata.normalize("NFC", str(value or "")))
 
@@ -1372,16 +1379,16 @@ def _output_filename_suffix(value, filename_prefix, extension, padding, counter=
     used_utf8, used_utf16 = _filename_units(f"{filename_prefix}{tail}")
     available_utf8 = 255 - used_utf8
     available_utf16 = 255 - used_utf16
-    if available_utf8 <= 1 or available_utf16 <= 1:
+    if available_utf8 <= 0 or available_utf16 <= 0:
         return ""
-    candidate = f"_{raw_suffix}"
+    candidate = raw_suffix
     candidate_utf8, candidate_utf16 = _filename_units(candidate)
     if candidate_utf8 <= available_utf8 and candidate_utf16 <= available_utf16:
         return raw_suffix
 
     digest = hashlib.sha256(raw_suffix.encode("utf-8")).hexdigest()[:8]
     kept = []
-    used_utf8 = used_utf16 = 1  # The separating underscore.
+    used_utf8 = used_utf16 = 0
     for character in raw_suffix:
         char_utf8, char_utf16 = _filename_units(character)
         if used_utf8 + char_utf8 + 9 > available_utf8 or used_utf16 + char_utf16 + 9 > available_utf16:
@@ -1389,11 +1396,20 @@ def _output_filename_suffix(value, filename_prefix, extension, padding, counter=
         kept.append(character)
         used_utf8 += char_utf8
         used_utf16 += char_utf16
-    if not kept and 10 > available_utf8:
+    if not kept and 9 > available_utf8:
         return ""
-    if not kept and 10 > available_utf16:
+    if not kept and 9 > available_utf16:
         return ""
     return f"{''.join(kept)}~{digest}"
+
+
+def _output_filename_parts(filename_prefix, filename_suffix, extension, padding, counter, counter_position):
+    prefix = _output_filename_prefix(filename_prefix, extension, padding, counter)
+    suffix = _output_filename_suffix(filename_suffix, prefix, extension, padding, counter)
+    counter_text = f"{counter:0{padding}d}"
+    if _counter_position(counter_position) == COUNTER_POSITION_FIRST:
+        return prefix, suffix, f"{prefix}{counter_text}{suffix}.{extension}"
+    return prefix, suffix, f"{prefix}{suffix}{counter_text}.{extension}"
 
 
 def _resolve_run_dir(run_dir):
@@ -1420,19 +1436,47 @@ def _subfolder_for_preview(directory, output_dir):
     return "" if rel == "." else rel.replace(os.sep, "/")
 
 
-def _find_next_index(run_root, extension, padding, filename_prefix=""):
+def _metadata_file_index(path, filename_prefix, counter_position):
+    try:
+        with Image.open(path) as image:
+            scene_info = json.loads(image.text.get("scene_info", ""))
+    except (OSError, ValueError, TypeError):
+        return None
+    value = scene_info.get("file_index") if isinstance(scene_info, dict) else None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_SAFE_INTEGER
+        or scene_info.get("filename_prefix") != filename_prefix
+        or _counter_position(scene_info.get("counter_position")) != counter_position
+    ):
+        return None
+    return value
+
+
+def _find_next_index(run_root, extension, padding, filename_prefix="", counter_position=COUNTER_POSITION_LAST):
     prefix = _output_filename_prefix(filename_prefix, extension, padding)
-    pattern = re.compile(
-        rf"^{re.escape(prefix)}(\d{{{padding},}})(?:_.*)?\.{re.escape(extension)}$",
-        re.IGNORECASE,
-    )
+    counter_position = _counter_position(counter_position)
+    if counter_position == COUNTER_POSITION_FIRST:
+        pattern = re.compile(rf"^{re.escape(prefix)}(\d{{{padding},}}).*\.{re.escape(extension)}$", re.IGNORECASE)
+    else:
+        pattern = re.compile(rf"^{re.escape(prefix)}.*?(\d{{{padding},}})\.{re.escape(extension)}$", re.IGNORECASE)
     highest = 0
     if os.path.isdir(run_root):
         for root, _dirs, files in os.walk(run_root):
             for filename in files:
+                if not filename.startswith(prefix) or not filename.lower().endswith(f".{extension.lower()}"):
+                    continue
+                path = os.path.join(root, filename)
+                metadata_index = _metadata_file_index(path, prefix, counter_position)
+                if metadata_index is not None:
+                    highest = max(highest, metadata_index)
+                    continue
                 match = pattern.match(filename)
                 if match:
-                    highest = max(highest, int(match.group(1)))
+                    value = int(match.group(1))
+                    if 1 <= value <= MAX_SAFE_INTEGER:
+                        highest = max(highest, value)
     return highest + 1
 
 
@@ -1442,8 +1486,8 @@ _COUNTER_STATE_SEEN_LOCK = threading.Lock()
 _FILENAME_RESERVATION_LOCK = threading.Lock()
 
 
-def _counter_state_paths(run_root, extension, padding, filename_prefix):
-    key = "\0".join((str(extension).lower(), str(int(padding)), filename_prefix))
+def _counter_state_paths(run_root, extension, padding, filename_prefix, counter_position=COUNTER_POSITION_LAST):
+    key = "\0".join((str(extension).lower(), str(int(padding)), filename_prefix, _counter_position(counter_position)))
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return (
         os.path.join(run_root, f".scene-save-{digest}.lock"),
@@ -1456,9 +1500,6 @@ def _counter_state_paths(run_root, extension, padding, filename_prefix):
 def _counter_state_lock(lock_path):
     """Use a stable, one-byte advisory lock shared by independent ComfyUI processes."""
     with open(lock_path, "a+b") as lock_file:
-        if os.path.getsize(lock_path) == 0:
-            lock_file.write(b"\0")
-            lock_file.flush()
         lock_file.seek(0)
         if os.name == "nt":
             import msvcrt
@@ -1501,16 +1542,17 @@ def _write_counter_state(state_path, next_index):
         raise
 
 
-def _allocate_output_index(run_root, extension, padding, filename_prefix, requested_index=1):
+def _allocate_output_index(run_root, extension, padding, filename_prefix, requested_index=1, counter_position=COUNTER_POSITION_LAST):
     """Allocate a prefix-wide counter, independent of filename suffixes."""
-    lock_path, state_path, key = _counter_state_paths(run_root, extension, padding, filename_prefix)
+    counter_position = _counter_position(counter_position)
+    lock_path, state_path, key = _counter_state_paths(run_root, extension, padding, filename_prefix, counter_position)
     with _counter_state_lock(lock_path):
         state_index = _read_counter_state(state_path)
         with _COUNTER_STATE_SEEN_LOCK:
             first_allocation = key not in _COUNTER_STATE_SEEN
             if not first_allocation:
                 _COUNTER_STATE_SEEN.move_to_end(key)
-        scanned_index = _find_next_index(run_root, extension, padding, filename_prefix) if first_allocation or state_index is None else 1
+        scanned_index = _find_next_index(run_root, extension, padding, filename_prefix, counter_position) if first_allocation or state_index is None else 1
         counter = max(1, int(requested_index or 1), state_index or 1, scanned_index)
         _write_counter_state(state_path, counter + 1)
         with _COUNTER_STATE_SEEN_LOCK:
@@ -1521,11 +1563,11 @@ def _allocate_output_index(run_root, extension, padding, filename_prefix, reques
         return counter
 
 
-def _reserve_output_path(directory, extension, padding, counter, filename_prefix="", filename_suffix=""):
+def _reserve_output_path(directory, extension, padding, counter, filename_prefix="", filename_suffix="", counter_position=COUNTER_POSITION_LAST):
     """Reserve one exact output name; callers allocate a fresh persistent counter on collision."""
-    prefix = _output_filename_prefix(filename_prefix, extension, padding, counter)
-    suffix = _output_filename_suffix(filename_suffix, prefix, extension, padding, counter)
-    filename = f"{prefix}{counter:0{padding}d}{f'_{suffix}' if suffix else ''}.{extension}"
+    prefix, suffix, filename = _output_filename_parts(
+        filename_prefix, filename_suffix, extension, padding, counter, counter_position,
+    )
     path = os.path.join(directory, filename)
     reservation_path = f"{path}.scene-save-reservation"
     if os.path.exists(path):
@@ -1602,6 +1644,7 @@ def _normalize_scene_save_info(value):
         "use_run_dir": _scene_bool(use_run_dir),
         "path": str(value.get("path") or "").strip(),
         "filename_prefix": _safe_filename_prefix(value.get("filename_prefix")),
+        "counter_position": _counter_position(value.get("counter_position")),
         "file_index": _metadata_count(value.get("file_index"), "file_index", MAX_SAFE_INTEGER, 0),
         "positive": str(value.get("positive") or ""),
         "negative": str(value.get("negative") or ""),
@@ -2353,6 +2396,14 @@ class ScenePromptExpand:
                         "label": "ファイル名プレフィックス",
                     },
                 ),
+                "counter_position": (
+                    COUNTER_POSITION_CHOICES,
+                    {
+                        "default": COUNTER_POSITION_LAST,
+                        "display_name": "連番の位置",
+                        "label": "連番の位置",
+                    },
+                ),
                 "scene_prompt": (
                     SCENE_PROMPT_TYPE,
                     {"display_name": "scene_prompt", "label": "scene_prompt"},
@@ -2395,6 +2446,7 @@ class ScenePromptExpand:
         seed_base=0,
         timestamp_dir=True,
         prefix="",
+        counter_position=COUNTER_POSITION_LAST,
         scene_prompt=None,
         model_mode=None,
         replace_underscores=None,
@@ -2419,6 +2471,7 @@ class ScenePromptExpand:
                 str(_scene_bool(seed_base_literal)),
                 str(_scene_bool(timestamp_dir)),
                 _safe_filename_prefix(prefix),
+                _counter_position(counter_position),
                 str(_expand_conversion_options(model_mode, replace_underscores, convert_anima_weights)),
             ]
         )
@@ -2430,6 +2483,7 @@ class ScenePromptExpand:
         seed_base=0,
         timestamp_dir=True,
         prefix="",
+        counter_position=COUNTER_POSITION_LAST,
         scene_prompt=None,
         model_mode=None,
         replace_underscores=None,
@@ -2512,9 +2566,8 @@ class ScenePromptExpand:
             "use_run_dir": use_run_dir,
             "path": _row_path(row),
             "filename_prefix": str(prefix or ""),
-            "filename_suffix": "_".join(
-                str(part).strip() for part in row.get("filename_parts", []) if str(part).strip()
-            ),
+            "filename_suffix": "".join(str(part) for part in row.get("filename_parts", []) if str(part)),
+            "counter_position": _counter_position(counter_position),
             "file_index": global_index + 1,
             "positive": positive,
             "negative": negative,
@@ -2555,7 +2608,7 @@ class ScenePromptExpand:
 
 
 class SceneSaveImage:
-    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はExpandのプレフィックス、5桁の連番、Scene Prompt／Matrix名の順で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「生成経路ノードのみ」「プロンプトのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。Presetの中身を展開すると、保存時に固定されたPresetを実ノードと接続へ置き換えます。"""
+    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はExpandのプレフィックスを先頭に置き、5桁の連番とScene Prompt／Matrix名はExpandで選んだ順序で連結します。既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「生成経路ノードのみ」「プロンプトのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。Presetの中身を展開すると、保存時に固定されたPresetを実ノードと接続へ置き換えます。"""
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
@@ -2614,6 +2667,7 @@ class SceneSaveImage:
         info = _normalize_scene_save_info(scene_info)
         filename_prefix = _output_filename_prefix(info.get("filename_prefix", ""), extension, padding)
         filename_suffix = info.get("filename_suffix", "")
+        counter_position = _counter_position(info.get("counter_position"))
         base_root = folder_paths.get_output_directory()
         base_path_parts = _safe_relative_parts(path)
         scene_path_parts = _safe_relative_parts(info.get("path"))
@@ -2661,12 +2715,12 @@ class SceneSaveImage:
                 img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
                 while True:
                     counter = _allocate_output_index(
-                        run_root, extension, padding, filename_prefix, requested_index,
+                        run_root, extension, padding, filename_prefix, requested_index, counter_position,
                     )
                     requested_index = counter + 1
                     with _FILENAME_RESERVATION_LOCK:
                         reserved = _reserve_output_path(
-                            output_dir, extension, padding, counter, filename_prefix, filename_suffix,
+                            output_dir, extension, padding, counter, filename_prefix, filename_suffix, counter_position,
                         )
                     if reserved is None:
                         continue
@@ -2695,6 +2749,7 @@ class SceneSaveImage:
                                 "run_dir": "/".join(run_parts),
                                 "filename_prefix": effective_prefix,
                                 "filename_suffix": effective_suffix,
+                                "counter_position": counter_position,
                                 "file_index": counter,
                                 "label": info.get("label", ""),
                                 "row_index": info.get("row_index", 0),

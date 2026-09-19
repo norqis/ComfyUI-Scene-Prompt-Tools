@@ -1551,9 +1551,10 @@ NODE_CLASS_MAPPINGS = {
         graph = _save_graph("ワークフロー全体", "filename-prefix")
         graph["1"]["inputs"].update({"prompt_name": "PromptA", "filename_enabled": True})
         graph["4"]["inputs"]["prefix"] = "run_"
+        graph["4"]["inputs"]["counter_position"] = "先頭"
         self._queue_and_wait(graph)
         files = sorted((self.base / "output" / "filename-prefix").glob("*.png"))
-        self.assertEqual([path.name for path in files], ["run_00001_PromptA.png", "run_00002_PromptA.png"])
+        self.assertEqual([path.name for path in files], ["run_00001PromptA.png", "run_00002PromptA.png"])
         from PIL import Image
         with Image.open(files[0]) as image:
             scene_info = json.loads(image.text["scene_info"])
