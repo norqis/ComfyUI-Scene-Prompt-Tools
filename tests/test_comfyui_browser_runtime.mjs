@@ -325,6 +325,34 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(conversionRoundTrips.original[5], "Anima", "legacy input is never mutated");
     assert.equal(conversionRoundTrips.modelExists, false);
     console.log("real ComfyUI Expand options and legacy Callback/replay widget migration passed");
+    const applyModelInputOrder = await page.evaluate(async () => {
+        const app = window.app;
+        app.graph.clear();
+        const scene = window.LiteGraph.createNode("ScenePrompter");
+        const applyModel = window.LiteGraph.createNode("SceneApplyModel");
+        app.graph.add(scene);
+        app.graph.add(applyModel);
+        const inputIndex = applyModel.inputs.findIndex((input) => input.name === "scene_prompt");
+        scene.connect(0, applyModel, inputIndex);
+        const workflow = app.graph.serialize();
+        const applyModelId = applyModel.id;
+        const sceneId = scene.id;
+        await app.loadGraphData(workflow, true, true);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const restored = app.graph.getNodeById(applyModelId);
+        const link = Object.values(app.graph.links).find((candidate) => (
+            candidate.origin_id === sceneId && candidate.target_id === applyModelId
+        ));
+        return {
+            created: applyModel.inputs.map((input) => input.name),
+            restored: restored.inputs.map((input) => input.name),
+            targetSlot: link?.target_slot,
+        };
+    });
+    assert.deepEqual(applyModelInputOrder.created, ["scene_prompt", "model", "clip", "vae"]);
+    assert.deepEqual(applyModelInputOrder.restored, ["scene_prompt", "model", "clip", "vae"]);
+    assert.equal(applyModelInputOrder.targetSlot, 0, "restored Scene link follows reordered input slot");
+    console.log("real ComfyUI Scene Apply Model input order passed");
     const bypassPreset = await page.evaluate(async () => {
         const app = window.app;
         app.graph.clear();
