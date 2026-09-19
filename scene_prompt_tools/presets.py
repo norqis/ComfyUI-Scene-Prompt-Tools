@@ -140,8 +140,10 @@ def _preset_path(preset_id, user_id="default"):
 
 def _normalize_legacy_preset_ids(preset):
     normalized = copy.deepcopy(preset)
-    nodes = ((normalized.get("api_graph") or {}).get("output") if isinstance(normalized, dict) else None)
+    graph = normalized.get("api_graph") if isinstance(normalized, dict) else None
+    nodes = graph.get("output") if isinstance(graph, dict) else None
     if isinstance(nodes, dict):
+        normalized["api_graph"] = {"output": nodes}
         for node in nodes.values():
             if not isinstance(node, dict):
                 continue
@@ -699,7 +701,7 @@ def save_preset(payload, user_id="default"):
     extra = workflow.get("extra")
     if isinstance(extra, dict):
         extra.pop("scene_preset_editor", None)
-    api_graph = _api_graph_with_titles({**api_graph, "output": connected_nodes}, workflow)
+    api_graph = _api_graph_with_titles({"output": connected_nodes}, workflow)
     with _PRESET_LOCK:
         try:
             _validate_workflow_nodes(workflow, api_graph["output"])
@@ -1137,13 +1139,6 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
                 }
                 for preset_id, preset in resolved.items()
             ],
-            "preset_graphs": {
-                preset_id: {
-                    "metadata": copy.deepcopy(preset["metadata"]),
-                    "api_graph": copy.deepcopy(preset["api_graph"]),
-                }
-                for preset_id, preset in resolved.items()
-            },
             "total_images": int(plan.get("total_images") or 0),
             "total_batches": int(plan.get("total_batches") or 0),
         }

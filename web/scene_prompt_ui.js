@@ -7671,8 +7671,6 @@ async function resolveScenePresetsForRun(run, snapshot, expandNodeId) {
         return null;
     }
     clearScenePresetReferenceErrors({ nodeIds: referenceIds });
-    run.presetGraphs = new Map(Object.entries(data.preset_graphs || {}));
-    run.presetSnapshots = Array.isArray(data.presets) ? data.presets : [];
     run.runHandle = String(data.run_handle);
     return data;
 }
