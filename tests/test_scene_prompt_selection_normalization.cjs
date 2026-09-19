@@ -146,4 +146,108 @@ assert.deepEqual(
     "reordering and additions preserve selected parts",
 );
 
+const partWrites = [];
+const partContext = {
+    Number,
+    Object,
+    String,
+    Map,
+    Set,
+    JSON,
+    popupStateWidgetName(node, options = {}) {
+        return options.stateWidgetName || node.sceneDefaultStateWidgetName;
+    },
+    readStateFromWidget(node) {
+        return JSON.parse(JSON.stringify(node.partState));
+    },
+    writeState(node, state, options = {}) {
+        node.partState = JSON.parse(JSON.stringify(state));
+        partWrites.push({ stateWidgetName: options.stateWidgetName, state: node.partState });
+    },
+};
+vm.createContext(partContext);
+for (const name of [
+    "itemPath",
+    "pathKey",
+    "itemCategoryKey",
+    "itemKey",
+    "normalizeWeight",
+    "weightForStorage",
+    "itemWeight",
+    "splitPromptParts",
+    "itemPromptParts",
+    "partKey",
+    "normalizedSelectedParts",
+    "itemForState",
+    "selectedItems",
+    "selectedItemFor",
+    "partSelectionsForItem",
+    "writeItemPartSelections",
+    "setItemPartChecked",
+    "setItemPartWeight",
+]) {
+    vm.runInContext(functionSource(name), partContext);
+}
+
+const multipart = candidate("weights", "Weights", "alpha, beta");
+const partNode = {
+    sceneDefaultStateWidgetName: "positive_json",
+    partState: stateFor({
+        ...multipart,
+        selected_parts: [
+            { index: 0, text: "alpha", weight: 1.3 },
+            { index: 1, text: "beta", weight: 1.2 },
+        ],
+    }),
+};
+
+partContext.setItemPartWeight(partNode, multipart, { index: 1, text: "beta" }, 1.3);
+let partSelected = partNode.partState.categories[category][0];
+assert.equal(partSelected.weight, 1.3, "matching the final individual weight restores the whole-item weight");
+assert.equal(partSelected.selected_parts, undefined, "matching all individual weights removes the per-part representation");
+
+partNode.partState = stateFor({
+    ...multipart,
+    selected_parts: [{ index: 0, text: "alpha" }],
+});
+partContext.setItemPartChecked(partNode, multipart, { index: 1, text: "beta" }, true);
+partSelected = partNode.partState.categories[category][0];
+assert.equal(partSelected.selected_parts, undefined, "checking the final unselected part restores the whole-item representation");
+assert.equal(partSelected.weight, undefined, "the default whole-item weight remains implicit");
+
+partNode.partState = stateFor({ ...multipart });
+partContext.setItemPartChecked(partNode, multipart, { index: 0, text: "alpha" }, false);
+partSelected = partNode.partState.categories[category][0];
+assert.deepEqual(
+    JSON.parse(JSON.stringify(partSelected.selected_parts)),
+    [{ index: 1, text: "beta" }],
+    "a partial selection keeps its selected-parts representation",
+);
+
+partNode.partState = stateFor({ ...multipart });
+partContext.setItemPartWeight(partNode, multipart, { index: 0, text: "alpha" }, 1.3);
+partSelected = partNode.partState.categories[category][0];
+assert.deepEqual(
+    JSON.parse(JSON.stringify(partSelected.selected_parts)),
+    [{ index: 0, text: "alpha", weight: 1.3 }, { index: 1, text: "beta" }],
+    "different individual weights keep their selected-parts representation",
+);
+
+partNode.partState = stateFor({
+    ...multipart,
+    selected_parts: [
+        { index: 0, text: "alpha", weight: 1.3 },
+        { index: 4, text: "removed", missing: true, weight: 1.3 },
+    ],
+});
+partContext.setItemPartWeight(partNode, multipart, { index: 0, text: "alpha" }, 1.3);
+partSelected = partNode.partState.categories[category][0];
+assert.equal(partSelected.weight, undefined, "a missing part never turns into a whole-item selection");
+assert.deepEqual(
+    JSON.parse(JSON.stringify(partSelected.selected_parts)),
+    [{ index: 0, text: "alpha", weight: 1.3 }, { index: 4, text: "removed", missing: true, weight: 1.3 }],
+    "a missing part remains an explicit per-part selection",
+);
+assert.ok(partWrites.length >= 5, "part edits write through the active state widget");
+
 console.log("Scene Prompt selection normalization tests passed.");

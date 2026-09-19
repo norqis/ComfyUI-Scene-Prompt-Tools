@@ -78,6 +78,12 @@ const baseItem = {
   category_key: "Outfit",
   category_label: "Outfit",
 };
+const weightItem = {
+  ...baseItem,
+  id: "weight-test",
+  label: "Weight Test",
+  prompt: "alpha, beta",
+};
 const nestedItem = {
   id: "search-detail",
   label: "Search Detail",
@@ -87,7 +93,7 @@ const nestedItem = {
   category_key: "Search/Nested",
   category_label: "Search > Nested",
 };
-const promptItems = [baseItem, nestedItem, ...Array.from({ length: 60 }, (_value, index) => ({
+const promptItems = [baseItem, weightItem, nestedItem, ...Array.from({ length: 60 }, (_value, index) => ({
   ...baseItem,
   id: "summer-" + index,
   label: "Summer " + index,
@@ -457,6 +463,32 @@ try {
     assert.ok(selectedState.selectedList.drawCount > 0);
     assert.ok(selectedState.selectedList.paintedPixels > 0);
 
+    const weightCandidate = page.getByTitle("alpha, beta", { exact: true });
+    await weightCandidate.click();
+    await page.getByTitle("alpha, beta", { exact: true }).getByRole("button", { name: "個別選択", exact: true }).click();
+    let partWeights = page.locator(".pc-part-row .pc-weight-input");
+    await partWeights.nth(0).fill("1.3");
+    await partWeights.nth(0).press("Tab");
+    let partSelection = await page.evaluate(() => JSON.parse(window.__scenePromptTestNode.widgets.find((widget) => widget.name === "positive_json").value).categories.Outfit.find((item) => item.id === "weight-test"));
+    assert.deepEqual(partSelection.selected_parts, [{ index: 0, text: "alpha", weight: 1.3 }, { index: 1, text: "beta" }], "a changed individual weight remains a per-part selection");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    await page.getByRole("button", { name: "選択済み一覧", exact: true }).click();
+    let weightChip = page.locator('.pc-selected-chip[title="alpha, beta"]');
+    assert.equal(await weightChip.locator(".pc-weight-input").isDisabled(), true, "the whole-item weight stays disabled while individual weights differ");
+    await weightChip.getByRole("button", { name: "個別", exact: true }).click();
+    partWeights = page.locator(".pc-part-row .pc-weight-input");
+    await partWeights.nth(1).fill("1.3");
+    await partWeights.nth(1).press("Tab");
+    partSelection = await page.evaluate(() => JSON.parse(window.__scenePromptTestNode.widgets.find((widget) => widget.name === "positive_json").value).categories.Outfit.find((item) => item.id === "weight-test"));
+    assert.equal(partSelection.weight, 1.3, "matching all individual weights restores the whole-item weight");
+    assert.equal(partSelection.selected_parts, undefined, "matching all individual weights removes selected_parts");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    weightChip = page.locator('.pc-selected-chip[title="alpha, beta"]');
+    assert.equal(await weightChip.locator(".pc-weight-input").isDisabled(), false, "the whole-item weight becomes editable after individual weights match");
+    assert.equal(await weightChip.locator(".pc-weight-input").inputValue(), "1.3");
+    await weightChip.locator('input[type="checkbox"]').click();
+    await page.getByRole("button", { name: "一覧", exact: true }).click();
+
     const candidateFilter = page.locator(".pc-popup .pc-searchbox");
     await candidateFilter.fill("Summer");
     const candidateList = page.locator(".pc-popup .pc-popup-list");
@@ -806,6 +838,37 @@ try {
     await page.getByRole("button", { name: "行編集へ戻る" }).click();
     assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value.includes("summer")), true, "行編集へ戻る keeps the already committed positive Matrix candidate");
     assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), writesBeforeWeightCommit + 1, "secondary and outer close do not add a duplicate Matrix state write");
+
+    const matrixJsonBeforePartWeights = await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value);
+    await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
+    await page.getByText("Outfit", { exact: false }).click();
+    await page.getByTitle("alpha, beta", { exact: true }).click();
+    await page.getByTitle("alpha, beta", { exact: true }).getByRole("button", { name: "個別選択", exact: true }).click();
+    let matrixPartWeights = page.locator(".pc-part-row .pc-weight-input");
+    await matrixPartWeights.nth(0).fill("1.3");
+    await matrixPartWeights.nth(0).press("Tab");
+    assert.deepEqual(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.positive_json).categories.Outfit.find((item) => item.id === "weight-test").selected_parts), [{ index: 0, text: "alpha", weight: 1.3 }, { index: 1, text: "beta" }], "Matrix keeps differing individual weights in its row draft");
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value), matrixJsonBeforePartWeights, "changing Matrix individual weights does not commit the row draft yet");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    await page.getByRole("button", { name: "選択済み一覧", exact: true }).click();
+    let matrixWeightChip = page.locator('.pc-selected-chip[title="alpha, beta"]');
+    assert.equal(await matrixWeightChip.locator(".pc-weight-input").isDisabled(), true, "Matrix selected list disables whole-item weight while individual weights differ");
+    await matrixWeightChip.getByRole("button", { name: "個別", exact: true }).click();
+    matrixPartWeights = page.locator(".pc-part-row .pc-weight-input");
+    await matrixPartWeights.nth(1).fill("1.3");
+    await matrixPartWeights.nth(1).press("Tab");
+    assert.deepEqual(await page.evaluate(() => {
+        const state = JSON.parse(window.__sceneMatrixTestNode.sceneMatrixLineDraftContext.draft.positive_json);
+        const item = state.categories.Outfit.find((candidateItem) => candidateItem.id === "weight-test");
+        return { weight: item.weight, selected_parts: item.selected_parts };
+    }), { weight: 1.3, selected_parts: undefined }, "Matrix collapses matching individual weights to the whole-item representation in its draft");
+    await page.getByRole("button", { name: "←戻る", exact: true }).click();
+    matrixWeightChip = page.locator('.pc-selected-chip[title="alpha, beta"]');
+    assert.equal(await matrixWeightChip.locator(".pc-weight-input").isDisabled(), false, "Matrix selected list enables whole-item weight after individual weights match");
+    await matrixWeightChip.locator('input[type="checkbox"]').click();
+    await page.getByRole("button", { name: "行編集へ戻る" }).click();
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value), matrixJsonBeforePartWeights, "removing the draft-only test candidate leaves the committed Matrix row unchanged");
+
     await page.getByRole("button", { name: "ネガティブ候補" }).nth(1).click();
     await page.getByText("Outfit", { exact: false }).click();
     await page.getByTitle("summer dress", { exact: true }).click();
