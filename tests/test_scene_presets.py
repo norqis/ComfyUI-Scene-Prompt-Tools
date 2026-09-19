@@ -150,6 +150,24 @@ class ScenePresetTests(unittest.TestCase):
             "strength_clip": 0.7,
         }])
 
+    def test_preset_scene_prompt_preserves_outer_model_and_lora_route(self):
+        saved = self.save("outer-model", basic_nodes())
+        upstream = self.nodes.SceneApplyModel().apply_model(
+            ["checkpoint", 0], ["checkpoint", 1], ["checkpoint", 2],
+        )[0]
+        upstream = self.nodes.SceneApplyLora().apply_lora(
+            "style/example.safetensors", 0.8, 0.7, upstream,
+        )[0]
+
+        plan = self.module._evaluate_preset_scene(saved, {}, upstream)
+        row = plan["rows"][0]["row"]
+        self.assertEqual(row["model_links"], {
+            "model": ["checkpoint", 0], "clip": ["checkpoint", 1], "vae": ["checkpoint", 2],
+        })
+        self.assertEqual(row["loras"], [{
+            "name": "style/example.safetensors", "strength_model": 0.8, "strength_clip": 0.7,
+        }])
+
     def test_save_prunes_root_and_extra_reroutes_for_removed_links(self):
         workflow = {
             "version": 1,

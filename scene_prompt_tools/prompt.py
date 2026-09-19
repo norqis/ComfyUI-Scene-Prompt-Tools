@@ -524,6 +524,7 @@ class _ScenePromptBase:
                 negative_parts,
             )
             output_row = {
+                **row,
                 "labels": [*row.get("labels", []), label],
                 "positive_parts": merged_positive_parts,
                 "negative_parts": merged_negative_parts,
@@ -536,8 +537,6 @@ class _ScenePromptBase:
                 "source_node_names": dict(row.get("source_node_names", {})),
                 "callbacks": list(row.get("callbacks", [])),
             }
-            if "latent" in row:
-                output_row["latent"] = dict(row["latent"])
             output_row = with_prompt_trace(output_row, row, positive_parts, negative_parts)
             rows.append({"row": output_row, "count": item["count"]})
 

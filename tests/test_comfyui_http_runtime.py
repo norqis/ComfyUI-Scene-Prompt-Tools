@@ -772,6 +772,46 @@ NODE_CLASS_MAPPINGS = {
         self._queue_and_wait(graph)
         self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["selected"])
 
+    def test_model_route_before_scene_prompt_reaches_expand(self):
+        marker = self.base / "model-before-prompt.txt"
+        graph = {
+            "1": {"class_type": "TestSceneModelBundle", "inputs": {"label": "before-prompt", "log_path": str(marker)}},
+            "2": {"class_type": "SceneApplyModel", "inputs": {
+                "model": ["1", 0], "clip": ["1", 1], "vae": ["1", 2],
+            }},
+            "3": {"class_type": "ScenePrompter", "inputs": {
+                **_scene_prompt_inputs(), "scene_prompt": ["2", 0],
+            }},
+            "4": {"class_type": "ScenePrompterExpand", "inputs": {
+                "scene_prompt": ["3", 0], "current_index": 0, "seed_base": 1,
+                "run_id": "", "timestamp_dir": False, "prefix": "",
+            }},
+            "5": {"class_type": "TestSceneModelSink", "inputs": {
+                "model": ["4", 5], "clip": ["4", 6], "vae": ["4", 7],
+            }},
+        }
+        self._queue_and_wait(graph)
+        self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["before-prompt"])
+
+    def test_model_route_after_scene_prompt_reaches_expand(self):
+        marker = self.base / "model-after-prompt.txt"
+        graph = {
+            "1": {"class_type": "ScenePrompter", "inputs": _scene_prompt_inputs()},
+            "2": {"class_type": "TestSceneModelBundle", "inputs": {"label": "after-prompt", "log_path": str(marker)}},
+            "3": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["1", 0], "model": ["2", 0], "clip": ["2", 1], "vae": ["2", 2],
+            }},
+            "4": {"class_type": "ScenePrompterExpand", "inputs": {
+                "scene_prompt": ["3", 0], "current_index": 0, "seed_base": 1,
+                "run_id": "", "timestamp_dir": False, "prefix": "",
+            }},
+            "5": {"class_type": "TestSceneModelSink", "inputs": {
+                "model": ["4", 5], "clip": ["4", 6], "vae": ["4", 7],
+            }},
+        }
+        self._queue_and_wait(graph)
+        self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["after-prompt"])
+
     def _prepare_callback_run(self, graph, expand_node_id="10", workflow=None, client_id=None):
         workflow = workflow or _workflow_for_graph(graph)
         payload = {
