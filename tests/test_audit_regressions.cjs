@@ -586,6 +586,122 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
     assert.deepEqual(errors, [["Presetは保存しましたが、一覧を更新できませんでした。", "refresh offline"]]);
 }
 
+async function testPresetSaveMarksOnlyTheReferenceReturnedByTheServer() {
+    const failedReference = {
+        id: 12,
+        type: "ScenePresetReference",
+        color: "original-failed",
+        bgcolor: "original-failed-bg",
+        setDirtyCanvas() {},
+    };
+    const otherReference = {
+        id: 13,
+        type: "ScenePresetReference",
+        color: "original-other",
+        bgcolor: "original-other-bg",
+        setDirtyCanvas() {},
+    };
+    const node = {
+        id: 20,
+        graph: null,
+        widgets: [
+            { name: "preset_id", value: "preset-a" },
+            { name: "preset_name", value: "Preset A" },
+        ],
+    };
+    const errors = [];
+    const context = {
+        String,
+        JSON,
+        Set,
+        app: {
+            graph: {
+                _nodes: [failedReference, otherReference],
+                serialize() { return { nodes: [] }; },
+                setDirtyCanvas() {},
+            },
+            async graphToPrompt() { return { output: {} }; },
+        },
+        syncAllScenePromptNames() {},
+        commitActiveMatrixLineDraft() {},
+        applySceneSourceNodeNames() {},
+        findWidget(target, name) { return target.widgets.find((widget) => widget.name === name); },
+        isScenePresetReferenceNode(target) { return target.type === "ScenePresetReference"; },
+        api: {
+            async fetchApi() {
+                return {
+                    ok: false,
+                    payload: { error: "途中の参照 #12 でPresetが選択されていません。", node_id: "12" },
+                };
+            },
+        },
+        async readApiJson(response) { return response.payload; },
+        showSceneBatchError(message, error) { errors.push([message, error.message]); },
+    };
+    node.graph = context.app.graph;
+    vm.createContext(context);
+    vm.runInContext(functionSource("markScenePresetReferenceErrors"), context);
+    vm.runInContext(functionSource("saveScenePreset"), context);
+
+    await context.saveScenePreset(node);
+
+    assert.equal(failedReference.color, "#7f1d1d");
+    assert.equal(failedReference.bgcolor, "#3b1010");
+    assert.equal(failedReference.scenePresetError, "途中の参照 #12 でPresetが選択されていません。");
+    assert.equal(otherReference.color, "original-other");
+    assert.equal(otherReference.bgcolor, "original-other-bg");
+    assert.deepEqual(errors, [["Presetを保存できませんでした。", "途中の参照 #12 でPresetが選択されていません。"]]);
+}
+
+async function testPresetPickerClearsTheSelectedReferenceError() {
+    const buttons = [];
+    const cleared = [];
+    const node = { id: 12, widgets: [{ name: "preset_id", value: "" }], setDirtyCanvas() {} };
+    const createElement = (tagName) => ({
+        tagName,
+        children: [],
+        className: "",
+        textContent: "",
+        appendChild(child) { this.children.push(child); },
+    });
+    const context = {
+        Array,
+        String,
+        document: { createElement },
+        scenePresetListErrors: [],
+        app: { graph: { setDirtyCanvas() {} } },
+        async loadPopupRequest() { return [{ preset_id: "chosen", name: "Chosen" }]; },
+        refreshScenePresetReferenceList() { throw new Error("initial load is supplied by the test"); },
+        openPopupShell() { return createElement("popup"); },
+        createButton(label) {
+            const button = {
+                label,
+                classList: { add() {} },
+                addEventListener(type, listener) { this[type] = listener; },
+            };
+            buttons.push(button);
+            return button;
+        },
+        selectedScenePreset() { return null; },
+        setWidgetValue(target, name, value) {
+            target.widgets.find((widget) => widget.name === name).value = value;
+        },
+        clearScenePresetReferenceErrors(options) { cleared.push([...options.nodeIds]); },
+        refreshScenePresetReference() {},
+        refreshAllScenePresetReferences() {},
+        closePopup() {},
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("sortedScenePresetCandidates"), context);
+    vm.runInContext(functionSource("openScenePresetPicker"), context);
+
+    await context.openScenePresetPicker(node);
+    buttons.find((button) => button.label === "Chosen").click();
+
+    assert.equal(node.widgets[0].value, "chosen");
+    assert.deepEqual(cleared, [[12]]);
+}
+
 async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange() {
     let resolveLoad;
     const pending = new Promise((resolve) => { resolveLoad = resolve; });
@@ -684,6 +800,8 @@ Promise.resolve()
     .then(testPendingFifoRunPreparesPresetSnapshotImmediately)
     .then(testOverflowCountsDoNotStartABatchRun)
     .then(testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure)
+    .then(testPresetSaveMarksOnlyTheReferenceReturnedByTheServer)
+    .then(testPresetPickerClearsTheSelectedReferenceError)
     .then(testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange)
     .then(testPopupRequestsUseOneIntentAcrossNodes)
     .then(() => console.log("Audit regression tests passed."))

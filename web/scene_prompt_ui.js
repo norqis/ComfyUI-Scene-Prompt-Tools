@@ -10004,6 +10004,7 @@ async function openScenePresetPicker(node) {
         }
         button.addEventListener("click", () => {
             setWidgetValue(node, "preset_id", preset.preset_id);
+            clearScenePresetReferenceErrors({ nodeIds: [node.id] });
             refreshScenePresetReference(node, presets);
             refreshAllScenePresetReferences(presets);
             closePopup();
@@ -10063,6 +10064,7 @@ async function saveScenePreset(node) {
         showSceneBatchError("Preset IDを入力してください。");
         return;
     }
+    let failedReferenceNodeId = "";
     try {
         const graphToPrompt = app.graphToPrompt?.bind(app);
         if (!graphToPrompt || !app.graph?.serialize) {
@@ -10090,6 +10092,7 @@ async function saveScenePreset(node) {
         });
         const data = await readApiJson(response, "Presetの保存に失敗しました");
         if (!response.ok) {
+            failedReferenceNodeId = String(data.node_id || "").trim();
             throw new Error(data.error || "Presetの保存に失敗しました");
         }
         const metadata = data.metadata || {};
@@ -10103,6 +10106,11 @@ async function saveScenePreset(node) {
         }
         showSceneNotification(`Preset「${metadata.name || name}」を保存しました。`);
     } catch (error) {
+        if (failedReferenceNodeId) {
+            markScenePresetReferenceErrors(error?.message || "Presetの検証に失敗しました。", {
+                nodeId: failedReferenceNodeId,
+            });
+        }
         showSceneBatchError("Presetを保存できませんでした。", error);
     }
 }
