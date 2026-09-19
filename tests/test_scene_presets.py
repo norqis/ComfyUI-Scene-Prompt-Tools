@@ -256,6 +256,76 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual(on_disk["metadata"]["name"], "Renamed")
         self.assertNotIn("revision", on_disk["metadata"])
 
+    def test_save_keeps_only_output_in_api_graph(self):
+        nodes = basic_nodes()
+        payload_graph = {
+            "output": nodes,
+            "workflow": {"large": ["unused"] * 1000},
+            "extra": {"unused": True},
+        }
+        saved = self.module.save_preset({
+            "preset_id": "compact-api-graph",
+            "name": "compact-api-graph",
+            "output_node_id": "3",
+            "api_graph": payload_graph,
+            "workflow": {"version": 1, "nodes": []},
+        })
+        self.assertEqual(set(saved["api_graph"]), {"output"})
+        on_disk = json.loads(self.module._preset_path("compact-api-graph").read_text(encoding="utf-8"))
+        self.assertEqual(set(on_disk["api_graph"]), {"output"})
+
+    def test_load_normalizes_legacy_embedded_workflow_after_hash_validation_without_rewriting(self):
+        saved = self.save("legacy-heavy", basic_nodes("legacy"))
+        path = self.module._preset_path("legacy-heavy")
+        legacy = copy.deepcopy(saved)
+        legacy["api_graph"]["workflow"] = {
+            "nodes": [{"id": index, "payload": "x" * 1000} for index in range(1000)]
+        }
+        legacy["metadata"]["sha256"] = self.module._content_hash(
+            legacy["api_graph"], legacy["workflow"]
+        )
+        path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+        before_bytes = path.read_bytes()
+        before_mtime = path.stat().st_mtime_ns
+
+        loaded = self.module.load_preset("legacy-heavy")
+
+        self.assertEqual(set(loaded["api_graph"]), {"output"})
+        self.assertEqual(
+            loaded["metadata"]["sha256"],
+            self.module._content_hash(loaded["api_graph"], loaded["workflow"]),
+        )
+        self.assertEqual(path.read_bytes(), before_bytes)
+        self.assertEqual(path.stat().st_mtime_ns, before_mtime)
+        self.assertEqual(
+            self.module.load_preset("legacy-heavy")["metadata"]["sha256"],
+            loaded["metadata"]["sha256"],
+        )
+
+        response = self.module.snapshot_presets_for_run(
+            "legacy-heavy-run",
+            graph({
+                "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "legacy-heavy"}},
+                "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
+            }),
+            "11",
+        )
+        serialized_response = json.dumps(response)
+        self.assertNotIn("preset_graphs", response)
+        self.assertNotIn('"payload"', serialized_response)
+        self.assertLess(len(serialized_response), 1024)
+        self.assertEqual(
+            set(self.module._RUN_SNAPSHOTS[("default", "legacy-heavy-run")]["presets"]["legacy-heavy"]["api_graph"]),
+            {"output"},
+        )
+
+        corrupt = copy.deepcopy(legacy)
+        corrupt["api_graph"]["workflow"]["nodes"][0]["payload"] = "tampered"
+        path.write_text(json.dumps(corrupt, ensure_ascii=False), encoding="utf-8")
+        self.module._invalidate_preset_file_cache("legacy-heavy")
+        with self.assertRaisesRegex(self.module.ScenePresetError, "hash"):
+            self.module.load_preset("legacy-heavy")
+
     def test_save_ignores_stale_and_invalid_expected_revision(self):
         self.save("revision", basic_nodes("first"))
         self.save("revision", basic_nodes("second"), expected_revision=1)
@@ -1504,8 +1574,10 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual(snapshot["metadata"]["sha256"], first["presets"][0]["sha256"])
         self.assertEqual(snapshot["api_graph"]["output"]["2"]["inputs"]["positive_base"], "first")
         next_run = self.module.snapshot_presets_for_run("next-run", api_graph, "11")
+        self.assertNotIn("preset_graphs", next_run)
+        self.assertNotIn("preset_graphs", self.module._RUN_SNAPSHOTS[("default", "next-run")]["response"])
         self.assertEqual(
-            next_run["preset_graphs"]["fixed"]["api_graph"]["output"]["2"]["inputs"]["positive_base"],
+            self.module._snapshot_preset("next-run", "fixed")["api_graph"]["output"]["2"]["inputs"]["positive_base"],
             "second",
         )
 

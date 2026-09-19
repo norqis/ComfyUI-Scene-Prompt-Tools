@@ -330,20 +330,6 @@ async function testScenePresetResolution() {
             return {
                 run_handle: "opaque-run-handle",
                 presets: [{ preset_id: "preset-a" }],
-                preset_graphs: {
-                    "preset-a": {
-                        metadata: { sha256: "abc" },
-                        api_graph: {
-                            output: {
-                                "1": { class_type: "ScenePresetInput", inputs: {} },
-                                "2": { class_type: "SceneMatrix", inputs: { matrix_json: "{\"version\":1,\"sets\":[{\"enabled\":true},{\"enabled\":true}]}", scene_prompt: ["1", 0] } },
-                                "3": { class_type: "SceneApplyLora", inputs: { scene_prompt: ["2", 0] } },
-                                "4": { class_type: "ScenePromptCounter", inputs: { count: 3, scene_prompt: ["3", 0] } },
-                                "5": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
-                            },
-                        },
-                    },
-                },
             };
         },
         releaseSceneRunHandle() {},
@@ -356,20 +342,6 @@ async function testScenePresetResolution() {
                 assert.equal(request.run_id, "run-a");
                 return presetContext.apiResponse({
                     presets: [{ preset_id: "preset-a" }],
-                    preset_graphs: {
-                        "preset-a": {
-                            metadata: { sha256: "abc" },
-                            api_graph: {
-                                output: {
-                                    "1": { class_type: "ScenePresetInput", inputs: {} },
-                                    "2": { class_type: "SceneMatrix", inputs: { matrix_json: "{\"version\":1,\"sets\":[{\"enabled\":true},{\"enabled\":true}]}", scene_prompt: ["1", 0] } },
-                                    "3": { class_type: "SceneApplyLora", inputs: { scene_prompt: ["2", 0] } },
-                                "4": { class_type: "ScenePromptCounter", inputs: { count: 3, scene_prompt: ["3", 0] } },
-                                "5": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
-                                },
-                            },
-                        },
-                    },
                 });
             },
         },
@@ -407,13 +379,11 @@ async function testScenePresetResolution() {
         },
     };
     const run = { runId: "run-a" };
-    await presetContext.resolveScenePresetsForRun(run, snapshot, "10");
+    const resolved = await presetContext.resolveScenePresetsForRun(run, snapshot, "10");
     assert.equal(run.runHandle, "opaque-run-handle");
-    assert.equal(run.presetSnapshots[0].preset_id, "preset-a");
-    presetContext.scenePresetDisplayGraphs = run.presetGraphs;
-    const presetStats = presetContext.scenePresetStats("preset-a", null);
-    assert.equal(presetStats.rows, 2);
-    assert.equal(presetStats.total, 6);
+    assert.equal(resolved.presets[0].preset_id, "preset-a");
+    assert.equal("presetGraphs" in run, false);
+    assert.equal("presetSnapshots" in run, false);
 
     presetContext.prepareSceneRunContext = async () => { throw new Error("Presetが壊れています"); };
     await assert.rejects(
@@ -768,7 +738,7 @@ async function testCancelledPresetResolutionReleasesOnce() {
     assert.equal(cancelledContext.releaseCalls, 1);
     assert.equal(cancelledContext.sceneBatchRunsById.has(run.runId), false);
 
-    cancelledContext.prepareSceneRunContext = async () => ({ run_handle: "unused", presets: [], preset_graphs: {}, total_images: 1 });
+    cancelledContext.prepareSceneRunContext = async () => ({ run_handle: "unused", presets: [], total_images: 1 });
     cancelledContext.clearScenePresetReferenceErrors = () => { throw new Error("cancelled run must not alter UI"); };
     cancelledContext.scenePresetReferenceIdsForExpand = () => [];
     vm.runInContext(functionSource("resolveScenePresetsForRun"), cancelledContext);
@@ -811,7 +781,7 @@ async function testPresetResolveClearsOnlyItsOwnReferences() {
             if (String(expand) === "4") {
                 throw new Error("B is broken");
             }
-            return { run_handle: "handle-A", presets: [], preset_graphs: {}, total_images: 1 };
+            return { run_handle: "handle-A", presets: [], total_images: 1 };
         },
     };
     vm.createContext(resolveContext);
