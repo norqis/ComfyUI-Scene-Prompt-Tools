@@ -358,6 +358,7 @@ window.__sceneSeedRuntimeTest = {
         await app.loadGraphData(loaded.workflow, true, true);
         const restored = app.graph.getNodeById(reverse.id);
         const restoredApi = await app.graphToPrompt();
+        const restoredLinks = Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]);
         app.graph.clear();
         const nestedInput = create("ScenePresetInput");
         const reference = create("ScenePresetReference");
@@ -387,7 +388,7 @@ window.__sceneSeedRuntimeTest = {
         const unbypassedReferenceApi = await app.graphToPrompt();
         return {
             bypassMode: restored?.mode,
-            links: Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]),
+            links: restoredLinks,
             expectedLinks: [[input.id, prompt.id], [prompt.id, reverse.id], [reverse.id, output.id]],
             apiContainsReverse: Boolean(restoredApi.output[String(reverse.id)]),
             outputSource: restoredApi.output[String(output.id)].inputs.scene_prompt,
