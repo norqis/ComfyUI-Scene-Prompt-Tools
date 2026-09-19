@@ -1834,7 +1834,7 @@ function writeItemPartSelections(node, item, selections, options = {}) {
     const allChecked = !checked.some((part) => part.missing) && checked.length === allParts.length;
     const firstWeight = weightForStorage(checked[0]?.weight);
     const sameWeight = checked.every((part) => weightForStorage(part.weight) === firstWeight);
-    if (allChecked && sameWeight && !options.forceParts) {
+    if (allChecked && sameWeight) {
         if (firstWeight === null) {
             delete selected.weight;
         } else {
@@ -1869,7 +1869,7 @@ function setItemPartChecked(node, item, part, checked, options = {}) {
         }
         return selection;
     });
-    return writeItemPartSelections(node, item, selections, { forceParts: true, stateWidgetName });
+    return writeItemPartSelections(node, item, selections, { stateWidgetName });
 }
 
 function setItemPartWeight(node, item, part, value, options = {}) {
@@ -1881,7 +1881,7 @@ function setItemPartWeight(node, item, part, value, options = {}) {
         }
         return selection;
     });
-    return writeItemPartSelections(node, item, selections, { forceParts: true, stateWidgetName });
+    return writeItemPartSelections(node, item, selections, { stateWidgetName });
 }
 
 function setAllItemParts(node, item, checked, options = {}) {
@@ -1891,7 +1891,7 @@ function setAllItemParts(node, item, checked, options = {}) {
         ...selection,
         checked,
     }));
-    return writeItemPartSelections(node, item, selections, { forceParts: !checked, stateWidgetName });
+    return writeItemPartSelections(node, item, selections, { stateWidgetName });
 }
 
 function clearSelection(node, stateWidgetName = null) {
