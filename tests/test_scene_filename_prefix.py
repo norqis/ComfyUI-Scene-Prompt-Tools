@@ -1185,6 +1185,103 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 if isinstance(value, list) and len(value) == 2:
                     self.assertIn(str(value[0]), saved_ids)
 
+    def _sibling_merge_model_metadata(self, same_loader=False):
+        loader_a = "loader" if same_loader else "loader_a"
+        loader_b = "loader" if same_loader else "loader_b"
+        prompt = {
+            "left": {"class_type": "ScenePrompter", "inputs": {}},
+            "right": {"class_type": "ScenePrompter", "inputs": {}},
+            loader_a: {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            **({} if same_loader else {loader_b: {"class_type": "CheckpointLoaderSimple", "inputs": {}}}),
+            "model_a": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["left", 0], "model": [loader_a, 0], "clip": [loader_a, 1], "vae": [loader_a, 2],
+            }},
+            "model_b": {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": ["right", 0], "model": [loader_b, 0], "clip": [loader_b, 1], "vae": [loader_b, 2],
+            }},
+            "merge": {"class_type": "ScenePrompterMerge", "inputs": {
+                "scene_prompt1": ["model_a", 0], "scene_prompt2": ["model_b", 0],
+            }},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["merge", 0]}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["queue", 0]}},
+            "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["expand", 4], "scene_info": ["expand", 2]}},
+        }
+        workflow_nodes = [
+            {"id": node_id, "type": node["class_type"], "inputs": [], "outputs": []}
+            for node_id, node in prompt.items()
+        ]
+        by_id = {str(node["id"]): node for node in workflow_nodes}
+        links = []
+        for link_id, (target_id, input_name, value) in enumerate((
+            (target_id, input_name, value) for target_id, node in prompt.items()
+            for input_name, value in node["inputs"].items() if isinstance(value, list)
+        ), start=1):
+            source_id, source_slot = value
+            source = by_id[str(source_id)]
+            while len(source["outputs"]) <= source_slot:
+                source["outputs"].append({"links": []})
+            source["outputs"][source_slot]["links"].append(link_id)
+            target = by_id[target_id]
+            target_slot = len(target["inputs"])
+            target["inputs"].append({"name": input_name, "link": link_id})
+            links.append([link_id, source_id, source_slot, target_id, target_slot, "*"])
+        return self.nodes._metadata_for_save_mode(
+            prompt, {"workflow": {"nodes": workflow_nodes, "links": links, "groups": []}}, "save",
+            self.nodes.SAVE_METADATA_EXECUTION_PATH,
+            {"source_node_ids": ["left", "model_a", "right", "model_b", "merge", "queue", "expand"]},
+        )
+
+    def test_generation_path_metadata_keeps_right_sibling_merge_model_and_queue_route(self):
+        saved_prompt, saved_extra = self._sibling_merge_model_metadata()
+        self.assertNotIn("loader_a", saved_prompt)
+        self.assertNotIn("model_a", saved_prompt)
+        self.assertEqual(
+            set(saved_prompt),
+            {"left", "right", "loader_b", "model_b", "merge", "queue", "expand", "save"},
+        )
+        self.assertEqual(saved_prompt["merge"]["inputs"]["scene_prompt1"], ["left", 0])
+        self.assertEqual(saved_prompt["merge"]["inputs"]["scene_prompt2"], ["model_b", 0])
+        self.assertEqual(saved_prompt["model_b"]["inputs"]["model"], ["loader_b", 0])
+        self.assertEqual(saved_prompt["queue"]["inputs"]["scene_prompt1"], ["merge", 0])
+        saved_workflow = saved_extra["workflow"]
+        saved_ids = set(saved_prompt)
+        self.assertEqual({str(node["id"]) for node in saved_workflow["nodes"]}, saved_ids)
+        workflow_routes = {(str(link[1]), link[2], str(link[3])) for link in saved_workflow["links"]}
+        self.assertIn(("left", 0, "merge"), workflow_routes)
+        self.assertIn(("model_b", 0, "merge"), workflow_routes)
+        workflow_links = {link[0]: link for link in saved_workflow["links"]}
+        self.assertTrue(all(
+            str(link[1]) in saved_ids and str(link[3]) in saved_ids
+            for link in workflow_links.values()
+        ))
+        for workflow_node in saved_workflow["nodes"]:
+            node_id = str(workflow_node["id"])
+            for slot_index, slot in enumerate(workflow_node.get("inputs", [])):
+                if isinstance(slot, dict) and slot.get("link") is not None:
+                    link = workflow_links[slot["link"]]
+                    self.assertEqual((str(link[3]), link[4]), (node_id, slot_index))
+            for slot_index, slot in enumerate(workflow_node.get("outputs", [])):
+                if isinstance(slot, dict) and isinstance(slot.get("links"), list):
+                    for link_id in slot["links"]:
+                        link = workflow_links[link_id]
+                        self.assertEqual((str(link[1]), link[2]), (node_id, slot_index))
+        for node in saved_prompt.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and len(value) == 2:
+                    self.assertIn(str(value[0]), saved_ids)
+
+    def test_generation_path_metadata_uses_merge_source_order_when_models_share_loader(self):
+        saved_prompt, saved_extra = self._sibling_merge_model_metadata(same_loader=True)
+        self.assertNotIn("model_a", saved_prompt)
+        self.assertEqual(
+            set(saved_prompt),
+            {"left", "right", "loader", "model_b", "merge", "queue", "expand", "save"},
+        )
+        self.assertEqual(saved_prompt["merge"]["inputs"]["scene_prompt1"], ["left", 0])
+        self.assertEqual(saved_prompt["merge"]["inputs"]["scene_prompt2"], ["model_b", 0])
+        self.assertEqual(saved_prompt["model_b"]["inputs"]["model"], ["loader", 0])
+        self.assertEqual({str(node["id"]) for node in saved_extra["workflow"]["nodes"]}, set(saved_prompt))
+
     def test_execution_path_rebases_queue_second_branch_and_preserves_repeat(self):
         def branch(source_id, text, count):
             plan = self.nodes.with_source_node(

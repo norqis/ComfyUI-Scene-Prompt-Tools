@@ -551,11 +551,15 @@ SCENE_NODE_TYPES = {
 }
 
 
-def _scene_source_ids(scene_info):
+def _scene_source_id_list(scene_info):
     if not isinstance(scene_info, dict):
-        return set()
+        return []
     values = scene_info.get("source_node_ids", [])
-    return {str(value) for value in values if str(value).strip()} if isinstance(values, list) else set()
+    return list(dict.fromkeys(str(value) for value in values if str(value).strip())) if isinstance(values, list) else []
+
+
+def _scene_source_ids(scene_info):
+    return set(_scene_source_id_list(scene_info))
 
 
 _EXPAND_WORKFLOW_WIDGET_INDEX = {
@@ -709,28 +713,17 @@ def _scene_prompt_input_links(prompt, node_id):
 
 
 def _contract_superseded_model_sources(prompt, selected_scene_ids):
-    """Remove overridden Apply Model nodes while preserving their Scene routes."""
-    selected = {str(node_id) for node_id in selected_scene_ids}
+    """Keep the row-order effective Apply Model while preserving Scene routes."""
+    selected_order = list(dict.fromkeys(str(node_id) for node_id in selected_scene_ids if str(node_id).strip()))
+    selected = set(selected_order)
     if not isinstance(prompt, dict):
         return prompt, selected, {}
 
-    superseded = set()
-    for node_id in selected:
-        node = prompt.get(node_id)
-        if not isinstance(node, dict) or node.get("class_type") != "SceneApplyModel":
-            continue
-        pending = [node_id]
-        seen = set()
-        while pending:
-            current_id = str(pending.pop())
-            if current_id in seen:
-                continue
-            seen.add(current_id)
-            for _name, source_id, _slot in _scene_prompt_input_links(prompt, current_id):
-                source = prompt.get(source_id)
-                if isinstance(source, dict) and source.get("class_type") == "SceneApplyModel" and source_id in selected:
-                    superseded.add(source_id)
-                pending.append(source_id)
+    model_ids = [
+        node_id for node_id in selected_order
+        if isinstance(prompt.get(node_id), dict) and prompt[node_id].get("class_type") == "SceneApplyModel"
+    ]
+    superseded = set(model_ids[:-1])
 
     replacements = {}
 
@@ -923,13 +916,14 @@ def _metadata_for_save_mode(
         expanded_extra["workflow"] = expanded_workflow
         if metadata_mode == SAVE_METADATA_WORKFLOW:
             return expanded_prompt, expanded_extra
-        selected_sources = _scene_source_ids(scene_info)
+        selected_source_ids = _scene_source_id_list(scene_info)
         replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases)
-        selected_ids = {
+        selected_ids = [
             node_id
-            for node_id, source_id in source_aliases.items()
-            if source_id in selected_sources
-        }
+            for source_id in selected_source_ids
+            for node_id, alias in source_aliases.items()
+            if alias == source_id
+        ]
         contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
             expanded_prompt, selected_ids,
         )
@@ -958,8 +952,10 @@ def _metadata_for_save_mode(
     if metadata_mode == SAVE_METADATA_WORKFLOW:
         return prompt, extra_pnginfo
 
-    selected_sources = _scene_source_ids(scene_info)
-    contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(prompt, selected_sources)
+    selected_source_ids = _scene_source_id_list(scene_info)
+    contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(
+        prompt, selected_source_ids,
+    )
     ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)
     saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
     replay_values = _replay_expand_values(scene_info, prompt)
