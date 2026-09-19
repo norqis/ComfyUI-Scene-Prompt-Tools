@@ -8,7 +8,7 @@ import threading
 import time
 import tempfile
 import unicodedata
-from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import datetime
 
 import numpy as np
@@ -1297,8 +1297,7 @@ def _safe_relative_parts(value):
 
 
 def _safe_filename_prefix(value):
-    prefix = unicodedata.normalize("NFC", str(value or ""))
-    prefix = BAD_FILENAME_PREFIX_CHARS_RE.sub("_", prefix)
+    prefix = _sanitize_filename_text(value)
     first_component = prefix.split(".", 1)[0].rstrip(" ")
     if WINDOWS_RESERVED_PREFIX_RE.match(first_component):
         prefix = f"_{prefix}"
@@ -1314,6 +1313,10 @@ def _safe_filename_prefix(value):
         kept.append(character)
         units += width
     return f"{''.join(kept)}~{digest}"
+
+
+def _sanitize_filename_text(value):
+    return BAD_FILENAME_PREFIX_CHARS_RE.sub("_", unicodedata.normalize("NFC", str(value or "")))
 
 
 def _filename_units(value):
@@ -1354,6 +1357,44 @@ def _output_filename_prefix(value, extension, padding, counter=None):
     return f"{''.join(kept)}~{digest}"
 
 
+def _output_filename_suffix(value, filename_prefix, extension, padding, counter=None):
+    """Fit a Scene filename suffix after its already-stable prefix and counter."""
+    raw_suffix = _sanitize_filename_text(value)
+    if not raw_suffix:
+        return ""
+    counter_width = max(
+        int(padding),
+        len(str(MAX_SAFE_INTEGER)),
+        len(str(counter)) if counter is not None else 0,
+    )
+    tail = f"{'9' * counter_width}.{extension}.scene-save-reservation"
+    used_utf8, used_utf16 = _filename_units(f"{filename_prefix}{tail}")
+    available_utf8 = 255 - used_utf8
+    available_utf16 = 255 - used_utf16
+    if available_utf8 <= 1 or available_utf16 <= 1:
+        return ""
+    candidate = f"_{raw_suffix}"
+    candidate_utf8, candidate_utf16 = _filename_units(candidate)
+    if candidate_utf8 <= available_utf8 and candidate_utf16 <= available_utf16:
+        return raw_suffix
+
+    digest = hashlib.sha256(raw_suffix.encode("utf-8")).hexdigest()[:8]
+    kept = []
+    used_utf8 = used_utf16 = 1  # The separating underscore.
+    for character in raw_suffix:
+        char_utf8, char_utf16 = _filename_units(character)
+        if used_utf8 + char_utf8 + 9 > available_utf8 or used_utf16 + char_utf16 + 9 > available_utf16:
+            break
+        kept.append(character)
+        used_utf8 += char_utf8
+        used_utf16 += char_utf16
+    if not kept and 10 > available_utf8:
+        return ""
+    if not kept and 10 > available_utf16:
+        return ""
+    return f"{''.join(kept)}~{digest}"
+
+
 def _resolve_run_dir(run_dir):
     value = str(run_dir or "").strip().strip('"')
     if not value or value.lower() == "auto":
@@ -1381,7 +1422,7 @@ def _subfolder_for_preview(directory, output_dir):
 def _find_next_index(run_root, extension, padding, filename_prefix=""):
     prefix = _output_filename_prefix(filename_prefix, extension, padding)
     pattern = re.compile(
-        rf"^{re.escape(prefix)}(\d{{{padding},}})\.{re.escape(extension)}$",
+        rf"^{re.escape(prefix)}(\d{{{padding},}})(?:_.*)?\.{re.escape(extension)}$",
         re.IGNORECASE,
     )
     highest = 0
@@ -1395,74 +1436,110 @@ def _find_next_index(run_root, extension, padding, filename_prefix=""):
 
 
 _RUN_DIR_CACHE = {}
-_NEXT_INDEX_CACHE = OrderedDict()
-_NEXT_INDEX_CACHE_LOCK = threading.RLock()
+_COUNTER_STATE_SEEN = set()
+_COUNTER_STATE_SEEN_LOCK = threading.Lock()
 _FILENAME_RESERVATION_LOCK = threading.Lock()
 
 
-def _next_index_cache_key(run_root, extension, padding, filename_prefix=""):
+def _counter_state_paths(run_root, extension, padding, filename_prefix):
+    key = "\0".join((str(extension).lower(), str(int(padding)), filename_prefix))
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return (
-        os.path.abspath(run_root),
-        str(extension).lower(),
-        int(padding),
-        _output_filename_prefix(filename_prefix, extension, padding),
+        os.path.join(run_root, f".scene-save-{digest}.lock"),
+        os.path.join(run_root, f".scene-save-{digest}.state"),
+        (os.path.abspath(run_root), key),
     )
 
 
-def _cached_next_index(run_root, extension, padding, filename_prefix=""):
-    key = _next_index_cache_key(run_root, extension, padding, filename_prefix)
-    with _NEXT_INDEX_CACHE_LOCK:
-        cached = _NEXT_INDEX_CACHE.get(key)
-        if cached is not None:
-            _NEXT_INDEX_CACHE.move_to_end(key)
-            return cached
-        value = _find_next_index(run_root, extension, padding, filename_prefix)
-        _NEXT_INDEX_CACHE[key] = value
-        if len(_NEXT_INDEX_CACHE) > 256:
-            _NEXT_INDEX_CACHE.popitem(last=False)
-        return value
-
-
-def _remember_next_index(run_root, extension, padding, next_index, filename_prefix=""):
-    key = _next_index_cache_key(run_root, extension, padding, filename_prefix)
-    with _NEXT_INDEX_CACHE_LOCK:
-        current = _NEXT_INDEX_CACHE.get(key, 0)
-        _NEXT_INDEX_CACHE[key] = max(int(current or 0), int(next_index or 0))
-        _NEXT_INDEX_CACHE.move_to_end(key)
-        if len(_NEXT_INDEX_CACHE) > 256:
-            _NEXT_INDEX_CACHE.popitem(last=False)
-
-
-def _reserve_output_path(directory, extension, padding, counter, filename_prefix=""):
-    """Reserve a unique output name without exposing an unfinished PNG."""
-    while True:
-        prefix = _output_filename_prefix(filename_prefix, extension, padding, counter)
-        filename = f"{prefix}{counter:0{padding}d}.{extension}"
-        path = os.path.join(directory, filename)
-        reservation_path = f"{path}.scene-save-reservation"
-        if os.path.exists(path):
-            counter += 1
-            continue
-        try:
-            descriptor = os.open(reservation_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            counter += 1
-            continue
-        except PermissionError as exc:
-            if exc.errno == errno.EACCES and os.path.lexists(reservation_path):
-                counter += 1
-                continue
-            raise
+@contextmanager
+def _counter_state_lock(lock_path):
+    """Use a stable, one-byte advisory lock shared by independent ComfyUI processes."""
+    with open(lock_path, "a+b") as lock_file:
+        if os.path.getsize(lock_path) == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
         else:
-            os.close(descriptor)
-            if os.path.exists(path):
-                try:
-                    os.unlink(reservation_path)
-                except OSError:
-                    pass
-                counter += 1
-                continue
-            return path, reservation_path, filename, counter
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _read_counter_state(state_path):
+    try:
+        with open(state_path, "r", encoding="ascii") as state_file:
+            return max(1, int(state_file.read().strip()))
+    except (FileNotFoundError, ValueError, OSError):
+        return 1
+
+
+def _write_counter_state(state_path, next_index):
+    descriptor, temp_path = tempfile.mkstemp(prefix=".scene-save-state-", suffix=".tmp", dir=os.path.dirname(state_path))
+    try:
+        with os.fdopen(descriptor, "w", encoding="ascii") as state_file:
+            state_file.write(str(next_index))
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        os.replace(temp_path, state_path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _allocate_output_index(run_root, extension, padding, filename_prefix, requested_index=1):
+    """Allocate a prefix-wide counter, independent of filename suffixes."""
+    lock_path, state_path, key = _counter_state_paths(run_root, extension, padding, filename_prefix)
+    with _FILENAME_RESERVATION_LOCK, _counter_state_lock(lock_path):
+        state_index = _read_counter_state(state_path)
+        with _COUNTER_STATE_SEEN_LOCK:
+            first_allocation = key not in _COUNTER_STATE_SEEN
+        scanned_index = _find_next_index(run_root, extension, padding, filename_prefix) if first_allocation else 1
+        counter = max(1, int(requested_index or 1), state_index, scanned_index)
+        _write_counter_state(state_path, counter + 1)
+        if first_allocation:
+            with _COUNTER_STATE_SEEN_LOCK:
+                _COUNTER_STATE_SEEN.add(key)
+        return counter
+
+
+def _reserve_output_path(directory, extension, padding, counter, filename_prefix="", filename_suffix=""):
+    """Reserve one exact output name; callers allocate a fresh persistent counter on collision."""
+    prefix = _output_filename_prefix(filename_prefix, extension, padding, counter)
+    suffix = _output_filename_suffix(filename_suffix, prefix, extension, padding, counter)
+    filename = f"{prefix}{counter:0{padding}d}{f'_{suffix}' if suffix else ''}.{extension}"
+    path = os.path.join(directory, filename)
+    reservation_path = f"{path}.scene-save-reservation"
+    if os.path.exists(path):
+        return None
+    try:
+        descriptor = os.open(reservation_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+    except PermissionError as exc:
+        if exc.errno == errno.EACCES and os.path.lexists(reservation_path):
+            return None
+        raise
+    os.close(descriptor)
+    if os.path.exists(path):
+        try:
+            os.unlink(reservation_path)
+        except FileNotFoundError:
+            pass
+        return None
+    return path, reservation_path, filename, counter, prefix, suffix
 
 
 def _remove_output_reservation(reservation_path):
@@ -1531,6 +1608,10 @@ def _normalize_scene_save_info(value):
         "source_node_ids": [str(node_id) for node_id in value.get("source_node_ids", []) if str(node_id).strip()] if isinstance(value.get("source_node_ids"), list) else [],
         "run_handle": str(value.get("run_handle") or "").strip(),
     }
+    # Old PNG metadata did not include a suffix. Keep that representation
+    # intact so loading existing workflows remains byte-for-byte compatible.
+    if "filename_suffix" in value:
+        info["filename_suffix"] = _sanitize_filename_text(value.get("filename_suffix"))
     # The plan reference is process-local provenance for metadata slicing. It
     # must stay by reference here and is intentionally absent from PNG JSON.
     if isinstance(value.get("_plan_ref"), dict):
@@ -2424,7 +2505,10 @@ class ScenePromptExpand:
             "run_dir": run_dir,
             "use_run_dir": use_run_dir,
             "path": _row_path(row),
-            "filename_prefix": _safe_filename_prefix("".join(row.get("filename_parts", [])) + str(prefix or "")),
+            "filename_prefix": str(prefix or ""),
+            "filename_suffix": "_".join(
+                str(part).strip() for part in row.get("filename_parts", []) if str(part).strip()
+            ),
             "file_index": global_index + 1,
             "positive": positive,
             "negative": negative,
@@ -2465,7 +2549,7 @@ class ScenePromptExpand:
 
 
 class SceneSaveImage:
-    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はプレフィックスと5桁の連番で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「生成経路ノードのみ」「プロンプトのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。Presetの中身を展開すると、保存時に固定されたPresetを実ノードと接続へ置き換えます。"""
+    DESCRIPTION = """生成画像をComfyUIのoutputディレクトリ配下へPNGで保存します。\n保存パス、タイムスタンプディレクトリ、Scene Path で追加された階層を組み合わせ、必要なフォルダは保存時に作成されます。\nファイル名はExpandのプレフィックス、5桁の連番、Scene Prompt／Matrix名の順で構成され、既存ファイルは上書きせず次の番号を使います。\nメタデータ保存は「ワークフロー全体」「生成経路ノードのみ」「プロンプトのみ」から選べます。プロンプトのみはドラッグでワークフローを復元できません。Presetの中身を展開すると、保存時に固定されたPresetを実ノードと接続へ置き換えます。"""
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
@@ -2523,6 +2607,7 @@ class SceneSaveImage:
         padding = 5
         info = _normalize_scene_save_info(scene_info)
         filename_prefix = _output_filename_prefix(info.get("filename_prefix", ""), extension, padding)
+        filename_suffix = info.get("filename_suffix", "")
         base_root = folder_paths.get_output_directory()
         base_path_parts = _safe_relative_parts(path)
         scene_path_parts = _safe_relative_parts(info.get("path"))
@@ -2537,14 +2622,7 @@ class SceneSaveImage:
         output_dir = os.path.join(run_root, *scene_path_parts)
         os.makedirs(output_dir, exist_ok=True)
 
-        if info.get("file_index"):
-            counter = max(
-                1,
-                int(info["file_index"]),
-                _cached_next_index(run_root, extension, padding, filename_prefix),
-            )
-        else:
-            counter = _cached_next_index(run_root, extension, padding, filename_prefix)
+        requested_index = max(1, int(info.get("file_index") or 1))
 
         results = []
         saved_paths = []
@@ -2575,62 +2653,75 @@ class SceneSaveImage:
             for image in images:
                 image_array = 255.0 * image.cpu().numpy()
                 img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
-
-                with _FILENAME_RESERVATION_LOCK:
-                    counter = max(counter, _cached_next_index(run_root, extension, padding, filename_prefix))
-                    output_path, reservation_path, filename, counter = _reserve_output_path(
-                        output_dir, extension, padding, counter, filename_prefix
+                while True:
+                    counter = _allocate_output_index(
+                        run_root, extension, padding, filename_prefix, requested_index,
                     )
-                    _remember_next_index(run_root, extension, padding, counter + 1, filename_prefix)
-                reservation_paths.append(reservation_path)
-                descriptor, temp_path = tempfile.mkstemp(prefix=".scene-save-", suffix=".tmp", dir=output_dir)
-                os.close(descriptor)
-                temp_paths.append(temp_path)
-                metadata = None
-                if not args.disable_metadata:
-                    metadata = PngInfo()
-                    if prompt_metadata is not None:
-                        metadata.add_text("prompt", prompt_metadata)
-                    for key, value in extra_pnginfo_metadata:
-                        metadata.add_text(key, value)
-                    if info:
-                        relative_path = "/".join([*base_path_parts, *run_parts, *scene_path_parts])
-                        scene_metadata = {
-                            "positive": info.get("positive", ""),
-                            "negative": info.get("negative", ""),
-                            "seed": info.get("seed", 0),
-                            "base_path": "/".join(base_path_parts),
-                            "path": "/".join(scene_path_parts),
-                            "run_relative_path": relative_path,
-                            "full_path": relative_path,
-                            "run_dir": "/".join(run_parts),
-                            "filename_prefix": filename_prefix,
-                            "file_index": counter,
-                            "label": info.get("label", ""),
-                            "row_index": info.get("row_index", 0),
-                            "repeat_index": info.get("repeat_index", 0),
-                            "repeat_count": info.get("repeat_count", 0),
-                            "total_count": info.get("total_count", 0),
-                        }
-                        metadata.add_text("scene_info", json.dumps(scene_metadata, ensure_ascii=False, separators=(",", ":")))
-                        if scene_metadata["positive"]:
-                            metadata.add_text("scene_positive", scene_metadata["positive"])
-                        if scene_metadata["negative"]:
-                            metadata.add_text("scene_negative", scene_metadata["negative"])
-                        metadata.add_text("scene_seed", str(scene_metadata["seed"]))
-                img.save(temp_path, format="PNG", pnginfo=metadata, compress_level=self.compress_level)
-                with Image.open(temp_path) as check:
-                    check.verify()
-                os.link(temp_path, output_path)
-                os.unlink(temp_path)
-                temp_paths.remove(temp_path)
-                saved_paths.append(output_path)
-                _remove_output_reservation(reservation_path)
-                reservation_paths.remove(reservation_path)
-                if preview_subfolder is not None:
-                    preview_ref = {"filename": filename, "subfolder": preview_subfolder, "type": self.type}
-                    results.append(preview_ref)
-                counter += 1
+                    requested_index = counter + 1
+                    with _FILENAME_RESERVATION_LOCK:
+                        reserved = _reserve_output_path(
+                            output_dir, extension, padding, counter, filename_prefix, filename_suffix,
+                        )
+                    if reserved is None:
+                        continue
+                    output_path, reservation_path, filename, counter, effective_prefix, effective_suffix = reserved
+                    reservation_paths.append(reservation_path)
+                    descriptor, temp_path = tempfile.mkstemp(prefix=".scene-save-", suffix=".tmp", dir=output_dir)
+                    os.close(descriptor)
+                    temp_paths.append(temp_path)
+                    metadata = None
+                    if not args.disable_metadata:
+                        metadata = PngInfo()
+                        if prompt_metadata is not None:
+                            metadata.add_text("prompt", prompt_metadata)
+                        for key, value in extra_pnginfo_metadata:
+                            metadata.add_text(key, value)
+                        if info:
+                            relative_path = "/".join([*base_path_parts, *run_parts, *scene_path_parts])
+                            scene_metadata = {
+                                "positive": info.get("positive", ""),
+                                "negative": info.get("negative", ""),
+                                "seed": info.get("seed", 0),
+                                "base_path": "/".join(base_path_parts),
+                                "path": "/".join(scene_path_parts),
+                                "run_relative_path": relative_path,
+                                "full_path": relative_path,
+                                "run_dir": "/".join(run_parts),
+                                "filename_prefix": effective_prefix,
+                                "filename_suffix": effective_suffix,
+                                "file_index": counter,
+                                "label": info.get("label", ""),
+                                "row_index": info.get("row_index", 0),
+                                "repeat_index": info.get("repeat_index", 0),
+                                "repeat_count": info.get("repeat_count", 0),
+                                "total_count": info.get("total_count", 0),
+                            }
+                            metadata.add_text("scene_info", json.dumps(scene_metadata, ensure_ascii=False, separators=(",", ":")))
+                            if scene_metadata["positive"]:
+                                metadata.add_text("scene_positive", scene_metadata["positive"])
+                            if scene_metadata["negative"]:
+                                metadata.add_text("scene_negative", scene_metadata["negative"])
+                            metadata.add_text("scene_seed", str(scene_metadata["seed"]))
+                    try:
+                        img.save(temp_path, format="PNG", pnginfo=metadata, compress_level=self.compress_level)
+                        with Image.open(temp_path) as check:
+                            check.verify()
+                        os.link(temp_path, output_path)
+                    except FileExistsError:
+                        _remove_output_reservation(reservation_path)
+                        reservation_paths.remove(reservation_path)
+                        os.unlink(temp_path)
+                        temp_paths.remove(temp_path)
+                        continue
+                    os.unlink(temp_path)
+                    temp_paths.remove(temp_path)
+                    saved_paths.append(output_path)
+                    _remove_output_reservation(reservation_path)
+                    reservation_paths.remove(reservation_path)
+                    if preview_subfolder is not None:
+                        preview_ref = {"filename": filename, "subfolder": preview_subfolder, "type": self.type}
+                        results.append(preview_ref)
+                    break
         except Exception:
             for candidate in temp_paths:
                 try:
@@ -2645,7 +2736,5 @@ class SceneSaveImage:
                 except OSError:
                     pass
             raise
-
-        _remember_next_index(run_root, extension, padding, counter, filename_prefix)
 
         return {"ui": {"images": results}, "result": (images, "\n".join(saved_paths))}

@@ -1547,6 +1547,19 @@ NODE_CLASS_MAPPINGS = {
             else:
                 self.assertIn("prompt", metadata)
 
+    def test_http_save_places_prefix_counter_before_scene_filename_suffix(self):
+        graph = _save_graph("ワークフロー全体", "filename-prefix")
+        graph["1"]["inputs"].update({"prompt_name": "PromptA", "filename_enabled": True})
+        graph["4"]["inputs"]["prefix"] = "run_"
+        self._queue_and_wait(graph)
+        files = sorted((self.base / "output" / "filename-prefix").glob("*.png"))
+        self.assertEqual([path.name for path in files], ["run_00001_PromptA.png", "run_00002_PromptA.png"])
+        from PIL import Image
+        with Image.open(files[0]) as image:
+            scene_info = json.loads(image.text["scene_info"])
+        self.assertEqual(scene_info["filename_prefix"], "run_")
+        self.assertEqual(scene_info["filename_suffix"], "PromptA")
+
     def test_http_large_batch_multiple_saves_preserve_workflow_metadata(self):
         graph = _save_graph(
             "ワークフロー全体",

@@ -382,8 +382,10 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         second_info = self.nodes.ScenePromptExpand().expand(
             current_index=1, timestamp_dir=False, prefix="_base", scene_prompt=queued,
         )[2]
-        self.assertEqual(first_info["filename_prefix"], "ABD_base")
-        self.assertEqual(second_info["filename_prefix"], "ACD_base")
+        self.assertEqual(first_info["filename_prefix"], "_base")
+        self.assertEqual(second_info["filename_prefix"], "_base")
+        self.assertEqual(first_info["filename_suffix"], "A_B_D")
+        self.assertEqual(second_info["filename_suffix"], "A_C_D")
 
     def test_optional_inputs_do_not_raise_in_is_changed(self):
         self.nodes.SceneMatrix.IS_CHANGED('{"version":1,"sets":[]}')

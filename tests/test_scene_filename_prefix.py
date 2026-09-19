@@ -339,6 +339,90 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertNotIn("absolute_path", metadata)
         self.assertNotIn(str(self.temp_dir.name), saved_image.text["scene_info"])
 
+    def test_expand_puts_literal_prefix_before_prompt_and_matrix_suffixes(self):
+        prompt = sys.modules[f"{self.nodes.__package__}.prompt"].ScenePrompt()
+        source = prompt.build(
+            "PromptA", "", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
+            filename_enabled=True,
+        )[0]
+        plan = self.nodes.SceneMatrix().build(json.dumps({"version": 1, "sets": [
+            _matrix_line("MatrixA", filename_enabled=True),
+        ]}), scene_prompt=source)[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, prefix="", scene_prompt=plan,
+        )[2]
+        self.assertEqual(info["filename_prefix"], "")
+        self.assertEqual(info["filename_suffix"], "PromptA_MatrixA")
+
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saved = Path(self.nodes.SceneSaveImage().save_images([image], "", scene_info=info)["result"][1])
+        self.assertEqual(saved.name, "00001_PromptA_MatrixA.png")
+        with Image.open(saved) as saved_image:
+            metadata = json.loads(saved_image.text["scene_info"])
+        self.assertEqual(metadata["filename_prefix"], "")
+        self.assertEqual(metadata["filename_suffix"], "PromptA_MatrixA")
+
+    def test_prefix_remains_first_with_a_direct_prompt_suffix(self):
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=0, timestamp_dir=False, prefix="run_",
+            scene_prompt=self.nodes.transform(None, lambda row, _item: {**row, "filename_parts": ["PromptA"]}),
+        )[2]
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saved = Path(self.nodes.SceneSaveImage().save_images([image], "", scene_info=info)["result"][1])
+        self.assertEqual(saved.name, "run_00001_PromptA.png")
+
+    def test_prefix_counter_is_shared_by_distinct_suffixes_and_digit_suffixes(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saver = self.nodes.SceneSaveImage()
+        first = Path(saver.save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": "run_", "filename_suffix": "123",
+        })["result"][1])
+        second = Path(saver.save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": "run_", "filename_suffix": "other",
+        })["result"][1])
+        self.assertEqual((first.name, second.name), ("run_00001_123.png", "run_00002_other.png"))
+
+        self.nodes._COUNTER_STATE_SEEN.clear()
+        third = Path(saver.save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": "run_", "filename_suffix": "restart",
+        })["result"][1])
+        self.assertEqual(third.name, "run_00003_restart.png")
+
+    def test_same_and_different_suffixes_allocate_one_prefix_wide_sequence(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+
+        def save_one(index):
+            return Path(self.nodes.SceneSaveImage().save_images([image], "", scene_info={
+                "use_run_dir": False, "file_index": 1, "filename_prefix": "parallel_",
+                "filename_suffix": "same" if index % 2 else "other",
+            })["result"][1])
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            paths = list(pool.map(save_one, range(16)))
+        counters = sorted(int(path.name.split("_", 1)[1].split("_", 1)[0]) for path in paths)
+        self.assertEqual(counters, list(range(1, 17)))
+        self.assertEqual({path.name.rsplit("_", 1)[1] for path in paths}, {"same.png", "other.png"})
+
+    def test_suffix_uses_remaining_component_budget_without_changing_prefix(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        raw_prefix = "p" * 500
+        effective_prefix = self.nodes._output_filename_prefix(raw_prefix, "png", 5)
+        saved = Path(self.nodes.SceneSaveImage().save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": raw_prefix,
+            "filename_suffix": "s" * 500,
+        })["result"][1])
+        self.assertTrue(saved.name.startswith(f"{effective_prefix}00001"))
+        self.assertLessEqual(len(saved.name.encode("utf-8")), 255)
+        self.assertLessEqual(len(saved.name.encode("utf-16-le")) // 2, 255)
+        self.assertLessEqual(len(f"{saved.name}.scene-save-reservation".encode("utf-8")), 255)
+
+    def test_legacy_scene_info_without_suffix_keeps_legacy_filename(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saved = Path(self.nodes.SceneSaveImage().save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": "legacy_",
+        })["result"][1])
+        self.assertEqual(saved.name, "legacy_00001.png")
+
     def test_save_without_prefix_uses_numbered_filename(self):
         saver = self.nodes.SceneSaveImage()
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
@@ -357,17 +441,24 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(first.name, "00001.png")
         self.assertEqual(second.name, "00002.png")
 
-    def test_next_index_cache_is_bounded_and_keeps_recent_roots(self):
-        with self.nodes._NEXT_INDEX_CACHE_LOCK:
-            self.nodes._NEXT_INDEX_CACHE.clear()
-        for index in range(1_000):
-            self.nodes._remember_next_index(str(Path(self.temp_dir.name) / f"root-{index}"), "png", 5, index + 1)
-        with self.nodes._NEXT_INDEX_CACHE_LOCK:
-            self.assertLessEqual(len(self.nodes._NEXT_INDEX_CACHE), 256)
-            first_key = next(iter(self.nodes._NEXT_INDEX_CACHE))
-        self.nodes._cached_next_index(*first_key[:3], first_key[3])
-        with self.nodes._NEXT_INDEX_CACHE_LOCK:
-            self.assertEqual(next(reversed(self.nodes._NEXT_INDEX_CACHE)), first_key)
+    def test_counter_state_restarts_from_persisted_prefix_wide_index(self):
+        root = Path(self.temp_dir.name) / "state"
+        root.mkdir()
+        first = self.nodes._allocate_output_index(str(root), "png", 5, "prefix_", 1)
+        self.nodes._COUNTER_STATE_SEEN.clear()
+        second = self.nodes._allocate_output_index(str(root), "png", 5, "prefix_", 1)
+        self.assertEqual((first, second), (1, 2))
+        self.assertEqual(len(list(root.glob(".scene-save-*.lock"))), 1)
+        self.assertEqual(len(list(root.glob(".scene-save-*.state"))), 1)
+
+    def test_first_counter_allocation_scans_only_exact_png_names_with_suffixes(self):
+        root = Path(self.temp_dir.name) / "scan"
+        nested = root / "nested"
+        nested.mkdir(parents=True)
+        (nested / "run_00009_123.png").touch()
+        (nested / "run_99999_ignore.png.tmp").touch()
+        (nested / "run_00008.jpg").touch()
+        self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), 10)
 
     def test_save_metadata_keeps_large_effective_counts(self):
         plan = _scene_prompt(self.nodes, 10_000)
@@ -575,7 +666,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(Path(result["result"][1]).name, "00002.png")
         self.assertFalse((target / "00001.png").exists())
 
-    def test_eacces_reservation_collision_uses_next_filename_only_when_claim_exists(self):
+    def test_eacces_reservation_collision_returns_no_claim_only_when_claim_exists(self):
         target = Path(self.temp_dir.name) / "eacces-collision"
         target.mkdir()
         claimed = target / "00001.png.scene-save-reservation"
@@ -591,12 +682,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
 
         with mock.patch.object(self.nodes.os, "open", side_effect=eacces_once):
             with self.nodes._FILENAME_RESERVATION_LOCK:
-                output_path, reservation_path, filename, _counter = self.nodes._reserve_output_path(
-                    str(target), "png", 5, 1
-                )
-        self.assertEqual(Path(output_path).name, "00002.png")
-        self.assertEqual(filename, "00002.png")
-        self.nodes._remove_output_reservation(reservation_path)
+                reserved = self.nodes._reserve_output_path(str(target), "png", 5, 1)
+        self.assertIsNone(reserved)
 
     def test_eacces_without_reservation_is_not_hidden(self):
         target = Path(self.temp_dir.name) / "eacces-error"
@@ -629,7 +716,13 @@ class SceneFilenamePrefixTests(unittest.TestCase):
 
     def test_final_publication_does_not_use_overwriting_replace(self):
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
-        with mock.patch.object(self.nodes.os, "replace", side_effect=AssertionError("replace must not publish PNGs")):
+        original_replace = self.nodes.os.replace
+
+        def replace_state_only(source, destination):
+            self.assertTrue(str(destination).endswith(".state"))
+            return original_replace(source, destination)
+
+        with mock.patch.object(self.nodes.os, "replace", side_effect=replace_state_only):
             result = self.nodes.SceneSaveImage().save_images(
                 [image], "non-overwriting", scene_info={"use_run_dir": False, "file_index": 1}
             )
@@ -647,13 +740,13 @@ class SceneFilenamePrefixTests(unittest.TestCase):
 
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
         with mock.patch.object(Image.Image, "save", create_competing_png):
-            with self.assertRaises(FileExistsError):
-                self.nodes.SceneSaveImage().save_images(
-                    [image], "competing", scene_info={"use_run_dir": False, "file_index": 1}
-                )
+            result = self.nodes.SceneSaveImage().save_images(
+                [image], "competing", scene_info={"use_run_dir": False, "file_index": 1}
+            )
 
         with Image.open(output_path) as existing:
             self.assertEqual(existing.getpixel((0, 0)), (255, 0, 0))
+        self.assertEqual(Path(result["result"][1]).name, "00002.png")
         self.assertEqual(list(target.glob("*.scene-save-reservation")), [])
 
     def test_save_metadata_mode_choices_are_ordered_and_default_to_full_workflow(self):
