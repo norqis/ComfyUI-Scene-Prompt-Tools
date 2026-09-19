@@ -2,6 +2,7 @@ import importlib
 import importlib.util
 import json
 import errno
+import multiprocessing
 import sys
 import tempfile
 import threading
@@ -54,6 +55,12 @@ def _load_nodes(output_dir):
     package.__path__ = [str(PACKAGE_ROOT)]
     sys.modules[package_name] = package
     return importlib.import_module(f"{package_name}.nodes")
+
+
+def _allocate_counter_in_child(output_dir, barrier, result_queue):
+    nodes = _load_nodes(Path(output_dir))
+    barrier.wait(timeout=10)
+    result_queue.put(nodes._allocate_output_index(output_dir, "png", 5, "shared_", 1))
 
 
 def _load_node_package(output_dir):
@@ -459,6 +466,43 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         (nested / "run_99999_ignore.png.tmp").touch()
         (nested / "run_00008.jpg").touch()
         self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), 10)
+
+    def test_missing_or_invalid_state_forces_a_rescan_even_after_the_key_was_seen(self):
+        root = Path(self.temp_dir.name) / "state-recovery"
+        root.mkdir()
+        (root / "run_00001_first.png").touch()
+        self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), 2)
+        (root / "run_00002_second.png").touch()
+        _lock_path, state_path, _key = self.nodes._counter_state_paths(str(root), "png", 5, "run_")
+        Path(state_path).write_text("invalid", encoding="ascii")
+        self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), 3)
+
+    def test_counter_seen_keys_are_bounded(self):
+        with self.nodes._COUNTER_STATE_SEEN_LOCK:
+            self.nodes._COUNTER_STATE_SEEN.clear()
+        for index in range(300):
+            root = Path(self.temp_dir.name) / f"seen-{index}"
+            root.mkdir()
+            self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1)
+        with self.nodes._COUNTER_STATE_SEEN_LOCK:
+            self.assertLessEqual(len(self.nodes._COUNTER_STATE_SEEN), 256)
+
+    def test_separate_processes_share_one_prefix_counter(self):
+        root = Path(self.temp_dir.name) / "processes"
+        root.mkdir()
+        context = multiprocessing.get_context("spawn")
+        barrier = context.Barrier(2)
+        result_queue = context.Queue()
+        processes = [
+            context.Process(target=_allocate_counter_in_child, args=(str(root), barrier, result_queue))
+            for _ in range(2)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=20)
+        self.assertTrue(all(process.exitcode == 0 for process in processes))
+        self.assertEqual(sorted(result_queue.get(timeout=5) for _ in processes), [1, 2])
 
     def test_save_metadata_keeps_large_effective_counts(self):
         plan = _scene_prompt(self.nodes, 10_000)

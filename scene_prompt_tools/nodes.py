@@ -8,6 +8,7 @@ import threading
 import time
 import tempfile
 import unicodedata
+from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -1436,7 +1437,7 @@ def _find_next_index(run_root, extension, padding, filename_prefix=""):
 
 
 _RUN_DIR_CACHE = {}
-_COUNTER_STATE_SEEN = set()
+_COUNTER_STATE_SEEN = OrderedDict()
 _COUNTER_STATE_SEEN_LOCK = threading.Lock()
 _FILENAME_RESERVATION_LOCK = threading.Lock()
 
@@ -1478,9 +1479,10 @@ def _counter_state_lock(lock_path):
 def _read_counter_state(state_path):
     try:
         with open(state_path, "r", encoding="ascii") as state_file:
-            return max(1, int(state_file.read().strip()))
+            next_index = int(state_file.read().strip())
     except (FileNotFoundError, ValueError, OSError):
-        return 1
+        return None
+    return next_index if next_index >= 1 else None
 
 
 def _write_counter_state(state_path, next_index):
@@ -1502,16 +1504,20 @@ def _write_counter_state(state_path, next_index):
 def _allocate_output_index(run_root, extension, padding, filename_prefix, requested_index=1):
     """Allocate a prefix-wide counter, independent of filename suffixes."""
     lock_path, state_path, key = _counter_state_paths(run_root, extension, padding, filename_prefix)
-    with _FILENAME_RESERVATION_LOCK, _counter_state_lock(lock_path):
+    with _counter_state_lock(lock_path):
         state_index = _read_counter_state(state_path)
         with _COUNTER_STATE_SEEN_LOCK:
             first_allocation = key not in _COUNTER_STATE_SEEN
-        scanned_index = _find_next_index(run_root, extension, padding, filename_prefix) if first_allocation else 1
-        counter = max(1, int(requested_index or 1), state_index, scanned_index)
+            if not first_allocation:
+                _COUNTER_STATE_SEEN.move_to_end(key)
+        scanned_index = _find_next_index(run_root, extension, padding, filename_prefix) if first_allocation or state_index is None else 1
+        counter = max(1, int(requested_index or 1), state_index or 1, scanned_index)
         _write_counter_state(state_path, counter + 1)
-        if first_allocation:
-            with _COUNTER_STATE_SEEN_LOCK:
-                _COUNTER_STATE_SEEN.add(key)
+        with _COUNTER_STATE_SEEN_LOCK:
+            _COUNTER_STATE_SEEN[key] = None
+            _COUNTER_STATE_SEEN.move_to_end(key)
+            if len(_COUNTER_STATE_SEEN) > 256:
+                _COUNTER_STATE_SEEN.popitem(last=False)
         return counter
 
 
