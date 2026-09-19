@@ -9800,7 +9800,17 @@ function openSceneMatrixLinesPopup(node) {
             });
             actions.appendChild(filename);
 
-            const remove = createButton("削除");
+            const duplicate = createButton("複製");
+            duplicate.addEventListener("click", () => {
+                const copiedDraft = JSON.parse(JSON.stringify(draft));
+                copiedDraft.row_id = createMatrixLine(`行 ${index + 2}`).row_id;
+                drafts.splice(index + 1, 0, createMatrixLineDraft(copiedDraft, index + 1));
+                commitStructuralChange();
+                renderRows();
+            });
+            actions.appendChild(duplicate);
+
+            const remove = createButton("削除", "pc-danger");
             remove.addEventListener("click", () => {
                 drafts.splice(index, 1);
                 commitStructuralChange();

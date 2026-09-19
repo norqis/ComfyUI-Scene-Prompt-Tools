@@ -575,8 +575,8 @@ try {
             type: "SCENE_MATRIX_LINE",
             version: 1,
             row_id: rowId,
-            node_id: "",
-            category: "",
+            node_id: `node-${rowId}`,
+            category: `category-${rowId}`,
             name,
             path_label: name,
             enabled: true,
@@ -585,7 +585,7 @@ try {
             positive_json: emptySelection,
             negative_base: "",
             negative_json: emptySelection,
-            category_order: "",
+            category_order: `order-${rowId}`,
             positive_parts: [],
             negative_parts: [],
             display_labels: [],
@@ -862,8 +862,59 @@ try {
         ["Summer"],
         "a saved whitespace-only base prompt remains hidden from the row summary",
     );
+
+    const writesBeforeDuplicate = await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount);
+    const matrixRows = page.locator(".pc-popup .pc-popup-list > .pc-candidate");
+    await matrixRows.nth(0).getByPlaceholder("名前").fill("Duplicate Source Draft");
+    await matrixRows.nth(0).getByRole("button", { name: "複製", exact: true }).click();
+    const duplicatedState = await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode;
+        const state = JSON.parse(node.widgets.find((widget) => widget.name === "matrix_json").value);
+        const comparable = (line) => {
+            const copy = JSON.parse(JSON.stringify(line));
+            delete copy.row_id;
+            return copy;
+        };
+        const actions = [...document.querySelector(".pc-popup .pc-popup-list > .pc-candidate")?.querySelectorAll("button") || []];
+        const remove = actions.find((button) => button.textContent === "削除");
+        return {
+            source: comparable(state.sets[0]),
+            duplicate: comparable(state.sets[1]),
+            rowIds: state.sets.slice(0, 2).map((line) => line.row_id),
+            length: state.sets.length,
+            actionLabels: actions.map((button) => button.textContent),
+            deleteDanger: remove?.classList.contains("pc-danger"),
+            deleteStyle: remove ? {
+                background: getComputedStyle(remove).backgroundColor,
+                border: getComputedStyle(remove).borderTopColor,
+                color: getComputedStyle(remove).color,
+            } : null,
+        };
+    });
+    assert.equal(duplicatedState.length, 3, "duplicating immediately commits the expanded Matrix state");
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), writesBeforeDuplicate + 1, "duplicating commits once");
+    assert.deepEqual(duplicatedState.source, duplicatedState.duplicate, "duplicating keeps every Matrix setting and computed prompt field");
+    assert.notEqual(duplicatedState.rowIds[0], duplicatedState.rowIds[1], "duplicated Matrix rows receive a fresh row id");
+    assert.deepEqual(duplicatedState.actionLabels.slice(-2), ["複製", "削除"], "duplicate precedes delete in Matrix row controls");
+    assert.equal(duplicatedState.deleteDanger, true, "Matrix delete uses the danger button class");
+    assert.deepEqual(duplicatedState.deleteStyle, { background: "rgb(74, 32, 38)", border: "rgb(163, 78, 90)", color: "rgb(255, 235, 238)" }, "Matrix delete has a visible danger treatment");
+    await matrixRows.nth(0).getByRole("button", { name: "削除", exact: true }).hover();
+    assert.deepEqual(await matrixRows.nth(0).getByRole("button", { name: "削除", exact: true }).evaluate((button) => ({
+        background: getComputedStyle(button).backgroundColor,
+        border: getComputedStyle(button).borderTopColor,
+        color: getComputedStyle(button).color,
+    })), { background: "rgb(104, 42, 52)", border: "rgb(237, 102, 119)", color: "rgb(255, 247, 248)" }, "danger hover overrides the generic button hover");
+    await matrixRows.nth(0).getByPlaceholder("名前").fill("Source Changed After Duplicate");
+    assert.equal(await matrixRows.nth(1).getByPlaceholder("名前").inputValue(), "Duplicate Source Draft", "duplicated Matrix drafts stay independent after source edits");
+    await matrixRows.nth(1).getByRole("button", { name: "削除", exact: true }).click();
+    const afterDuplicateDelete = await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value));
+    assert.equal(afterDuplicateDelete.sets.length, 2, "deleting a duplicated Matrix row still works");
+    assert.equal(afterDuplicateDelete.sets[0].name, "Source Changed After Duplicate", "editing the source after duplication does not mutate the copy");
+    assert.equal(afterDuplicateDelete.sets[1].name, "Line Two", "deleting the duplicate keeps its adjacent original neighbor");
+
+    const writesAfterDuplicateDelete = await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount);
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
-    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), matrixState.writes, "closing an unchanged Matrix editor does not write again");
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), writesAfterDuplicateDelete, "closing an unchanged Matrix editor does not write again");
 
     await page.evaluate(() => {
         const node = window.__sceneMatrixTestNode;
@@ -892,7 +943,7 @@ try {
             };
         }, width);
         assert.ok(bounds.scrollWidth <= bounds.clientWidth, `long Matrix prompts must not create horizontal overflow at ${width}px`);
-        assert.equal(bounds.controls.length, 6);
+        assert.equal(bounds.controls.length, 7);
         assert.ok(bounds.controls.every((button) => button.inside && button.width > 0), `all Matrix buttons fit at ${width}px: ${JSON.stringify(bounds.controls)}`);
     }
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
