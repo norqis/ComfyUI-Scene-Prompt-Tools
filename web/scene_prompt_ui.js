@@ -9701,7 +9701,7 @@ function createMatrixLineBaseInput(draft, side) {
 
 function openSceneMatrixLinesPopup(node) {
     closeAllPopups();
-    const drafts = matrixLineDraftsForNode(node);
+    let drafts = matrixLineDraftsForNode(node);
     const commitDrafts = () => commitMatrixLineDrafts(node, drafts);
     const popup = openPopupShell(node, "Matrix 行を編集", {
         hideReload: true,
@@ -9713,6 +9713,7 @@ function openSceneMatrixLinesPopup(node) {
             closePopup();
         }
         commitDrafts();
+        drafts = matrixLineDraftsForNode(node);
     };
     if (activePopupContext?.popup === popup) {
         activePopupContext.reopen = () => openSceneMatrixLinesPopup(node);
@@ -9751,11 +9752,9 @@ function openSceneMatrixLinesPopup(node) {
             name.value = matrixLineDraftLabel(draft);
             name.addEventListener("input", () => {
                 const nextName = name.value.trim();
-                if (nextName) {
-                    draft.name = nextName;
-                    draft.path_label = nextName;
-                    refreshMatrixLineDraftComputedFields(draft);
-                }
+                draft.name = nextName;
+                draft.path_label = nextName;
+                refreshMatrixLineDraftComputedFields(draft);
             });
             row.appendChild(name);
 
@@ -9804,7 +9803,7 @@ function openSceneMatrixLinesPopup(node) {
             duplicate.addEventListener("click", () => {
                 const copiedDraft = JSON.parse(JSON.stringify(draft));
                 copiedDraft.row_id = createMatrixLine(`行 ${index + 2}`).row_id;
-                drafts.splice(index + 1, 0, createMatrixLineDraft(copiedDraft, index + 1));
+                drafts.splice(index + 1, 0, copiedDraft);
                 commitStructuralChange();
                 renderRows();
             });

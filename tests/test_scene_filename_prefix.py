@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
 from comfy_stubs import install_comfy_execution_stub, install_torch_stub
 
@@ -418,7 +419,6 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             self.temp_dir.name, "png", 5, "run_", "先頭",
         )
         Path(state_path).unlink()
-        self.nodes._COUNTER_STATE_SEEN.clear()
         second = Path(saver.save_images([image], "", scene_info={
             "use_run_dir": False, "file_index": 1, "filename_prefix": "run_",
             "filename_suffix": "123", "counter_position": "先頭",
@@ -436,7 +436,6 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         })["result"][1])
         self.assertEqual((first.name, second.name), ("run_12300001.png", "run_other00002.png"))
 
-        self.nodes._COUNTER_STATE_SEEN.clear()
         third = Path(saver.save_images([image], "", scene_info={
             "use_run_dir": False, "file_index": 1, "filename_prefix": "run_", "filename_suffix": "restart",
         })["result"][1])
@@ -499,20 +498,134 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         root = Path(self.temp_dir.name) / "state"
         root.mkdir()
         first = self.nodes._allocate_output_index(str(root), "png", 5, "prefix_", 1)
-        self.nodes._COUNTER_STATE_SEEN.clear()
         second = self.nodes._allocate_output_index(str(root), "png", 5, "prefix_", 1)
         self.assertEqual((first, second), (1, 2))
         self.assertEqual(len(list(root.glob(".scene-save-*.lock"))), 1)
         self.assertEqual(len(list(root.glob(".scene-save-*.state"))), 1)
 
-    def test_first_counter_allocation_scans_only_exact_png_names_with_suffixes(self):
+    def test_first_counter_allocation_scans_current_and_legacy_last_png_names(self):
         root = Path(self.temp_dir.name) / "scan"
         nested = root / "nested"
         nested.mkdir(parents=True)
         (nested / "run_suffix00009.png").touch()
+        (nested / "PromptArun_00010.png").touch()
         (nested / "run_99999_ignore.png.tmp").touch()
         (nested / "run_00008.jpg").touch()
-        self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), 10)
+        self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), 11)
+
+    def test_fallback_uses_five_digits_at_the_requested_position(self):
+        first_root = Path(self.temp_dir.name) / "fallback-first"
+        last_root = Path(self.temp_dir.name) / "fallback-last"
+        first_root.mkdir()
+        last_root.mkdir()
+        (first_root / "run_00001123.png").touch()
+        (last_root / "run_12300001.png").touch()
+        self.assertEqual(self.nodes._find_next_index(str(first_root), "png", 5, "run_", "先頭"), 2)
+        self.assertEqual(self.nodes._find_next_index(str(last_root), "png", 5, "run_", "最後"), 2)
+        (first_root / "run_00009suffix.png").touch()
+        (last_root / "run_suffix00008.png").touch()
+        self.assertEqual(self.nodes._find_next_index(str(first_root), "png", 5, "run_", "先頭"), 10)
+        self.assertEqual(self.nodes._find_next_index(str(last_root), "png", 5, "run_", "最後"), 9)
+
+    def test_missing_state_and_metadata_recover_the_prefix_wide_counter(self):
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saver = self.nodes.SceneSaveImage()
+        first = Path(saver.save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": "run_", "filename_suffix": "123",
+        })["result"][1])
+        with Image.open(first) as saved_image:
+            saved_image.copy().save(first)
+        _lock_path, state_path, _key = self.nodes._counter_state_paths(self.temp_dir.name, "png", 5, "run_")
+        Path(state_path).unlink()
+        second = Path(saver.save_images([image], "", scene_info={
+            "use_run_dir": False, "file_index": 1, "filename_prefix": "run_", "filename_suffix": "other",
+        })["result"][1])
+        self.assertEqual((first.name, second.name), ("run_12300001.png", "run_other00002.png"))
+
+    def test_metadata_continues_large_current_and_legacy_counters(self):
+        root = Path(self.temp_dir.name) / "metadata"
+        root.mkdir()
+
+        def save_metadata(name, scene_info):
+            png_info = PngInfo()
+            png_info.add_text("scene_info", json.dumps(scene_info))
+            Image.new("RGB", (1, 1)).save(root / name, pnginfo=png_info)
+
+        save_metadata("run_suffix100000.png", {
+            "file_index": 100000,
+            "filename_prefix": "run_",
+            "filename_suffix": "suffix",
+            "counter_position": "最後",
+        })
+        save_metadata("PromptARUN_100001.png", {
+            "file_index": 100001,
+            "filename_prefix": "PromptARUN_",
+        })
+        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "run_", "最後"), 100002)
+
+    def test_metadata_prefix_match_is_case_insensitive(self):
+        root = Path(self.temp_dir.name) / "metadata-casefold"
+        root.mkdir()
+        png_info = PngInfo()
+        png_info.add_text("scene_info", json.dumps({
+            "file_index": 100000,
+            "filename_prefix": "RUN_",
+            "filename_suffix": "suffix",
+            "counter_position": "最後",
+        }))
+        Image.new("RGB", (1, 1)).save(root / "RUN_suffix100000.PNG", pnginfo=png_info)
+        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "run_", "最後"), 100001)
+
+    def test_empty_prefix_scans_legacy_default_png_names(self):
+        root = Path(self.temp_dir.name) / "empty-prefix"
+        root.mkdir()
+        (root / "anything00009.png").touch()
+        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "", "最後"), 10)
+        (root / "anything100001.png").touch()
+        self.assertEqual(self.nodes._find_next_index(str(root), "png", 5, "", "最後"), 10)
+
+    def test_counter_state_paths_share_casefolded_prefixes(self):
+        root = Path(self.temp_dir.name) / "casefold-state"
+        root.mkdir()
+        upper_paths = self.nodes._counter_state_paths(str(root), "png", 5, "RUN_")
+        lower_paths = self.nodes._counter_state_paths(str(root), "png", 5, "run_")
+        self.assertEqual(upper_paths[:2], lower_paths[:2])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            counters = list(pool.map(
+                lambda prefix: self.nodes._allocate_output_index(str(root), "png", 5, prefix, 1),
+                ("RUN_", "run_"),
+            ))
+        self.assertEqual(sorted(counters), [1, 2])
+
+    def test_counter_state_allows_maximum_once_then_exhausts(self):
+        root = Path(self.temp_dir.name) / "maximum-state"
+        root.mkdir()
+        maximum = self.nodes.MAX_SAFE_INTEGER
+        _lock_path, state_path, _key = self.nodes._counter_state_paths(str(root), "png", 5, "run_")
+        Path(state_path).write_text(str(maximum), encoding="ascii")
+        self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), maximum)
+        self.assertIsNone(self.nodes._read_counter_state(state_path))
+        with self.assertRaisesRegex(ValueError, "上限"):
+            self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1)
+
+    def test_counter_allocation_rejects_requested_and_scanned_overflow(self):
+        root = Path(self.temp_dir.name) / "maximum-requested"
+        root.mkdir()
+        with self.assertRaisesRegex(ValueError, "上限"):
+            self.nodes._allocate_output_index(str(root), "png", 5, "run_", self.nodes.MAX_SAFE_INTEGER + 1)
+
+        scan_root = Path(self.temp_dir.name) / "maximum-scanned"
+        scan_root.mkdir()
+        png_info = PngInfo()
+        png_info.add_text("scene_info", json.dumps({
+            "file_index": self.nodes.MAX_SAFE_INTEGER,
+            "filename_prefix": "run_",
+            "filename_suffix": "suffix",
+            "counter_position": "最後",
+        }))
+        Image.new("RGB", (1, 1)).save(scan_root / "run_suffix99999.png", pnginfo=png_info)
+        with self.assertRaisesRegex(ValueError, "上限"):
+            self.nodes._allocate_output_index(str(scan_root), "png", 5, "run_", 1)
 
     def test_missing_or_invalid_state_forces_a_rescan_even_after_the_key_was_seen(self):
         root = Path(self.temp_dir.name) / "state-recovery"
@@ -524,15 +637,26 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         Path(state_path).write_text("invalid", encoding="ascii")
         self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), 3)
 
-    def test_counter_seen_keys_are_bounded(self):
-        with self.nodes._COUNTER_STATE_SEEN_LOCK:
-            self.nodes._COUNTER_STATE_SEEN.clear()
-        for index in range(300):
-            root = Path(self.temp_dir.name) / f"seen-{index}"
-            root.mkdir()
-            self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1)
-        with self.nodes._COUNTER_STATE_SEEN_LOCK:
-            self.assertLessEqual(len(self.nodes._COUNTER_STATE_SEEN), 256)
+    def test_missing_state_scans_without_holding_the_counter_lock(self):
+        root = Path(self.temp_dir.name) / "scan-lock"
+        root.mkdir()
+        _lock_path, state_path, _key = self.nodes._counter_state_paths(str(root), "png", 5, "run_")
+        scan_started = threading.Event()
+        release_scan = threading.Event()
+
+        def slow_scan(*_args):
+            scan_started.set()
+            self.assertTrue(release_scan.wait(timeout=5))
+            return 1
+
+        with mock.patch.object(self.nodes, "_find_next_index", side_effect=slow_scan):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(self.nodes._allocate_output_index, str(root), "png", 5, "run_", 1)
+                self.assertTrue(scan_started.wait(timeout=5))
+                Path(state_path).write_text("7", encoding="ascii")
+                self.assertEqual(pool.submit(self.nodes._allocate_output_index, str(root), "png", 5, "run_", 1).result(timeout=2), 7)
+                release_scan.set()
+                self.assertEqual(first.result(timeout=5), 8)
 
     def test_separate_processes_share_one_prefix_counter(self):
         root = Path(self.temp_dir.name) / "processes"
