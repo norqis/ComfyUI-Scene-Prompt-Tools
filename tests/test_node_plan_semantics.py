@@ -274,6 +274,7 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertFalse(input_types["optional"]["replace_underscores"][1]["default"])
         self.assertEqual(input_types["optional"]["convert_anima_weights"][0], "BOOLEAN")
         self.assertFalse(input_types["optional"]["convert_anima_weights"][1]["default"])
+        self.assertEqual(input_types["optional"]["counter_position"][0], ("先頭", "最後"))
         self.assertNotIn("model_mode", input_types["optional"])
         plan = self.prompt.ScenePrompt().build(
             "A", "blue_hair", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,
@@ -290,6 +291,10 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
             for replace_underscores, convert_anima_weights in ((False, False), (True, False), (False, True), (True, True))
         }
         self.assertEqual(len(cache_keys), 4)
+        self.assertNotEqual(
+            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, counter_position="先頭"),
+            self.nodes.ScenePromptExpand.IS_CHANGED(scene_prompt=plan, counter_position="最後"),
+        )
 
         legacy_anima = self.nodes.ScenePromptExpand().expand(
             current_index=0, timestamp_dir=False, scene_prompt=plan, model_mode="Anima",
@@ -382,8 +387,10 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         second_info = self.nodes.ScenePromptExpand().expand(
             current_index=1, timestamp_dir=False, prefix="_base", scene_prompt=queued,
         )[2]
-        self.assertEqual(first_info["filename_prefix"], "ABD_base")
-        self.assertEqual(second_info["filename_prefix"], "ACD_base")
+        self.assertEqual(first_info["filename_prefix"], "_base")
+        self.assertEqual(second_info["filename_prefix"], "_base")
+        self.assertEqual(first_info["filename_suffix"], "ABD")
+        self.assertEqual(second_info["filename_suffix"], "ACD")
 
     def test_optional_inputs_do_not_raise_in_is_changed(self):
         self.nodes.SceneMatrix.IS_CHANGED('{"version":1,"sets":[]}')

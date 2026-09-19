@@ -77,6 +77,16 @@ export function injectStyle() {
         .pc-button:hover {
             background: #373d47;
         }
+        .pc-button.pc-danger {
+            background: #4a2026;
+            border-color: #a34e5a;
+            color: #ffebee;
+        }
+        .pc-button.pc-danger:hover {
+            background: #682a34;
+            border-color: #ed6677;
+            color: #fff7f8;
+        }
         .pc-button.pc-on {
             background: #244832;
             border-color: #4d9b63;
