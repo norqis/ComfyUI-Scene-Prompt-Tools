@@ -912,9 +912,21 @@ try {
     assert.equal(afterDuplicateDelete.sets[0].name, "Source Changed After Duplicate", "editing the source after duplication does not mutate the copy");
     assert.equal(afterDuplicateDelete.sets[1].name, "Line Two", "deleting the duplicate keeps its adjacent original neighbor");
 
-    const writesAfterDuplicateDelete = await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount);
+    await matrixRows.nth(0).getByPlaceholder("名前").fill("");
+    await matrixRows.nth(0).getByRole("button", { name: "複製", exact: true }).click();
+    const fallbackDuplicate = await page.evaluate(() => {
+        const state = JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value);
+        return { state, visibleNames: [...document.querySelectorAll('.pc-popup .pc-popup-list > .pc-candidate input[placeholder="名前"]')].map((input) => input.value) };
+    });
+    assert.deepEqual(fallbackDuplicate.state.sets.slice(0, 2).map((line) => line.name), ["行 1", "行 2"], "clearing then duplicating saves positional fallback names immediately");
+    assert.deepEqual(fallbackDuplicate.state.sets.slice(0, 2).map((line) => line.path_label), ["行 1", "行 2"], "fallback names are also the saved Matrix path labels");
+    assert.deepEqual(fallbackDuplicate.visibleNames.slice(0, 2), ["行 1", "行 2"], "the Matrix editor reloads saved fallback names after duplication");
+    await matrixRows.nth(0).getByPlaceholder("名前").fill("Independent Source");
+    assert.equal(await matrixRows.nth(1).getByPlaceholder("名前").inputValue(), "行 2", "fallback-named duplicates remain independently editable");
+
+    const writesBeforeFallbackClose = await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount);
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
-    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), writesAfterDuplicateDelete, "closing an unchanged Matrix editor does not write again");
+    assert.equal(await page.evaluate(() => window.__sceneMatrixTestNode.matrixWriteCount), writesBeforeFallbackClose + 1, "closing the independently edited Matrix source commits once");
 
     await page.evaluate(() => {
         const node = window.__sceneMatrixTestNode;

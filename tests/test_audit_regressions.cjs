@@ -388,7 +388,10 @@ function testSourceOwnershipBoundaries() {
     const removeIndex = matrixEditor.indexOf('createButton("削除", "pc-danger")');
     assert.ok(negativeIndex >= 0 && negativeIndex < filenameIndex && filenameIndex < duplicateIndex && duplicateIndex < removeIndex);
     assert.match(matrixEditor, /copiedDraft\.row_id = createMatrixLine\(`行 \$\{index \+ 2\}`\)\.row_id/);
-    assert.match(matrixEditor, /drafts\.splice\(index \+ 1, 0, createMatrixLineDraft\(copiedDraft, index \+ 1\)\)/);
+    assert.match(matrixEditor, /let drafts = matrixLineDraftsForNode\(node\)/);
+    assert.match(matrixEditor, /drafts = matrixLineDraftsForNode\(node\)/);
+    assert.match(matrixEditor, /draft\.name = nextName;\s+draft\.path_label = nextName/);
+    assert.match(matrixEditor, /drafts\.splice\(index \+ 1, 0, copiedDraft\)/);
     assert.match(matrixEditor, /const remove = createButton\("削除", "pc-danger"\)/);
 
     const capture = functionSource("installSceneBatchPromptCapture");

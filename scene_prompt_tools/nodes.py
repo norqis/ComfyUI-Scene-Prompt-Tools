@@ -8,7 +8,6 @@ import threading
 import time
 import tempfile
 import unicodedata
-from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -1443,46 +1442,63 @@ def _metadata_file_index(path, filename_prefix, counter_position):
     except (OSError, ValueError, TypeError):
         return None
     value = scene_info.get("file_index") if isinstance(scene_info, dict) else None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 1 <= value <= MAX_SAFE_INTEGER
-        or scene_info.get("filename_prefix") != filename_prefix
-        or _counter_position(scene_info.get("counter_position")) != counter_position
-    ):
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_SAFE_INTEGER:
         return None
-    return value
+    if (
+        scene_info.get("filename_prefix") == filename_prefix
+        and scene_info.get("counter_position") == counter_position
+    ):
+        return value
+    if (
+        counter_position == COUNTER_POSITION_LAST
+        and "filename_suffix" not in scene_info
+        and "counter_position" not in scene_info
+        and isinstance(scene_info.get("filename_prefix"), str)
+        and scene_info["filename_prefix"].endswith(filename_prefix)
+    ):
+        return value
+    return None
 
 
 def _find_next_index(run_root, extension, padding, filename_prefix="", counter_position=COUNTER_POSITION_LAST):
     prefix = _output_filename_prefix(filename_prefix, extension, padding)
     counter_position = _counter_position(counter_position)
+    extension_pattern = re.escape(extension)
+    prefix_pattern = re.escape(prefix)
     if counter_position == COUNTER_POSITION_FIRST:
-        pattern = re.compile(rf"^{re.escape(prefix)}(\d{{{padding},}}).*\.{re.escape(extension)}$", re.IGNORECASE)
+        patterns = [re.compile(rf"^{prefix_pattern}(\d{{5}})(?!\d).*\.{extension_pattern}$", re.IGNORECASE)]
     else:
-        pattern = re.compile(rf"^{re.escape(prefix)}.*?(\d{{{padding},}})\.{re.escape(extension)}$", re.IGNORECASE)
+        patterns = [re.compile(rf"^{prefix_pattern}.*(?<!\d)(\d{{5}})\.{extension_pattern}$", re.IGNORECASE)]
+        if prefix:
+            patterns.append(re.compile(rf"^.*{prefix_pattern}(\d{{5}})\.{extension_pattern}$", re.IGNORECASE))
+    current_candidate = re.compile(rf"^{prefix_pattern}.*\.{extension_pattern}$", re.IGNORECASE)
+    legacy_last_candidate = re.compile(rf"^.*{prefix_pattern}\d+\.{extension_pattern}$", re.IGNORECASE)
     highest = 0
     if os.path.isdir(run_root):
         for root, _dirs, files in os.walk(run_root):
             for filename in files:
-                if not filename.startswith(prefix) or not filename.lower().endswith(f".{extension.lower()}"):
+                if not filename.lower().endswith(f".{extension.lower()}"):
+                    continue
+                if not current_candidate.match(filename) and (
+                    counter_position != COUNTER_POSITION_LAST or not legacy_last_candidate.match(filename)
+                ):
                     continue
                 path = os.path.join(root, filename)
                 metadata_index = _metadata_file_index(path, prefix, counter_position)
                 if metadata_index is not None:
                     highest = max(highest, metadata_index)
                     continue
-                match = pattern.match(filename)
-                if match:
-                    value = int(match.group(1))
-                    if 1 <= value <= MAX_SAFE_INTEGER:
-                        highest = max(highest, value)
+                for pattern in patterns:
+                    match = pattern.match(filename)
+                    if match:
+                        value = int(match.group(1))
+                        if 1 <= value <= MAX_SAFE_INTEGER:
+                            highest = max(highest, value)
+                        break
     return highest + 1
 
 
 _RUN_DIR_CACHE = {}
-_COUNTER_STATE_SEEN = OrderedDict()
-_COUNTER_STATE_SEEN_LOCK = threading.Lock()
 _FILENAME_RESERVATION_LOCK = threading.Lock()
 
 
@@ -1545,21 +1561,19 @@ def _write_counter_state(state_path, next_index):
 def _allocate_output_index(run_root, extension, padding, filename_prefix, requested_index=1, counter_position=COUNTER_POSITION_LAST):
     """Allocate a prefix-wide counter, independent of filename suffixes."""
     counter_position = _counter_position(counter_position)
-    lock_path, state_path, key = _counter_state_paths(run_root, extension, padding, filename_prefix, counter_position)
+    lock_path, state_path, _key = _counter_state_paths(run_root, extension, padding, filename_prefix, counter_position)
     with _counter_state_lock(lock_path):
         state_index = _read_counter_state(state_path)
-        with _COUNTER_STATE_SEEN_LOCK:
-            first_allocation = key not in _COUNTER_STATE_SEEN
-            if not first_allocation:
-                _COUNTER_STATE_SEEN.move_to_end(key)
-        scanned_index = _find_next_index(run_root, extension, padding, filename_prefix, counter_position) if first_allocation or state_index is None else 1
-        counter = max(1, int(requested_index or 1), state_index or 1, scanned_index)
+        if state_index is not None:
+            counter = max(1, int(requested_index or 1), state_index)
+            _write_counter_state(state_path, counter + 1)
+            return counter
+
+    scanned_index = _find_next_index(run_root, extension, padding, filename_prefix, counter_position)
+    with _counter_state_lock(lock_path):
+        state_index = _read_counter_state(state_path)
+        counter = max(1, int(requested_index or 1), scanned_index, state_index or 1)
         _write_counter_state(state_path, counter + 1)
-        with _COUNTER_STATE_SEEN_LOCK:
-            _COUNTER_STATE_SEEN[key] = None
-            _COUNTER_STATE_SEEN.move_to_end(key)
-            if len(_COUNTER_STATE_SEEN) > 256:
-                _COUNTER_STATE_SEEN.popitem(last=False)
         return counter
 
 
