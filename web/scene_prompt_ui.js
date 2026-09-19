@@ -3945,6 +3945,19 @@ function syncInputLinkTargetSlots(node) {
     });
 }
 
+function moveScenePromptInputFirst(node) {
+    if (!Array.isArray(node?.inputs)) {
+        return;
+    }
+    const index = node.inputs.findIndex((input) => input?.name === "scene_prompt");
+    if (index <= 0) {
+        return;
+    }
+    const [scenePromptInput] = node.inputs.splice(index, 1);
+    node.inputs.unshift(scenePromptInput);
+    syncInputLinkTargetSlots(node);
+}
+
 function syncOutputLinkOriginSlots(node) {
     const graph = node?.graph || app.graph;
     if (!node || !Array.isArray(node.outputs) || !graph?.links) {
@@ -10335,6 +10348,9 @@ function attachSceneUtilityNode(node, nodeName) {
             setWidgetValue(node, "run_id", "", { silent: true });
         }
         ensureSceneExpandControls(node);
+    }
+    if (SCENE_APPLY_MODEL_NODE_NAMES.has(nodeName)) {
+        moveScenePromptInputFirst(node);
     }
     if (SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)) {
         installSceneEmptyLatentWidgetSyncHandlers(node);

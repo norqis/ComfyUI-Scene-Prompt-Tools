@@ -158,6 +158,7 @@ const expandContext = {
     injectStyle() {}, applySceneWidgetLabels() {}, installSceneConnectionWatcher() {},
     isSceneExpandNodeName: (name) => name === "ScenePrompterExpand",
     rebindSceneBatchRunNode() { return null; }, setWidgetValue() {}, ensureSceneExpandControls() {},
+    SCENE_APPLY_MODEL_NODE_NAMES: new Set(),
     SCENE_EMPTY_LATENT_NODE_NAMES: new Set(), SCENE_PROMPT_REVERSE_NODE_NAMES: new Set(),
     installSceneEmptyLatentWidgetSyncHandlers() {}, installScenePromptReverseWidgetSyncHandlers() {},
     hideSceneUtilityWidgets() {}, scheduleHideInternalDomWidgets() {}, refreshSceneExpandNode() {},
@@ -204,6 +205,45 @@ assert.deepEqual(
     [101, 102, 103, 104].map((linkId) => expandContext.app.graph.links[linkId].target_slot),
     [2, 5, 6, 7],
     "Expand resynchronizes existing Scene and Callback links after internal socket removal",
+);
+
+const applyModelContext = {
+    SCENE_APPLY_MODEL_NODE_NAMES: new Set(["SceneApplyModel"]),
+    app: { graph: { links: {}, setDirtyCanvas() {} }, canvas: { setDirty() {} } },
+    injectStyle() {}, applySceneWidgetLabels() {}, installSceneConnectionWatcher() {},
+    isSceneExpandNodeName() { return false; },
+    SCENE_EMPTY_LATENT_NODE_NAMES: new Set(), SCENE_PROMPT_REVERSE_NODE_NAMES: new Set(),
+    installSceneEmptyLatentWidgetSyncHandlers() {}, installScenePromptReverseWidgetSyncHandlers() {},
+    hideSceneUtilityWidgets() {}, scheduleHideInternalDomWidgets() {},
+};
+vm.createContext(applyModelContext);
+for (const name of ["syncInputLinkTargetSlots", "moveScenePromptInputFirst", "attachSceneUtilityNode"]) {
+    vm.runInContext(functionSource(name), applyModelContext);
+}
+const applyModelNode = {
+    id: 42,
+    graph: applyModelContext.app.graph,
+    inputs: [
+        { name: "model", link: 201 },
+        { name: "clip", link: 202 },
+        { name: "vae", link: 203 },
+        { name: "scene_prompt", link: 204 },
+    ],
+    setDirtyCanvas() {},
+};
+for (const linkId of [201, 202, 203, 204]) {
+    applyModelContext.app.graph.links[linkId] = { target_id: 42, target_slot: -1 };
+}
+applyModelContext.attachSceneUtilityNode(applyModelNode, "SceneApplyModel");
+assert.deepEqual(
+    Array.from(applyModelNode.inputs, (input) => input.name),
+    ["scene_prompt", "model", "clip", "vae"],
+    "Scene Apply Model displays scene_prompt first",
+);
+assert.deepEqual(
+    [204, 201, 202, 203].map((linkId) => applyModelContext.app.graph.links[linkId].target_slot),
+    [0, 1, 2, 3],
+    "Scene Apply Model updates existing link slots after reordering inputs",
 );
 
 console.log("Scene Prompt UI audit behavior tests passed.");
