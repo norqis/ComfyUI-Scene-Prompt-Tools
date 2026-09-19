@@ -19,6 +19,7 @@ from PIL.PngImagePlugin import PngInfo
 import comfy.model_management
 import folder_paths
 from comfy.cli_args import args
+from comfy_execution.graph_utils import GraphBuilder, is_link
 
 from .prompt import (
     DEFAULT_SELECTED_JSON,
@@ -544,6 +545,7 @@ def _slice_workflow_for_output(
 SCENE_NODE_TYPES = {
     "ScenePrompter", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePrompterExpand",
     "ScenePromptCounter", "ScenePromptReverse", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
+    "SceneApplyModel", "SceneApplyLora",
     "ScenePromptCallback",
     "ScenePresetInput", "ScenePresetOutput", "ScenePresetReference",
 }
@@ -1765,6 +1767,79 @@ class SceneEmptyLatent:
         return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 
 
+class SceneApplyModel:
+    DESCRIPTION = """接続されたMODEL、CLIP、VAEをScene経路へ設定します。scene_promptが未接続なら空のSceneから開始します。実体は選択されたSceneをExpandするときにだけ評価されます。同じ経路に複数ある場合は後段の設定を使います。"""
+    CATEGORY = "Scene/model"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "apply_model"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL", {"rawLink": True, "lazy": True}),
+                "clip": ("CLIP", {"rawLink": True, "lazy": True}),
+                "vae": ("VAE", {"rawLink": True, "lazy": True}),
+            },
+            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE,)},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, model, clip, vae, scene_prompt=None, **kwargs):
+        del kwargs
+        return "|".join([_scene_prompt_change_key(scene_prompt), repr(model), repr(clip), repr(vae)])
+
+    def apply_model(self, model, clip, vae, scene_prompt=None, unique_id=None, source_node_id="", source_node_name=""):
+        links = {"model": model, "clip": clip, "vae": vae}
+        if not all(is_link(value) for value in links.values()):
+            raise ValueError("Scene Apply ModelのMODEL、CLIP、VAEをすべて接続してください。")
+        plan = transform(scene_prompt, lambda row, _item: {**row, "model_links": {key: list(value) for key, value in links.items()}})
+        return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
+
+
+class SceneApplyLora:
+    DESCRIPTION = """ComfyUIのmodels/lorasからLoRAを選び、Scene経路へ追加します。複数を直列接続すると生成経路の上流から順に適用されます。実際の適用はExpand時に行われます。"""
+    CATEGORY = "Scene/model"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "apply_lora"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "lora_name": (folder_paths.get_filename_list("loras"),),
+                "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
+                "strength_clip": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
+            },
+            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE,)},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, **kwargs):
+        del kwargs
+        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip))])
+
+    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name=""):
+        name = str(lora_name or "").strip()
+        if not name:
+            raise ValueError("LoRAを選択してください。")
+        descriptor = {"name": name, "strength_model": float(strength_model), "strength_clip": float(strength_clip)}
+        plan = transform(scene_prompt, lambda row, _item: {**row, "loras": [*row.get("loras", []), descriptor]})
+        return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
+
+
 class ScenePromptCallbackDiscord:
     """Discord通知の設定を作ります。このノード単体では送信しません。"""
     DESCRIPTION = """Discord Webhook用の通知設定です。このノードは送信せず、Scene Prompt CallbackまたはScene Prompt Expandのcallback_*へ接続した実行時だけ通知されます。"""
@@ -1978,8 +2053,8 @@ def _current_prompt_id():
 class ScenePromptExpand:
     DESCRIPTION = """Scene生成計画から、生成番号に対応する1件を取り出して展開します。\nポジティブ、ネガティブ、保存用メタ情報、シード、空の潜在画像を出力し、{A|B|C} 形式の候補もこの段階で開始シードを基準に確定します。\n連続生成では計画全体を1枚ずつ処理し、複数の実行要求は順番に実行されます。このノード自身は画像を保存しません。"""
     CATEGORY = "Scene/prompt"
-    RETURN_TYPES = ("STRING", "STRING", SCENE_SAVE_INFO_TYPE, "INT", "LATENT")
-    RETURN_NAMES = ("ポジティブ", "ネガティブ", "メタ情報", "シード", "潜在画像")
+    RETURN_TYPES = ("STRING", "STRING", SCENE_SAVE_INFO_TYPE, "INT", "LATENT", "MODEL", "CLIP", "VAE")
+    RETURN_NAMES = ("ポジティブ", "ネガティブ", "メタ情報", "シード", "潜在画像", "MODEL", "CLIP", "VAE")
     FUNCTION = "expand"
 
     @classmethod
@@ -2204,7 +2279,27 @@ class ScenePromptExpand:
             "_plan_ref": plan,
         }
 
-        return (positive, negative, save_info, seed, latent)
+        model_links = row.get("model_links")
+        if model_links is None:
+            return (positive, negative, save_info, seed, latent, None, None, None)
+        model = model_links["model"]
+        clip = model_links["clip"]
+        graph = GraphBuilder()
+        for descriptor in row.get("loras", []):
+            loader = graph.node(
+                "LoraLoader",
+                model=model,
+                clip=clip,
+                lora_name=descriptor["name"],
+                strength_model=descriptor["strength_model"],
+                strength_clip=descriptor["strength_clip"],
+            )
+            model = loader.out(0)
+            clip = loader.out(1)
+        return {
+            "result": (positive, negative, save_info, seed, latent, model, clip, model_links["vae"]),
+            "expand": graph.finalize(),
+        }
 
 
 

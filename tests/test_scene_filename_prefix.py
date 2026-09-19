@@ -992,6 +992,65 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 if isinstance(value, list) and len(value) == 2:
                     self.assertIn(str(value[0]), saved_prompt)
 
+    def test_generation_path_metadata_keeps_only_the_selected_model_route(self):
+        prompt = {
+            "loader_a": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "loader_b": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "model_a": {"class_type": "SceneApplyModel", "inputs": {
+                "model": ["loader_a", 0], "clip": ["loader_a", 1], "vae": ["loader_a", 2],
+            }},
+            "model_b": {"class_type": "SceneApplyModel", "inputs": {
+                "model": ["loader_b", 0], "clip": ["loader_b", 1], "vae": ["loader_b", 2],
+            }},
+            "lora_a": {"class_type": "SceneApplyLora", "inputs": {"scene_prompt": ["model_a", 0]}},
+            "lora_b": {"class_type": "SceneApplyLora", "inputs": {"scene_prompt": ["model_b", 0]}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {
+                "scene_prompt1": ["lora_a", 0], "scene_prompt2": ["lora_b", 0],
+            }},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["queue", 0]}},
+            "positive": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["expand", 6], "text": ["expand", 0]}},
+            "negative": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["expand", 6], "text": ["expand", 1]}},
+            "sampler": {"class_type": "KSampler", "inputs": {
+                "model": ["expand", 5], "positive": ["positive", 0], "negative": ["negative", 0],
+            }},
+            "decode": {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["expand", 7]}},
+            "save": {"class_type": "SceneSaveImage", "inputs": {"images": ["decode", 0], "scene_info": ["expand", 2]}},
+        }
+        workflow_nodes = [
+            {
+                "id": node_id, "type": node["class_type"], "pos": [index * 100, index * 25], "size": [220, 120],
+                "widgets_values": [], "inputs": [], "outputs": [],
+            }
+            for index, (node_id, node) in enumerate(prompt.items())
+        ]
+        links = []
+        workflow_by_id = {str(node["id"]): node for node in workflow_nodes}
+        for link_id, (target_id, input_name, value) in enumerate((
+            (target_id, input_name, value)
+            for target_id, node in prompt.items()
+            for input_name, value in node["inputs"].items()
+            if isinstance(value, list)
+        ), start=1):
+            source_id = str(value[0])
+            target_slot = len(workflow_by_id[target_id]["inputs"])
+            links.append([link_id, source_id, value[1], target_id, target_slot, "*"])
+            workflow_by_id[target_id]["inputs"].append({"name": input_name, "link": link_id})
+            workflow_by_id[source_id]["outputs"].append({"name": "output", "links": [link_id]})
+
+        selected = {"loader_a", "model_a", "lora_a", "queue", "expand", "positive", "negative", "sampler", "decode", "save"}
+        saved_prompt, saved_extra = self.nodes._metadata_for_save_mode(
+            prompt,
+            {"workflow": {"nodes": workflow_nodes, "links": links, "groups": []}},
+            "save",
+            self.nodes.SAVE_METADATA_EXECUTION_PATH,
+            {"source_node_ids": ["model_a", "lora_a", "queue", "expand"]},
+        )
+        self.assertEqual(set(saved_prompt), selected)
+        self.assertEqual({str(node["id"]) for node in saved_extra["workflow"]["nodes"]}, selected)
+        self.assertNotIn("loader_b", saved_prompt)
+        self.assertNotIn("model_b", saved_prompt)
+        self.assertNotIn("lora_b", saved_prompt)
+
     def test_execution_path_rebases_queue_second_branch_and_preserves_repeat(self):
         def branch(source_id, text, count):
             plan = self.nodes.with_source_node(
@@ -1166,6 +1225,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             "ScenePromptCallbackRequest",
             "ScenePromptCallbackDesktop",
             "SceneEmptyLatent",
+            "SceneApplyModel",
+            "SceneApplyLora",
             "ScenePrompterExpand",
             "SceneSaveImage",
             "ScenePresetInput",
@@ -1188,6 +1249,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 "ScenePromptCallbackRequest": "Scene Prompt Callback (Request)",
                 "ScenePromptCallbackDesktop": "Scene Prompt Callback (Desktop)",
                 "SceneEmptyLatent": "Scene Empty Latent",
+                "SceneApplyModel": "Scene Apply Model",
+                "SceneApplyLora": "Scene Apply LoRA",
                 "ScenePrompterExpand": "Scene Prompt Expand",
                 "SceneSaveImage": "Scene Save Image",
                 "ScenePresetInput": "Scene Preset Input",

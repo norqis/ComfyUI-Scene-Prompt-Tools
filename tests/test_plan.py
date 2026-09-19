@@ -175,12 +175,19 @@ class ScenePlanTests(unittest.TestCase):
 
     def test_normalize_uses_one_running_cursor_per_row(self):
         row_count = 2_000
-        plan = make_plan([{"row": prompt_row(str(index)), "count": 1} for index in range(row_count)])
+        plan = dict(make_plan([{"row": prompt_row(str(index)), "count": 1} for index in range(row_count)]))
         expected = list(range(row_count))
         with mock.patch.object(plan_module, "_build_plan", wraps=plan_module._build_plan) as build_plan:
             normalized = normalize_plan(plan)
         self.assertEqual([item["start_index"] for item in normalized["rows"]], expected)
         self.assertEqual(build_plan.call_count, 1)
+
+    def test_internal_plan_skips_revalidation(self):
+        plan = make_plan([{"row": prompt_row("A"), "count": 1}])
+        with mock.patch.object(plan_module, "_build_plan", wraps=plan_module._build_plan) as build_plan:
+            normalized = normalize_plan(plan)
+        self.assertIs(normalized, plan)
+        self.assertEqual(build_plan.call_count, 0)
 
 
 if __name__ == "__main__":

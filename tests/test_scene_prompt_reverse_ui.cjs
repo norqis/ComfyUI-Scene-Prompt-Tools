@@ -30,6 +30,12 @@ assert.match(functionSource("scenePromptStats"), /isScenePromptReverseNode\(node
 assert.match(functionSource("scenePromptPreviewEntries"), /isScenePromptReverseNode\(node\)/u);
 assert.match(functionSource("hideSceneUtilityWidgets"), /SCENE_PROMPT_REVERSE_NODE_NAMES/u);
 assert.match(functionSource("attachSceneUtilityNode"), /installScenePromptReverseWidgetSyncHandlers/u);
+assert.match(source, /SCENE_PLAN_NODE_CLASS_TYPES[\s\S]*"SceneApplyModel"[\s\S]*"SceneApplyLora"/u);
+assert.match(source, /SCENE_SOURCE_NODE_CLASS_TYPES[\s\S]*"SceneApplyModel"[\s\S]*"SceneApplyLora"/u);
+assert.match(source, /strength_model: "モデル強度"/u);
+assert.match(source, /strength_clip: "CLIP強度"/u);
+assert.match(functionSource("attachSceneNode"), /SCENE_APPLY_MODEL_NODE_NAMES/u);
+assert.match(functionSource("attachSceneNode"), /SCENE_APPLY_LORA_NODE_NAMES/u);
 
 const context = {
     String,

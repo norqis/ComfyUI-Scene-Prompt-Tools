@@ -591,9 +591,45 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         cls.base = Path(cls.temp.name)
         cls.port = _free_port()
         cls.node_dir = cls.base / "custom_nodes" / "scene-prompt-tools-http-smoke"
+        cls.lazy_test_node_dir = cls.base / "custom_nodes" / "scene-prompt-lazy-test"
         (cls.base / "custom_nodes").mkdir()
         shutil.rmtree(cls.node_dir, ignore_errors=True)
         shutil.copytree(ROOT, cls.node_dir, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"))
+        cls.lazy_test_node_dir.mkdir()
+        (cls.lazy_test_node_dir / "__init__.py").write_text(
+            '''from pathlib import Path
+
+class TestSceneModelBundle:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"label": ("STRING",), "log_path": ("STRING",)}}
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE")
+    FUNCTION = "load"
+    CATEGORY = "test"
+    def load(self, label, log_path):
+        with Path(log_path).open("a", encoding="utf-8") as handle:
+            handle.write(label + "\\n")
+        value = {"label": label}
+        return value, value, value
+
+class TestSceneModelSink:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"model": ("MODEL",), "clip": ("CLIP",), "vae": ("VAE",)}}
+    RETURN_TYPES = ()
+    FUNCTION = "consume"
+    OUTPUT_NODE = True
+    CATEGORY = "test"
+    def consume(self, model, clip, vae):
+        return ()
+
+NODE_CLASS_MAPPINGS = {
+    "TestSceneModelBundle": TestSceneModelBundle,
+    "TestSceneModelSink": TestSceneModelSink,
+}
+''',
+            encoding="utf-8",
+        )
         cls.log_path = cls.base / "comfyui-http-smoke.log"
         cls.log = cls.log_path.open("w", encoding="utf-8")
         cls.process = subprocess.Popen(
@@ -617,7 +653,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         while time.monotonic() < deadline:
             try:
                 object_info = cls._request("/object_info")
-                if "ScenePrompter" in object_info and "SceneSaveImage" in object_info:
+                if "ScenePrompter" in object_info and "SceneSaveImage" in object_info and "TestSceneModelBundle" in object_info:
                     return
             except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
                 pass
@@ -645,6 +681,8 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
             cls.log.close()
         if getattr(cls, "node_dir", None) is not None:
             shutil.rmtree(cls.node_dir, ignore_errors=True)
+        if getattr(cls, "lazy_test_node_dir", None) is not None:
+            shutil.rmtree(cls.lazy_test_node_dir, ignore_errors=True)
         if getattr(cls, "temp", None) is not None:
             cls.temp.cleanup()
 
@@ -708,6 +746,31 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         if extra_data is not None:
             payload["extra_data"] = extra_data
         return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
+
+    def test_model_route_executes_only_the_selected_lazy_loader(self):
+        marker = self.base / "selected-model-loaders.txt"
+        graph = {
+            "1": {"class_type": "TestSceneModelBundle", "inputs": {"label": "selected", "log_path": str(marker)}},
+            "2": {"class_type": "TestSceneModelBundle", "inputs": {"label": "unselected", "log_path": str(marker)}},
+            "3": {"class_type": "SceneApplyModel", "inputs": {
+                "model": ["1", 0], "clip": ["1", 1], "vae": ["1", 2],
+            }},
+            "4": {"class_type": "SceneApplyModel", "inputs": {
+                "model": ["2", 0], "clip": ["2", 1], "vae": ["2", 2],
+            }},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {
+                "scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0],
+            }},
+            "6": {"class_type": "ScenePrompterExpand", "inputs": {
+                "scene_prompt": ["5", 0], "current_index": 0, "seed_base": 1,
+                "run_id": "", "timestamp_dir": False, "prefix": "",
+            }},
+            "7": {"class_type": "TestSceneModelSink", "inputs": {
+                "model": ["6", 5], "clip": ["6", 6], "vae": ["6", 7],
+            }},
+        }
+        self._queue_and_wait(graph)
+        self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["selected"])
 
     def _prepare_callback_run(self, graph, expand_node_id="10", workflow=None, client_id=None):
         workflow = workflow or _workflow_for_graph(graph)
