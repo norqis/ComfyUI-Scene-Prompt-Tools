@@ -1062,10 +1062,16 @@ try {
             }
             addCustomWidget(widget) { this.widgets.push(widget); return widget; }
             serialize() { return { widgets_values: this.widgets.map((widget) => widget.value) }; }
+            configure(serialized) {
+                for (const [index, value] of (serialized.widgets_values || []).entries()) {
+                    this.widgets[index].value = structuredClone(value);
+                }
+                this.widgets_values = structuredClone(serialized.widgets_values || []);
+            }
             setDirtyCanvas() {}
             setSize(size) { this.size = [...size]; }
         }
-        const expand = new ExpandNode(203, 1, 41, false);
+        const expand = new ExpandNode(203, 0, 0, false);
         const zeroReplayExpand = new ExpandNode(204, 0, 0, true);
         await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallback" });
         callback.onNodeCreated();
@@ -1074,6 +1080,7 @@ try {
         await window.__scenePromptExtension.beforeRegisterNodeDef(CallbackNode, { name: "ScenePromptCallbackDesktop" });
         desktop.onNodeCreated();
         await window.__scenePromptExtension.beforeRegisterNodeDef(ExpandNode, { name: "ScenePrompterExpand" });
+        expand.configure({ widgets_values: [15, "saved-run", 41, true, "", false, false, 10, "続行", false] });
         expand.onNodeCreated();
         zeroReplayExpand.onNodeCreated();
         window.app.graph._nodes.push(callback, request, desktop, expand, zeroReplayExpand);
@@ -1142,8 +1149,8 @@ try {
         { name: "callback_timeout_seconds", label: "Callbackタイムアウト（秒）", hidden: false },
         { name: "callback_failure_mode", label: "Callback失敗時", hidden: false },
     ], "Expand shows Japanese Callback settings");
-    assert.deepEqual(callbackUi.loadedReplay, [1, 41, false, ""], "loading keeps a nonzero saved index and seed while clearing only stale run state");
-    assert.deepEqual(callbackUi.loadedReplaySerialized, [1, "", 41, false], "normal replay serialization keeps a nonzero saved index and seed");
+    assert.deepEqual(callbackUi.loadedReplay, [0, 41, false, ""], "loading resets the transient saved index while preserving the seed and clearing stale run state");
+    assert.deepEqual(callbackUi.loadedReplaySerialized, [0, "", 41, false], "normal replay serialization starts from the first Scene row after load");
     assert.deepEqual(callbackUi.zeroReplay, [0, 0, true, ""], "loading keeps literal seed 0 for one normal replay");
     assert.equal(callbackUi.replaySeedLiteralHidden, true, "literal seed replay state stays internal");
     assert.deepEqual(callbackUi.zeroReplaySerialized, [0, "", 0, true], "normal replay serialization keeps literal seed mode");

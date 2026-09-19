@@ -4689,6 +4689,9 @@ function sceneExpandConfigureValues(config) {
     } else if (converted.length === 5) {
         converted.push(false, false);
     }
+    if (converted.length) {
+        converted[0] = 0;
+    }
     return { ...config, widgets_values: converted };
 }
 

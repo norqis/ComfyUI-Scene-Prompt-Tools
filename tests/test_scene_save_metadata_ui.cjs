@@ -74,20 +74,25 @@ assert.deepEqual(loraWidgets.map((widget) => widget.hidden), [false, false, fals
 
 vm.runInContext(functionSource("sceneExpandConfigureValues"), context);
 const legacyAnima = {
-    widgets_values: [0, "", 7, true, "prefix", "Anima", 13, "停止", true],
+    widgets_values: [15, "saved-run", 7, true, "prefix", "Anima", 13, "停止", true],
 };
 const migratedAnima = context.sceneExpandConfigureValues(legacyAnima);
 assert.deepEqual(JSON.parse(JSON.stringify(migratedAnima.widgets_values)), [
-    0, "", 7, true, "prefix", true, true, 13, "停止", true,
+    0, "saved-run", 7, true, "prefix", true, true, 13, "停止", true,
 ]);
-assert.deepEqual(legacyAnima.widgets_values, [0, "", 7, true, "prefix", "Anima", 13, "停止", true]);
+assert.deepEqual(legacyAnima.widgets_values, [15, "saved-run", 7, true, "prefix", "Anima", 13, "停止", true]);
 assert.deepEqual(
     JSON.parse(JSON.stringify(context.sceneExpandConfigureValues(migratedAnima).widgets_values)),
     JSON.parse(JSON.stringify(migratedAnima.widgets_values)),
     "migration is idempotent",
 );
 assert.deepEqual(
-    JSON.parse(JSON.stringify(context.sceneExpandConfigureValues({ widgets_values: [0, "", 7, true, "prefix"] }).widgets_values)),
-    [0, "", 7, true, "prefix", false, false],
+    JSON.parse(JSON.stringify(context.sceneExpandConfigureValues({ widgets_values: [15, "saved-run", 7, true, "prefix"] }).widgets_values)),
+    [0, "saved-run", 7, true, "prefix", false, false],
     "pre-model workflows receive explicit false conversion options",
+);
+assert.deepEqual(
+    JSON.parse(JSON.stringify(context.sceneExpandConfigureValues({ widgets_values: [] }).widgets_values)),
+    [],
+    "an empty legacy widget list stays untouched",
 );

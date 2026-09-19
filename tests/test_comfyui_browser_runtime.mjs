@@ -149,6 +149,7 @@ window.__sceneSeedRuntimeTest = {
                 const expandNode = window.app.graph?._nodes?.find(
                     (node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand",
                 );
+                const prompt = await window.app.graphToPrompt();
                 return {
                     nodes: window.app.graph?._nodes?.length || 0,
                     settled,
@@ -157,6 +158,8 @@ window.__sceneSeedRuntimeTest = {
                         expandNode?.widgets?.find((widget) => widget.name === "convert_anima_weights")?.value,
                     ],
                     modelMode: expandNode?.widgets?.find((widget) => widget.name === "model_mode")?.value,
+                    currentIndex: expandNode?.widgets?.find((widget) => widget.name === "current_index")?.value,
+                    promptCurrentIndex: prompt.output?.[String(expandNode?.id)]?.inputs?.current_index,
                 };
             } catch (error) {
                 return {
@@ -176,6 +179,8 @@ window.__sceneSeedRuntimeTest = {
             assert.deepEqual(dropResult.conversionOptions, expectedConversionOptions, "drag-style PNG loading must preserve Expand conversion options");
         }
         assert.equal(dropResult.modelMode, undefined, "Expand no longer exposes a model selector");
+        assert.equal(dropResult.currentIndex, 0, "PNG loading resets a transient Expand cursor to its first Scene row");
+        assert.equal(dropResult.promptCurrentIndex, 0, "normal Queue after PNG loading serializes the first Scene row");
         assert.deepEqual(pageErrors, [], `PNG handling raised browser errors:\n${pageErrors.join("\n")}`);
         console.log(`real ComfyUI PNG handleFile passed (${dropResult.nodes} nodes)`);
 
@@ -185,13 +190,23 @@ window.__sceneSeedRuntimeTest = {
                     window.app.loadGraphData(savedWorkflow),
                     new Promise((_resolve, reject) => setTimeout(() => reject(new Error("loadGraphData timed out")), 15_000)),
                 ]);
-                return { nodes: window.app.graph?._nodes?.length || 0 };
+                const expandNode = window.app.graph?._nodes?.find(
+                    (node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand",
+                );
+                const prompt = await window.app.graphToPrompt();
+                return {
+                    nodes: window.app.graph?._nodes?.length || 0,
+                    currentIndex: expandNode?.widgets?.find((widget) => widget.name === "current_index")?.value,
+                    promptCurrentIndex: prompt.output?.[String(expandNode?.id)]?.inputs?.current_index,
+                };
             } catch (error) {
                 return { error: error?.stack || error?.message || String(error) };
             }
         }, workflow);
         assert.equal(loadResult.error, undefined, loadResult.error);
         assert.equal(loadResult.nodes, workflow.nodes.length, "the PNG workflow must load every serialized node");
+        assert.equal(loadResult.currentIndex, 0, "JSON workflow loading resets a transient Expand cursor to its first Scene row");
+        assert.equal(loadResult.promptCurrentIndex, 0, "normal Queue after JSON workflow loading serializes the first Scene row");
         assert.deepEqual(pageErrors, [], `workflow load raised browser errors:\n${pageErrors.join("\n")}`);
         console.log(`real ComfyUI PNG workflow load passed (${loadResult.nodes} nodes)`);
     }
