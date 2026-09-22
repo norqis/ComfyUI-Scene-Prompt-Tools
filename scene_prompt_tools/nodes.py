@@ -654,7 +654,7 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
         # counter position with a timeout, or the current fixed-timeout layout.
         if len(widgets) > 8 and (
             widgets[5] in COUNTER_POSITION_CHOICES
-            or any(input.get("name") == "counter_position" for input in node.get("inputs", []))
+            or (widgets[5] is None and any(input.get("name") == "counter_position" for input in node.get("inputs", [])))
         ):
             # Connected callback widgets serialize as None; their values cannot
             # distinguish the old 11-widget layout from the current 10 widgets.
