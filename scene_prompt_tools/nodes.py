@@ -100,6 +100,7 @@ PATH_DIRECTORY = "フォルダに分ける"
 PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
 MODEL_MODE_ILLUSTRIOUS = "Illustrious"
 MODEL_MODE_ANIMA = "Anima"
+EXPAND_CALLBACK_TIMEOUT_SECONDS = 10
 REVERSE_SCOPE_ALL = "全てのノード"
 REVERSE_SCOPE_PREVIOUS = "直前のノード"
 REVERSE_SCOPE_CHOICES = (REVERSE_SCOPE_ALL, REVERSE_SCOPE_PREVIOUS)
@@ -568,7 +569,6 @@ def _scene_source_ids(scene_info):
 _EXPAND_WORKFLOW_WIDGET_INDEX = {
     "current_index": 0,
     "seed_base": 2,
-    "seed_base_literal": 9,
 }
 
 
@@ -649,11 +649,17 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
         widgets = node.get("widgets_values")
         if not isinstance(widgets, list):
             continue
-        # v0.4.12 stored model_mode at index 5. Its seed_base_literal follows
-        # callbacks at index 8; the two conversion booleans move it to index 9.
         indexes = dict(_EXPAND_WORKFLOW_WIDGET_INDEX)
-        if len(widgets) > 5 and isinstance(widgets[5], str):
+        # Preserve the saved layout: old model selector, conversion booleans,
+        # counter position with a timeout, or the current fixed-timeout layout.
+        if len(widgets) > 5 and widgets[5] in (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA):
             indexes["seed_base_literal"] = 8
+        elif len(widgets) > 6 and type(widgets[5]) is bool and type(widgets[6]) is bool:
+            indexes["seed_base_literal"] = 9
+        elif len(widgets) > 8 and widgets[5] in COUNTER_POSITION_CHOICES:
+            indexes["seed_base_literal"] = (
+                9 if widgets[8] in (CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP) else 10
+            )
         for name, index in indexes.items():
             if index < len(widgets):
                 widgets[index] = values[name]
@@ -1503,12 +1509,23 @@ _FILENAME_RESERVATION_LOCK = threading.Lock()
 
 
 def _counter_state_paths(run_root, extension, padding, filename_prefix, counter_position=COUNTER_POSITION_LAST):
-    key = "\0".join((str(extension).lower(), str(int(padding)), str(filename_prefix).casefold(), _counter_position(counter_position)))
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    components = (str(extension).lower(), str(int(padding)), str(filename_prefix).casefold())
+    key = "\0".join((*components, _counter_position(counter_position)))
+    # Existing output-side state must keep sharing the old version's lock.
+    # A lone lock or state is sufficient to retain that namespace.
+    legacy_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    lock_path = os.path.join(run_root, f".scene-save-{legacy_digest}.lock")
+    state_path = os.path.join(run_root, f".scene-save-{legacy_digest}.state")
+    if os.path.exists(lock_path) or os.path.exists(state_path):
+        return lock_path, state_path, (os.path.abspath(run_root), key)
+
+    canonical_root = os.path.normcase(os.path.realpath(run_root))
+    digest = hashlib.sha256(f"{canonical_root}\0{key}".encode("utf-8")).hexdigest()
+    state_root = os.path.join(folder_paths.get_system_user_directory("scene_prompt_tools"), "output_counters")
     return (
-        os.path.join(run_root, f".scene-save-{digest}.lock"),
-        os.path.join(run_root, f".scene-save-{digest}.state"),
-        (os.path.abspath(run_root), key),
+        os.path.join(state_root, f".scene-save-{digest}.lock"),
+        os.path.join(state_root, f".scene-save-{digest}.state"),
+        (canonical_root, key),
     )
 
 
@@ -1570,6 +1587,7 @@ def _allocate_output_index(run_root, extension, padding, filename_prefix, reques
     """Allocate a prefix-wide counter, independent of filename suffixes."""
     counter_position = _counter_position(counter_position)
     lock_path, state_path, _key = _counter_state_paths(run_root, extension, padding, filename_prefix, counter_position)
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     with _counter_state_lock(lock_path):
         state_index = _read_counter_state(state_path)
         if state_index is not None:
@@ -2455,7 +2473,6 @@ class ScenePromptExpand:
                 "callback_first": (SCENE_CALLBACK_TYPE, {"display_name": "callback_first"}),
                 "callback_each": (SCENE_CALLBACK_TYPE, {"display_name": "callback_each"}),
                 "callback_last": (SCENE_CALLBACK_TYPE, {"display_name": "callback_last"}),
-                "callback_timeout_seconds": ("INT", {"default": 10, "min": 1, "display_name": "callback_timeout_seconds"}),
                 "callback_failure_mode": ([CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP], {"default": CALLBACK_FAILURE_CONTINUE, "display_name": "callback_failure_mode"}),
                 "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
             },
@@ -2569,8 +2586,8 @@ class ScenePromptExpand:
         }
         callback_id = str(unique_id or "")
         desktop_context = get_run_delivery_context(run_handle)
-        _dispatch_expand_callback(callback_first, f"{callback_id}:first", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, once=True, desktop_context=desktop_context)
-        _dispatch_expand_callback(callback_each, f"{callback_id}:each", callback_timeout_seconds, callback_failure_mode, callback_values, run_handle, desktop_context=desktop_context)
+        _dispatch_expand_callback(callback_first, f"{callback_id}:first", EXPAND_CALLBACK_TIMEOUT_SECONDS, callback_failure_mode, callback_values, run_handle, once=True, desktop_context=desktop_context)
+        _dispatch_expand_callback(callback_each, f"{callback_id}:each", EXPAND_CALLBACK_TIMEOUT_SECONDS, callback_failure_mode, callback_values, run_handle, desktop_context=desktop_context)
         _dispatch_row_callbacks(
             row, item, seed, model_mode, run_handle, positive, negative,
             desktop_context=desktop_context,
@@ -2579,7 +2596,7 @@ class ScenePromptExpand:
         )
         if callback_last is not None and run_handle and global_index + 1 == int(item.get("total_batches", 0)):
             prompt_id = _current_prompt_id()
-            register_last_callback(run_handle, callback_id, callback_last, callback_values, callback_timeout_seconds, callback_failure_mode, prompt_id, desktop_context)
+            register_last_callback(run_handle, callback_id, callback_last, callback_values, EXPAND_CALLBACK_TIMEOUT_SECONDS, callback_failure_mode, prompt_id, desktop_context)
         latent_config = _row_latent(row)
         latent = _empty_latent(latent_config)
         use_run_dir = _scene_bool(timestamp_dir)

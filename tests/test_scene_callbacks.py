@@ -307,6 +307,30 @@ class SceneCallbackTests(unittest.TestCase):
         self.assertEqual(dispatched[2]["current_positive"], "before tag, (before weight:3)")
         self.assertEqual(dispatched[2]["all_positive"], output[0])
 
+    def test_expand_ignores_legacy_timeout_for_first_each_and_last_callbacks(self):
+        nodes = _nodes_module()
+        plan = make_plan([{"row": empty_row(), "count": 1}])
+        self.assertNotIn("callback_timeout_seconds", nodes.ScenePromptExpand.INPUT_TYPES()["optional"])
+        self.assertIn("timeout_seconds", nodes.ScenePromptCallback.INPUT_TYPES()["required"])
+        for legacy_timeout in (0, 13, None, "invalid"):
+            with self.subTest(legacy_timeout=legacy_timeout):
+                with mock.patch.object(nodes, "_scene_run_plan", return_value=plan), \
+                     mock.patch.object(nodes, "get_run_delivery_context", return_value=None), \
+                     mock.patch.object(nodes, "claim_callback_attempt", return_value=True), \
+                     mock.patch.object(nodes, "dispatch_callback") as dispatch, \
+                     mock.patch.object(nodes, "register_last_callback") as register_last:
+                    nodes.ScenePromptExpand().expand(
+                        seed_base=17, timestamp_dir=False, scene_prompt=plan, run_handle="run",
+                        callback_first={"kind": "request"}, callback_each={"kind": "request"},
+                        callback_last={"kind": "request"}, callback_timeout_seconds=legacy_timeout,
+                    )
+                self.assertEqual([call.args[2] for call in dispatch.call_args_list], [10, 10])
+                self.assertEqual(register_last.call_args.args[4], 10)
+                self.assertEqual(
+                    nodes.ScenePromptExpand.IS_CHANGED(seed_base=17, callback_timeout_seconds=legacy_timeout),
+                    nodes.ScenePromptExpand.IS_CHANGED(seed_base=17),
+                )
+
     def test_callback_failures_do_not_reach_latent_and_continue_runs_next(self):
         nodes = _nodes_module()
         base = make_plan([{"row": {**empty_row(), "positive_parts": ["prompt"]}, "count": 1}])

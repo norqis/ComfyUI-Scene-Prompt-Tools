@@ -96,6 +96,8 @@ Each `prompt.json` is a JSON array, not an object with an `items` field. `label`
 
 Use the Scene Prompt UI to create and manage saved prompt collections. They are stored separately at `data/保存済みプロンプト/<collection>/prompt.json`.
 
+Click the **☆** at the top right of a prompt candidate to mark it as a favorite. Switch between **検索** (Search) and **お気に入り** (Favorites) in the candidate popup. Favorites are shared across nodes and workflows for the current user and are saved separately from workflow and PNG metadata.
+
 ## Prompt Choices
 
 Use braces to select one option when **Scene Prompt Expand** runs. Selection is seeded, so the same starting seed and generation index produce the same choice.
@@ -155,7 +157,7 @@ Scene Prompt Callback (Discord, Request, or Desktop) -> Scene Prompt Callback.ca
 
 For GET, the text body is disabled; put query parameters in the URL. Variables used in URLs are percent-encoded. For a JSON body, write valid JSON and use variables inside string values, for example `{"content":"{all_positive}"}`. The common Callback node has **frequency** (`初回` or `毎回`), timeout seconds, and failure behavior (`続行` or `停止`). `初回` runs once for that Callback node during a continuous-generation run; `毎回` runs whenever its position is traversed in that run. Sending happens after Expand has finalized the batch prompt and before image generation starts. Selected Callbacks run in path order and each request completes before the next Callback or image generation continues; `続行` logs a failure and continues, while `停止` stops the run.
 
-**Scene Prompt Expand** also accepts optional `callback_first`, `callback_each`, and `callback_last` inputs. Connect a Discord, Request, or Desktop configuration node directly to them when the callback belongs to that Expand rather than to a location in the Scene path. `callback_first` runs only for the first batch, `callback_each` runs for every batch, and `callback_last` runs once after the final batch has generated successfully. They use the Expand callback timeout and failure settings. `callback_last` waits for the request before its run context is released and before the next queued continuous run begins. It does not run after an error, interruption, manual stop, or closing the page. With `続行`, transport errors are returned as warnings and the next queued run continues; with `停止`, the completed run is released but later queued runs do not start automatically.
+**Scene Prompt Expand** also accepts optional `callback_first`, `callback_each`, and `callback_last` inputs. Connect a Discord, Request, or Desktop configuration node directly to them when the callback belongs to that Expand rather than to a location in the Scene path. `callback_first` runs only for the first batch, `callback_each` runs for every batch, and `callback_last` runs once after the final batch has generated successfully. These three inputs use a fixed **10-second timeout** and the Expand failure setting; older saved timeout values are ignored. The separate Scene Prompt Callback node retains its configurable timeout. `callback_last` waits for the request before its run context is released and before the next queued continuous run begins. It does not run after an error, interruption, manual stop, or closing the page. With `続行`, transport errors are returned as warnings and the next queued run continues; with `停止`, the completed run is released but later queued runs do not start automatically.
 
 Text fields support these variables. `all` is the completed prompt for the current batch, not every batch in the run.
 
@@ -202,6 +204,8 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 When [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts) is installed, the positive and negative base-prompt fields opened from each **Scene Matrix** row use its existing autocomplete, including tag, embedding, and LoRA suggestions. Without it, the fields remain normal text inputs.
 
 ## Scene Save Image Metadata
+
+Scene Save Image keeps persistent filename counters for each output root, extension, padding, prefix, and counter position. New counter keys store their lock and state files in ComfyUI's system-user directory at `scene_prompt_tools/output_counters`, leaving output folders free of permanent counter sidecars. Existing output-side `.scene-save-*.lock` or `.state` files remain in use so running older versions can share their lock. Separate ComfyUI user directories do not share the new counter lock; neither do old and new versions starting together with no existing sidecars. Those combinations still prevent overwriting the same output filename but do not guarantee one prefix-wide sequence.
 
 Choose the metadata mode on **Scene Save Image**:
 

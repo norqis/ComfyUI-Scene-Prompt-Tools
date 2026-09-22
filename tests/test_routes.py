@@ -31,6 +31,7 @@ def load_routes(data_dir):
     folder_paths.get_output_directory = lambda: str(data_dir / "output")
     folder_paths.get_user_directory = lambda: str(data_dir / "user")
     folder_paths.get_public_user_directory = lambda user_id: str(data_dir / "user" / user_id)
+    folder_paths.get_system_user_directory = lambda name: str(data_dir / "user" / "__system__" / name)
 
     registered = {}
     def route(method):

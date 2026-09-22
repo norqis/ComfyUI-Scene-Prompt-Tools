@@ -25,6 +25,7 @@ def install_stubs(user_directory):
     folder_paths = types.ModuleType("folder_paths")
     folder_paths.get_user_directory = lambda: str(user_directory)
     folder_paths.get_public_user_directory = lambda user_id: str(user_directory / user_id)
+    folder_paths.get_system_user_directory = lambda name: str(user_directory / "__system__" / name)
     folder_paths.get_output_directory = lambda: str(user_directory / "output")
     folder_paths.get_filename_list = lambda category: ["style/example.safetensors"] if category == "loras" else []
     sys.modules["folder_paths"] = folder_paths

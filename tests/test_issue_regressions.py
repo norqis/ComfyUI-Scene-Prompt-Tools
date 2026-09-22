@@ -27,6 +27,7 @@ def load_presets(root):
     folder_paths.get_output_directory = lambda: str(root / "output")
     folder_paths.get_user_directory = lambda: str(root / "user")
     folder_paths.get_public_user_directory = lambda user_id: str(root / "user" / user_id)
+    folder_paths.get_system_user_directory = lambda name: str(root / "user" / "__system__" / name)
     sys.modules.update({
         "comfy": comfy,
         "comfy.model_management": management,

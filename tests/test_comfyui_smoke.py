@@ -99,7 +99,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertEqual(request["required"]["headers_json"][0], "STRING")
         for name in ("callback_first", "callback_each", "callback_last"):
             self.assertEqual(expand["optional"][name][0], "SCENE_CALLBACK")
-        self.assertIn("callback_timeout_seconds", expand["optional"])
+        self.assertNotIn("callback_timeout_seconds", expand["optional"])
         self.assertIn("callback_failure_mode", expand["optional"])
 
     def test_scene_model_route_uses_real_graph_builder_links(self):

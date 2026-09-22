@@ -29,6 +29,7 @@ def load_nodes(output_dir):
     folder_paths.get_output_directory = lambda: str(output_dir)
     folder_paths.get_user_directory = lambda: str(output_dir / "user")
     folder_paths.get_public_user_directory = lambda user_id: str(output_dir / "user" / user_id)
+    folder_paths.get_system_user_directory = lambda name: str(output_dir / "user" / "__system__" / name)
     folder_paths.get_filename_list = lambda category: ["style/example.safetensors"] if category == "loras" else []
     sys.modules.update({
         "comfy": comfy,
