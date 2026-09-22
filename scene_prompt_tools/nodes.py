@@ -652,14 +652,17 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
         indexes = dict(_EXPAND_WORKFLOW_WIDGET_INDEX)
         # Preserve the saved layout: old model selector, conversion booleans,
         # counter position with a timeout, or the current fixed-timeout layout.
-        if len(widgets) > 5 and widgets[5] in (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA):
-            indexes["seed_base_literal"] = 8
-        elif len(widgets) > 6 and type(widgets[5]) is bool and type(widgets[6]) is bool:
-            indexes["seed_base_literal"] = 9
-        elif len(widgets) > 8 and widgets[5] in COUNTER_POSITION_CHOICES:
+        if len(widgets) > 8 and (
+            widgets[5] in COUNTER_POSITION_CHOICES
+            or any(input.get("name") == "counter_position" for input in node.get("inputs", []))
+        ):
             # Connected callback widgets serialize as None; their values cannot
             # distinguish the old 11-widget layout from the current 10 widgets.
             indexes["seed_base_literal"] = 10 if len(widgets) > 10 else 9
+        elif len(widgets) > 5 and widgets[5] in (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA):
+            indexes["seed_base_literal"] = 8
+        elif len(widgets) > 6 and type(widgets[5]) is bool and type(widgets[6]) is bool:
+            indexes["seed_base_literal"] = 9
         for name, index in indexes.items():
             if index < len(widgets):
                 widgets[index] = values[name]

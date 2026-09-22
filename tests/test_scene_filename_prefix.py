@@ -1806,6 +1806,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             ([3, "run", 100, False, "prefix_", "最後", True, False, "停止", False], 9),
             ([3, "run", 100, False, "prefix_", "最後", True, False, None, None, False], 10),
             ([3, "run", 100, False, "prefix_", "最後", True, False, None, False], 9),
+            ([3, "run", 100, False, "prefix_", None, True, False, None, None, False], 10),
+            ([3, "run", 100, False, "prefix_", None, True, False, None, False], 9),
         )
         for seed in (0, 42):
             for widgets, literal_index in layouts:
@@ -1818,7 +1820,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                         "expand": {"class_type": "ScenePrompterExpand", "inputs": {"current_index": 3, "seed_base": 100,
                             "callback_timeout_seconds": 13, "callback_failure_mode": "停止", "timestamp_dir": False}},
                     }
-                    workflow = {"nodes": [{"id": "expand", "type": "ScenePrompterExpand", "widgets_values": list(widgets)}]}
+                    workflow = {"nodes": [{"id": "expand", "type": "ScenePrompterExpand", "widgets_values": list(widgets),
+                        "inputs": [{"name": "counter_position", "link": 123}] if widgets[5] is None else []}]}
                     values = self.nodes._replay_expand_values(info, prompt)
                     self.nodes._apply_replay_expand_values(prompt, workflow, info, values)
                     expected = list(widgets)
