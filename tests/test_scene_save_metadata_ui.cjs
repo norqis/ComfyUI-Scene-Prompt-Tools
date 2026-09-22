@@ -115,3 +115,17 @@ for (const timeout of [0, 13, false, true, null]) {
         assert.equal(original.at(-3), timeout, "migration does not mutate the saved values");
     }
 }
+for (const legacyTimeout of [false, true]) {
+    const original = [0, "", 0, true, "prefix", "最後", false, false, ...(legacyTimeout ? [null] : []), null, true];
+    const migrated = context.sceneExpandConfigureValues({ widgets_values: original });
+    assert.deepEqual(JSON.parse(JSON.stringify(migrated.widgets_values)), [0, "", 0, true, "prefix", "最後", false, false, null, true],
+        `${legacyTimeout ? "legacy timeout and " : "current "}failure input placeholders retain the literal seed slot`);
+    assert.deepEqual(JSON.parse(JSON.stringify(context.sceneExpandConfigureValues(migrated))), JSON.parse(JSON.stringify(migrated)));
+    assert.equal(original.length, legacyTimeout ? 11 : 10, "the original null input layout is never mutated");
+    const linkedCounter = { inputs: [{ name: "counter_position", link: 42 }], widgets_values: [...original] };
+    linkedCounter.widgets_values[5] = null;
+    const migratedCounter = context.sceneExpandConfigureValues(linkedCounter);
+    assert.deepEqual(JSON.parse(JSON.stringify(migratedCounter.widgets_values)), [0, "", 0, true, "prefix", null, false, false, null, true],
+        "a linked counter placeholder identifies the counter schema without inserting old options");
+    assert.deepEqual(JSON.parse(JSON.stringify(context.sceneExpandConfigureValues(migratedCounter))), JSON.parse(JSON.stringify(migratedCounter)));
+}

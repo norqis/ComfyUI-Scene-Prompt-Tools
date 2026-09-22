@@ -408,6 +408,103 @@ window.__sceneSeedRuntimeTest = {
     }
     console.log("real ComfyUI linked legacy timeout removal preserves surviving links and replay values");
 
+    const failureModeInputRoundTrips = await page.evaluate(async () => {
+        const app = window.app;
+        const results = [];
+        for (const [legacyTimeout, linkedCounter] of [[false, false], [true, false], [false, true], [true, true]]) {
+            app.graph.clear();
+            const expand = window.LiteGraph.createNode("ScenePrompterExpand");
+            const failureSource = window.LiteGraph.createNode("PrimitiveNode");
+            app.graph.add(expand);
+            app.graph.add(failureSource);
+            const workflow = app.graph.serialize();
+            const stored = workflow.nodes.find((node) => String(node.id) === String(expand.id));
+            stored.widgets_values = [0, "", 0, true, "prefix", linkedCounter ? null : "最後", false, false, ...(legacyTimeout ? [null] : []), null, true];
+            let failureSlot = stored.inputs.findIndex((input) => input.name === "callback_failure_mode");
+            if (failureSlot < 0) {
+                failureSlot = stored.inputs.length;
+                stored.inputs.push({ name: "callback_failure_mode", type: "COMBO", widget: { name: "callback_failure_mode" } });
+            }
+            const failureLink = workflow.last_link_id + 1;
+            stored.inputs[failureSlot].link = failureLink;
+            workflow.links.push([failureLink, failureSource.id, 0, expand.id, failureSlot, "COMBO"]);
+            workflow.last_link_id = failureLink;
+            const storedSource = workflow.nodes.find((node) => String(node.id) === String(failureSource.id));
+            storedSource.outputs[0] = { ...storedSource.outputs[0], name: "COMBO", type: "COMBO", links: [failureLink] };
+            storedSource.widgets_values = ["停止"];
+            if (legacyTimeout) {
+                const timeoutSource = window.LiteGraph.createNode("PrimitiveNode");
+                app.graph.add(timeoutSource);
+                const storedTimeoutSource = timeoutSource.serialize();
+                const timeoutSlot = stored.inputs.length;
+                const timeoutLink = failureLink + 1;
+                stored.inputs.push({ name: "callback_timeout_seconds", type: "FLOAT", link: timeoutLink, widget: { name: "callback_timeout_seconds" } });
+                storedTimeoutSource.outputs[0] = { ...storedTimeoutSource.outputs[0], name: "FLOAT", type: "FLOAT", links: [timeoutLink] };
+                storedTimeoutSource.widgets_values = [13, "fixed"];
+                workflow.nodes.push(storedTimeoutSource);
+                workflow.links.push([timeoutLink, timeoutSource.id, 0, expand.id, timeoutSlot, "FLOAT"]);
+                workflow.last_link_id = timeoutLink;
+                workflow.last_node_id = app.graph.last_node_id;
+            }
+            if (linkedCounter) {
+                const counterSource = window.LiteGraph.createNode("PrimitiveNode");
+                app.graph.add(counterSource);
+                const storedCounterSource = counterSource.serialize();
+                const counterSlot = stored.inputs.findIndex((input) => input.name === "counter_position");
+                if (counterSlot < 0) throw new Error("Missing native counter_position input");
+                const counterLink = workflow.last_link_id + 1;
+                stored.inputs[counterSlot].link = counterLink;
+                storedCounterSource.outputs[0] = { ...storedCounterSource.outputs[0], name: "COMBO", type: "COMBO", links: [counterLink] };
+                storedCounterSource.widgets_values = ["先頭"];
+                workflow.nodes.push(storedCounterSource);
+                workflow.links.push([counterLink, counterSource.id, 0, expand.id, counterSlot, "COMBO"]);
+                workflow.last_link_id = counterLink;
+                workflow.last_node_id = app.graph.last_node_id;
+            }
+            const originalValues = [...stored.widgets_values];
+            await app.loadGraphData(workflow, true, true);
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            const restored = app.graph.getNodeById(expand.id);
+            const first = restored.serialize();
+            const apiGraph = await app.graphToPrompt();
+            const savedWorkflow = app.graph.serialize();
+            await app.loadGraphData(savedWorkflow, true, true);
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            const reloaded = app.graph.getNodeById(expand.id);
+            const reloadedApi = await app.graphToPrompt();
+            results.push({
+                legacyTimeout, linkedCounter, originalValues, inputAfterLoad: stored.widgets_values,
+                firstValues: first.widgets_values,
+                reloadedValues: reloaded.serialize().widgets_values,
+                literalSeed: reloaded.widgets.find((widget) => widget.name === "seed_base_literal").value,
+                literalIndex: reloaded.widgets.findIndex((widget) => widget.name === "seed_base_literal"),
+                failureMode: apiGraph.output[String(expand.id)].inputs.callback_failure_mode,
+                reloadedFailureMode: reloadedApi.output[String(expand.id)].inputs.callback_failure_mode,
+                counterPosition: reloadedApi.output[String(expand.id)].inputs.counter_position,
+                failureLinked: reloaded.inputs.find((input) => input.name === "callback_failure_mode")?.link != null,
+                timeoutInputExists: reloaded.inputs.some((input) => input.name === "callback_timeout_seconds"),
+            });
+        }
+        return results;
+    });
+    for (const result of failureModeInputRoundTrips) {
+        assert.equal(result.originalValues.length, result.legacyTimeout ? 11 : 10);
+        assert.equal(result.originalValues.at(-2), null, "linked failure widgets may be stored as null");
+        assert.deepEqual(result.inputAfterLoad, result.originalValues, "loading does not rewrite the source workflow");
+        assert.equal(result.firstValues.length, 10, "Expand has no trailing serializable UI controls");
+        assert.equal(result.firstValues[9], true);
+        assert.equal(result.reloadedValues.length, 10);
+        assert.equal(result.reloadedValues[9], true);
+        assert.equal(result.literalSeed, true);
+        assert.equal(result.literalIndex, 9);
+        assert.equal(result.failureMode, "停止");
+        assert.equal(result.reloadedFailureMode, "停止");
+        assert.equal(result.counterPosition, result.linkedCounter ? "先頭" : "最後");
+        assert.equal(result.failureLinked, true);
+        assert.equal(result.timeoutInputExists, false);
+    }
+    console.log("real ComfyUI linked failure-mode widgets preserve current/legacy null layouts and literal seed round trips");
+
     await page.evaluate(() => window.app.graph.clear());
     await page.evaluate(async () => {
         const response = await fetch("/scene_prompt/items", {

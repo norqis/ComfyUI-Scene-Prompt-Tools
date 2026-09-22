@@ -4853,7 +4853,8 @@ function sceneExpandConfigureValues(config) {
         return config;
     }
     const converted = [...values];
-    if (converted[5] === "先頭" || converted[5] === "最後") {
+    if (converted[5] === "先頭" || converted[5] === "最後"
+        || (converted[5] == null && config.inputs?.some((input) => input.name === "counter_position"))) {
         // Already current: preserve the selected position and every later value.
     } else if (typeof converted[5] === "string") {
         const enabled = converted[5] === "Anima";
@@ -4864,7 +4865,7 @@ function sceneExpandConfigureValues(config) {
         converted.splice(5, 0, "最後", false, false);
     }
     if ((converted[8] === null || typeof converted[8] === "number" || typeof converted[8] === "boolean")
-        && (converted[9] === "続行" || converted[9] === "停止")) {
+        && (converted[9] === "続行" || converted[9] === "停止" || converted.length >= 11)) {
         converted.splice(8, 1);
     }
     if (converted.length) {
