@@ -644,6 +644,8 @@ NODE_CLASS_MAPPINGS = {
                 "--disable-auto-launch",
                 "--base-directory",
                 str(cls.base),
+                "--database-url",
+                "sqlite:///:memory:",
             ],
             cwd=cls.source,
             stdout=cls.log,
