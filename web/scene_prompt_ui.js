@@ -205,7 +205,6 @@ const SCENE_WIDGET_LABELS = {
     callback_first: "開始時Callback",
     callback_each: "毎回Callback",
     callback_last: "完了時Callback",
-    callback_timeout_seconds: "Callbackタイムアウト（秒）",
     callback_failure_mode: "Callback失敗時",
     frequency: "実行頻度",
     timeout_seconds: "タイムアウト（秒）",
@@ -244,6 +243,11 @@ let promptItemsLatestPromise = null;
 let savedPromptsLatestPromise = null;
 let promptItemsRequestGeneration = 0;
 let savedPromptsRequestGeneration = 0;
+const FAVORITES_USER_DATA_FILE = "scene_prompt_tools/favorites.json";
+let favoriteKeys = null;
+let favoritesPromise = null;
+let favoriteWriteQueue = Promise.resolve();
+let favoritesError = "";
 let activePopup = null;
 let activePopupContext = null;
 let popupRequestIntent = 0;
@@ -651,6 +655,7 @@ function createPopupSession() {
         list: { kind: "categories", path: [] },
         candidateQueries: {},
         searchQuery: "",
+        favoritesQuery: "",
         forms: {
             save: { name: "", description: "" },
             create: { category: "", subcategory: "", name: "", prompt: "", description: "" },
@@ -856,6 +861,92 @@ function itemStartsWithPath(item, path) {
 
 function itemKey(item) {
     return `${itemCategoryKey(item)}::${item.id || item.label || item.prompt || ""}`;
+}
+
+function refreshFavoriteUI(refreshList = false) {
+    for (const button of document.querySelectorAll(".pc-favorite")) {
+        const checked = !!favoriteKeys?.has(button.dataset.favoriteKey);
+        button.textContent = checked ? "★" : "☆";
+        button.setAttribute("aria-pressed", String(checked));
+        button.title = checked ? "お気に入りから解除" : "お気に入りに追加";
+        button.setAttribute("aria-label", button.title);
+        button.disabled = favoriteKeys === null;
+    }
+    for (const status of document.querySelectorAll(".pc-favorites-status")) {
+        status.hidden = !favoritesError;
+        status.querySelector(".pc-error").textContent = favoritesError;
+        status.querySelector("button").hidden = favoriteKeys !== null;
+    }
+    if (refreshList) {
+        activePopupContext?.refreshFavorites?.();
+    }
+}
+
+function loadFavorites() {
+    if (favoriteKeys !== null) {
+        return Promise.resolve(favoriteKeys);
+    }
+    if (!favoritesPromise) {
+        favoritesPromise = (async () => {
+            try {
+                const response = await api.getUserData(FAVORITES_USER_DATA_FILE);
+                if (!response.ok && response.status !== 404) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const keys = response.status === 404 ? [] : await response.json();
+                if (!Array.isArray(keys) || keys.some((key) => typeof key !== "string")) {
+                    throw new Error("保存データの形式が不正です。");
+                }
+                favoriteKeys = new Set(keys);
+                favoritesError = "";
+                return favoriteKeys;
+            } catch (error) {
+                favoritesError = `お気に入りを読み込めませんでした。${error.message}`;
+                throw error;
+            } finally {
+                favoritesPromise = null;
+                refreshFavoriteUI(true);
+            }
+        })();
+    }
+    return favoritesPromise;
+}
+
+function toggleFavorite(key) {
+    const operation = favoriteWriteQueue.then(async () => {
+        await loadFavorites();
+        const next = new Set(favoriteKeys);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        await api.storeUserData(FAVORITES_USER_DATA_FILE, [...next], {
+            overwrite: true, stringify: true, throwOnError: true,
+        });
+        favoriteKeys = next;
+        favoritesError = "";
+        refreshFavoriteUI(true);
+    });
+    favoriteWriteQueue = operation.catch((error) => {
+        favoritesError = `お気に入りを保存できませんでした。${error.message}`;
+        refreshFavoriteUI();
+    });
+    return favoriteWriteQueue;
+}
+
+function appendFavoriteButton(container, item) {
+    const button = createButton("☆", "pc-favorite");
+    button.dataset.favoriteKey = itemKey(item);
+    const checked = !!favoriteKeys?.has(itemKey(item));
+    button.textContent = checked ? "★" : "☆";
+    button.title = checked ? "お気に入りから解除" : "お気に入りに追加";
+    button.setAttribute("aria-label", button.title);
+    button.setAttribute("aria-pressed", String(checked));
+    button.disabled = favoriteKeys === null;
+    button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void toggleFavorite(itemKey(item));
+    });
+    container.appendChild(button);
 }
 
 function normalizeWeight(value) {
@@ -2325,6 +2416,25 @@ function appendPopupNavButtons(toolbar, node, current = "", options = {}) {
     search.classList.toggle("pc-on", current === "search");
     search.addEventListener("click", () => openSearchPopup(node, { stateWidgetName }));
     toolbar.appendChild(search);
+
+    const favorites = createButton("お気に入り");
+    favorites.classList.toggle("pc-on", current === "favorites");
+    favorites.addEventListener("click", () => openSearchPopup(node, { stateWidgetName, favorites: true }));
+    toolbar.appendChild(favorites);
+
+    const status = document.createElement("div");
+    status.className = "pc-favorites-status";
+    const error = document.createElement("div");
+    error.className = "pc-error";
+    status.appendChild(error);
+    const retry = createButton("お気に入りを再読み込み");
+    retry.addEventListener("click", () => { void loadFavorites().catch(() => {}); });
+    status.appendChild(retry);
+    status.hidden = !favoritesError;
+    error.textContent = favoritesError;
+    retry.hidden = favoriteKeys !== null;
+    toolbar.appendChild(status);
+    void loadFavorites().catch(() => {});
 }
 
 function appendMatrixLineEditReturn(popup, node, options = {}) {
@@ -2645,7 +2755,11 @@ function appendCandidateRow(container, node, item, selected, onUpdate, options =
     const title = document.createElement("div");
     title.className = "pc-candidate-title";
     title.textContent = itemBaseLabel(selectedItem || item, { showWeight: false });
-    main.appendChild(title);
+    const header = document.createElement("div");
+    header.className = "pc-candidate-header";
+    header.appendChild(title);
+    appendFavoriteButton(header, item);
+    main.appendChild(header);
 
     if (showPath) {
         const path = document.createElement("div");
@@ -2733,6 +2847,7 @@ function appendCandidateChip(container, node, item, selected, onUpdate, options 
     const label = document.createElement("span");
     label.textContent = itemBaseLabel(selectedItem || item, { showWeight: false });
     chip.appendChild(label);
+    appendFavoriteButton(chip, item);
 
     const openParts = (event) => {
         event.preventDefault();
@@ -3615,33 +3730,37 @@ async function openSavedPromptDetailPopup(node, savedPrompt, options = {}) {
 async function openSearchPopup(node, options = {}) {
     const stateWidgetName = activatePopupStateWidget(node, options);
     const session = options.popupSession || popupSessionFor(node, stateWidgetName);
+    const favorites = !!options.favorites;
+    const mode = favorites ? "favorites" : "search";
+    const queryKey = favorites ? "favoritesQuery" : "searchQuery";
+    const reopen = () => openSearchPopup(node, { stateWidgetName, popupSession: session, favorites });
     const data = await loadPopupRequest(node, () => loadPromptItems(), "候補を読み込めませんでした。");
     if (!data) {
         return;
     }
     setActiveStateWidget(node, stateWidgetName);
-    const popup = openPopupShell(node, "候補検索", { stateWidgetName, popupSession: session });
+    const popup = openPopupShell(node, favorites ? "お気に入り" : "候補検索", { stateWidgetName, popupSession: session });
     if (activePopupContext?.popup === popup) {
-        activePopupContext.reopen = () => openSearchPopup(node, { stateWidgetName, popupSession: session });
+        activePopupContext.reopen = reopen;
     }
 
     appendMatrixLineEditReturn(popup, node, { stateWidgetName });
     const toolbar = document.createElement("div");
     toolbar.className = "pc-toolbar";
-    appendPopupNavButtons(toolbar, node, "search", { stateWidgetName });
+    appendPopupNavButtons(toolbar, node, mode, { stateWidgetName });
     popup.appendChild(toolbar);
 
     appendMatrixLineBasePromptInput(popup, node, { stateWidgetName });
     const input = document.createElement("input");
     input.className = "pc-searchbox";
     input.placeholder = "カテゴリ / サブカテゴリ / ラベル / 説明 / prompt を検索";
-    input.value = session.searchQuery;
+    input.value = session[queryKey];
     popup.appendChild(input);
 
     const list = document.createElement("div");
     list.className = "pc-popup-list";
     popup.appendChild(list);
-    rememberPopupScroll(session, "search", list);
+    rememberPopupScroll(session, mode, list);
 
     const renderResults = () => {
         const state = readPopupSelectionState(node, stateWidgetName, data);
@@ -3650,14 +3769,16 @@ async function openSearchPopup(node, options = {}) {
         }
         const selected = selectedKeys(state);
         const query = input.value.trim().toLowerCase();
-        const matchedCategories = query ? searchCategoryPaths(data, query, 1) : [];
-        const matchedSubcategories = query ? searchCategoryPaths(data, query, 2) : [];
-        const matchedItems = query
-            ? data.filter((item) => itemSearchHaystack(item).includes(query))
-            : [];
+        const matchedCategories = query && !favorites ? searchCategoryPaths(data, query, 1) : [];
+        const matchedSubcategories = query && !favorites ? searchCategoryPaths(data, query, 2) : [];
+        const matchedItems = data.filter((item) => (
+            (favorites ? favoriteKeys?.has(itemKey(item)) : !!query)
+            && (!query || itemSearchHaystack(item).includes(query))
+        ));
 
+        const scrollTop = list.scrollTop;
         list.innerHTML = "";
-        if (!query) {
+        if (!query && !favorites) {
             const empty = document.createElement("div");
             empty.className = "pc-empty";
             empty.textContent = "検索語を入力";
@@ -3668,7 +3789,9 @@ async function openSearchPopup(node, options = {}) {
         if (!matchedCategories.length && !matchedSubcategories.length && !matchedItems.length) {
             const empty = document.createElement("div");
             empty.className = "pc-empty";
-            empty.textContent = "一致なし";
+            empty.textContent = favorites && favoriteKeys === null
+                ? favoritesError ? "お気に入りを再読み込みしてください。" : "お気に入りを読み込み中です。"
+                : favorites && !query ? "お気に入りはありません。候補の☆から追加できます。" : "一致なし";
             list.appendChild(empty);
             fitPopupToContent(popup);
             return;
@@ -3693,16 +3816,20 @@ async function openSearchPopup(node, options = {}) {
                 showPath: true,
                 stateWidgetName,
                 state,
-                returnToCandidate: () => openSearchPopup(node, { stateWidgetName, popupSession: session }),
+                returnToCandidate: reopen,
             });
         }
         fitPopupToContent(popup);
+        list.scrollTop = scrollTop;
     };
 
     input.addEventListener("input", () => {
-        session.searchQuery = input.value;
+        session[queryKey] = input.value;
         renderResults();
     });
+    if (favorites && activePopupContext?.popup === popup) {
+        activePopupContext.refreshFavorites = renderResults;
+    }
     renderResults();
     fitPopupToContent(popup);
     input.focus();
@@ -3863,7 +3990,7 @@ function hideSceneUtilityWidgets(node, nodeName) {
             ? new Set([
                 "timestamp_dir", "prefix", "counter_position", "replace_underscores", "convert_anima_weights",
                 "callback_first", "callback_each", "callback_last",
-                "callback_timeout_seconds", "callback_failure_mode",
+                "callback_failure_mode",
             ])
             : SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
                 ? new Set(["width", "height", "batch_size"])
@@ -4726,7 +4853,8 @@ function sceneExpandConfigureValues(config) {
         return config;
     }
     const converted = [...values];
-    if (converted[5] === "先頭" || converted[5] === "最後") {
+    if (converted[5] === "先頭" || converted[5] === "最後"
+        || (converted[5] == null && config.inputs?.some((input) => input.name === "counter_position"))) {
         // Already current: preserve the selected position and every later value.
     } else if (typeof converted[5] === "string") {
         const enabled = converted[5] === "Anima";
@@ -4735,6 +4863,10 @@ function sceneExpandConfigureValues(config) {
         converted.splice(5, 0, "最後");
     } else if (converted.length >= 5) {
         converted.splice(5, 0, "最後", false, false);
+    }
+    if ((converted[8] === null || typeof converted[8] === "number" || typeof converted[8] === "boolean")
+        && (converted[9] === "続行" || converted[9] === "停止" || converted.length >= 11)) {
+        converted.splice(8, 1);
     }
     if (converted.length) {
         converted[0] = 0;
@@ -10390,6 +10522,10 @@ function attachSceneUtilityNode(node, nodeName) {
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
     if (isSceneExpandNodeName(nodeName)) {
+        const timeoutInput = node.inputs?.findIndex((input) => input.name === "callback_timeout_seconds");
+        if (timeoutInput >= 0) {
+            node.removeInput(timeoutInput);
+        }
         removeInternalInputSockets(node);
         syncInputLinkTargetSlots(node);
         const run = rebindSceneBatchRunNode(node);

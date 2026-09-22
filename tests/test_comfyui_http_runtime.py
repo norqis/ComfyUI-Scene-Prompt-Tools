@@ -594,7 +594,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         cls.lazy_test_node_dir = cls.base / "custom_nodes" / "scene-prompt-lazy-test"
         (cls.base / "custom_nodes").mkdir()
         shutil.rmtree(cls.node_dir, ignore_errors=True)
-        shutil.copytree(ROOT, cls.node_dir, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"))
+        shutil.copytree(ROOT, cls.node_dir, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc", ".venv", "node_modules"))
         cls.lazy_test_node_dir.mkdir()
         (cls.lazy_test_node_dir / "__init__.py").write_text(
             '''from pathlib import Path
@@ -644,6 +644,8 @@ NODE_CLASS_MAPPINGS = {
                 "--disable-auto-launch",
                 "--base-directory",
                 str(cls.base),
+                "--database-url",
+                "sqlite:///:memory:",
             ],
             cwd=cls.source,
             stdout=cls.log,
@@ -987,7 +989,8 @@ NODE_CLASS_MAPPINGS = {
             handle, prompt_id = queue_first(client, graph, client.client_id)
             try:
                 timed_out = client.wait_for(1)[-1]
-                self.assertEqual(client.wait_for(2, timeout=5)[-1]["title"], "Desktop each")
+                self.assertEqual(timed_out["timeout_seconds"], 10)
+                self.assertEqual(client.wait_for(2, timeout=15)[-1]["title"], "Desktop each")
                 status, _late_ack = self._request_status("/scene_prompt/callbacks/desktop/ack", {
                     "request_id": timed_out["request_id"], "success": True,
                 })
@@ -997,6 +1000,44 @@ NODE_CLASS_MAPPINGS = {
                 self._wait_for_prompt(prompt_id)
             finally:
                 self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
+
+    def test_http_old_expand_timeout_values_validate_and_send_with_fixed_ten_seconds(self):
+        schema = self._request("/object_info/ScenePrompterExpand")["ScenePrompterExpand"]["input"]
+        self.assertNotIn("callback_timeout_seconds", schema["optional"])
+        for legacy_timeout in (0, 13):
+            with self.subTest(legacy_timeout=legacy_timeout), _DesktopCallbackClient(
+                self.port, f"old-expand-timeout-{legacy_timeout}"
+            ) as client:
+                graph = _desktop_callback_graph(f"old-expand-timeout-{legacy_timeout}", count=1, timeout_seconds=legacy_timeout)
+                graph["5"]["inputs"]["timeout_seconds"] = 3
+                graph["7"]["inputs"]["timeout_seconds"] = 3
+                handle, workflow = self._prepare_callback_run(graph, client_id=client.client_id)
+                try:
+                    prompt_id = self._queue_desktop_graph(graph, handle, workflow, client.client_id, claim_run=True)
+                    for index, (marker, timeout) in enumerate((("first", 10), ("each", 10), ("pathA", 3), ("pathB", 3)), start=1):
+                        notification = client.wait_for(index)[-1]
+                        self.assertEqual(notification["title"], f"Desktop {marker}")
+                        self.assertEqual(notification["timeout_seconds"], timeout)
+                        self.assertTrue(self._desktop_ack(notification)["acknowledged"])
+                    self._wait_for_prompt(prompt_id)
+                    finalized = {}
+
+                    def finalize():
+                        finalized.update(self._request("/scene_prompt/runs/finalize", {
+                            "run_handle": handle, "expand_node_id": "10", "prompt_id": prompt_id,
+                        }))
+
+                    final_thread = Thread(target=finalize)
+                    final_thread.start()
+                    last = client.wait_for(5)[-1]
+                    self.assertEqual(last["title"], "Desktop last")
+                    self.assertEqual(last["timeout_seconds"], 10)
+                    self.assertTrue(self._desktop_ack(last)["acknowledged"])
+                    final_thread.join(timeout=15)
+                    self.assertFalse(final_thread.is_alive())
+                    self.assertEqual(finalized["state"], "finalized")
+                finally:
+                    self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
 
     def test_http_expand_callback_lifecycle_finalizes_after_last_saved_image(self):
         with _CallbackReceiver() as receiver:

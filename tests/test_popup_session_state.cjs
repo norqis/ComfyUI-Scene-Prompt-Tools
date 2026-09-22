@@ -147,7 +147,7 @@ for (const marker of [
     'rememberPopupScroll(session, popupListScrollKey("saved", path), list)',
     'rememberPopupScroll(session, popupListScrollKey("candidates", path), list)',
     'rememberPopupScroll(session, "selected", list)',
-    'rememberPopupScroll(session, "search", list)',
+    'rememberPopupScroll(session, mode, list)',
     'resetPopupForm(session, "save")',
     'resetPopupForm(session, "create")',
 ]) {

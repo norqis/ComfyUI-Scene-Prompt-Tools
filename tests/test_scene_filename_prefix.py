@@ -2,7 +2,9 @@ import importlib
 import importlib.util
 import json
 import errno
+import hashlib
 import multiprocessing
+import os
 import re
 import sys
 import tempfile
@@ -40,6 +42,7 @@ def _install_comfy_stubs(output_dir):
     folder_paths.get_output_directory = lambda: str(output_dir)
     folder_paths.get_user_directory = lambda: str(output_dir / "user")
     folder_paths.get_public_user_directory = lambda user_id: str(output_dir / "user" / user_id)
+    folder_paths.get_system_user_directory = lambda name: str(output_dir / "user" / "__system__" / name)
 
     sys.modules["comfy"] = comfy
     sys.modules["comfy.model_management"] = model_management
@@ -59,10 +62,16 @@ def _load_nodes(output_dir):
     return importlib.import_module(f"{package_name}.nodes")
 
 
-def _allocate_counter_in_child(output_dir, barrier, result_queue):
+def _allocate_counter_in_child(output_dir, barrier, result_queue, prefix="shared_"):
     nodes = _load_nodes(Path(output_dir))
     barrier.wait(timeout=10)
-    result_queue.put(nodes._allocate_output_index(output_dir, "png", 5, "shared_", 1))
+    result_queue.put(nodes._allocate_output_index(output_dir, "png", 5, prefix, 1))
+
+
+def _legacy_counter_paths(root, prefix):
+    key = "\0".join(("png", "5", prefix.casefold(), "最後"))
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return root / f".scene-save-{digest}.lock", root / f".scene-save-{digest}.state"
 
 
 def _load_node_package(output_dir):
@@ -500,8 +509,71 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         first = self.nodes._allocate_output_index(str(root), "png", 5, "prefix_", 1)
         second = self.nodes._allocate_output_index(str(root), "png", 5, "prefix_", 1)
         self.assertEqual((first, second), (1, 2))
-        self.assertEqual(len(list(root.glob(".scene-save-*.lock"))), 1)
-        self.assertEqual(len(list(root.glob(".scene-save-*.state"))), 1)
+        self.assertEqual(list(root.iterdir()), [])
+        lock_path, state_path, _key = self.nodes._counter_state_paths(str(root), "png", 5, "prefix_")
+        self.assertTrue(Path(lock_path).is_file())
+        self.assertEqual(Path(state_path).read_text(encoding="ascii"), "3")
+        self.assertEqual(Path(state_path).parent, Path(self.temp_dir.name) / "user" / "__system__" / "scene_prompt_tools" / "output_counters")
+
+    def test_central_counter_key_uses_canonical_root_and_all_filename_settings(self):
+        root = Path(self.temp_dir.name) / "canonical"
+        root.mkdir()
+        first = self.nodes._counter_state_paths(str(root), "PNG", 5, "RUN_", "最後")
+        equivalent = self.nodes._counter_state_paths(str(root / ".." / "canonical"), "png", 5, "run_", "最後")
+        self.assertEqual(first, equivalent)
+        if os.name == "nt":
+            self.assertEqual(first, self.nodes._counter_state_paths(str(root).upper(), "png", 5, "run_", "最後"))
+        for arguments in ((str(root / "other"), "png", 5, "run_", "最後"), (str(root), "jpg", 5, "run_", "最後"),
+                          (str(root), "png", 6, "run_", "最後"), (str(root), "png", 5, "other_", "最後"),
+                          (str(root), "png", 5, "run_", "先頭")):
+            self.assertNotEqual(first[0], self.nodes._counter_state_paths(*arguments)[0])
+
+    def test_each_legacy_artifact_keeps_its_original_lock_and_state_namespace(self):
+        for artifact_index in (0, 1):
+            with self.subTest(artifact=artifact_index):
+                root = Path(self.temp_dir.name) / f"legacy-{artifact_index}"
+                root.mkdir()
+                (root / "RUN_old00004.png").touch()
+                legacy_paths = _legacy_counter_paths(root, "RUN_")
+                legacy_paths[artifact_index].write_text("7" if artifact_index else "", encoding="ascii")
+                with mock.patch.object(self.nodes.folder_paths, "get_system_user_directory", side_effect=AssertionError("legacy must not use central state")):
+                    actual = self.nodes._counter_state_paths(str(root), "PNG", 5, "run_")
+                    self.assertEqual(tuple(map(Path, actual[:2])), legacy_paths)
+                    self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_"), 7 if artifact_index else 5)
+                self.assertTrue(all(path.exists() for path in legacy_paths))
+                self.assertEqual(len(list(root.glob(".scene-save-*"))), 2)
+
+    def test_central_and_legacy_counters_preserve_recovery_and_exhaustion_contracts(self):
+        for namespace in ("central", "legacy"):
+            with self.subTest(namespace=namespace):
+                root = Path(self.temp_dir.name) / namespace
+                root.mkdir()
+                if namespace != "central":
+                    _legacy_counter_paths(root, "run_")[0].touch()
+                allocate = lambda prefix="run_": self.nodes._allocate_output_index(str(root), "png", 5, prefix)
+                self.assertEqual(allocate("RUN_"), 1)
+                image = root / "RUN_first00001.png"
+                image.touch()
+                image.unlink()
+                with mock.patch.object(self.nodes, "_find_next_index", side_effect=AssertionError("valid state must avoid a rescan")):
+                    self.assertEqual(allocate(), 2)
+                lock_path, state_path, _key = self.nodes._counter_state_paths(str(root), "png", 5, "run_")
+                state = Path(state_path)
+                (root / "RUN_other00009.png").touch()
+                state.write_text("invalid", encoding="ascii")
+                self.assertEqual(allocate(), 10)
+                (root / "run_later00010.png").touch()
+                state.unlink()
+                self.assertEqual(allocate("RUN_"), 11)
+                maximum = self.nodes.MAX_SAFE_INTEGER
+                state.write_text(str(maximum), encoding="ascii")
+                self.assertEqual(allocate(), maximum)
+                self.assertEqual(state.read_text(encoding="ascii"), str(maximum + 1))
+                with self.assertRaisesRegex(ValueError, "上限"):
+                    allocate()
+                self.assertTrue(Path(lock_path).exists())
+                if namespace == "central":
+                    self.assertEqual(list(root.glob(".scene-save-*")), [])
 
     def test_first_counter_allocation_scans_current_and_legacy_last_png_names(self):
         root = Path(self.temp_dir.name) / "scan"
@@ -602,6 +674,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         root.mkdir()
         maximum = self.nodes.MAX_SAFE_INTEGER
         _lock_path, state_path, _key = self.nodes._counter_state_paths(str(root), "png", 5, "run_")
+        Path(state_path).parent.mkdir(parents=True, exist_ok=True)
         Path(state_path).write_text(str(maximum), encoding="ascii")
         self.assertEqual(self.nodes._allocate_output_index(str(root), "png", 5, "run_", 1), maximum)
         self.assertIsNone(self.nodes._read_counter_state(state_path))
@@ -659,21 +732,27 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                 self.assertEqual(first.result(timeout=5), 8)
 
     def test_separate_processes_share_one_prefix_counter(self):
-        root = Path(self.temp_dir.name) / "processes"
-        root.mkdir()
         context = multiprocessing.get_context("spawn")
-        barrier = context.Barrier(2)
-        result_queue = context.Queue()
-        processes = [
-            context.Process(target=_allocate_counter_in_child, args=(str(root), barrier, result_queue))
-            for _ in range(2)
-        ]
-        for process in processes:
-            process.start()
-        for process in processes:
-            process.join(timeout=20)
-        self.assertTrue(all(process.exitcode == 0 for process in processes))
-        self.assertEqual(sorted(result_queue.get(timeout=5) for _ in processes), [1, 2])
+        for namespace in ("central", "legacy"):
+            with self.subTest(namespace=namespace):
+                root = Path(self.temp_dir.name) / f"processes-{namespace}"
+                root.mkdir()
+                if namespace != "central":
+                    _legacy_counter_paths(root, "shared_")[0].touch()
+                barrier = context.Barrier(2)
+                result_queue = context.Queue()
+                processes = [
+                    context.Process(target=_allocate_counter_in_child, args=(str(root), barrier, result_queue, prefix))
+                    for prefix in ("shared_", "SHARED_")
+                ]
+                for process in processes:
+                    process.start()
+                for process in processes:
+                    process.join(timeout=20)
+                self.assertTrue(all(process.exitcode == 0 for process in processes))
+                self.assertEqual(sorted(result_queue.get(timeout=5) for _ in processes), [1, 2])
+                result_queue.close()
+                result_queue.join_thread()
 
     def test_save_metadata_keeps_large_effective_counts(self):
         plan = _scene_prompt(self.nodes, 10_000)
@@ -1718,6 +1797,39 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             scene_prompt=plan,
         )
         self.assertEqual(replay[3], 0)
+
+    def test_replay_preserves_all_four_saved_expand_widget_layouts(self):
+        layouts = (
+            ([3, "run", 100, False, "prefix_", "Anima", 13, "停止", False], 8),
+            ([3, "run", 100, False, "prefix_", True, False, 13, "停止", False], 9),
+            ([3, "run", 100, False, "prefix_", "最後", True, False, 13, "停止", False], 10),
+            ([3, "run", 100, False, "prefix_", "最後", True, False, "停止", False], 9),
+            ([3, "run", 100, False, "prefix_", "最後", True, False, None, None, False], 10),
+            ([3, "run", 100, False, "prefix_", "最後", True, False, None, False], 9),
+            ([3, "run", 100, False, "prefix_", None, True, False, None, None, False], 10),
+            ([3, "run", 100, False, "prefix_", None, True, False, None, False], 9),
+        )
+        for seed in (0, 42):
+            for widgets, literal_index in layouts:
+                with self.subTest(seed=seed, widgets=widgets):
+                    plan = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "scene")
+                    info = {"_plan_ref": plan, "row_index": 0, "repeat_index": 1, "seed": seed,
+                            "source_node_ids": ["scene", "expand"]}
+                    prompt = {
+                        "scene": {"class_type": "ScenePrompter", "inputs": {}},
+                        "expand": {"class_type": "ScenePrompterExpand", "inputs": {"current_index": 3, "seed_base": 100,
+                            "callback_timeout_seconds": 13, "callback_failure_mode": "停止", "timestamp_dir": False}},
+                    }
+                    workflow = {"nodes": [{"id": "expand", "type": "ScenePrompterExpand", "widgets_values": list(widgets),
+                        "inputs": [{"name": "counter_position", "link": 123}] if widgets[5] is None else []}]}
+                    values = self.nodes._replay_expand_values(info, prompt)
+                    self.nodes._apply_replay_expand_values(prompt, workflow, info, values)
+                    expected = list(widgets)
+                    expected[0], expected[2], expected[literal_index] = 0, seed, seed == 0
+                    self.assertEqual(workflow["nodes"][0]["widgets_values"], expected)
+                    self.assertEqual(prompt["expand"]["inputs"]["callback_timeout_seconds"], 13)
+                    replay = self.nodes.ScenePromptExpand().expand(scene_prompt=plan, **prompt["expand"]["inputs"])
+                    self.assertEqual(replay[3], seed)
 
     def test_generation_path_metadata_rejects_unknown_target_and_invalid_links(self):
         prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {"images": ["missing", 0]}}}

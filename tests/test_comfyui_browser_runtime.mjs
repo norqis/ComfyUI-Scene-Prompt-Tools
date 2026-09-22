@@ -65,6 +65,7 @@ try {
         "--port", String(port),
         "--disable-auto-launch",
         "--base-directory", directory,
+        "--database-url", "sqlite:///:memory:",
     ], { cwd: source, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.on("data", (chunk) => output.push(String(chunk)));
     child.stderr.on("data", (chunk) => output.push(String(chunk)));
@@ -87,6 +88,19 @@ try {
         const response = await route.fetch();
         await route.fulfill({ response, body: `${await response.text()}
 window.__sceneSeedRuntimeTest = {
+    async openFavoritePicker(favorites = false) {
+        const node = window.LiteGraph.createNode("ScenePrompter");
+        window.app.graph.add(node);
+        if (favorites) {
+            await openSearchPopup(node, { favorites: true, stateWidgetName: "positive_json" });
+            return null;
+        }
+        const [item] = await loadPromptItems();
+        if (!item) throw new Error("The isolated package has no prompt candidates");
+        await openPromptCandidatePopup(node, itemPath(item), { stateWidgetName: "positive_json" });
+        return { key: itemKey(item), selection: findWidget(node, "positive_json").value, nodeId: node.id };
+    },
+    async readFavorites() { return (await api.getUserData(FAVORITES_USER_DATA_FILE)).json(); },
     async queueBatch(node) {
         const run = createSceneBatchRun(node, 3);
         try {
@@ -288,7 +302,7 @@ window.__sceneSeedRuntimeTest = {
             return node;
         };
         const read = (node) => Object.fromEntries([
-            "replace_underscores", "convert_anima_weights", "callback_timeout_seconds",
+            "counter_position", "replace_underscores", "convert_anima_weights",
             "callback_failure_mode", "seed_base_literal",
         ].map((name) => [name, node.widgets.find((widget) => widget.name === name)?.value]));
         const results = [];
@@ -302,29 +316,217 @@ window.__sceneSeedRuntimeTest = {
                 results.push({ expected: [underscores, weights], actual: read(restored) });
             }
         }
-        const old = make();
-        const serialized = old.serialize();
-        const legacy = { ...serialized, widgets_values: [0, "", 7, true, "prefix", "Anima", 13, "停止", true] };
-        old.configure(legacy);
-        const migrated = read(old);
-        old.configure(legacy);
-        const repeated = read(old);
-        const restoredLegacy = make();
-        restoredLegacy.configure(old.serialize());
-        return { results, migrated, repeated, reloaded: read(restoredLegacy), original: legacy.widgets_values,
-            modelExists: old.widgets.some((widget) => widget.name === "model_mode") };
+        const legacyResults = [];
+        for (const timeout of [0, 13, false, true]) {
+            for (const controls of [["Anima"], [true, true], ["先頭", true, true]]) {
+                const old = make();
+                const legacy = { ...old.serialize(), widgets_values: [0, "", 7, true, "prefix", ...controls, timeout, "停止", true] };
+                const original = [...legacy.widgets_values];
+                old.configure(legacy);
+                const migrated = read(old);
+                old.configure(legacy);
+                const restoredLegacy = make();
+                restoredLegacy.configure(old.serialize());
+                legacyResults.push({ timeout, controls, migrated, repeated: read(old), reloaded: read(restoredLegacy),
+                    original, after: legacy.widgets_values,
+                    obsoleteExists: old.widgets.some((widget) => ["model_mode", "callback_timeout_seconds"].includes(widget.name)) });
+            }
+        }
+        return { results, legacyResults };
     });
     for (const result of conversionRoundTrips.results) {
         assert.deepEqual([result.actual.replace_underscores, result.actual.convert_anima_weights], result.expected);
     }
-    const migratedOptions = { replace_underscores: true, convert_anima_weights: true,
-        callback_timeout_seconds: 13, callback_failure_mode: "停止", seed_base_literal: true };
-    assert.deepEqual(conversionRoundTrips.migrated, migratedOptions);
-    assert.deepEqual(conversionRoundTrips.repeated, migratedOptions);
-    assert.deepEqual(conversionRoundTrips.reloaded, migratedOptions);
-    assert.equal(conversionRoundTrips.original[5], "Anima", "legacy input is never mutated");
-    assert.equal(conversionRoundTrips.modelExists, false);
+    for (const legacy of conversionRoundTrips.legacyResults) {
+        const migratedOptions = { counter_position: legacy.controls[0] === "先頭" ? "先頭" : "最後",
+            replace_underscores: true, convert_anima_weights: true, callback_failure_mode: "停止", seed_base_literal: true };
+        assert.deepEqual(legacy.migrated, migratedOptions);
+        assert.deepEqual(legacy.repeated, migratedOptions);
+        assert.deepEqual(legacy.reloaded, migratedOptions);
+        assert.deepEqual(legacy.after, legacy.original, "legacy input is never mutated");
+        assert.equal(legacy.obsoleteExists, false);
+    }
     console.log("real ComfyUI Expand options and legacy Callback/replay widget migration passed");
+    const linkedTimeoutResults = await page.evaluate(async () => {
+        const app = window.app;
+        const results = [];
+        for (const timeout of [13, null]) {
+            app.graph.clear();
+            const make = (type) => {
+                const node = window.LiteGraph.createNode(type);
+                app.graph.add(node);
+                return node;
+            };
+            const scene = make("ScenePrompter");
+            const expand = make("ScenePrompterExpand");
+            const callback = make("ScenePromptCallbackDesktop");
+            const primitive = make("PrimitiveNode");
+            scene.connect(0, expand, expand.inputs.findIndex((input) => input.name === "scene_prompt"));
+            callback.connect(0, expand, expand.inputs.findIndex((input) => input.name === "callback_first"));
+            const workflow = app.graph.serialize();
+            const savedExpand = workflow.nodes.find((node) => String(node.id) === String(expand.id));
+            if (!savedExpand) throw new Error(JSON.stringify({ expected: expand.id, nodes: workflow.nodes.map(({ id, type }) => ({ id, type })) }));
+            savedExpand.widgets_values = [0, "", 0, true, "prefix", "最後", true, false, timeout, "停止", true];
+            const timeoutSlot = savedExpand.inputs.findIndex((input) => input.name === "callback_first");
+            const timeoutLink = workflow.last_link_id + 1;
+            savedExpand.inputs.splice(timeoutSlot, 0, { name: "callback_timeout_seconds", type: "FLOAT", link: timeoutLink, widget: { name: "callback_timeout_seconds" } });
+            for (const link of workflow.links) {
+                if (link[3] === expand.id && link[4] >= timeoutSlot) link[4] += 1;
+            }
+            workflow.links.push([timeoutLink, primitive.id, 0, expand.id, timeoutSlot, "FLOAT"]);
+            workflow.last_link_id = timeoutLink;
+            const savedPrimitive = workflow.nodes.find((node) => String(node.id) === String(primitive.id));
+            savedPrimitive.outputs[0] = { ...savedPrimitive.outputs[0], name: "FLOAT", type: "FLOAT", links: [timeoutLink] };
+            savedPrimitive.widgets_values = [13, "fixed"];
+            await app.loadGraphData(workflow, true, true);
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            const restored = app.graph.getNodeById(expand.id);
+            const apiGraph = await app.graphToPrompt();
+            const restoredWorkflow = app.graph.serialize();
+            results.push({
+                timeout,
+                inputs: restored.inputs.map((input) => input.name),
+                values: Object.fromEntries(["callback_failure_mode", "seed_base_literal"].map((name) => [name, restored.widgets.find((widget) => widget.name === name)?.value])),
+                apiInputs: apiGraph.output[String(expand.id)].inputs,
+                expectedScene: [String(scene.id), 0], expectedCallback: [String(callback.id), 0],
+                timeoutLinkExists: !!app.graph.links[timeoutLink],
+                savedInputExists: restoredWorkflow.nodes.find((node) => String(node.id) === String(expand.id)).inputs.some((input) => input.name === "callback_timeout_seconds"),
+                linksAligned: Object.values(app.graph.links).filter((link) => link.target_id === expand.id).every((link) => restored.inputs[link.target_slot]?.link === link.id),
+            });
+        }
+        return results;
+    });
+    for (const result of linkedTimeoutResults) {
+        assert.equal(result.inputs.includes("callback_timeout_seconds"), false);
+        assert.equal(result.savedInputExists, false);
+        assert.equal(result.timeoutLinkExists, false);
+        assert.equal(result.linksAligned, true);
+        assert.deepEqual(result.values, { callback_failure_mode: "停止", seed_base_literal: true });
+        assert.equal(result.apiInputs.callback_timeout_seconds, undefined);
+        assert.deepEqual(result.apiInputs.scene_prompt, result.expectedScene);
+        assert.deepEqual(result.apiInputs.callback_first, result.expectedCallback);
+    }
+    console.log("real ComfyUI linked legacy timeout removal preserves surviving links and replay values");
+
+    const failureModeInputRoundTrips = await page.evaluate(async () => {
+        const app = window.app;
+        const results = [];
+        for (const [legacyTimeout, linkedCounter] of [[false, false], [true, false], [false, true], [true, true]]) {
+            app.graph.clear();
+            const expand = window.LiteGraph.createNode("ScenePrompterExpand");
+            const failureSource = window.LiteGraph.createNode("PrimitiveNode");
+            app.graph.add(expand);
+            app.graph.add(failureSource);
+            const workflow = app.graph.serialize();
+            const stored = workflow.nodes.find((node) => String(node.id) === String(expand.id));
+            stored.widgets_values = [0, "", 0, true, "prefix", linkedCounter ? null : "最後", false, false, ...(legacyTimeout ? [null] : []), null, true];
+            let failureSlot = stored.inputs.findIndex((input) => input.name === "callback_failure_mode");
+            if (failureSlot < 0) {
+                failureSlot = stored.inputs.length;
+                stored.inputs.push({ name: "callback_failure_mode", type: "COMBO", widget: { name: "callback_failure_mode" } });
+            }
+            const failureLink = workflow.last_link_id + 1;
+            stored.inputs[failureSlot].link = failureLink;
+            workflow.links.push([failureLink, failureSource.id, 0, expand.id, failureSlot, "COMBO"]);
+            workflow.last_link_id = failureLink;
+            const storedSource = workflow.nodes.find((node) => String(node.id) === String(failureSource.id));
+            storedSource.outputs[0] = { ...storedSource.outputs[0], name: "COMBO", type: "COMBO", links: [failureLink] };
+            storedSource.widgets_values = ["停止"];
+            if (legacyTimeout) {
+                const timeoutSource = window.LiteGraph.createNode("PrimitiveNode");
+                app.graph.add(timeoutSource);
+                const storedTimeoutSource = timeoutSource.serialize();
+                const timeoutSlot = stored.inputs.length;
+                const timeoutLink = failureLink + 1;
+                stored.inputs.push({ name: "callback_timeout_seconds", type: "FLOAT", link: timeoutLink, widget: { name: "callback_timeout_seconds" } });
+                storedTimeoutSource.outputs[0] = { ...storedTimeoutSource.outputs[0], name: "FLOAT", type: "FLOAT", links: [timeoutLink] };
+                storedTimeoutSource.widgets_values = [13, "fixed"];
+                workflow.nodes.push(storedTimeoutSource);
+                workflow.links.push([timeoutLink, timeoutSource.id, 0, expand.id, timeoutSlot, "FLOAT"]);
+                workflow.last_link_id = timeoutLink;
+                workflow.last_node_id = app.graph.last_node_id;
+            }
+            if (linkedCounter) {
+                const counterSource = window.LiteGraph.createNode("PrimitiveNode");
+                app.graph.add(counterSource);
+                const storedCounterSource = counterSource.serialize();
+                const counterSlot = stored.inputs.findIndex((input) => input.name === "counter_position");
+                if (counterSlot < 0) throw new Error("Missing native counter_position input");
+                const counterLink = workflow.last_link_id + 1;
+                stored.inputs[counterSlot].link = counterLink;
+                storedCounterSource.outputs[0] = { ...storedCounterSource.outputs[0], name: "COMBO", type: "COMBO", links: [counterLink] };
+                storedCounterSource.widgets_values = ["先頭"];
+                workflow.nodes.push(storedCounterSource);
+                workflow.links.push([counterLink, counterSource.id, 0, expand.id, counterSlot, "COMBO"]);
+                workflow.last_link_id = counterLink;
+                workflow.last_node_id = app.graph.last_node_id;
+            }
+            const originalValues = [...stored.widgets_values];
+            await app.loadGraphData(workflow, true, true);
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            const restored = app.graph.getNodeById(expand.id);
+            const first = restored.serialize();
+            const apiGraph = await app.graphToPrompt();
+            const savedWorkflow = app.graph.serialize();
+            await app.loadGraphData(savedWorkflow, true, true);
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            const reloaded = app.graph.getNodeById(expand.id);
+            const reloadedApi = await app.graphToPrompt();
+            results.push({
+                legacyTimeout, linkedCounter, originalValues, inputAfterLoad: stored.widgets_values,
+                firstValues: first.widgets_values,
+                reloadedValues: reloaded.serialize().widgets_values,
+                literalSeed: reloaded.widgets.find((widget) => widget.name === "seed_base_literal").value,
+                literalIndex: reloaded.widgets.findIndex((widget) => widget.name === "seed_base_literal"),
+                failureMode: apiGraph.output[String(expand.id)].inputs.callback_failure_mode,
+                reloadedFailureMode: reloadedApi.output[String(expand.id)].inputs.callback_failure_mode,
+                counterPosition: reloadedApi.output[String(expand.id)].inputs.counter_position,
+                failureLinked: reloaded.inputs.find((input) => input.name === "callback_failure_mode")?.link != null,
+                timeoutInputExists: reloaded.inputs.some((input) => input.name === "callback_timeout_seconds"),
+            });
+        }
+        return results;
+    });
+    for (const result of failureModeInputRoundTrips) {
+        assert.equal(result.originalValues.length, result.legacyTimeout ? 11 : 10);
+        assert.equal(result.originalValues.at(-2), null, "linked failure widgets may be stored as null");
+        assert.deepEqual(result.inputAfterLoad, result.originalValues, "loading does not rewrite the source workflow");
+        assert.equal(result.firstValues.length, 10, "Expand has no trailing serializable UI controls");
+        assert.equal(result.firstValues[9], true);
+        assert.equal(result.reloadedValues.length, 10);
+        assert.equal(result.reloadedValues[9], true);
+        assert.equal(result.literalSeed, true);
+        assert.equal(result.literalIndex, 9);
+        assert.equal(result.failureMode, "停止");
+        assert.equal(result.reloadedFailureMode, "停止");
+        assert.equal(result.counterPosition, result.linkedCounter ? "先頭" : "最後");
+        assert.equal(result.failureLinked, true);
+        assert.equal(result.timeoutInputExists, false);
+    }
+    console.log("real ComfyUI linked failure-mode widgets preserve current/legacy null layouts and literal seed round trips");
+
+    await page.evaluate(() => window.app.graph.clear());
+    await page.evaluate(async () => {
+        const response = await fetch("/scene_prompt/items", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ category: "Favorites Runtime", name: "Runtime favorite", prompt: "runtime favorite prompt", description: "Isolated browser fixture" }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+    });
+    const favorite = await page.evaluate(() => window.__sceneSeedRuntimeTest.openFavoritePicker());
+    await page.waitForFunction((key) => [...document.querySelectorAll(".pc-favorite")].some((button) => button.dataset.favoriteKey === key && !button.disabled), favorite.key);
+    await page.locator(".pc-favorite").evaluateAll((buttons, key) => buttons.find((button) => button.dataset.favoriteKey === key).click(), favorite.key);
+    await page.waitForFunction((key) => [...document.querySelectorAll(".pc-favorite")].some((button) => button.dataset.favoriteKey === key && button.getAttribute("aria-pressed") === "true"), favorite.key);
+    assert.deepEqual(await page.evaluate(() => window.__sceneSeedRuntimeTest.readFavorites()), [favorite.key], "the real userdata endpoint stores the favorite");
+    assert.equal(await page.evaluate((id) => window.app.graph.getNodeById(id).widgets.find((widget) => widget.name === "positive_json").value, favorite.nodeId), favorite.selection);
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForFunction(() => window.__sceneSeedRuntimeTest && window.app?.graph && window.LiteGraph?.registered_node_types?.ScenePrompter);
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__sceneSeedRuntimeTest.openFavoritePicker(true));
+    await page.waitForFunction((key) => [...document.querySelectorAll(".pc-favorite")].some((button) => button.dataset.favoriteKey === key && button.getAttribute("aria-pressed") === "true"), favorite.key);
+    assert.equal(await page.locator(".pc-candidate").count(), 1);
+    await page.locator(".pc-popup").getByRole("button", { name: "閉じる", exact: true }).click();
+    console.log("real ComfyUI userdata favorite persistence survives a page reload");
     const applyModelInputOrder = await page.evaluate(async () => {
         const app = window.app;
         app.graph.clear();
