@@ -81,7 +81,7 @@ const legacyAnima = {
 };
 const migratedAnima = context.sceneExpandConfigureValues(legacyAnima);
 assert.deepEqual(JSON.parse(JSON.stringify(migratedAnima.widgets_values)), [
-    0, "saved-run", 7, true, "prefix", "最後", true, true, 13, "停止", true,
+    0, "saved-run", 7, true, "prefix", "最後", true, true, "停止", true,
 ]);
 assert.deepEqual(legacyAnima.widgets_values, [15, "saved-run", 7, true, "prefix", "Anima", 13, "停止", true]);
 assert.deepEqual(
@@ -96,7 +96,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
     JSON.parse(JSON.stringify(context.sceneExpandConfigureValues({ widgets_values: [15, "saved-run", 7, true, "prefix", true, false, 13, "停止", true] }).widgets_values)),
-    [0, "saved-run", 7, true, "prefix", "最後", true, false, 13, "停止", true],
+    [0, "saved-run", 7, true, "prefix", "最後", true, false, "停止", true],
     "existing conversion and callback values stay aligned",
 );
 assert.deepEqual(
@@ -104,3 +104,14 @@ assert.deepEqual(
     [],
     "an empty legacy widget list stays untouched",
 );
+for (const timeout of [0, 13, false, true, null]) {
+    for (const controls of [["Anima"], [true, true], ["先頭", true, true]]) {
+        const original = [15, "saved-run", 7, true, "prefix", ...controls, timeout, "停止", true];
+        const migrated = context.sceneExpandConfigureValues({ widgets_values: original });
+        assert.deepEqual(JSON.parse(JSON.stringify(migrated.widgets_values)), [
+            0, "saved-run", 7, true, "prefix", controls[0] === "先頭" ? "先頭" : "最後", true, true, "停止", true,
+        ], `legacy layout ${controls.length} removes timeout ${timeout} without shifting failure mode or literal seed`);
+        assert.deepEqual(JSON.parse(JSON.stringify(context.sceneExpandConfigureValues(migrated))), JSON.parse(JSON.stringify(migrated)));
+        assert.equal(original.at(-3), timeout, "migration does not mutate the saved values");
+    }
+}

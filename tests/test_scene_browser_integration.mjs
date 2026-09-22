@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -92,6 +92,10 @@ window.__scenePromptChangeTracker = ChangeTracker;
 const apiModule = `
 const listeners = new Map();
 const calls = [];
+let releaseFavoriteSave = null;
+const favoriteMock = { loadStatuses: [], saveStatuses: [], delayNextSave: false, writes: 0, activeWrites: 0, maxActiveWrites: 0 };
+window.__favoriteMock = favoriteMock;
+window.__releaseFavoriteSave = () => releaseFavoriteSave?.();
 let releaseDelayedItems = null;
 const baseItem = {
   id: "summer",
@@ -126,6 +130,29 @@ const promptItems = [baseItem, weightItem, nestedItem, ...Array.from({ length: 6
 const savedPrompt = { id: "browser-set", name: "Browser Set", description: "", items: [baseItem] };
 export const api = {
   clientId: "browser-client",
+  async getUserData(file) {
+    calls.push({ url: "getUserData:" + file, options: {} });
+    return fetch("/userdata/" + encodeURIComponent(file), { headers: { "x-test-status": String(favoriteMock.loadStatuses.shift() || 200) } });
+  },
+  async storeUserData(file, data, options) {
+    calls.push({ url: "storeUserData:" + file, data, options });
+    favoriteMock.writes += 1;
+    favoriteMock.activeWrites += 1;
+    favoriteMock.maxActiveWrites = Math.max(favoriteMock.maxActiveWrites, favoriteMock.activeWrites);
+    try {
+      if (favoriteMock.delayNextSave) {
+        favoriteMock.delayNextSave = false;
+        await new Promise((resolve) => { releaseFavoriteSave = resolve; });
+        releaseFavoriteSave = null;
+      }
+      const response = await fetch("/userdata/" + encodeURIComponent(file), {
+        method: "POST", body: JSON.stringify(data),
+        headers: { "x-test-status": String(favoriteMock.saveStatuses.shift() || 200) },
+      });
+      if (response.status !== 200 && options.throwOnError !== false) throw new Error("HTTP " + response.status);
+      return response;
+    } finally { favoriteMock.activeWrites -= 1; }
+  },
   fileURL(route) {
     calls.push({ url: "fileURL:" + route, options: {} });
     return route;
@@ -169,6 +196,7 @@ export const api = {
 };
 window.api = api;
 window.__scenePromptCalls = calls;
+window.__scenePromptItems = promptItems;
 window.__scenePromptListeners = listeners;
 window.__delayScenePromptItems = () => { window.__delayNextScenePromptItems = true; };
 window.__releaseScenePromptItems = () => releaseDelayedItems?.();
@@ -215,6 +243,7 @@ export class TextAreaAutoComplete {
 }
 `;
 let customScriptsAutocompleteAvailable = true;
+let storedFavorites = null;
 const index = `<!doctype html><script type="module">
   import { injectStyle } from "/extensions/scene-prompt/web/scene_prompt_style.js";
   import "/extensions/scene-prompt/web/scene_prompt_ui.js";
@@ -224,6 +253,22 @@ const index = `<!doctype html><script type="module">
 </script>`;
 
 const server = http.createServer(async (request, response) => {
+    if (request.url === "/userdata/scene_prompt_tools%2Ffavorites.json") {
+        const status = Number(request.headers["x-test-status"] || 200);
+        if (status !== 200) {
+            response.writeHead(status);
+            response.end("User data unavailable");
+            return;
+        }
+        if (request.method === "POST") {
+            const chunks = [];
+            for await (const chunk of request) chunks.push(chunk);
+            storedFavorites = JSON.parse(Buffer.concat(chunks).toString());
+        }
+        response.writeHead(storedFavorites === null ? 404 : 200, { "content-type": "application/json" });
+        response.end(JSON.stringify(storedFavorites));
+        return;
+    }
     if (request.url === "/") {
         response.writeHead(200, { "content-type": "text/html" });
         response.end(index);
@@ -252,6 +297,7 @@ const server = http.createServer(async (request, response) => {
             source += `\nwindow.__scenePromptPopupTestHooks = {\n`
                 + `  openSavePromptPopup,\n`
                 + `  openCreatePromptPopup,\n`
+                + `  openSearchPopup, openPromptCandidatePopup, loadFavorites, setMatrixLineDraftContext,\n`
                 + `  attachMatrixTextAreaAutocomplete,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
@@ -280,6 +326,191 @@ async function createPreparedRun(page) {
 
 async function releaseCalls(page) {
     return page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.includes("/runs/release")));
+}
+
+async function prepareFavoriteFixture(page, url) {
+    await page.goto(url);
+    await page.waitForFunction(() => window.__scenePromptBrowserReady === true);
+    await page.evaluate(() => {
+        const node = {
+            id: 901, type: "FavoriteFixture", graph: window.app.graph, size: [420, 300], properties: {},
+            widgets: ["positive_json", "negative_json"].map((name) => ({ name, value: '{"version":1,"categories":{}}' })),
+            setDirtyCanvas() {},
+        };
+        node.widgets_values = node.widgets.map((widget) => widget.value);
+        window.app.graph._nodes.push(node);
+        window.__favoriteNode = node;
+    });
+}
+
+async function checkFavorites(browser, url) {
+    const page = await browser.newPage();
+    await prepareFavoriteFixture(page, url);
+    await page.evaluate(async () => {
+        window.__favoriteMock.loadStatuses = [503];
+        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { favorites: true });
+    });
+    await page.getByText(/お気に入りを読み込めませんでした。HTTP 503/).waitFor();
+    assert.equal(storedFavorites, null, "load failures do not overwrite the user data with an empty list");
+    await page.getByRole("button", { name: "お気に入りを再読み込み", exact: true }).click();
+    await page.getByText("お気に入りはありません。候補の☆から追加できます。", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    const search = page.locator(".pc-searchbox");
+    await search.fill("Summer");
+    const baseStar = page.locator('.pc-favorite[data-favorite-key="Outfit::summer"]');
+    const originalSelection = await page.evaluate(() => JSON.stringify(window.__favoriteNode.widgets_values));
+    await baseStar.click();
+    await page.waitForFunction(() => document.querySelector('.pc-favorite[data-favorite-key="Outfit::summer"]')?.getAttribute("aria-pressed") === "true");
+    assert.equal(await page.evaluate(() => JSON.stringify(window.__favoriteNode.widgets_values)), originalSelection, "star clicks do not change positive/negative selection or weights");
+    assert.equal(await page.locator('.pc-candidate[title="summer dress"] input[type="checkbox"]').isChecked(), false);
+    const firstSave = await page.evaluate(() => window.__scenePromptCalls.find((call) => call.url.startsWith("storeUserData:")));
+    assert.deepEqual(firstSave.options, { overwrite: true, stringify: true, throwOnError: true });
+    assert.deepEqual(storedFavorites, ["Outfit::summer"]);
+
+    await page.evaluate(() => { window.__favoriteMock.saveStatuses = [500]; });
+    await baseStar.click();
+    await page.getByText(/お気に入りを保存できませんでした。HTTP 500/).waitFor();
+    assert.equal(await baseStar.getAttribute("aria-pressed"), "true", "failed removal remains committed as a favorite");
+    assert.deepEqual(storedFavorites, ["Outfit::summer"]);
+    await page.evaluate(() => {
+        window.__favoriteMock.delayNextSave = true;
+        const button = document.querySelector('.pc-favorite[data-favorite-key="Outfit::summer"]');
+        button.click(); button.click(); button.click();
+    });
+    await page.waitForFunction(() => window.__favoriteMock.activeWrites === 1);
+    assert.equal(await baseStar.getAttribute("aria-pressed"), "true", "pending saves never show uncommitted star state");
+    await page.evaluate(() => window.__releaseFavoriteSave());
+    await page.waitForFunction(() => window.__favoriteMock.writes === 5 && window.__favoriteMock.activeWrites === 0);
+    assert.equal(await baseStar.getAttribute("aria-pressed"), "false", "three queued toggles are applied in order after a failed save");
+    assert.deepEqual(storedFavorites, []);
+    assert.equal(await page.evaluate(() => window.__favoriteMock.maxActiveWrites), 1);
+
+    await page.evaluate(() => {
+        window.__favoriteMock.saveStatuses = [503, 200];
+        const button = document.querySelector('.pc-favorite[data-favorite-key="Outfit::summer"]');
+        button.click(); button.click();
+    });
+    await page.waitForFunction(() => window.__favoriteMock.writes === 7 && window.__favoriteMock.activeWrites === 0);
+    assert.equal(await baseStar.getAttribute("aria-pressed"), "true", "the next queued toggle starts from the committed state after its predecessor fails");
+
+    // Identical ids in different categories are distinct, while labels may change.
+    await page.evaluate(() => {
+        window.__scenePromptItems.push({ ...window.__scenePromptItems[0], category_key: "Other", category_path: ["Other"], category_label: "Other", label: "Other Summer" });
+        window.__scenePromptItems[0].label = "Renamed Summer";
+    });
+    await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
+    await search.fill("Summer");
+    assert.equal(await baseStar.getAttribute("aria-pressed"), "true", "a label edit retains favorites by id");
+    assert.equal(await page.locator('.pc-favorite[data-favorite-key="Other::summer"]').getAttribute("aria-pressed"), "false");
+    await page.locator('.pc-favorite[data-favorite-key="Other::summer"]').click();
+    await page.waitForFunction(() => window.__favoriteMock.writes === 8 && window.__favoriteMock.activeWrites === 0);
+    await page.getByRole("button", { name: "お気に入り", exact: true }).click();
+    assert.equal(await search.inputValue(), "");
+    assert.equal(await page.locator(".pc-candidate").count(), 2);
+    await search.fill("Other");
+    assert.equal(await page.locator(".pc-candidate").count(), 1);
+    await page.locator(".pc-favorite").click();
+    await page.getByText("一致なし", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    assert.equal(await search.inputValue(), "Summer", "normal search retains its own query");
+    await search.fill("Search Detail");
+    await page.locator(".pc-favorite").click();
+    await page.waitForFunction(() => window.__favoriteMock.activeWrites === 0 && document.querySelector(".pc-favorite")?.getAttribute("aria-pressed") === "true");
+    await page.getByRole("button", { name: "お気に入り", exact: true }).click();
+    assert.equal(await search.inputValue(), "Other", "favorite search retains its separate query");
+    await search.fill("Search Detail");
+    for (const action of ["個別選択", "編集"]) {
+        await page.getByRole("button", { name: action, exact: true }).click();
+        await page.getByRole("button", { name: "←戻る", exact: true }).click();
+        assert.equal(await page.locator(".pc-popup-title").textContent(), "お気に入り");
+        assert.equal(await search.inputValue(), "Search Detail");
+        assert.equal(await page.getByRole("button", { name: "お気に入り", exact: true }).evaluate((element) => element.classList.contains("pc-on")), true);
+    }
+    await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
+    await page.locator(".pc-popup-title").filter({ hasText: /^お気に入り$/ }).waitFor();
+    assert.equal(await search.inputValue(), "Search Detail", "popup reopen retains favorite mode and query");
+
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    await search.fill("Summer");
+    const savedBeforeBatch = await page.evaluate(() => window.__favoriteMock.writes);
+    await page.evaluate(() => {
+        for (const button of [...document.querySelectorAll('.pc-favorite[aria-pressed="false"]')].slice(0, 14)) button.click();
+    });
+    await page.waitForFunction((writes) => window.__favoriteMock.writes === writes + 14 && window.__favoriteMock.activeWrites === 0, savedBeforeBatch);
+    await page.getByRole("button", { name: "お気に入り", exact: true }).click();
+    await search.fill("Summer");
+    const scroll = await page.locator(".pc-popup-list").evaluate((element) => {
+        element.scrollTop = 240;
+        element.dispatchEvent(new Event("scroll"));
+        return element.scrollTop;
+    });
+    assert.ok(scroll > 0);
+    await page.getByRole("button", { name: "検索", exact: true }).click();
+    await page.getByRole("button", { name: "お気に入り", exact: true }).click();
+    await page.waitForFunction((scroll) => document.querySelector(".pc-popup-list")?.scrollTop === scroll, scroll);
+    assert.equal(await search.inputValue(), "Summer");
+
+    await page.evaluate(async () => {
+        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { favorites: true, stateWidgetName: "negative_json" });
+    });
+    assert.equal(await search.inputValue(), "", "the negative side starts with an independent query");
+    assert.equal(await baseStar.getAttribute("aria-pressed"), "true", "positive and negative use the same saved favorites");
+    await page.locator('.pc-candidate[title="summer dress"] input[type="checkbox"]').click();
+    assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteNode.widgets[1].value).categories.Outfit[0].id), "summer");
+    assert.equal(await page.evaluate(() => window.__favoriteNode.widgets[0].value), '{"version":1,"categories":{}}');
+
+    await page.evaluate(async () => {
+        const draft = { row_id: "favorites-matrix", positive_json: '{"version":1,"categories":{}}', negative_json: '{"version":1,"categories":{}}' };
+        window.__favoriteMatrixDraft = draft;
+        const stateWidgetName = window.__scenePromptPopupTestHooks.setMatrixLineDraftContext(window.__favoriteNode, 0, draft, "positive", () => {}, () => {});
+        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { favorites: true, stateWidgetName });
+    });
+    const matrixPopup = page.locator(".pc-popup").last();
+    assert.equal(await matrixPopup.locator('.pc-favorite[data-favorite-key="Outfit::summer"]').getAttribute("aria-pressed"), "true");
+    await matrixPopup.locator('.pc-candidate[title="summer dress"] input[type="checkbox"]').click();
+    assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteMatrixDraft.positive_json).categories.Outfit[0].id), "summer", "favorites use the existing Matrix row draft path");
+    assert.equal(await page.evaluate(() => window.__favoriteNode.widgets[0].value), '{"version":1,"categories":{}}', "the Matrix picker does not write normal selections");
+    await matrixPopup.getByRole("button", { name: "行編集へ戻る", exact: true }).click();
+
+    await page.evaluate(async () => {
+        const item = window.__scenePromptItems[0];
+        item.label = "非常に長いお気に入り候補の名前".repeat(12);
+        item.prompt = "long_unbroken_prompt_".repeat(30);
+        window.__scenePromptPopupTestHooks.clearPromptItemsCache();
+        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { favorites: true, stateWidgetName: "positive_json" });
+    });
+    for (const width of [420, 556, 760]) {
+        await page.locator(".pc-popup").evaluate((element, width) => { element.style.width = `${width}px`; }, width);
+        const overflow = await page.locator(".pc-candidate").evaluateAll((rows) => rows.map((row) => {
+            const rect = row.getBoundingClientRect();
+            const star = row.querySelector(".pc-favorite").getBoundingClientRect();
+            return { overflow: row.scrollWidth > row.clientWidth, starInside: star.right <= rect.right && star.left >= rect.left };
+        }));
+        assert.ok(overflow.length);
+        assert.equal(overflow.some(({ overflow, starInside }) => overflow || !starInside), false, `favorite star and long text stay inside ${width}px candidates`);
+        if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR && width !== 556) {
+            await mkdir(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, { recursive: true });
+            const screenshot = resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, `favorites-${width}.png`);
+            await page.locator(".pc-popup").screenshot({ path: screenshot });
+            console.log(`Favorite UI review: ${screenshot}`);
+        }
+    }
+    const loads = await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("getUserData:")).length);
+    assert.equal(loads, 2, "failed load retries once; every subsequent picker shares the successful cache");
+    const finalFavorites = [...storedFavorites];
+    assert.equal(JSON.stringify(await page.evaluate(() => window.__favoriteNode.widgets_values)).includes("favorite"), false, "favorites are not serialized in the workflow");
+    await page.close();
+
+    const reloadedPage = await browser.newPage();
+    await prepareFavoriteFixture(reloadedPage, url);
+    await reloadedPage.evaluate(async () => {
+        await Promise.all(Array.from({ length: 5 }, () => window.__scenePromptPopupTestHooks.loadFavorites()));
+        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { favorites: true });
+    });
+    assert.equal(await reloadedPage.locator('.pc-favorite[aria-pressed="true"]').count(), finalFavorites.length);
+    assert.equal(await reloadedPage.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("getUserData:")).length), 1, "a fresh page shares concurrent loads and restores persistent favorites");
+    await reloadedPage.close();
+    console.log("Favorite persistence, failure recovery, navigation, Matrix draft, and responsive layout passed.");
 }
 
 await new Promise((resolveServer) => server.listen(0, "127.0.0.1", resolveServer));
@@ -1286,7 +1517,6 @@ try {
                     { name: "counter_position", type: "combo", value: "最後", options: {} },
                     { name: "replace_underscores", type: "toggle", value: false, options: {} },
                     { name: "convert_anima_weights", type: "toggle", value: false, options: {} },
-                    { name: "callback_timeout_seconds", type: "number", value: 10, options: {} },
                     { name: "callback_failure_mode", type: "combo", value: "続行", options: {} },
                     { name: "seed_base_literal", type: "toggle", value: seedBaseLiteral, options: {} },
                 ];
@@ -1345,10 +1575,10 @@ try {
                 .filter((widget) => ["callback_timeout_seconds", "callback_failure_mode"].includes(widget.name))
                 .map((widget) => ({ name: widget.name, label: widget.label, hidden: !!widget.hidden })),
             loadedReplay: ["current_index", "seed_base", "seed_base_literal", "run_id"].map((name) => expand.widgets.find((widget) => widget.name === name).value),
-            loadedReplaySerialized: expand.serialize().widgets_values.slice(0, 3).concat(expand.serialize().widgets_values[10]),
+            loadedReplaySerialized: expand.serialize().widgets_values.slice(0, 3).concat(expand.serialize().widgets_values[9]),
             zeroReplay: ["current_index", "seed_base", "seed_base_literal", "run_id"].map((name) => zeroReplayExpand.widgets.find((widget) => widget.name === name).value),
             replaySeedLiteralHidden: zeroReplayExpand.widgets.find((widget) => widget.name === "seed_base_literal").hidden,
-            zeroReplaySerialized: zeroReplayExpand.serialize().widgets_values.slice(0, 3).concat(zeroReplayExpand.serialize().widgets_values[10]),
+            zeroReplaySerialized: zeroReplayExpand.serialize().widgets_values.slice(0, 3).concat(zeroReplayExpand.serialize().widgets_values[9]),
         };
         const method = request.widgets.find((widget) => widget.name === "method");
         method.value = "POST";
@@ -1382,7 +1612,6 @@ try {
         { name: "callback_last", type: "SCENE_CALLBACK", link: null },
     ], "Expand registers three optional Callback sockets");
     assert.deepEqual(callbackUi.expandCallbackWidgets, [
-        { name: "callback_timeout_seconds", label: "Callbackタイムアウト（秒）", hidden: false },
         { name: "callback_failure_mode", label: "Callback失敗時", hidden: false },
     ], "Expand shows Japanese Callback settings");
     assert.deepEqual(callbackUi.loadedReplay, [0, 41, false, ""], "loading resets the transient saved index while preserving the seed and clearing stale run state");
@@ -1529,6 +1758,7 @@ try {
     const releases = await releaseCalls(closingPage);
     assert.equal(releases.length, 0, "pagehide preserves an accepted ordinary run for queued generation");
     await closingPage.close();
+    await checkFavorites(browser, `http://127.0.0.1:${address.port}/`);
     console.log("Scene Prompt browser integration tests passed.");
 } finally {
     await browser.close();

@@ -198,7 +198,7 @@ assert.deepEqual(
     [
         "timestamp_dir", "prefix", "counter_position", "scene_prompt", "replace_underscores", "convert_anima_weights",
         "callback_first", "callback_each", "callback_last",
-        "callback_timeout_seconds", "callback_failure_mode",
+        "callback_failure_mode",
     ],
     "Expand removes internal sockets while preserving Scene, Callback, and public widget inputs",
 );

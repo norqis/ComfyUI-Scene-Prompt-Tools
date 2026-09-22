@@ -378,6 +378,26 @@ export function injectStyle() {
         .pc-candidate-main {
             min-width: 0;
         }
+        .pc-candidate-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+        .pc-candidate-header .pc-candidate-title {
+            flex: 1;
+            min-width: 0;
+        }
+        .pc-favorite {
+            flex: 0 0 auto;
+            padding: 1px 6px;
+            color: #ffd56b;
+            font-size: 18px;
+            line-height: 22px;
+        }
+        .pc-favorites-status {
+            flex-basis: 100%;
+            overflow-wrap: anywhere;
+        }
         .pc-candidate-title {
             color: #f3f3f3;
             font-weight: 600;
