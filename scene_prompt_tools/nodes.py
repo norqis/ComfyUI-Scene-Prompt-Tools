@@ -657,9 +657,9 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
         elif len(widgets) > 6 and type(widgets[5]) is bool and type(widgets[6]) is bool:
             indexes["seed_base_literal"] = 9
         elif len(widgets) > 8 and widgets[5] in COUNTER_POSITION_CHOICES:
-            indexes["seed_base_literal"] = (
-                9 if widgets[8] in (CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP) else 10
-            )
+            # Connected callback widgets serialize as None; their values cannot
+            # distinguish the old 11-widget layout from the current 10 widgets.
+            indexes["seed_base_literal"] = 10 if len(widgets) > 10 else 9
         for name, index in indexes.items():
             if index < len(widgets):
                 widgets[index] = values[name]

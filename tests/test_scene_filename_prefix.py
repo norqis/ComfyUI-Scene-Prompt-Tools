@@ -1804,6 +1804,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             ([3, "run", 100, False, "prefix_", True, False, 13, "停止", False], 9),
             ([3, "run", 100, False, "prefix_", "最後", True, False, 13, "停止", False], 10),
             ([3, "run", 100, False, "prefix_", "最後", True, False, "停止", False], 9),
+            ([3, "run", 100, False, "prefix_", "最後", True, False, None, None, False], 10),
+            ([3, "run", 100, False, "prefix_", "最後", True, False, None, False], 9),
         )
         for seed in (0, 42):
             for widgets, literal_index in layouts:
