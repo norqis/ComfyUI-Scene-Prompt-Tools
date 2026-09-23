@@ -649,7 +649,10 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
             # v0.5.9/10 has 10 widgets; the restored model selector, like the
             # older timeout widget, places the literal seed flag at index 10.
             indexes["seed_base_literal"] = 10 if len(widgets) > 10 else 9
-        elif len(widgets) > 5 and widgets[5] in (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA):
+        elif len(widgets) > 5 and (
+            widgets[5] in (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
+            or (widgets[5] is None and any(input.get("name") == "model_mode" for input in node.get("inputs", [])))
+        ):
             indexes["seed_base_literal"] = 8
         elif len(widgets) > 6 and type(widgets[5]) is bool and type(widgets[6]) is bool:
             indexes["seed_base_literal"] = 9

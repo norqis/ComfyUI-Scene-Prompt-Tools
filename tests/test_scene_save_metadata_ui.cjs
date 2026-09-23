@@ -79,6 +79,18 @@ context.hideSceneUtilityWidgets({ widgets: loraWidgets }, "SceneApplyLora");
 assert.deepEqual(loraWidgets.map((widget) => widget.hidden), [false, false, false, false, true]);
 
 vm.runInContext(functionSource("sceneExpandConfigureValues"), context);
+for (const seed of [0, 42]) {
+    const literal = seed === 0;
+    const legacyReplay = {
+        widgets_values: [0, "run", seed, false, "prefix", null, 13, "停止", literal],
+        inputs: [{ name: "model_mode", link: 77 }],
+    };
+    const migrated = context.sceneExpandConfigureValues(legacyReplay);
+    assert.equal(migrated.widgets_values[2], seed);
+    assert.equal(migrated.widgets_values[10], literal, "linked legacy model replay keeps the literal seed flag after migration");
+    assert.equal(migrated.inputs, legacyReplay.inputs);
+    assert.deepEqual(JSON.parse(JSON.stringify(context.sceneExpandConfigureValues(migrated))), JSON.parse(JSON.stringify(migrated)));
+}
 const legacyAnima = {
     widgets_values: [15, "saved-run", 7, true, "prefix", "Anima", 13, "停止", true],
 };
