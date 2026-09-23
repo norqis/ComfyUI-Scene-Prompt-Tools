@@ -110,6 +110,8 @@ Use braces to select one option when **Scene Prompt Expand** runs. Selection is 
 
 Empty options are meaningful. Keep every `|` that represents a blank outcome.
 
+Repeated tags keep the spelling with the highest explicit `(tag:weight)` value; a plain tag counts as `1.0`. The winner stays at the first occurrence's position, and equal weights keep the first spelling. This applies separately to positive and negative prompts, including expanded choices. Negative tags still override positive tags regardless of weight. Only finite numeric colon weights are compared, using the outermost weight for nested forms; `(tag)`, `[tag]`, `(tag;1.4)`, and `<lora:tag:1>` remain distinct. Anima conversion runs after this selection.
+
 ## Presets
 
 Create a reusable Scene fragment:

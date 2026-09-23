@@ -358,6 +358,32 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["{A|B}"])
         self.assertEqual((first[0], second[0]), ("B", "A"))
 
+    def test_matrix_and_merge_keep_highest_weights_with_negative_precedence(self):
+        empty = '{"version":1,"categories":{}}'
+        source = self.prompt.ScenePrompt().build(
+            "Source", "tag, shared, before", empty, "bad", empty, "", 0, True,
+        )[0]
+        matrix = self.nodes.SceneMatrix().build(json.dumps({
+            "version": 1,
+            "sets": [{
+                "row_id": "weighted-row", "name": "Weighted", "path_label": "Weighted",
+                "positive_parts": ["(tag:1.4)", "middle", "(shared:9)"],
+                "negative_parts": ["(bad:1.2)", "(shared:.2)"],
+            }],
+        }), scene_prompt=source)[0]
+        later = self.prompt.ScenePrompt().build(
+            "Later", "after, (tag:1.2)", empty, "(bad:1.4)", empty, "", 0, True,
+        )[0]
+        merged = self.nodes.ScenePromptMerge().merge(matrix, later)[0]
+        original = json.dumps(merged)
+        expanded = self.nodes.ScenePromptExpand().expand(
+            current_index=0, seed_base=7, timestamp_dir=False, scene_prompt=merged,
+        )
+        self.assertEqual(expanded[:2], ("(tag:1.4), before, middle, after", "(bad:1.4), (shared:.2)"))
+        self.assertEqual(expanded[2]["positive"], expanded[0])
+        self.assertEqual(expanded[2]["negative"], expanded[1])
+        self.assertEqual(json.dumps(merged), original)
+
     def test_filename_parts_follow_prompt_matrix_merge_and_queue_order(self):
         prompt = self.prompt.ScenePrompt()
         first = prompt.build(

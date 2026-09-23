@@ -20,7 +20,6 @@ SELECTION_ITEM_KNOWN_KEYS = (
 SELECTED_PART_REQUIRED_KEYS = {"index", "text"}
 SELECTED_PART_OPTIONAL_KEYS = {"weight", "missing"}
 CHOICE_RE = re.compile(r"\{([^{}]+)\}")
-WEIGHTED_PART_RE = re.compile(r"^\((.*):\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\)$")
 
 
 def _split_prompt(text):
@@ -51,14 +50,31 @@ def _prompt_key(part):
     return re.sub(r"\s+", " ", str(part).strip()).lower()
 
 
-def _prompt_override_key(part):
+def _explicit_prompt_weight(text):
+    if not text.startswith("(") or not text.endswith(")"):
+        return None
+    content, separator, raw_weight = text[1:-1].rpartition(":")
+    if not separator:
+        return None
+    try:
+        weight = float(raw_weight)
+    except ValueError:
+        return None
+    return (content.strip(), weight) if math.isfinite(weight) else None
+
+
+def _prompt_identity(part):
     text = str(part or "").strip()
-    while True:
-        match = WEIGHTED_PART_RE.match(text)
-        if not match:
-            break
-        text = match.group(1).strip()
-    return _prompt_key(text)
+    explicit = _explicit_prompt_weight(text)
+    weight = explicit[1] if explicit is not None else 1.0
+    while explicit is not None:
+        text = explicit[0]
+        explicit = _explicit_prompt_weight(text)
+    return _prompt_key(text), weight
+
+
+def _prompt_override_key(part):
+    return _prompt_identity(part)[0]
 
 
 def _item_weight(item):
@@ -81,15 +97,10 @@ def _apply_weight(part, weight):
 
 
 def _join_unique(parts, separator, seen_keys=None):
-    seen = set(seen_keys or [])
-    out = []
-    for part in parts:
-        key = _prompt_key(part)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(part.strip())
-    return separator.join(out)
+    if seen_keys:
+        seen = set(seen_keys)
+        parts = (part for part in parts if _prompt_key(part) not in seen)
+    return separator.join(_unique_parts(parts))
 
 
 def _selected_prompt_parts(categories, order):
@@ -153,10 +164,10 @@ def _choice_rng(seed, stream):
 def _is_empty_weighted_part(text):
     value = str(text or "").strip()
     while value:
-        match = WEIGHTED_PART_RE.match(value)
-        if not match:
+        explicit = _explicit_prompt_weight(value)
+        if explicit is None:
             return False
-        value = match.group(1).strip()
+        value = explicit[0]
     return True
 
 
@@ -340,17 +351,21 @@ def _override_keys(parts):
 
 
 def _unique_parts(parts, blocked_override_keys=None):
-    seen = set()
+    winners = {}
     blocked = set(blocked_override_keys or [])
     out = []
     for part in parts or []:
         text = str(part or "").strip()
-        key = _prompt_key(text)
-        override_key = _prompt_override_key(text)
-        if not key or key in seen or override_key in blocked:
+        key, weight = _prompt_identity(text)
+        if not key or key in blocked:
             continue
-        seen.add(key)
-        out.append(text)
+        if key not in winners:
+            winners[key] = (len(out), weight)
+            out.append(text)
+        elif weight > winners[key][1]:
+            index = winners[key][0]
+            winners[key] = (index, weight)
+            out[index] = text
     return out
 
 
