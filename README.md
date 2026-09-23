@@ -136,7 +136,7 @@ Checkpoint Loader (Simple) -> Scene Apply Model -> Scene Apply LoRA -> Scene Pro
 
 Connect MODEL, CLIP, and VAE from a checkpoint loader to **Scene Apply Model**. Separate diffusion-model, CLIP, and VAE loaders can also be connected. Connect Expand's MODEL and CLIP outputs to the corresponding sampler and text-encode inputs, and its VAE output to VAE Decode. The loader nodes are evaluated only when their Scene path is selected.
 
-**Scene Apply LoRA** uses ComfyUI's standard `models/loras` list and stores its relative model path. LoRAs on the selected Scene path are applied in path order. If several **Scene Apply Model** nodes occur on one path, the last model bundle wins, then every LoRA on that path is applied to it. The nodes may therefore appear in either visual order while preserving the route's LoRA order. Scene Apply LoRA can be saved inside a Preset; Scene Apply Model stays in the outer workflow because its MODEL, CLIP, and VAE links point to external loader nodes.
+**Scene Apply LoRA** uses ComfyUI's standard `models/loras` list and stores its relative model path. Set **モデル種別** to `Illustrious` or `Anima` on each LoRA and on **Scene Prompt Expand**; both default to `Illustrious`. Expand loads only matching LoRAs, preserving their path order. With no matches, it returns the original MODEL and CLIP. If several **Scene Apply Model** nodes occur on one path, the last model bundle wins. The nodes may appear in either visual order while preserving the matching LoRAs' relative order. Scene Apply LoRA can be saved inside a Preset, including its model setting; older Presets without the setting use `Illustrious`. Scene Apply Model stays in the outer workflow because its MODEL, CLIP, and VAE links point to external loader nodes.
 
 ## Callbacks
 
@@ -172,7 +172,7 @@ Text fields support these variables. `all` is the completed prompt for the curre
 | `{exec_current_count}` / `{exec_total_count}` | Current batch number (starting at 1) and total batches in this continuous run. |
 | `{exec_replace_underscores}` | `true` when Scene Prompt Expand replaces `_` with spaces. |
 | `{exec_anima_weights}` | `true` when Scene Prompt Expand applies the Anima emphasis-weight conversion. |
-| `{exec_model}` | Deprecated compatibility placeholder. Its value is empty. |
+| `{exec_model}` | The model type selected on Scene Prompt Expand: `Illustrious` or `Anima`. |
 | `{exec_seed}` | Seed for the current batch. |
 
 Unknown variables stay unchanged, so a literal placeholder is never silently removed.
@@ -199,7 +199,7 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Save Image | Saves PNGs using the Scene output path, filename information, and selected metadata mode. |
 | Scene Preset Input / Output / Reference | Save, reuse, and edit Scene plan fragments. |
 
-`Scene Prompt Expand` has two independent conversion options, both off by default. **_を空白に変換** replaces ASCII underscores in final positive and negative prompts before they reach CLIP, PNG metadata, and Callback variables. **強調値をAnima向けに変換** converts only forward-compatible emphasis weights from 1.0–1.5 to Anima's range; turning it off never reverses existing values. Existing workflows saved with the former Anima model selection load with both options on, and former Illustrious selections load with both off.
+`Scene Prompt Expand` has two independent conversion options, both off by default; changing **モデル種別** does not change them. **_を空白に変換** replaces ASCII underscores in final positive and negative prompts before they reach CLIP, PNG metadata, and Callback variables. **強調値をAnima向けに変換** converts only forward-compatible emphasis weights from 1.0–1.5 to Anima's range; turning it off never reverses existing values. Existing workflows saved with the v0.4.12 Anima selection load with both options on, and former Illustrious selections load with both off. Workflows from versions without the model selector receive `Illustrious` while retaining their conversion settings.
 
 **Scene Prompt Reverse** swaps positive and negative prompt content without changing row order, generation counts, paths, latent settings, or callbacks. Select **全てのノード** to swap the complete prompt accumulated so far. Select **直前のノード** to swap only the prompt contribution of the immediately preceding Scene node. If the preceding node is Path, Count, Empty Latent, or Callback, it has no prompt contribution and the operation is a no-op. Merge, Queue, Preset Reference, and Reverse treat each complete output row as their contribution.
 

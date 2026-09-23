@@ -36,6 +36,9 @@ from .plan import (
     MAX_SAFE_INTEGER,
     MIN_BATCH_SIZE,
     MIN_DIMENSION,
+    MODEL_MODE_ILLUSTRIOUS,
+    MODEL_MODE_ANIMA,
+    MODEL_MODE_CHOICES,
     ScenePlanError,
     empty_row,
     item_for_normalized_plan,
@@ -98,8 +101,6 @@ DEFAULT_LATENT = {"width": 512, "height": 512, "batch_size": 1}
 
 PATH_DIRECTORY = "フォルダに分ける"
 PATH_APPEND_TO_PREVIOUS = "前のフォルダ名に結合"
-MODEL_MODE_ILLUSTRIOUS = "Illustrious"
-MODEL_MODE_ANIMA = "Anima"
 EXPAND_CALLBACK_TIMEOUT_SECONDS = 10
 REVERSE_SCOPE_ALL = "全てのノード"
 REVERSE_SCOPE_PREVIOUS = "直前のノード"
@@ -146,22 +147,11 @@ def _normalize_model_mode(value):
     return MODEL_MODE_ANIMA if str(value or "").strip() == MODEL_MODE_ANIMA else MODEL_MODE_ILLUSTRIOUS
 
 
-def _expand_conversion_options(model_mode=None, replace_underscores=None, convert_anima_weights=None):
-    """Resolve new explicit options, retaining API-only compatibility with v0.4.12."""
-    legacy_anima = _normalize_model_mode(model_mode) == MODEL_MODE_ANIMA
+def _expand_conversion_options(replace_underscores=None, convert_anima_weights=None):
     return (
-        legacy_anima if replace_underscores is None else _scene_bool(replace_underscores, default=False),
-        legacy_anima if convert_anima_weights is None else _scene_bool(convert_anima_weights, default=False),
+        _scene_bool(replace_underscores, default=False),
+        _scene_bool(convert_anima_weights, default=False),
     )
-
-
-def _legacy_expand_model_mode(model_mode, prompt, unique_id):
-    """Read the removed v0.4.12 widget from a persisted API graph when needed."""
-    if model_mode is not None or not isinstance(prompt, dict) or unique_id is None:
-        return model_mode
-    node = prompt.get(str(unique_id), prompt.get(unique_id))
-    inputs = node.get("inputs") if isinstance(node, dict) else None
-    return inputs.get("model_mode") if isinstance(inputs, dict) else None
 
 
 def _model_prompt_weight(weight):
@@ -656,8 +646,8 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
             widgets[5] in COUNTER_POSITION_CHOICES
             or (widgets[5] is None and any(input.get("name") == "counter_position" for input in node.get("inputs", [])))
         ):
-            # Connected callback widgets serialize as None; their values cannot
-            # distinguish the old 11-widget layout from the current 10 widgets.
+            # v0.5.9/10 has 10 widgets; the restored model selector, like the
+            # older timeout widget, places the literal seed flag at index 10.
             indexes["seed_base_literal"] = 10 if len(widgets) > 10 else 9
         elif len(widgets) > 5 and widgets[5] in (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA):
             indexes["seed_base_literal"] = 8
@@ -2140,7 +2130,7 @@ class SceneApplyModel:
 
 
 class SceneApplyLora:
-    DESCRIPTION = """ComfyUIのmodels/lorasからLoRAを選び、Scene経路へ追加します。複数を直列接続すると生成経路の上流から順に適用されます。実際の適用はExpand時に行われます。"""
+    DESCRIPTION = """ComfyUIのmodels/lorasからLoRAを選び、対象のモデル種別を指定してScene経路へ追加します。Expandで選んだモデル種別に一致するLoRAだけが、経路の上流から順に適用されます。"""
     CATEGORY = "Scene/model"
     RETURN_TYPES = (SCENE_PROMPT_TYPE,)
     RETURN_NAMES = ("scene_prompt",)
@@ -2154,7 +2144,10 @@ class SceneApplyLora:
                 "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
                 "strength_clip": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
             },
-            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE,)},
+            "optional": {
+                "scene_prompt": (SCENE_PROMPT_TYPE,),
+                "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
@@ -2163,15 +2156,15 @@ class SceneApplyLora:
         }
 
     @classmethod
-    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, **kwargs):
+    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, model_mode=MODEL_MODE_ILLUSTRIOUS, **kwargs):
         del kwargs
-        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip))])
+        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip)), _normalize_model_mode(model_mode)])
 
-    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name=""):
+    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS):
         name = str(lora_name or "").strip()
         if not name:
             raise ValueError("LoRAを選択してください。")
-        descriptor = {"name": name, "strength_model": float(strength_model), "strength_clip": float(strength_clip)}
+        descriptor = {"name": name, "strength_model": float(strength_model), "strength_clip": float(strength_clip), "model_mode": _normalize_model_mode(model_mode)}
         plan = transform(scene_prompt, lambda row, _item: {**row, "loras": [*row.get("loras", []), descriptor]})
         return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 
@@ -2298,7 +2291,7 @@ def _callback_prompts(positive_parts, negative_parts, seed, model_mode=None, rep
     positive = _join_unique(positive_parts, ", ")
     negative = _join_unique(negative_parts, ", ")
     replace_underscores, convert_anima_weights = _expand_conversion_options(
-        model_mode, replace_underscores, convert_anima_weights,
+        replace_underscores, convert_anima_weights,
     )
     return (
         _format_expand_prompt(positive, replace_underscores, convert_anima_weights),
@@ -2318,7 +2311,7 @@ def _dispatch_row_callbacks(
     desktop_context=None, replace_underscores=None, convert_anima_weights=None,
 ):
     replace_underscores, convert_anima_weights = _expand_conversion_options(
-        model_mode, replace_underscores, convert_anima_weights,
+        replace_underscores, convert_anima_weights,
     )
     callbacks = row.get("callbacks", [])
     seen = set()
@@ -2350,7 +2343,7 @@ def _dispatch_row_callbacks(
             "all_node_names": _callback_names(row, row.get("source_node_ids", [])),
             "exec_current_count": int(item.get("global_index", 0)) + 1,
             "exec_total_count": int(item.get("total_batches", 0)),
-            "exec_model": "",
+            "exec_model": _normalize_model_mode(model_mode),
             "exec_replace_underscores": str(replace_underscores).lower(),
             "exec_anima_weights": str(convert_anima_weights).lower(),
             "exec_seed": seed,
@@ -2453,6 +2446,7 @@ class ScenePromptExpand:
                         "label": "連番の位置",
                     },
                 ),
+                "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
                 "scene_prompt": (
                     SCENE_PROMPT_TYPE,
                     {"display_name": "scene_prompt", "label": "scene_prompt"},
@@ -2496,7 +2490,7 @@ class ScenePromptExpand:
         prefix="",
         counter_position=COUNTER_POSITION_LAST,
         scene_prompt=None,
-        model_mode=None,
+        model_mode=MODEL_MODE_ILLUSTRIOUS,
         replace_underscores=None,
         convert_anima_weights=None,
         run_handle="",
@@ -2509,7 +2503,7 @@ class ScenePromptExpand:
         callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
         seed_base_literal=False,
     ):
-        model_mode = _legacy_expand_model_mode(model_mode, prompt, unique_id)
+        model_mode = _normalize_model_mode(model_mode)
         return "|".join(
             [
                 _scene_prompt_change_key(scene_prompt),
@@ -2520,7 +2514,8 @@ class ScenePromptExpand:
                 str(_scene_bool(timestamp_dir)),
                 _safe_filename_prefix(prefix),
                 _counter_position(counter_position),
-                str(_expand_conversion_options(model_mode, replace_underscores, convert_anima_weights)),
+                model_mode,
+                str(_expand_conversion_options(replace_underscores, convert_anima_weights)),
             ]
         )
 
@@ -2533,7 +2528,7 @@ class ScenePromptExpand:
         prefix="",
         counter_position=COUNTER_POSITION_LAST,
         scene_prompt=None,
-        model_mode=None,
+        model_mode=MODEL_MODE_ILLUSTRIOUS,
         replace_underscores=None,
         convert_anima_weights=None,
         run_handle="",
@@ -2546,7 +2541,7 @@ class ScenePromptExpand:
         callback_failure_mode=CALLBACK_FAILURE_CONTINUE,
         seed_base_literal=False,
     ):
-        model_mode = _legacy_expand_model_mode(model_mode, prompt, unique_id)
+        model_mode = _normalize_model_mode(model_mode)
         separator = ", "
         if run_handle and unique_id is not None and isinstance(prompt, dict):
             set_run_prompt_reference(run_handle, unique_id, prompt)
@@ -2571,7 +2566,7 @@ class ScenePromptExpand:
         positive = _join_unique(positive_parts, separator)
         negative = _join_unique(negative_parts, separator)
         replace_underscores, convert_anima_weights = _expand_conversion_options(
-            model_mode, replace_underscores, convert_anima_weights,
+            replace_underscores, convert_anima_weights,
         )
         positive = _format_expand_prompt(positive, replace_underscores, convert_anima_weights)
         negative = _format_expand_prompt(negative, replace_underscores, convert_anima_weights)
@@ -2582,7 +2577,7 @@ class ScenePromptExpand:
             "all_node_names": _callback_names(row, row.get("source_node_ids", [])),
             "exec_current_count": global_index + 1,
             "exec_total_count": int(item.get("total_batches", 0)),
-            "exec_model": "",
+            "exec_model": model_mode,
             "exec_replace_underscores": str(replace_underscores).lower(),
             "exec_anima_weights": str(convert_anima_weights).lower(),
             "exec_seed": seed,
@@ -2637,7 +2632,8 @@ class ScenePromptExpand:
         model = model_links["model"]
         clip = model_links["clip"]
         graph = GraphBuilder()
-        for descriptor in row.get("loras", []):
+        selected_loras = [descriptor for descriptor in row.get("loras", []) if descriptor["model_mode"] == model_mode]
+        for descriptor in selected_loras:
             loader = graph.node(
                 "LoraLoader",
                 model=model,

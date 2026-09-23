@@ -1798,7 +1798,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         )
         self.assertEqual(replay[3], 0)
 
-    def test_replay_preserves_all_four_saved_expand_widget_layouts(self):
+    def test_replay_preserves_saved_expand_widget_layouts(self):
         layouts = (
             ([3, "run", 100, False, "prefix_", "Anima", 13, "停止", False], 8),
             ([3, "run", 100, False, "prefix_", True, False, 13, "停止", False], 9),
@@ -1808,6 +1808,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             ([3, "run", 100, False, "prefix_", "最後", True, False, None, False], 9),
             ([3, "run", 100, False, "prefix_", None, True, False, None, None, False], 10),
             ([3, "run", 100, False, "prefix_", None, True, False, None, False], 9),
+            ([3, "run", 100, False, "prefix_", "最後", "Anima", True, False, "停止", False], 10),
+            ([3, "run", 100, False, "prefix_", "最後", None, True, False, None, False], 10),
         )
         for seed in (0, 42):
             for widgets, literal_index in layouts:

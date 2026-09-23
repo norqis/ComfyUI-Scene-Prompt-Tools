@@ -301,7 +301,7 @@ class SceneCallbackTests(unittest.TestCase):
         for values in dispatched[:2]:
             self.assertEqual(values["all_positive"], output[0])
             self.assertEqual(values["current_positive"], output[0])
-            self.assertEqual(values["exec_model"], "")
+            self.assertEqual(values["exec_model"], "Illustrious")
             self.assertEqual(values["exec_replace_underscores"], "true")
             self.assertEqual(values["exec_anima_weights"], "true")
         self.assertEqual(dispatched[2]["current_positive"], "before tag, (before weight:3)")
@@ -330,6 +330,21 @@ class SceneCallbackTests(unittest.TestCase):
                     nodes.ScenePromptExpand.IS_CHANGED(seed_base=17, callback_timeout_seconds=legacy_timeout),
                     nodes.ScenePromptExpand.IS_CHANGED(seed_base=17),
                 )
+
+    def test_expand_and_path_callbacks_report_normalized_mode_without_enabling_conversion(self):
+        nodes = _nodes_module()
+        base = make_plan([{"row": {**empty_row(), "positive_parts": ["blue_hair", "(test:1.2)"]}, "count": 1}])
+        plan = append_callback(base, "path", {"kind": "request"}, "毎回", 10, "続行")
+        for mode in ("Illustrious", " Anima "):
+            with mock.patch.object(nodes, "dispatch_callback") as dispatch:
+                result = nodes.ScenePromptExpand().expand(seed_base=7, timestamp_dir=False, scene_prompt=plan,
+                    model_mode=mode, callback_each={"kind": "request"})
+            self.assertEqual(result[0], "blue_hair, (test:1.2)")
+            self.assertEqual(dispatch.call_count, 2)
+            for call in dispatch.call_args_list:
+                self.assertEqual(call.args[1]["exec_model"], mode.strip())
+                self.assertEqual(call.args[1]["exec_replace_underscores"], "false")
+                self.assertEqual(call.args[1]["exec_anima_weights"], "false")
 
     def test_expand_and_callbacks_share_weight_winners_before_anima_conversion(self):
         nodes = _nodes_module()

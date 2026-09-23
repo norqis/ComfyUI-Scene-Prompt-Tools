@@ -110,13 +110,22 @@ class RealComfyUISmokeTests(unittest.TestCase):
             ["checkpoint", 0], ["checkpoint", 1], ["checkpoint", 2],
         )[0]
         plan = apply_lora.apply_lora("style/example.safetensors", 0.8, 0.7, plan)[0]
+        plan = apply_lora.apply_lora("style/anima.safetensors", 0.4, 0.3, plan, model_mode="Anima")[0]
         result = expand.expand(current_index=0, timestamp_dir=False, scene_prompt=plan)
         self.assertIsInstance(result, dict)
         self.assertEqual(len(result["expand"]), 1)
         lora_node = next(iter(result["expand"].values()))
         self.assertEqual(lora_node["class_type"], "LoraLoader")
         self.assertEqual(lora_node["inputs"]["model"], ["checkpoint", 0])
+        self.assertEqual(lora_node["inputs"]["lora_name"], "style/example.safetensors")
         self.assertEqual(result["result"][7], ["checkpoint", 2])
+        anima = expand.expand(current_index=0, timestamp_dir=False, scene_prompt=plan, model_mode="Anima")
+        self.assertEqual([node["inputs"]["lora_name"] for node in anima["expand"].values()], ["style/anima.safetensors"])
+        empty = apply_lora.apply_lora("style/anima.safetensors", model_mode="Anima")[0]
+        empty = apply_model.apply_model(["checkpoint", 0], ["checkpoint", 1], ["checkpoint", 2], empty)[0]
+        empty_result = expand.expand(timestamp_dir=False, scene_prompt=empty)
+        self.assertEqual(empty_result["expand"], {})
+        self.assertEqual(empty_result["result"][5:], (["checkpoint", 0], ["checkpoint", 1], ["checkpoint", 2]))
 
     def test_uses_established_scene_node_ids_without_aliases(self):
         self.assertNotIn("ScenePrompt", self.package.NODE_CLASS_MAPPINGS)

@@ -34,6 +34,19 @@ def prompt_row(label):
 
 
 class ScenePlanTests(unittest.TestCase):
+    def test_lora_descriptors_require_a_known_model_mode_in_version_five(self):
+        self.assertEqual(plan_module.PLAN_VERSION, 5)
+        descriptor = {"name": "lora", "strength_model": 1.0, "strength_clip": 1.0, "model_mode": "Anima"}
+        for mode in ("Illustrious", "Anima"):
+            row = {**empty_row(), "loras": [{**descriptor, "model_mode": mode}]}
+            self.assertEqual(make_plan([{"row": row, "count": 1}])["rows"][0]["row"]["loras"][0]["model_mode"], mode)
+        for mode in (None, "Unknown", "", 1):
+            with self.subTest(mode=mode), self.assertRaises(ScenePlanError):
+                make_plan([{"row": {**empty_row(), "loras": [{**descriptor, "model_mode": mode}]}, "count": 1}])
+        del descriptor["model_mode"]
+        with self.assertRaises(ScenePlanError):
+            make_plan([{"row": {**empty_row(), "loras": [descriptor]}, "count": 1}])
+
     def test_unconnected_input_starts_with_one_seed_row(self):
         plan = normalize_plan(None)
         self.assertEqual(plan["total_batches"], 1)

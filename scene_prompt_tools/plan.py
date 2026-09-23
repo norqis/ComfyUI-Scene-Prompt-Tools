@@ -8,7 +8,10 @@ import json
 
 
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
-PLAN_VERSION = 4
+PLAN_VERSION = 5
+MODEL_MODE_ILLUSTRIOUS = "Illustrious"
+MODEL_MODE_ANIMA = "Anima"
+MODEL_MODE_CHOICES = (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MIN_DIMENSION = 16
 MIN_BATCH_SIZE = 1
@@ -29,7 +32,7 @@ CALLBACK_KEYS = {
     "current_positive_parts", "current_negative_parts", "current_source_node_ids",
 }
 MODEL_LINK_KEYS = {"model", "clip", "vae"}
-LORA_KEYS = {"name", "strength_model", "strength_clip"}
+LORA_KEYS = {"name", "strength_model", "strength_clip", "model_mode"}
 PROMPT_TRACE_KEYS = {
     "kind", "before_positive_parts", "before_negative_parts", "added_positive_parts", "added_negative_parts",
 }
@@ -132,13 +135,16 @@ def _clone_loras(value):
             raise ScenePlanError("Scene Prompt row loras must contain objects.")
         _require_exact_keys(item, LORA_KEYS, "Scene Prompt row lora")
         name = _require_string(item["name"], "Scene Prompt row lora name", allow_empty=False)
+        model_mode = item["model_mode"]
+        if model_mode not in MODEL_MODE_CHOICES:
+            raise ScenePlanError("Scene Prompt row lora model_mode is invalid.")
         strengths = {}
         for key in ("strength_model", "strength_clip"):
             strength = item[key]
             if not isinstance(strength, (int, float)) or isinstance(strength, bool):
                 raise ScenePlanError(f"Scene Prompt row lora {key} must be a number.")
             strengths[key] = float(strength)
-        result.append({"name": name, **strengths})
+        result.append({"name": name, **strengths, "model_mode": model_mode})
     return result
 
 

@@ -141,9 +141,15 @@ window.__sceneSeedRuntimeTest = {
         const pngBase64 = (await readFile(process.env.COMFYUI_WORKFLOW_PNG)).toString("base64");
         const savedExpand = workflow.nodes.find((node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand");
         const savedWidgets = savedExpand?.widgets_values || [];
-        const expectedConversionOptions = typeof savedWidgets[5] === "string"
-            ? [savedWidgets[5] === "Anima", savedWidgets[5] === "Anima"]
-            : [savedWidgets[5], savedWidgets[6]];
+        const hasCounter = ["先頭", "最後"].includes(savedWidgets[5])
+            || (savedWidgets[5] == null && savedExpand?.inputs?.some((input) => input.name === "counter_position"));
+        const hasCurrentMode = hasCounter && (["Illustrious", "Anima"].includes(savedWidgets[6])
+            || (savedWidgets[6] == null && savedExpand?.inputs?.some((input) => input.name === "model_mode")));
+        const expectedConversionOptions = hasCounter
+            ? savedWidgets.slice(hasCurrentMode ? 7 : 6, hasCurrentMode ? 9 : 8)
+            : ["Illustrious", "Anima"].includes(savedWidgets[5])
+                ? [savedWidgets[5] === "Anima", savedWidgets[5] === "Anima"]
+                : savedWidgets.slice(5, 7);
         const dropResult = await page.evaluate(async ({ content, name, expectedNodes }) => {
             const bytes = Uint8Array.from(atob(content), (character) => character.charCodeAt(0));
             const file = new File([bytes], name, { type: "image/png" });
@@ -192,7 +198,7 @@ window.__sceneSeedRuntimeTest = {
         if (expectedConversionOptions.every((value) => typeof value === "boolean")) {
             assert.deepEqual(dropResult.conversionOptions, expectedConversionOptions, "drag-style PNG loading must preserve Expand conversion options");
         }
-        assert.equal(dropResult.modelMode, undefined, "Expand no longer exposes a model selector");
+        assert.ok(["Illustrious", "Anima"].includes(dropResult.modelMode), "Expand restores a model selector");
         assert.equal(dropResult.currentIndex, 0, "PNG loading resets a transient Expand cursor to its first Scene row");
         assert.equal(dropResult.promptCurrentIndex, 0, "normal Queue after PNG loading serializes the first Scene row");
         assert.deepEqual(pageErrors, [], `PNG handling raised browser errors:\n${pageErrors.join("\n")}`);
@@ -302,7 +308,7 @@ window.__sceneSeedRuntimeTest = {
             return node;
         };
         const read = (node) => Object.fromEntries([
-            "counter_position", "replace_underscores", "convert_anima_weights",
+            "counter_position", "model_mode", "replace_underscores", "convert_anima_weights",
             "callback_failure_mode", "seed_base_literal",
         ].map((name) => [name, node.widgets.find((widget) => widget.name === name)?.value]));
         const results = [];
@@ -329,7 +335,7 @@ window.__sceneSeedRuntimeTest = {
                 restoredLegacy.configure(old.serialize());
                 legacyResults.push({ timeout, controls, migrated, repeated: read(old), reloaded: read(restoredLegacy),
                     original, after: legacy.widgets_values,
-                    obsoleteExists: old.widgets.some((widget) => ["model_mode", "callback_timeout_seconds"].includes(widget.name)) });
+                    obsoleteExists: old.widgets.some((widget) => widget.name === "callback_timeout_seconds") });
             }
         }
         return { results, legacyResults };
@@ -339,6 +345,7 @@ window.__sceneSeedRuntimeTest = {
     }
     for (const legacy of conversionRoundTrips.legacyResults) {
         const migratedOptions = { counter_position: legacy.controls[0] === "先頭" ? "先頭" : "最後",
+            model_mode: legacy.controls[0] === "Anima" ? "Anima" : "Illustrious",
             replace_underscores: true, convert_anima_weights: true, callback_failure_mode: "停止", seed_base_literal: true };
         assert.deepEqual(legacy.migrated, migratedOptions);
         assert.deepEqual(legacy.repeated, migratedOptions);
@@ -347,6 +354,70 @@ window.__sceneSeedRuntimeTest = {
         assert.equal(legacy.obsoleteExists, false);
     }
     console.log("real ComfyUI Expand options and legacy Callback/replay widget migration passed");
+    const modelModes = await page.evaluate(async () => {
+        const app = window.app;
+        app.graph.clear();
+        const expand = window.LiteGraph.createNode("ScenePrompterExpand");
+        const lora = window.LiteGraph.createNode("SceneApplyLora");
+        app.graph.add(expand);
+        app.graph.add(lora);
+        const contract = {
+            expandWidgets: expand.widgets.map((widget) => widget.name).filter((name) => !name.startsWith("scene_")),
+            loraWidgets: lora.widgets.map((widget) => widget.name),
+            visible: [expand, lora].map((node) => !node.widgets.find((widget) => widget.name === "model_mode").hidden),
+        };
+        const linked = [];
+        for (const legacy of [true, false]) {
+            app.graph.clear();
+            const node = window.LiteGraph.createNode("ScenePrompterExpand");
+            const primitive = window.LiteGraph.createNode("PrimitiveNode");
+            app.graph.add(node);
+            app.graph.add(primitive);
+            const workflow = app.graph.serialize();
+            const stored = workflow.nodes.find((item) => String(item.id) === String(node.id));
+            stored.inputs = stored.inputs.filter((input) => input.name !== "model_mode" && (!legacy || input.name !== "counter_position"));
+            stored.widgets_values = legacy
+                ? [0, "", 7, false, "", null, 13, "停止", true]
+                : [0, "", 7, false, "", "最後", null, false, true, "停止", true];
+            const slot = stored.inputs.length;
+            const link = workflow.last_link_id + 1;
+            stored.inputs.push({ name: "model_mode", type: "COMBO", link, widget: { name: "model_mode" } });
+            workflow.links.push([link, primitive.id, 0, node.id, slot, "COMBO"]);
+            workflow.last_link_id = link;
+            const sourceNode = workflow.nodes.find((item) => String(item.id) === String(primitive.id));
+            sourceNode.outputs[0] = { ...sourceNode.outputs[0], name: "COMBO", type: "COMBO", links: [link] };
+            sourceNode.widgets_values = ["Anima"];
+            const original = JSON.stringify(stored);
+            await app.loadGraphData(workflow, true, true);
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            const first = await app.graphToPrompt();
+            const saved = app.graph.serialize();
+            await app.loadGraphData(saved, true, true);
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            const second = await app.graphToPrompt();
+            const restored = app.graph.getNodeById(node.id);
+            linked.push({ legacy, first: first.output[String(node.id)].inputs, second: second.output[String(node.id)].inputs,
+                sameInput: JSON.stringify(stored) === original,
+                literal: restored.widgets.find((widget) => widget.name === "seed_base_literal").value,
+                linked: restored.inputs.find((input) => input.name === "model_mode")?.link != null });
+        }
+        return { contract, linked };
+    });
+    assert.deepEqual(modelModes.contract.expandWidgets.slice(0, 11), ["current_index", "run_id", "seed_base", "timestamp_dir", "prefix",
+        "counter_position", "model_mode", "replace_underscores", "convert_anima_weights", "callback_failure_mode", "seed_base_literal"]);
+    assert.deepEqual(modelModes.contract.loraWidgets, ["lora_name", "strength_model", "strength_clip", "model_mode"]);
+    assert.deepEqual(modelModes.contract.visible, [true, true]);
+    for (const result of modelModes.linked) {
+        for (const inputs of [result.first, result.second]) {
+            assert.equal(inputs.model_mode, "Anima");
+            assert.equal(inputs.replace_underscores, false);
+            assert.equal(inputs.convert_anima_weights, !result.legacy);
+        }
+        assert.equal(result.sameInput, true);
+        assert.equal(result.literal, true);
+        assert.equal(result.linked, true);
+    }
+    console.log("real ComfyUI model widgets and linked old/current model mode round trips passed");
     const linkedTimeoutResults = await page.evaluate(async () => {
         const app = window.app;
         const results = [];
@@ -491,12 +562,12 @@ window.__sceneSeedRuntimeTest = {
         assert.equal(result.originalValues.length, result.legacyTimeout ? 11 : 10);
         assert.equal(result.originalValues.at(-2), null, "linked failure widgets may be stored as null");
         assert.deepEqual(result.inputAfterLoad, result.originalValues, "loading does not rewrite the source workflow");
-        assert.equal(result.firstValues.length, 10, "Expand has no trailing serializable UI controls");
-        assert.equal(result.firstValues[9], true);
-        assert.equal(result.reloadedValues.length, 10);
-        assert.equal(result.reloadedValues[9], true);
+        assert.equal(result.firstValues.length, 11, "Expand has no trailing serializable UI controls");
+        assert.equal(result.firstValues[10], true);
+        assert.equal(result.reloadedValues.length, 11);
+        assert.equal(result.reloadedValues[10], true);
         assert.equal(result.literalSeed, true);
-        assert.equal(result.literalIndex, 9);
+        assert.equal(result.literalIndex, 10);
         assert.equal(result.failureMode, "停止");
         assert.equal(result.reloadedFailureMode, "停止");
         assert.equal(result.counterPosition, result.linkedCounter ? "先頭" : "最後");

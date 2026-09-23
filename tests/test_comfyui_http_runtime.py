@@ -598,6 +598,14 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         cls.lazy_test_node_dir.mkdir()
         (cls.lazy_test_node_dir / "__init__.py").write_text(
             '''from pathlib import Path
+import folder_paths
+import nodes as comfy_nodes
+
+test_lora_dir = Path(__file__).parent / "loras"
+test_lora_dir.mkdir()
+for name in ("anima.safetensors", "illustrious.safetensors"):
+    (test_lora_dir / name).touch()
+folder_paths.add_model_folder_path("loras", str(test_lora_dir))
 
 class TestSceneModelBundle:
     @classmethod
@@ -609,8 +617,21 @@ class TestSceneModelBundle:
     def load(self, label, log_path):
         with Path(log_path).open("a", encoding="utf-8") as handle:
             handle.write(label + "\\n")
-        value = {"label": label}
+        value = {"label": label, "log_path": log_path}
         return value, value, value
+
+class TestSceneLoraLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"model": ("MODEL",), "clip": ("CLIP",), "lora_name": ("STRING",),
+            "strength_model": ("FLOAT",), "strength_clip": ("FLOAT",)}}
+    RETURN_TYPES = ("MODEL", "CLIP")
+    FUNCTION = "load_lora"
+    CATEGORY = "test"
+    def load_lora(self, model, clip, lora_name, strength_model, strength_clip):
+        with Path(model["log_path"]).open("a", encoding="utf-8") as handle:
+            handle.write("lora:" + lora_name + "\\n")
+        return model, clip
 
 class TestSceneModelSink:
     @classmethod
@@ -622,6 +643,10 @@ class TestSceneModelSink:
     CATEGORY = "test"
     def consume(self, model, clip, vae):
         return ()
+
+# Built-in names are excluded from custom-node registration. Replace this one
+# only inside the isolated CPU harness to record scheduling without model files.
+comfy_nodes.NODE_CLASS_MAPPINGS["LoraLoader"] = TestSceneLoraLoader
 
 NODE_CLASS_MAPPINGS = {
     "TestSceneModelBundle": TestSceneModelBundle,
@@ -773,6 +798,22 @@ NODE_CLASS_MAPPINGS = {
         }
         self._queue_and_wait(graph)
         self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["selected"])
+
+    def test_model_specific_loras_execute_only_matching_loaders(self):
+        for mode, include_illustrious, expected in (("Anima", True, ["lora:anima.safetensors"]),
+                ("Illustrious", True, ["lora:illustrious.safetensors"]), ("Illustrious", False, [])):
+            with self.subTest(mode=mode, include_illustrious=include_illustrious):
+                marker = self.base / f"lora-{mode}-{include_illustrious}.log"
+                graph = {
+                    "1": {"class_type": "TestSceneModelBundle", "inputs": {"label": "model", "log_path": str(marker)}},
+                    "2": {"class_type": "SceneApplyModel", "inputs": {"model": ["1", 0], "clip": ["1", 1], "vae": ["1", 2]}},
+                    "3": {"class_type": "SceneApplyLora", "inputs": {"scene_prompt": ["2", 0], "lora_name": "anima.safetensors", "strength_model": 0.8, "strength_clip": 0.7, "model_mode": "Anima"}},
+                    "4": {"class_type": "SceneApplyLora", "inputs": {"scene_prompt": ["3", 0], "lora_name": "illustrious.safetensors", "strength_model": 0.6, "strength_clip": 0.5, "model_mode": "Illustrious"}},
+                    "5": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["4" if include_illustrious else "3", 0], "current_index": 0, "seed_base": 7, "run_id": "", "timestamp_dir": False, "model_mode": mode}},
+                    "6": {"class_type": "TestSceneModelSink", "inputs": {"model": ["5", 5], "clip": ["5", 6], "vae": ["5", 7]}},
+                }
+                self._queue_and_wait(graph)
+                self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["model", *expected])
 
     def test_model_route_before_scene_prompt_reaches_expand(self):
         marker = self.base / "model-before-prompt.txt"
@@ -1204,9 +1245,9 @@ NODE_CLASS_MAPPINGS = {
             finally:
                 self._request("/scene_prompt/runs/release", {"run_handle": failed_handle})
 
-    def test_http_legacy_anima_input_respects_explicit_conversion_options(self):
+    def test_http_anima_mode_keeps_conversion_options_independent(self):
         cases = (
-            ("legacy-anima", {"model_mode": "Anima"}, "true", "true", "before tag, (before weight:3)"),
+            ("anima-independent", {"model_mode": "Anima"}, "false", "false", "before_tag, (before_weight:1.4)"),
             ("legacy-anima-off", {"model_mode": "Anima", "replace_underscores": False, "convert_anima_weights": False}, "false", "false", "before_tag, (before_weight:1.4)"),
         )
         with _CallbackReceiver() as receiver:
@@ -1222,6 +1263,7 @@ NODE_CLASS_MAPPINGS = {
                     payloads = [json.loads(request["body"]) for request in receiver.wait_for(received_count + 2)][received_count:]
                     self.assertEqual(len(payloads), 2)
                     for payload in payloads:
+                        self.assertEqual(payload["exec_model"], "Anima")
                         self.assertEqual(payload["current_positive"], expected_current)
                         self.assertEqual(payload["exec_replace_underscores"], expected_underscores)
                         self.assertEqual(payload["exec_anima_weights"], expected_weights)
@@ -1318,7 +1360,7 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(payload["all_positive"], "before, after")
             self.assertEqual(payload["all_negative"], "before-negative, after-negative")
             self.assertEqual(payload["exec_total_count"], "2")
-            self.assertEqual(payload["exec_model"], "")
+            self.assertEqual(payload["exec_model"], "Illustrious")
             self.assertEqual(payload["exec_replace_underscores"], "false")
             self.assertEqual(payload["exec_anima_weights"], "false")
             self.assertEqual(payload["current_node_names"], "Callback source")
