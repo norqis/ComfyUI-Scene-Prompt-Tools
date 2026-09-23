@@ -331,6 +331,33 @@ class SceneCallbackTests(unittest.TestCase):
                     nodes.ScenePromptExpand.IS_CHANGED(seed_base=17),
                 )
 
+    def test_expand_and_callbacks_share_weight_winners_before_anima_conversion(self):
+        nodes = _nodes_module()
+        base = make_plan([{"row": {
+            **empty_row(),
+            "positive_parts": ["test", "(test:1.2)", "(test:1.4)", "after", "(outside:1.4)", "(outside:1.6)", "(blocked:9)"],
+            "negative_parts": ["bad", "(bad:1.2)", "(blocked:.1)"],
+        }, "count": 1}])
+        plan = append_callback(base, "path-callback", {"kind": "request"}, "毎回", 10, "続行")
+        for convert in (False, True):
+            with self.subTest(convert=convert):
+                with mock.patch.object(nodes, "dispatch_callback") as dispatch:
+                    expanded = nodes.ScenePromptExpand().expand(
+                        seed_base=7, timestamp_dir=False, scene_prompt=plan,
+                        callback_first={"kind": "request"}, callback_each={"kind": "request"},
+                        convert_anima_weights=convert,
+                    )
+                expected = ("(test:3), after, (outside:1.6)", "(bad:2), (blocked:.1)") if convert else (
+                    "(test:1.4), after, (outside:1.6)", "(bad:1.2), (blocked:.1)",
+                )
+                self.assertEqual(expanded[:2], expected)
+                self.assertEqual((expanded[2]["positive"], expanded[2]["negative"]), expected)
+                self.assertEqual(dispatch.call_count, 3)
+                for call in dispatch.call_args_list:
+                    values = call.args[1]
+                    self.assertEqual((values["current_positive"], values["current_negative"]), expected)
+                    self.assertEqual((values["all_positive"], values["all_negative"]), expected)
+
     def test_callback_failures_do_not_reach_latent_and_continue_runs_next(self):
         nodes = _nodes_module()
         base = make_plan([{"row": {**empty_row(), "positive_parts": ["prompt"]}, "count": 1}])

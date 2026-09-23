@@ -13,7 +13,10 @@ folder_paths.get_user_directory = lambda: str(ROOT / ".test-user")
 folder_paths.get_public_user_directory = lambda user_id: str(ROOT / ".test-user" / user_id)
 sys.modules.setdefault("folder_paths", folder_paths)
 
-from scene_prompt_tools.prompt import _choice_rng, _compose_prompt_parts, _expand_choices, _expand_prompt_parts, _parse_selection_json
+from scene_prompt_tools.prompt import (
+    _choice_rng, _compose_prompt_parts, _expand_choices, _expand_prompt_parts,
+    _join_unique, _merge_positive_negative_parts, _parse_selection_json, _unique_parts,
+)
 
 
 EMPTY_SELECTION = '{"version":1,"categories":{}}'
@@ -256,6 +259,71 @@ class PromptChoiceTests(unittest.TestCase):
     def test_selection_values_are_stored(self):
         test_selection_keeps_its_stored_prompt_and_partial_selection()
         test_missing_partial_selection_is_valid_but_not_emitted()
+
+
+class PromptWeightDeduplicationTests(unittest.TestCase):
+    def assert_winners(self, parts, expected):
+        original = list(parts)
+        self.assertEqual(_unique_parts(parts), expected)
+        self.assertEqual(_join_unique(parts, ", "), ", ".join(expected))
+        self.assertEqual(parts, original)
+
+    def test_highest_weight_replaces_in_place_and_plain_tags_count_as_one(self):
+        self.assert_winners(
+            ["test", "between", "(test:1.4)", "after", "(test:1.2)"],
+            ["(test:1.4)", "between", "after"],
+        )
+        self.assert_winners(["(test:.5)", "between", "test", "(test:-2)"], ["test", "between"])
+
+    def test_equal_weights_preserve_the_first_spelling_and_position(self):
+        self.assert_winners(["(Test:1.0)", "test", "(TEST:1.)"], ["(Test:1.0)"])
+        self.assert_winners(["test", "(Test:1.0)"], ["test"])
+        self.assert_winners(
+            ["before", "( Tag   Name :1.40)", "middle", "(tag name:+1.4)"],
+            ["before", "( Tag   Name :1.40)", "middle"],
+        )
+
+    def test_all_finite_float_spellings_are_compared(self):
+        for spelling, expected in (("1.", "test"), (".5", "test"), ("+1.2", "(test:+1.2)"),
+                                   ("1e-1", "test"), ("1E+1", "(test:1E+1)"),
+                                   ("  +1.2  ", "(test:  +1.2  )"), ("1_0", "(test:1_0)")):
+            with self.subTest(spelling=spelling):
+                self.assert_winners(["test", f"(test:{spelling})"], [expected])
+
+    def test_nested_weights_compare_the_outer_weight_and_share_the_inner_tag(self):
+        self.assert_winners(
+            ["((test:4):0.5)", "between", "(test:1.2)", "((test:0.1):1.3)"],
+            ["((test:0.1):1.3)", "between"],
+        )
+
+    def test_other_syntax_and_nonfinite_weights_remain_distinct(self):
+        parts = ["test", "(test)", "[test]", "(test;1.4)", "<lora:test:1>",
+                 "(test:nan)", "(test:inf)", "(test:-inf)", "(test:1e999)", "(test:invalid)"]
+        self.assert_winners(parts, parts)
+
+    def test_negative_precedence_is_independent_of_weight(self):
+        self.assertEqual(
+            _merge_positive_negative_parts(
+                ["(shared:5)", "only_positive", "(keep:1.1)"], ["(shared:.1)", "negative"],
+                ["(keep:1.3)"], ["(negative:1.4)", "shared"],
+            ),
+            (["only_positive", "(keep:1.3)"], ["shared", "(negative:1.4)"]),
+        )
+
+    def test_choices_select_the_strongest_expanded_tag(self):
+        for stream in ("positive", "negative"):
+            with self.subTest(stream=stream):
+                outputs = {
+                    tuple(_expand_prompt_parts(["before", "{test|(test:1.4)}", "(test:1.2)", "after"], seed, stream))
+                    for seed in range(32)
+                }
+                self.assertEqual(outputs, {("before", "(test:1.2)", "after"), ("before", "(test:1.4)", "after")})
+        self.assertEqual(_expand_prompt_parts(["({|}:1e-1)", "keep"], 1, "positive"), ["keep"])
+
+    def test_join_preserves_explicit_seen_key_filtering(self):
+        seen = {"test"}
+        self.assertEqual(_join_unique(["test", "(test:1.2)", "after"], ", ", seen), "(test:1.2), after")
+        self.assertEqual(seen, {"test"})
 
 
 if __name__ == "__main__":
