@@ -186,6 +186,7 @@ const SCENE_WIDGET_LABELS = {
     timestamp_dir: "タイムスタンプディレクトリ",
     prefix: "ファイル名プレフィックス",
     counter_position: "連番の位置",
+    model_mode: "モデル種別",
     width: "width",
     height: "height",
     batch_size: "batch_size",
@@ -3985,10 +3986,10 @@ function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)
-            ? new Set(["lora_name", "strength_model", "strength_clip"])
+            ? new Set(["lora_name", "strength_model", "strength_clip", "model_mode"])
         : isSceneExpandNodeName(nodeName)
             ? new Set([
-                "timestamp_dir", "prefix", "counter_position", "replace_underscores", "convert_anima_weights",
+                "timestamp_dir", "prefix", "counter_position", "model_mode", "replace_underscores", "convert_anima_weights",
                 "callback_first", "callback_each", "callback_last",
                 "callback_failure_mode",
             ])
@@ -4853,11 +4854,21 @@ function sceneExpandConfigureValues(config) {
         return config;
     }
     const converted = [...values];
+    const linkedMode = config.inputs?.some((input) => input.name === "model_mode");
+    let modelMode = "Illustrious";
     if (converted[5] === "先頭" || converted[5] === "最後"
         || (converted[5] == null && config.inputs?.some((input) => input.name === "counter_position"))) {
-        // Already current: preserve the selected position and every later value.
-    } else if (typeof converted[5] === "string") {
-        const enabled = converted[5] === "Anima";
+        const hasMode = converted[6] === "Illustrious" || converted[6] === "Anima"
+            || (converted[6] == null && linkedMode);
+        if (hasMode) {
+            if (converted.length) converted[0] = 0;
+            return { ...config, widgets_values: converted };
+        }
+        // v0.5.10 has conversion widgets immediately after counter position.
+    } else if (converted[5] === "Illustrious" || converted[5] === "Anima"
+        || (converted[5] == null && linkedMode)) {
+        modelMode = converted[5];
+        const enabled = modelMode === "Anima";
         converted.splice(5, 1, "最後", enabled, enabled);
     } else if (typeof converted[5] === "boolean" && typeof converted[6] === "boolean") {
         converted.splice(5, 0, "最後");
@@ -4868,6 +4879,7 @@ function sceneExpandConfigureValues(config) {
         && (converted[9] === "続行" || converted[9] === "停止" || converted.length >= 11)) {
         converted.splice(8, 1);
     }
+    if (converted.length >= 5) converted.splice(6, 0, modelMode);
     if (converted.length) {
         converted[0] = 0;
     }

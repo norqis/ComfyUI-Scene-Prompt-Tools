@@ -149,6 +149,7 @@ class ScenePresetTests(unittest.TestCase):
             "name": "style/example.safetensors",
             "strength_model": 0.8,
             "strength_clip": 0.7,
+            "model_mode": "Illustrious",
         }])
 
     def test_preset_scene_prompt_preserves_outer_model_and_lora_route(self):
@@ -167,7 +168,24 @@ class ScenePresetTests(unittest.TestCase):
         })
         self.assertEqual(row["loras"], [{
             "name": "style/example.safetensors", "strength_model": 0.8, "strength_clip": 0.7,
+            "model_mode": "Illustrious",
         }])
+
+    def test_preset_lora_keeps_its_model_mode_through_save_load_and_expand(self):
+        nodes = basic_nodes()
+        nodes["4"] = {"class_type": "SceneApplyLora", "inputs": {
+            "scene_prompt": ["2", 0], "lora_name": "style/example.safetensors",
+            "strength_model": 0.8, "strength_clip": 0.7, "model_mode": "Anima",
+        }}
+        nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+        saved = self.save("anima-lora", nodes)
+        loaded = self.module.load_preset("anima-lora")
+        self.assertEqual(loaded["api_graph"]["output"]["4"]["inputs"]["model_mode"], "Anima")
+        upstream = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0])[0]
+        plan = self.module._evaluate_preset_scene(loaded, {}, upstream)
+        for mode, count in (("Anima", 1), ("Illustrious", 0)):
+            result = self.nodes.ScenePromptExpand().expand(seed_base=7, timestamp_dir=False, scene_prompt=plan, model_mode=mode)
+            self.assertEqual(len(result["expand"]), count)
 
     def test_save_prunes_root_and_extra_reroutes_for_removed_links(self):
         workflow = {
