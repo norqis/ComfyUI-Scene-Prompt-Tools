@@ -89,6 +89,22 @@ class SceneLoraPromptTests(unittest.TestCase):
             self.assertNotIn("red", positive)
             self.assertIn("red", negative)
 
+    def test_duplicate_choices_merge_before_expansion_and_negative_weight_wins(self):
+        plan = add_prompt(self.prompt, "base", "{red|blue}, blocked", "weak", node_id="1")
+        plan = self.nodes.SceneApplyLora().apply_lora(
+            "lora", scene_prompt=plan, positive="{red|blue}", negative="blocked, (weak:1.2)",
+        )[0]
+        row = plan["rows"][0]["row"]
+        for seed in range(20):
+            expected_choice = self.prompt._expand_prompt_parts(["{red|blue}"], seed, "positive")[0]
+            positive, negative = self.expand(plan, seed=seed)[:2]
+            self.assertEqual((positive, negative), (expected_choice, "(weak:1.2), blocked"))
+            self.assertEqual(
+                self.nodes._callback_prompts(row["positive_parts"], row["negative_parts"], seed,
+                                             "Illustrious", loras=row["loras"]),
+                (expected_choice, "(weak:1.2), blocked"),
+            )
+
 
 class LoraMetadataTests(unittest.TestCase):
     def test_header_only_metadata_and_cached_sha(self):

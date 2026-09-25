@@ -2455,8 +2455,11 @@ def _matching_lora_parts(loras, model_mode):
 def _callback_prompts(positive_parts, negative_parts, seed, model_mode=None, replace_underscores=None, convert_anima_weights=None, loras=()):
     lora_positive, lora_negative = _matching_lora_parts(loras, model_mode)
     positive_parts, negative_parts = _merge_positive_negative_parts(
-        _expand_prompt_parts([*positive_parts, *lora_positive], seed, "positive"),
-        _expand_prompt_parts([*negative_parts, *lora_negative], seed, "negative"),
+        positive_parts, negative_parts, lora_positive, lora_negative,
+    )
+    positive_parts, negative_parts = _merge_positive_negative_parts(
+        _expand_prompt_parts(positive_parts, seed, "positive"),
+        _expand_prompt_parts(negative_parts, seed, "negative"),
         [], [],
     )
     positive = _join_unique(positive_parts, ", ")
@@ -2728,8 +2731,11 @@ class ScenePromptExpand:
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + global_index) % SEED_MODULO
         lora_positive, lora_negative = _matching_lora_parts(row.get("loras", []), model_mode)
-        positive_parts = _expand_prompt_parts([*row.get("positive_parts", []), *lora_positive], seed, "positive")
-        negative_parts = _expand_prompt_parts([*row.get("negative_parts", []), *lora_negative], seed, "negative")
+        positive_parts, negative_parts = _merge_positive_negative_parts(
+            row.get("positive_parts", []), row.get("negative_parts", []), lora_positive, lora_negative,
+        )
+        positive_parts = _expand_prompt_parts(positive_parts, seed, "positive")
+        negative_parts = _expand_prompt_parts(negative_parts, seed, "negative")
         positive_parts, negative_parts = _merge_positive_negative_parts(
             positive_parts,
             negative_parts,
