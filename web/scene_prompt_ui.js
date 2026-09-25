@@ -8793,18 +8793,21 @@ function clearDetachedSceneBatchRun(run) {
     if (!run) {
         return;
     }
+    const node = sceneNodeForRun(run);
     sceneBatchDetachedRuns.delete(run.runId);
     if (run.detachedTimer) {
         clearTimeout(run.detachedTimer);
         run.detachedTimer = null;
     }
     if (run.controlsResetPending) {
-        const node = sceneNodeForRun(run);
-        if (String(findSceneWidget(node, "run_id")?.value || "") === run.runId) {
+        if (node && String(findSceneWidget(node, "run_id")?.value || "") === run.runId) {
             resetSceneExpandRunControls(node, { mark: false });
-            updateSceneExpandButton(node);
         }
         run.controlsResetPending = false;
+    }
+    if (node) {
+        updateSceneExpandButton(node);
+        updateSceneExpandCountWidget(node);
     }
 }
 
