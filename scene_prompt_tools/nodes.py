@@ -2108,10 +2108,10 @@ class ScenePromptToText:
             "required": {"scope": (TEXT_SCOPE_CHOICES, {"default": TEXT_SCOPE_ALL, "display_name": "対象"})},
             "optional": {
                 "scene_prompt": (SCENE_PROMPT_TYPE,),
-                "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
                 "current_index": ("INT", {"default": 0, "min": 0, "max": MAX_SAFE_INTEGER, "hidden": True}),
                 "seed_base": ("INT", {"default": 0, "min": 0, "max": SEED_MAX, "hidden": True}),
                 "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
+                "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),

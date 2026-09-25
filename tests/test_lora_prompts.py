@@ -81,6 +81,17 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(calls[0]["current_positive"], "base")
 
     def test_to_text_model_filter_and_delete_modify_descriptors(self):
+        schema = self.nodes.ScenePromptToText.INPUT_TYPES()
+        self.assertEqual(list(schema["optional"]), [
+            "scene_prompt", "current_index", "seed_base", "seed_base_literal", "model_mode",
+        ])
+        legacy_widgets_values = [self.nodes.TEXT_SCOPE_ALL, 2, 100, False]
+        widget_names = ["scope", *[name for name in schema["optional"] if name != "scene_prompt"]]
+        self.assertEqual(dict(zip(widget_names, legacy_widgets_values)), {
+            "scope": self.nodes.TEXT_SCOPE_ALL, "current_index": 2,
+            "seed_base": 100, "seed_base_literal": False,
+        })
+        self.assertEqual(schema["optional"]["model_mode"][1]["default"], "Illustrious")
         plan = add_prompt(self.prompt, "base", "base", "base-negative", node_id="1")
         plan = self.nodes.SceneApplyLora().apply_lora("ill", scene_prompt=plan, positive="ill-text", negative="ill-negative")[0]
         plan = self.nodes.SceneApplyLora().apply_lora("anima", scene_prompt=plan, model_mode="Anima",
