@@ -112,12 +112,20 @@ Empty options are meaningful. Keep every `|` that represents a blank outcome.
 
 Repeated tags keep the spelling with the highest explicit `(tag:weight)` value; a plain tag counts as `1.0`. The winner stays at the first occurrence's position, and equal weights keep the first spelling. This applies separately to positive and negative prompts, including expanded choices. Negative tags still override positive tags regardless of weight. Only finite numeric colon weights are compared, using the outermost weight for nested forms; `(tag)`, `[tag]`, `(tag;1.4)`, and `<lora:tag:1>` remain distinct. Anima conversion runs after this selection.
 
+## Text Output and Tag Deletion
+
+**Scene Prompt To Text** outputs the current planned row as ordinary `positive` and `negative` strings. Choose **全てのノード** for the complete row or **直前のノードのみ** for the immediately preceding node's additions. A preceding structural node supplies its whole row; a node that only passes prompts through supplies empty strings in the latter mode. An unconnected input produces empty strings at index 0.
+
+Normal Queue sends share one fresh starting seed across Expand and To Text nodes without changing their saved generation indexes. Continuous generation synchronizes To Text with the selected Expand's index and seed. Choices resolve before duplicate removal and negative precedence. Execution-path PNGs keep the Scene branches needed by each text consumer and rebase each consumer's index and seed separately, including Presets.
+
+**Scene Prompt Delete** removes comma- or newline-separated tags from each specified side of the incoming plan. Matching ignores surrounding/repeated whitespace, case, and explicit numeric weights; it is exact, so `bald` does not remove `bald head`. Later nodes can add the tag again. Deletion preserves choice slots: `{bald|hair}` becomes `{|hair}`, `{bald||hair}` becomes `{||hair}`, and `{bald}` becomes `{}` (one empty choice). Nested choices are supported. Delete can start an empty plan and can be saved inside Presets.
+
 ## Presets
 
 Create a reusable Scene fragment:
 
 ```text
-Scene Preset Input -> Scene Prompt / Matrix / Queue / Merge / Count / Reverse / Path / Empty Latent -> Scene Preset Output
+Scene Preset Input -> Scene Prompt / Matrix / Queue / Merge / Count / Reverse / Delete / Path / Empty Latent -> Scene Preset Output
 ```
 
 One editor workflow can contain several independent Preset branches. Set a Preset ID and name on the Output for the branch you want, then click **保存 (Save)**. Saving keeps only that Output's connected upstream branch; unrelated nodes and other Preset branches are not included.
@@ -186,6 +194,8 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Prompt Merge | Creates every combination of two Scene plans. |
 | Scene Prompt Queue | Appends up to ten Scene plans in input order. |
 | Scene Prompt Count | Multiplies the generation count for each row. |
+| Scene Prompt To Text | Outputs the current row or previous node contribution as positive/negative strings. |
+| Scene Prompt Delete | Removes exact tags from each prompt side, preserving empty choice slots. |
 | Scene Prompt Reverse | Swaps positive and negative prompts for the complete plan or only the immediately preceding Scene node. |
 | Scene Path | Adds output-folder parts without changing the prompt. |
 | Scene Empty Latent | Sets width, height, and batch size for the plan. |

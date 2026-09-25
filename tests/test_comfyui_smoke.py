@@ -60,6 +60,8 @@ class RealComfyUISmokeTests(unittest.TestCase):
 
     def test_registers_current_nodes_and_web_directory(self):
         self.assertIn("ScenePrompter", self.package.NODE_CLASS_MAPPINGS)
+        self.assertIn("ScenePromptDelete", self.package.NODE_CLASS_MAPPINGS)
+        self.assertIn("ScenePromptToText", self.package.NODE_CLASS_MAPPINGS)
         self.assertIn("ScenePromptCallback", self.package.NODE_CLASS_MAPPINGS)
         self.assertIn("ScenePromptCallbackDesktop", self.package.NODE_CLASS_MAPPINGS)
         self.assertIn("ScenePromptCallbackDiscord", self.package.NODE_CLASS_MAPPINGS)

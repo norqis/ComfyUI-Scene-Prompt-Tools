@@ -19,6 +19,7 @@ function functionSource(name) {
 }
 
 const context = {
+    sceneBatchSeedBase() { return 123456; },
     Date,
     Object,
     JSON,
@@ -198,7 +199,7 @@ context.installSceneBatchPromptCapture();
         } },
     } });
     assert.equal(standardScene.received.output["5"].inputs.current_index, 2, "normal Queue keeps the selected Scene row");
-    assert.equal(standardScene.received.output["5"].inputs.seed_base, 0, "normal Queue requests a fresh seed every time");
+    assert.equal(standardScene.received.output["5"].inputs.seed_base, 123456, "normal Queue shares a fresh positive seed");
     assert.equal(standardScene.received.output["5"].inputs.seed_base_literal, false);
 
     const continuousScene = await context.api.queuePrompt(0, { output: {

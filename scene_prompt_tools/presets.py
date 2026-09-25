@@ -25,6 +25,7 @@ from .nodes import (
     ScenePromptQueue,
     ScenePromptCounter,
     ScenePromptReverse,
+    ScenePromptDelete,
     ScenePromptCallback,
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
@@ -60,6 +61,7 @@ SAFE_NODE_CLASSES = {
     "ScenePrompterMerge": ScenePromptMerge,
     "ScenePromptCounter": ScenePromptCounter,
     "ScenePromptReverse": ScenePromptReverse,
+    "ScenePromptDelete": ScenePromptDelete,
     "ScenePrompterQueue": ScenePromptQueue,
     "SceneEmptyLatent": SceneEmptyLatent,
     "SceneApplyLora": SceneApplyLora,
@@ -97,6 +99,7 @@ DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePrompterMerge": "Scene Prompt Merge",
     "ScenePromptCounter": "Scene Prompt Count",
     "ScenePromptReverse": "Scene Prompt Reverse",
+    "ScenePromptDelete": "Scene Prompt Delete",
     "ScenePrompterQueue": "Scene Prompt Queue",
     "SceneEmptyLatent": "Scene Empty Latent",
     "SceneApplyModel": "Scene Apply Model",
@@ -1120,7 +1123,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             if _needs_workflow_preset_snapshots(nodes, expand_node_id)
             else []
         )
-        references = [*_find_references(scene_nodes), *workflow_references]
+        references = [*_find_references(nodes), *workflow_references]
         for reference_node_id, preset_id, _node in references:
             try:
                 _resolve_preset_tree(preset_id, resolved, [], user_id)

@@ -70,6 +70,7 @@ for (const name of [
     "cancelPendingSceneBatchRun",
     "activateNextSceneBatchRun",
     "cloneScenePromptPayload",
+    "syncSceneToTextInputs",
     "queueSingleScenePrompt",
 ]) {
     vm.runInContext(functionSource(name), context);
@@ -251,6 +252,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
         "sceneBatchNodeRunId",
         "sceneNodeForRun",
         "createSceneBatchRun",
+        "syncSceneToTextInputs",
         "prepareSceneBatchRunSnapshot",
         "activateNextSceneBatchRun",
     ]) {

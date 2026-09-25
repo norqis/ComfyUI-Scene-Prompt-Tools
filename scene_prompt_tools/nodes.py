@@ -25,10 +25,12 @@ from .prompt import (
     DEFAULT_SELECTED_JSON,
     SCENE_PROMPT_TYPE,
     _compose_prompt_parts,
+    _delete_prompt_parts,
     _expand_prompt_parts,
     _join_unique,
     _merge_positive_negative_parts,
     _parse_selection_json,
+    _prompt_override_key,
     _scene_prompt_change_key,
     _split_prompt,
 )
@@ -105,6 +107,9 @@ EXPAND_CALLBACK_TIMEOUT_SECONDS = 10
 REVERSE_SCOPE_ALL = "全てのノード"
 REVERSE_SCOPE_PREVIOUS = "直前のノード"
 REVERSE_SCOPE_CHOICES = (REVERSE_SCOPE_ALL, REVERSE_SCOPE_PREVIOUS)
+TEXT_SCOPE_ALL = "全てのノード"
+TEXT_SCOPE_PREVIOUS = "直前のノードのみ"
+TEXT_SCOPE_CHOICES = (TEXT_SCOPE_ALL, TEXT_SCOPE_PREVIOUS)
 MODEL_WEIGHT_RE = re.compile(r"(:\s*)([+-]?(?:\d+(?:\.\d+)?|\.\d+))(?=\s*\))")
 
 DEFAULT_MATRIX_JSON = "{\"version\":1,\"sets\":[]}"
@@ -538,7 +543,7 @@ def _slice_workflow_for_output(
 
 SCENE_NODE_TYPES = {
     "ScenePrompter", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePrompterExpand",
-    "ScenePromptCounter", "ScenePromptReverse", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
+    "ScenePromptCounter", "ScenePromptReverse", "ScenePromptDelete", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
     "SceneApplyModel", "SceneApplyLora",
     "ScenePromptCallback",
     "ScenePresetInput", "ScenePresetOutput", "ScenePresetReference",
@@ -574,7 +579,7 @@ def _visible_scene_source_ids(prompt, source_aliases=None):
     }
 
 
-def _replay_expand_values(scene_info, full_prompt, source_aliases=None):
+def _replay_expand_values(scene_info, full_prompt, source_aliases=None, retained_source_ids=None):
     """Rebase an execution-path replay onto just the rows saved in the PNG."""
     if not isinstance(scene_info, dict):
         return None
@@ -586,7 +591,7 @@ def _replay_expand_values(scene_info, full_prompt, source_aliases=None):
     repeat_index = scene_info.get("repeat_index")
     if type(row_index) is not int or type(repeat_index) is not int or row_index < 0 or repeat_index < 1:
         return None
-    selected_sources = _scene_source_ids(scene_info)
+    selected_sources = _scene_source_ids(scene_info) if retained_source_ids is None else retained_source_ids
     visible_sources = _visible_scene_source_ids(full_prompt, source_aliases)
 
     def is_retained(item):
@@ -662,6 +667,49 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
     return prompt, workflow
 
 
+def _text_replay_items(prompt, save_id, scene_info):
+    """Resolve each executed text consumer against its own original plan."""
+    result = {}
+    for node_id in _prompt_ancestor_ids(prompt, save_id):
+        node = prompt[node_id]
+        if node.get("class_type") != "ScenePromptToText":
+            continue
+        run_handle = str((scene_info or {}).get("run_handle") or "")
+        plan = get_run_plan_reference(run_handle, node_id) if run_handle else None
+        if plan is None:
+            raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
+        inputs = node.get("inputs", {})
+        item = _scene_prompt_item_for_index(None, inputs.get("current_index", 0), normalized=plan, strict=True)
+        seed_base = int(inputs.get("seed_base") or 0)
+        literal = _scene_bool(inputs.get("seed_base_literal", False))
+        if not literal and seed_base <= 0:
+            raise ValueError(f"Scene Prompt To Text {node_id} の自動シードを再現できません。生成経路の保存には正の seed_base または seed_base_literal が必要です。")
+        base_seed = seed_base % SEED_MODULO if literal else _auto_seed_base(seed_base)
+        result[node_id] = {
+            "_plan_ref": plan, "row_index": item["row_index"], "repeat_index": item["repeat_index"],
+            "source_node_ids": item["row"].get("source_node_ids", []),
+            "seed": (base_seed + item["global_index"]) % SEED_MODULO,
+        }
+    return result
+
+
+def _apply_text_replay_values(prompt, workflow, items, full_prompt, source_aliases=None):
+    retained = _visible_scene_source_ids(prompt, source_aliases)
+    workflow_nodes = {str(node.get("id")): node for node in (workflow or {}).get("nodes", [])}
+    for node_id, info in items.items():
+        if node_id not in prompt:
+            continue
+        values = _replay_expand_values(info, full_prompt, source_aliases, retained)
+        if values is None:
+            raise ValueError(f"Scene Prompt To Text {node_id} の再現用生成番号を算出できません。")
+        prompt[node_id].setdefault("inputs", {}).update(values)
+        widgets = workflow_nodes.get(node_id, {}).get("widgets_values")
+        if isinstance(widgets, list):
+            for name, index in (("current_index", 1), ("seed_base", 2), ("seed_base_literal", 3)):
+                if index < len(widgets):
+                    widgets[index] = values[name]
+
+
 def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=None):
     """Keep ordinary image ancestors, but only selected Scene-plan branches."""
     selected_scene_ids = _scene_source_ids(scene_info) if selected_scene_ids is None else selected_scene_ids
@@ -717,7 +765,7 @@ def _scene_prompt_input_links(prompt, node_id):
     )
 
 
-def _contract_superseded_model_sources(prompt, selected_scene_ids):
+def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=()):
     """Keep the row-order effective Apply Model while preserving Scene routes."""
     selected_order = list(dict.fromkeys(str(node_id) for node_id in selected_scene_ids if str(node_id).strip()))
     selected = set(selected_order)
@@ -728,7 +776,7 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids):
         node_id for node_id in selected_order
         if isinstance(prompt.get(node_id), dict) and prompt[node_id].get("class_type") == "SceneApplyModel"
     ]
-    superseded = set(model_ids[:-1])
+    superseded = set(model_ids[:-1]) - set(protected_source_ids)
 
     replacements = {}
 
@@ -876,6 +924,9 @@ def _metadata_for_save_mode(
     if metadata_mode == SAVE_METADATA_WORKFLOW and not expand_preset_contents:
         return prompt, extra_pnginfo
 
+    text_replay_items = _text_replay_items(prompt, unique_id, scene_info) if metadata_mode == SAVE_METADATA_EXECUTION_PATH else {}
+    text_source_ids = {source_id for info in text_replay_items.values() for source_id in _scene_source_ids(info)}
+
     if expand_preset_contents and isinstance(prompt, dict):
         has_prompt_reference = any(
             isinstance(node, dict) and node.get("class_type") == "ScenePresetReference"
@@ -922,21 +973,24 @@ def _metadata_for_save_mode(
         if metadata_mode == SAVE_METADATA_WORKFLOW:
             return expanded_prompt, expanded_extra
         selected_source_ids = _scene_source_id_list(scene_info)
-        replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases)
         selected_ids = [
             node_id
             for source_id in selected_source_ids
             for node_id, alias in source_aliases.items()
             if alias == source_id
         ]
+        text_ids = {node_id for node_id, alias in source_aliases.items() if alias in text_source_ids}
         contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
-            expanded_prompt, selected_ids,
+            expanded_prompt, selected_ids, text_ids,
         )
+        selected_ids.update(text_ids)
         contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements)
         ancestor_ids = _selected_ancestor_ids(
             contracted_prompt, unique_id, scene_info, selected_ids
         )
         saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
+        replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases,
+            _visible_scene_source_ids(saved_prompt, source_aliases) if text_replay_items else None)
         saved_extra = {
             key: value
             for key, value in expanded_extra.items()
@@ -952,6 +1006,7 @@ def _metadata_for_save_mode(
         _apply_replay_expand_values(
             saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
         )
+        _apply_text_replay_values(saved_prompt, saved_extra["workflow"], text_replay_items, expanded_prompt, source_aliases)
         return saved_prompt, saved_extra
 
     if metadata_mode == SAVE_METADATA_WORKFLOW:
@@ -959,11 +1014,13 @@ def _metadata_for_save_mode(
 
     selected_source_ids = _scene_source_id_list(scene_info)
     contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(
-        prompt, selected_source_ids,
+        prompt, selected_source_ids, text_source_ids,
     )
+    selected_sources.update(text_source_ids)
     ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)
     saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
-    replay_values = _replay_expand_values(scene_info, prompt)
+    replay_values = _replay_expand_values(scene_info, prompt, retained_source_ids=
+        _visible_scene_source_ids(saved_prompt) if text_replay_items else None)
     saved_extra = None
     if extra_pnginfo is not None:
         saved_extra = {
@@ -981,6 +1038,8 @@ def _metadata_for_save_mode(
         scene_info,
         replay_values,
     )
+    _apply_text_replay_values(saved_prompt, saved_extra.get("workflow") if isinstance(saved_extra, dict) else None,
+                              text_replay_items, prompt)
     return saved_prompt, saved_extra
 
 
@@ -1969,6 +2028,95 @@ class ScenePromptReverse:
 
         plan = transform(scene_prompt, reverse_row)
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
+
+
+class ScenePromptDelete:
+    DESCRIPTION = "入力されたpromptから、指定したタグだけを削除します。ポジティブとネガティブは各側だけに適用し、重みや大文字小文字を無視して完全一致で削除します。候補の空欄と順序は保持します。"
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "delete"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("STRING", {"default": "", "multiline": True, "display_name": "ポジティブから削除"}),
+                "negative": ("STRING", {"default": "", "multiline": True, "display_name": "ネガティブから削除"}),
+            },
+            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE,)},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, scene_prompt=None, positive="", negative="", **kwargs):
+        return json.dumps([_scene_prompt_change_key(scene_prompt), positive, negative], ensure_ascii=False)
+
+    def delete(self, positive="", negative="", scene_prompt=None, unique_id=None, source_node_id="", source_node_name=""):
+        keys = {
+            "positive_parts": {_prompt_override_key(part) for part in _split_prompt(positive)},
+            "negative_parts": {_prompt_override_key(part) for part in _split_prompt(negative)},
+        }
+
+        def delete_row(row, _item):
+            return {**row, **{side: _delete_prompt_parts(row[side], values) for side, values in keys.items()}}
+
+        plan = mark_prompt_passthrough(transform(scene_prompt, delete_row))
+        return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
+
+
+class ScenePromptToText:
+    DESCRIPTION = "現在の生成番号のpromptを通常の文字列として取り出します。対象を直前のノードの追加分だけに限定でき、候補はExpandと同じシードで確定します。"
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("positive", "negative")
+    FUNCTION = "to_text"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"scope": (TEXT_SCOPE_CHOICES, {"default": TEXT_SCOPE_ALL, "display_name": "対象"})},
+            "optional": {
+                "scene_prompt": (SCENE_PROMPT_TYPE,),
+                "current_index": ("INT", {"default": 0, "min": 0, "max": MAX_SAFE_INTEGER, "hidden": True}),
+                "seed_base": ("INT", {"default": 0, "min": 0, "max": SEED_MAX, "hidden": True}),
+                "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
+            },
+            "hidden": {
+                "run_handle": ("STRING", {"default": "", "hidden": True}),
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", **kwargs):
+        return "|".join([_scene_prompt_change_key(scene_prompt), scope, str(current_index),
+                         _seed_change_key(seed_base), str(_scene_bool(seed_base_literal)), str(run_handle)])
+
+    def to_text(self, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", unique_id=None):
+        if scope not in TEXT_SCOPE_CHOICES:
+            raise ValueError("Scene Prompt To Text の対象が不正です。")
+        plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
+        item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
+        row = item["row"]
+        positive, negative = row.get("positive_parts", []), row.get("negative_parts", [])
+        trace = row.get("prompt_trace")
+        if scope == TEXT_SCOPE_PREVIOUS and isinstance(trace, dict):
+            if trace["kind"] == "passthrough":
+                positive, negative = [], []
+            elif trace["kind"] == "delta":
+                positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
+        base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
+        seed = (base_seed + item["global_index"]) % SEED_MODULO
+        positive, negative = _merge_positive_negative_parts(
+            _expand_prompt_parts(positive, seed, "positive"),
+            _expand_prompt_parts(negative, seed, "negative"), [], [],
+        )
+        return _join_unique(positive, ", "), _join_unique(negative, ", ")
 
 
 class ScenePromptCounter:
