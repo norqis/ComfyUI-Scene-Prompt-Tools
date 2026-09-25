@@ -1199,7 +1199,7 @@ class ScenePresetTests(unittest.TestCase):
 
         self.assertEqual(sorted(status for _preset_id, status in results), ["rejected", "saved"])
 
-    def test_snapshot_ignores_references_outside_selected_expand_closure(self):
+    def test_snapshot_includes_all_references_in_sliced_prompt(self):
         self.save("reachable", basic_nodes("reachable"))
         api_graph = graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "reachable"}},
@@ -1207,8 +1207,8 @@ class ScenePresetTests(unittest.TestCase):
             "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "missing_preset"}},
             "21": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["20", 0]}},
         })
-        result = self.module.snapshot_presets_for_run("run-closure", api_graph, "11")
-        self.assertEqual([item["preset_id"] for item in result["presets"]], ["reachable"])
+        with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "missing_preset"):
+            self.module.snapshot_presets_for_run("run-closure", api_graph, "11")
         with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "missing_preset") as error:
             self.module.snapshot_presets_for_run("run-other-closure", api_graph, "21")
         self.assertEqual(error.exception.node_id, "20")

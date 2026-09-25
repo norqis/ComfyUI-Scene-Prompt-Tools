@@ -30,6 +30,8 @@ const context = {
     SCENE_SAVE_IMAGE_NODE_NAMES: new Set(["SceneSaveImage"]),
     SCENE_APPLY_LORA_NODE_NAMES: new Set(["SceneApplyLora"]),
     isSceneExpandNodeName(nodeName) { return nodeName === "ScenePrompterExpand"; },
+    SCENE_PROMPT_TO_TEXT_NODE_NAMES: new Set(["ScenePromptToText"]),
+    SCENE_PROMPT_DELETE_NODE_NAMES: new Set(["ScenePromptDelete"]),
     SCENE_EMPTY_LATENT_NODE_NAMES: new Set(),
     hideWidget(widget) { widget.hidden = true; },
     showWidget(widget) { widget.hidden = false; },

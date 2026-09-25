@@ -19,7 +19,7 @@ SELECTION_ITEM_KNOWN_KEYS = (
 )
 SELECTED_PART_REQUIRED_KEYS = {"index", "text"}
 SELECTED_PART_OPTIONAL_KEYS = {"weight", "missing"}
-CHOICE_RE = re.compile(r"\{([^{}]+)\}")
+CHOICE_RE = re.compile(r"\{([^{}]*)\}")
 
 
 def _split_prompt(text):
@@ -75,6 +75,48 @@ def _prompt_identity(part):
 
 def _prompt_override_key(part):
     return _prompt_identity(part)[0]
+
+
+def _delete_prompt_parts(parts, delete_keys):
+    """Delete exact tags inside choice slots without changing their positions."""
+    def delete_slot(slot):
+        original = _split_prompt(slot)
+        remaining = _delete_prompt_parts(original, delete_keys)
+        return slot if remaining == original else ", ".join(remaining)
+
+    def delete_choices(text):
+        result = []
+        start = 0
+        depth = 0
+        slots = []
+        slot_start = 0
+        for index, char in enumerate(text):
+            if char == "{":
+                if depth == 0:
+                    choice_start = index
+                    slot_start = index + 1
+                    slots = []
+                depth += 1
+            elif char == "|" and depth == 1:
+                slots.append(text[slot_start:index])
+                slot_start = index + 1
+            elif char == "}" and depth:
+                depth -= 1
+                if depth == 0:
+                    slots.append(text[slot_start:index])
+                    result.append(text[start:choice_start])
+                    result.append("{" + "|".join(delete_slot(slot) for slot in slots) + "}")
+                    start = index + 1
+        result.append(text[start:])
+        return "".join(result)
+
+    return [
+        rewritten
+        for part in parts
+        if _prompt_override_key(part) not in delete_keys
+        for rewritten in (delete_choices(part),)
+        if _prompt_override_key(rewritten) not in delete_keys
+    ]
 
 
 def _item_weight(item):

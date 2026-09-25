@@ -57,7 +57,7 @@ const applyContext = {
     JSON, Set, Map,
     isScenePromptNode(node) { return node.kind === "prompt"; },
     isPromptMatrixNode() { return false; }, isScenePathNode() { return false; },
-    isScenePromptMergeNode() { return false; }, isScenePromptReverseNode() { return false; },
+    isScenePromptMergeNode() { return false; }, isScenePromptReverseNode() { return false; }, isScenePromptDeleteNode() { return false; },
     isScenePromptCounterNode() { return false; }, isScenePromptQueueNode() { return false; },
     isSceneEmptyLatentNode() { return false; }, isScenePresetReferenceNode() { return false; },
     isScenePromptCallbackNode() { return false; },

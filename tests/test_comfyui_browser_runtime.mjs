@@ -724,6 +724,9 @@ window.__sceneSeedRuntimeTest = {
         };
         const scene = add("ScenePrompter");
         const expand = add("ScenePrompterExpand");
+        const text = add("ScenePromptToText");
+        const deletion = add("ScenePromptDelete");
+        const encoder = add("CLIPTextEncode");
         const sampler = add("KSampler");
         const decode = add("VAEDecode");
         const save = add("SceneSaveImage");
@@ -732,7 +735,11 @@ window.__sceneSeedRuntimeTest = {
                 to, to.inputs.findIndex((slot) => slot.name === input));
             if (!link) throw new Error(`Cannot connect ${output} to ${input}`);
         };
-        scene.connect(0, expand, expand.inputs.findIndex((slot) => slot.name === "scene_prompt"));
+        scene.connect(0, deletion, deletion.inputs.findIndex((slot) => slot.name === "scene_prompt"));
+        deletion.connect(0, expand, expand.inputs.findIndex((slot) => slot.name === "scene_prompt"));
+        deletion.connect(0, text, text.inputs.findIndex((slot) => slot.name === "scene_prompt"));
+        text.connect(0, encoder, encoder.inputs.findIndex((slot) => slot.name === "text"));
+        encoder.connect(0, sampler, sampler.inputs.findIndex((slot) => slot.name === "positive"));
         sampler.connect(0, decode, decode.inputs.findIndex((slot) => slot.name === "samples"));
         decode.connect(0, save, save.inputs.findIndex((slot) => slot.name === "images"));
         // Keep Expand on the saved image's execution path without linking its seed.
@@ -747,9 +754,22 @@ window.__sceneSeedRuntimeTest = {
         await window.app.queuePrompt(0, 1);
         await window.app.queuePrompt(0, 1);
         await window.__sceneSeedRuntimeTest.queueBatch(expand);
-        return { samplerId: sampler.id, seedIndex: sampler.widgets.findIndex((widget) => widget.name === "seed") };
+        return { textId: text.id, expandId: expand.id, deleteId: deletion.id, visible: text.widgets.filter(widget => !widget.hidden).map(widget => widget.name), deleteVisible: deletion.widgets.filter(widget => !widget.hidden).map(widget => widget.name), samplerId: sampler.id, seedIndex: sampler.widgets.findIndex((widget) => widget.name === "seed") };
     });
     assert.equal(seedRequests.length, 5, "two normal submissions and three batch submissions reach the API");
+    assert.deepEqual(seedNodes.visible, ["scope"]);
+    assert.deepEqual(seedNodes.deleteVisible, ["positive", "negative"]);
+    for (const [index, request] of seedRequests.entries()) {
+        const text = request.prompt[String(seedNodes.textId)];
+        const expand = request.prompt[String(seedNodes.expandId)];
+        assert.equal(text.inputs.seed_base, expand.inputs.seed_base);
+        assert.equal(text.inputs.seed_base_literal, false);
+        assert.equal(text.inputs.current_index, index < 3 ? 0 : index - 2);
+        if (index >= 3) {
+            assert.equal(text.inputs.scene_prompt, undefined);
+            assert.equal(request.prompt[String(seedNodes.deleteId)], undefined);
+        }
+    }
     const sentSeeds = seedRequests.map((request) => {
         const seed = request.prompt[String(seedNodes.samplerId)].inputs.seed;
         assert.ok(Number.isSafeInteger(seed));

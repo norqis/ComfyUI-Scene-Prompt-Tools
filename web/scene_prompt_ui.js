@@ -20,6 +20,8 @@ const PROMPT_MATRIX_NODE_NAMES = new Set(["SceneMatrix", "Scene Matrix"]);
 const SCENE_PATH_NODE_NAMES = new Set(["ScenePath", "Scene Path"]);
 const SCENE_PROMPT_MERGE_NODE_NAMES = new Set(["ScenePrompterMerge", "Scene Prompt Merge"]);
 const SCENE_PROMPT_COUNTER_NODE_NAMES = new Set(["ScenePromptCounter", "Scene Prompt Count"]);
+const SCENE_PROMPT_DELETE_NODE_NAMES = new Set(["ScenePromptDelete", "Scene Prompt Delete"]);
+const SCENE_PROMPT_TO_TEXT_NODE_NAMES = new Set(["ScenePromptToText", "Scene Prompt To Text"]);
 const SCENE_PROMPT_REVERSE_NODE_NAMES = new Set(["ScenePromptReverse", "Scene Prompt Reverse"]);
 const SCENE_PROMPT_QUEUE_NODE_NAMES = new Set(["ScenePrompterQueue", "Scene Prompt Queue"]);
 const SCENE_EMPTY_LATENT_NODE_NAMES = new Set(["SceneEmptyLatent", "Scene Empty Latent"]);
@@ -69,6 +71,7 @@ const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePrompterMerge",
     "ScenePromptCounter",
     "ScenePromptReverse",
+    "ScenePromptDelete",
     "ScenePrompterQueue",
     "SceneEmptyLatent",
     "SceneApplyModel",
@@ -86,6 +89,7 @@ const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
     "ScenePrompterMerge",
     "ScenePromptCounter",
     "ScenePromptReverse",
+    "ScenePromptDelete",
     "ScenePrompterQueue",
     "SceneEmptyLatent",
     "SceneApplyModel",
@@ -99,6 +103,8 @@ const NODE_NAMES = new Set([
     ...SCENE_PROMPT_MERGE_NODE_NAMES,
     ...SCENE_PROMPT_COUNTER_NODE_NAMES,
     ...SCENE_PROMPT_REVERSE_NODE_NAMES,
+    ...SCENE_PROMPT_DELETE_NODE_NAMES,
+    ...SCENE_PROMPT_TO_TEXT_NODE_NAMES,
     ...SCENE_PROMPT_QUEUE_NODE_NAMES,
     ...SCENE_EMPTY_LATENT_NODE_NAMES,
     ...SCENE_APPLY_MODEL_NODE_NAMES,
@@ -221,6 +227,8 @@ const SCENE_NODE_DISPLAY_NAMES = {
     ScenePrompterMerge: "Scene Prompt Merge",
     ScenePromptCounter: "Scene Prompt Count",
     ScenePromptReverse: "Scene Prompt Reverse",
+    ScenePromptDelete: "Scene Prompt Delete",
+    ScenePromptToText: "Scene Prompt To Text",
     ScenePrompterQueue: "Scene Prompt Queue",
     SceneEmptyLatent: "Scene Empty Latent",
     SceneApplyModel: "Scene Apply Model",
@@ -3983,7 +3991,11 @@ function hideNonSceneRoleWidgets(node) {
 }
 
 function hideSceneUtilityWidgets(node, nodeName) {
-    const visibleWidgets = SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
+    const visibleWidgets = SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeName)
+        ? new Set(["scope"])
+        : SCENE_PROMPT_DELETE_NODE_NAMES.has(nodeName)
+            ? new Set(["positive", "negative"])
+        : SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)
             ? new Set(["lora_name", "strength_model", "strength_clip", "model_mode"])
@@ -4902,6 +4914,10 @@ function isScenePromptCounterNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PROMPT_COUNTER_NODE_NAMES.has(name));
 }
 
+function isScenePromptDeleteNode(node) {
+    return nodeClassNames(node).some((name) => SCENE_PROMPT_DELETE_NODE_NAMES.has(name));
+}
+
 function isScenePromptReverseNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PROMPT_REVERSE_NODE_NAMES.has(name));
 }
@@ -4945,6 +4961,7 @@ function isScenePromptSourceNode(node) {
         || isScenePromptMergeNode(node)
         || isScenePromptCounterNode(node)
         || isScenePromptReverseNode(node)
+        || isScenePromptDeleteNode(node)
         || isScenePromptQueueNode(node)
         || isSceneEmptyLatentNode(node)
         || isSceneApplyModelNode(node)
@@ -5375,6 +5392,21 @@ function installScenePromptReverseWidgetSyncHandlers(node) {
         return result;
     };
     widget.scenePromptReverseSyncWrapped = true;
+}
+
+function installScenePromptDeleteWidgetSyncHandlers(node) {
+    for (const name of ["positive", "negative"]) {
+        const widget = findWidget(node, name);
+        if (!widget || widget.scenePromptDeleteSyncWrapped) continue;
+        const originalCallback = widget.callback;
+        widget.callback = function () {
+            const result = originalCallback?.apply(this, arguments);
+            clearSceneComputedCaches(node);
+            refreshDownstreamSceneNodes(node);
+            return result;
+        };
+        widget.scenePromptDeleteSyncWrapped = true;
+    }
 }
 
 function installScenePromptCounterWidgetSyncHandlers(node) {
@@ -6270,6 +6302,10 @@ function scenePromptSourceLocalCacheKey(node) {
             }),
         });
     }
+    if (isScenePromptDeleteNode(node)) {
+        return JSON.stringify({ type: "delete", id: node.id, mode: sceneNodeMode(node),
+            positive: findWidget(node, "positive")?.value, negative: findWidget(node, "negative")?.value, upstream: upstreamKey });
+    }
     if (isScenePromptReverseNode(node)) {
         return JSON.stringify({
             type: "reverse",
@@ -6440,6 +6476,8 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             result = source("scene_prompt") || sceneStatsSeed();
         } else if (node.class_type === "SceneEmptyLatent") {
             result = sceneStatsWithLatent(source("scene_prompt") || sceneStatsSeed(), clampSceneCount(apiInput(node, "batch_size"), 1));
+        } else if (node.class_type === "ScenePromptDelete") {
+            result = source("scene_prompt") || sceneStatsSeed();
         } else if (node.class_type === "ScenePromptReverse") {
             result = source("scene_prompt") || emptyScenePromptStats();
         } else if (node.class_type === "ScenePromptCounter") {
@@ -6628,6 +6666,9 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
         const first = firstSource ? scenePromptStats(firstSource, new Set(seen), memo) : sceneStatsSeed();
         const second = secondSource ? scenePromptStats(secondSource, new Set(seen), memo) : sceneStatsSeed();
         return finish(sceneStatsMerge(first, second));
+    }
+    if (isScenePromptDeleteNode(node)) {
+        return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     if (isScenePromptReverseNode(node)) {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : emptyScenePromptStats());
@@ -6858,6 +6899,9 @@ function scenePromptLineageKey(node) {
         if (isScenePromptCounterNode(current)) {
             parts.push(`count:${scenePromptCounterCount(current)}`);
         }
+        if (isScenePromptDeleteNode(current)) {
+            parts.push(JSON.stringify([findWidget(current, "positive")?.value, findWidget(current, "negative")?.value]));
+        }
         if (isScenePromptReverseNode(current)) {
             parts.push(`reverse:${scenePromptReverseScope(current)}`);
         }
@@ -7032,7 +7076,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         return finish(mergeScenePromptEntryLists(firstEntries, secondEntries, maxEntries));
     }
 
-    if (isScenePromptReverseNode(node)) {
+    if (isScenePromptReverseNode(node) || isScenePromptDeleteNode(node)) {
         const upstream = scenePromptInputSource(node);
         return finish(upstream
             ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
@@ -7704,6 +7748,7 @@ function sceneRunTargetNodes(apiGraph) {
         || node?.class_type === "SceneMatrix"
         || node?.class_type === "ScenePresetReference"
         || node?.class_type === "ScenePrompterExpand"
+        || node?.class_type === "ScenePromptToText"
     ));
 }
 
@@ -7713,6 +7758,7 @@ function applySceneRunHandle(apiGraph, runHandle) {
         || node?.class_type === "SceneMatrix"
         || node?.class_type === "ScenePresetReference"
         || node?.class_type === "ScenePrompterExpand"
+        || node?.class_type === "ScenePromptToText"
     ));
     for (const node of targetNodes) {
         node.inputs = node.inputs || {};
@@ -7956,12 +8002,14 @@ async function queueSingleScenePrompt() {
         expandPrompt.inputs.run_id = run.runId;
         expandPrompt.inputs.seed_base = run.currentSeed;
         expandPrompt.inputs.seed_base_literal = false;
+        syncSceneToTextInputs(run.cachedPrompt, run.nextIndex, run.currentSeed);
         const result = await api.queuePrompt(0, run.cachedPrompt);
         acceptSceneBatchPrompt(run, result);
         return result;
     }
 
     if (run?.firstPromptSnapshot) {
+        syncSceneToTextInputs(run.firstPromptSnapshot, 0, run.currentSeed);
         const result = await api.queuePrompt(0, run.firstPromptSnapshot);
         acceptSceneBatchPrompt(run, result);
         return result;
@@ -8008,6 +8056,9 @@ function buildSceneBatchCachedPrompt(prompt, expandNodeId) {
     }
 
     delete expandPrompt.inputs.scene_prompt;
+    for (const node of Object.values(output)) {
+        if (node?.class_type === "ScenePromptToText" && node.inputs) delete node.inputs.scene_prompt;
+    }
     const referenceCounts = new Map();
     for (const promptNode of Object.values(output)) {
         for (const inputSourceId of scenePromptInputSources(promptNode)) {
@@ -8042,13 +8093,27 @@ function buildSceneBatchCachedPrompt(prompt, expandNodeId) {
     return cached;
 }
 
+function syncSceneToTextInputs(prompt, currentIndex, seedBase) {
+    for (const node of Object.values(prompt?.output || {})) {
+        if (node?.class_type !== "ScenePromptToText") continue;
+        node.inputs = node.inputs || {};
+        Object.assign(node.inputs, { current_index: currentIndex, seed_base: seedBase, seed_base_literal: false });
+    }
+}
+
 function randomizeStandardSceneSeeds(prompt) {
-    for (const promptNode of Object.values(prompt?.output || {})) {
-        if (promptNode?.class_type !== "ScenePrompterExpand" || String(promptNode.inputs?.run_id || "")) {
-            continue;
-        }
-        promptNode.inputs.seed_base = 0;
-        promptNode.inputs.seed_base_literal = false;
+    const nodes = Object.values(prompt?.output || {});
+    const continuous = nodes.some((node) => node?.class_type === "ScenePrompterExpand" && String(node.inputs?.run_id || ""));
+    const targets = nodes.filter((node) => (
+        (node?.class_type === "ScenePrompterExpand" && !String(node.inputs?.run_id || ""))
+        || (node?.class_type === "ScenePromptToText" && !continuous)
+    ));
+    if (!targets.length) return;
+    const seed = sceneBatchSeedBase();
+    for (const node of targets) {
+        node.inputs = node.inputs || {};
+        node.inputs.seed_base = seed;
+        node.inputs.seed_base_literal = false;
     }
 }
 
@@ -9107,6 +9172,7 @@ function prepareSceneBatchRunSnapshot(run, node) {
             if (run.cancelled) {
                 return null;
             }
+            syncSceneToTextInputs(run.firstPromptSnapshot, 0, run.currentSeed);
             const resolved = await resolveScenePresetsForRun(run, run.firstPromptSnapshot, node.id);
             if (run.cancelled || !resolved) {
                 releaseCancelledSceneBatchRun(run);
@@ -10555,6 +10621,9 @@ function attachSceneUtilityNode(node, nodeName) {
     if (SCENE_PROMPT_REVERSE_NODE_NAMES.has(nodeName)) {
         installScenePromptReverseWidgetSyncHandlers(node);
     }
+    if (SCENE_PROMPT_DELETE_NODE_NAMES.has(nodeName)) {
+        installScenePromptDeleteWidgetSyncHandlers(node);
+    }
     hideSceneUtilityWidgets(node, nodeName);
     scheduleHideInternalDomWidgets();
     if (isSceneExpandNodeName(nodeName)) {
@@ -10631,6 +10700,8 @@ function attachSceneNode(node, nodeName) {
         SCENE_PROMPT_EXPAND_NODE_NAMES.has(nodeName)
         || SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)
         || SCENE_PROMPT_REVERSE_NODE_NAMES.has(nodeName)
+        || SCENE_PROMPT_DELETE_NODE_NAMES.has(nodeName)
+        || SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeName)
         || SCENE_APPLY_MODEL_NODE_NAMES.has(nodeName)
         || SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)
         || SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)

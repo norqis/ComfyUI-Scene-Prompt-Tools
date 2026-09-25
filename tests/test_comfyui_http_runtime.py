@@ -26,6 +26,7 @@ SCENE_RUN_NODE_CLASSES = {
     "SceneMatrix",
     "ScenePresetReference",
     "ScenePrompterExpand",
+    "ScenePromptToText",
 }
 
 
@@ -598,6 +599,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         cls.lazy_test_node_dir.mkdir()
         (cls.lazy_test_node_dir / "__init__.py").write_text(
             '''from pathlib import Path
+import json
 import folder_paths
 import nodes as comfy_nodes
 
@@ -633,6 +635,17 @@ class TestSceneLoraLoader:
             handle.write("lora:" + lora_name + "\\n")
         return model, clip
 
+class TestSceneTextImage:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"image": ("IMAGE",), "positive": ("STRING",), "negative": ("STRING",), "log_path": ("STRING",)}}
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "consume"
+    CATEGORY = "test"
+    def consume(self, image, positive, negative, log_path):
+        Path(log_path).write_text(json.dumps([positive, negative]), encoding="utf-8")
+        return (image,)
+
 class TestSceneModelSink:
     @classmethod
     def INPUT_TYPES(cls):
@@ -651,6 +664,7 @@ comfy_nodes.NODE_CLASS_MAPPINGS["LoraLoader"] = TestSceneLoraLoader
 NODE_CLASS_MAPPINGS = {
     "TestSceneModelBundle": TestSceneModelBundle,
     "TestSceneModelSink": TestSceneModelSink,
+    "TestSceneTextImage": TestSceneTextImage,
 }
 ''',
             encoding="utf-8",
@@ -1614,6 +1628,48 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(payload["exec_seed"], original_second["exec_seed"])
             self.assertEqual(payload["exec_current_count"], "1")
             self.assertEqual(payload["exec_total_count"], "1")
+
+    def test_http_to_text_delete_cached_plan_and_execution_png_replay(self):
+        from PIL import Image
+        marker = self.base / "text-result.json"
+        graph = {
+            "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "{bald|hair}, coat", "negative_base": "{coat|bad}"}},
+            "2": {"class_type": "ScenePromptDelete", "inputs": {"scene_prompt": ["1", 0], "positive": "bald", "negative": ""}},
+            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 3}},
+            "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0], "current_index": 0, "run_id": "text-http", "seed_base": 100, "timestamp_dir": False}},
+            "5": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["3", 0], "scope": "全てのノード", "current_index": 0, "seed_base": 100}},
+            "6": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "7": {"class_type": "TestSceneTextImage", "inputs": {"image": ["6", 0], "positive": ["5", 0], "negative": ["5", 1], "log_path": str(marker)}},
+            "8": {"class_type": "SceneSaveImage", "inputs": {"images": ["7", 0], "scene_info": ["4", 2], "path": "text-runtime", "metadata_mode": "生成経路ノードのみ"}},
+        }
+        handle, workflow = self._prepare_callback_run(graph, "4")
+        try:
+            self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+            cached = copy.deepcopy(graph)
+            for node_id in ("1", "2", "3"): del cached[node_id]
+            for node_id in ("4", "5"):
+                cached[node_id]["inputs"].pop("scene_prompt")
+                cached[node_id]["inputs"].update(current_index=2, seed_base=200)
+            self._queue_callback_graph(cached, handle, workflow)
+            expected = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertNotIn("bald", expected[0])
+            files = list((self.base / "output" / "text-runtime").glob("*.png"))
+            self.assertEqual(len(files), 2)
+            with Image.open(max(files, key=lambda path: path.stat().st_mtime_ns)) as image:
+                replay = json.loads(image.text["prompt"])
+                replay_workflow = json.loads(image.text["workflow"])
+            self.assertIn("2", replay, "cached PNG restores the Delete ancestor")
+            self.assertEqual(replay["5"]["inputs"]["current_index"], 2)
+            self.assertEqual(replay["5"]["inputs"]["seed_base"], 200)
+            replay["8"]["inputs"]["path"] = "text-replay"
+            replay_handle, replay_workflow = self._prepare_callback_run(replay, "4", replay_workflow)
+            try:
+                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected)
+            finally:
+                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_http_prompt_history_two_outputs_and_metadata_modes(self):
         for index, mode in enumerate(("ワークフロー全体", "生成経路ノードのみ", "プロンプトのみ"), start=1):
