@@ -167,6 +167,9 @@ export const api = {
     let payload = { items: [] };
     let status = 200;
     if (url.includes("/scene_prompt/items")) payload = { items: promptItems };
+    if (url.startsWith("/scene_prompt/loras/info?")) payload = {
+      name: "style.safetensors", sha256: "A".repeat(64), trigger_phrases: ["Local Tag", "BELLE ZZZ"],
+    };
     if (url === "/scene_prompt/items" && options.method === "POST") {
       const request = JSON.parse(options.body || "{}");
       if (request.name === "Failure") {
@@ -713,6 +716,9 @@ try {
                     { name: "lora_name", type: "combo", value: "style.safetensors", options: {} },
                     { name: "strength_model", type: "number", value: 0.8, options: {} },
                     { name: "strength_clip", type: "number", value: 0.7, options: {} },
+                    { name: "model_mode", type: "combo", value: "Anima", options: {} },
+                    { name: "positive", type: "text", value: "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", options: {} },
+                    { name: "negative", type: "text", value: "bad", options: {} },
                 ];
                 this.widgets_values = this.widgets.map((widget) => widget.value);
             }
@@ -731,18 +737,60 @@ try {
         const restoredLora = new SceneApplyLoraNode();
         restoredLora.onNodeCreated();
         restoredLora.configure(savedLora);
+        const legacyLora = new SceneApplyLoraNode();
+        legacyLora.onNodeCreated();
+        legacyLora.configure({ widgets_values: ["old.safetensors", 0.4, 0.3, "Illustrious"] });
+        const linkedLora = new SceneApplyLoraNode();
+        linkedLora.onNodeCreated();
+        linkedLora.inputs.push({ name: "model_mode", link: 17 });
+        linkedLora.configure({ widgets_values: ["linked.safetensors", 0.6, 0.5, null, "front", "back"] });
         window.__sceneApplyLoraRoundTrip = {
             visible: applyLora.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
             saved: savedLora.widgets_values,
-            restored: restoredLora.widgets.map((widget) => widget.value),
+            restored: restoredLora.serialize().widgets_values,
+            legacy: legacyLora.serialize().widgets_values,
+            linked: linkedLora.serialize().widgets_values,
+            copied: (() => { const copy = new SceneApplyLoraNode(); copy.onNodeCreated(); copy.configure(linkedLora.serialize()); return copy.serialize().widgets_values; })(),
         };
+        window.__sceneLoraTestNode = applyLora;
         window.__scenePromptTestNode = node;
         node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
     });
     const loraRoundTrip = await page.evaluate(() => window.__sceneApplyLoraRoundTrip);
-    assert.deepEqual(loraRoundTrip.visible, ["lora_name", "strength_model", "strength_clip"]);
-    assert.deepEqual(loraRoundTrip.saved, ["style.safetensors", 0.8, 0.7]);
-    assert.deepEqual(loraRoundTrip.restored, ["style.safetensors", 0.8, 0.7]);
+    assert.deepEqual(loraRoundTrip.visible, ["lora_name", "strength_model", "strength_clip", "詳細確認", "positive", "negative", "model_mode"]);
+    assert.deepEqual(loraRoundTrip.saved, ["style.safetensors", 0.8, 0.7, "Anima", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "bad"]);
+    assert.deepEqual(loraRoundTrip.restored, loraRoundTrip.saved);
+    assert.deepEqual(loraRoundTrip.legacy, ["old.safetensors", 0.4, 0.3, "Illustrious", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "bad"]);
+    assert.deepEqual(loraRoundTrip.linked, ["linked.safetensors", 0.6, 0.5, null, "front", "back"]);
+    assert.deepEqual(loraRoundTrip.copied, loraRoundTrip.linked);
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("/scene_prompt/loras/info?"))), false);
+    await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ id: 20, modelId: 10, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle"] }),
+    }));
+    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback());
+    const loraDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
+    await loraDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    assert.equal(await loraDialog.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"),
+        "https://civitai.com/models/10?modelVersionId=20");
+    assert.equal(await loraDialog.locator(".pc-lora-word").count(), 4, "local and Civitai words are deduplicated");
+    const injectWord = async (word) => loraDialog.locator(".pc-lora-word")
+        .filter({ has: page.locator("span").filter({ hasText: new RegExp(`^${word}$`, "i") }) })
+        .getByRole("button", { name: "注入" }).click();
+    await injectWord("Belle ZZZ");
+    assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.name === "positive").value),
+        "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "weighted identity is not added twice");
+    await injectWord("Local Tag");
+    await injectWord("Belle");
+    const afterInjection = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
+    assert.equal(afterInjection[4], "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra, Local Tag, Belle");
+    assert.equal(afterInjection[5], "bad", "injection leaves negative unchanged");
+    await page.keyboard.press("Escape");
+    assert.equal(await page.getByRole("dialog", { name: "LoRA 詳細確認" }).count(), 0);
+    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback());
+    await loraDialog.waitFor();
+    await page.evaluate(() => window.__sceneLoraTestNode.onRemoved());
+    assert.equal(await loraDialog.count(), 0, "removing the node cleans up its modal");
     await page.getByText("Outfit", { exact: false }).click();
     const candidate = page.getByTitle("summer dress", { exact: true });
     await candidate.click();
