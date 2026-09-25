@@ -2298,8 +2298,8 @@ class SceneApplyLora:
             "optional": {
                 "scene_prompt": (SCENE_PROMPT_TYPE,),
                 "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
-                "positive": ("STRING", {"default": "", "multiline": True, "display_name": "ポジティブ"}),
-                "negative": ("STRING", {"default": "", "multiline": True, "display_name": "ネガティブ"}),
+                "positive": ("STRING", {"default": "", "multiline": True, "display_name": "ポジティブテキスト", "label": "ポジティブテキスト"}),
+                "negative": ("STRING", {"default": "", "multiline": True, "display_name": "ネガティブテキスト", "label": "ネガティブテキスト"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
