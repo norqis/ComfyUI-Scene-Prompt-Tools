@@ -489,6 +489,40 @@ export function injectStyle() {
             pointer-events: none !important;
             visibility: hidden !important;
         }
+        .pc-lora-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 100002;
+            display: grid;
+            place-items: center;
+            background: rgba(0, 0, 0, .55);
+        }
+        .pc-lora-dialog {
+            box-sizing: border-box;
+            width: min(480px, calc(100vw - 24px));
+            max-height: calc(100vh - 24px);
+            overflow: auto;
+            padding: 14px;
+            border: 1px solid #4a505b;
+            border-radius: 7px;
+            background: #202329;
+            color: #e7e7e7;
+            box-shadow: 0 14px 36px rgba(0, 0, 0, .55);
+            font: 12px/1.4 system-ui, sans-serif;
+        }
+        .pc-lora-head, .pc-lora-word {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .pc-lora-content {
+            display: grid;
+            gap: 10px;
+            margin-top: 14px;
+        }
+        .pc-lora-word span { overflow-wrap: anywhere; }
+        .pc-lora-dialog a { color: #9db8ec; }
     `;
     if (!style.parentNode) {
         document.head.appendChild(style);

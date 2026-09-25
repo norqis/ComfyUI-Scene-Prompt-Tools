@@ -8,7 +8,7 @@ import json
 
 
 SCENE_PROMPT_TYPE = "SCENE_PROMPT"
-PLAN_VERSION = 5
+PLAN_VERSION = 6
 MODEL_MODE_ILLUSTRIOUS = "Illustrious"
 MODEL_MODE_ANIMA = "Anima"
 MODEL_MODE_CHOICES = (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
@@ -29,12 +29,13 @@ SOURCE_KEYS = {"index", "row_count", "total_images", "total_batches"}
 SET_REF_KEYS = {"category", "name", "path_label", "node_id"}
 CALLBACK_KEYS = {
     "callback_node_id", "config", "frequency", "timeout_seconds", "failure_mode",
-    "current_positive_parts", "current_negative_parts", "current_source_node_ids",
+    "current_positive_parts", "current_negative_parts", "current_source_node_ids", "current_loras",
 }
 MODEL_LINK_KEYS = {"model", "clip", "vae"}
-LORA_KEYS = {"name", "strength_model", "strength_clip", "model_mode"}
+LORA_KEYS = {"name", "strength_model", "strength_clip", "model_mode", "positive_parts", "negative_parts"}
 PROMPT_TRACE_KEYS = {
     "kind", "before_positive_parts", "before_negative_parts", "added_positive_parts", "added_negative_parts",
+    "lora_index",
 }
 PROMPT_TRACE_KINDS = {"delta", "passthrough", "whole"}
 
@@ -105,8 +106,12 @@ def _clone_prompt_trace(value):
     cloned = {"kind": kind}
     cloned.update({
         key: _require_string_list(value[key], f"Scene Prompt row prompt_trace {key}")
-        for key in PROMPT_TRACE_KEYS - {"kind"}
+        for key in PROMPT_TRACE_KEYS - {"kind", "lora_index"}
     })
+    index = value["lora_index"]
+    if index is not None and (type(index) is not int or index < 0):
+        raise ScenePlanError("Scene Prompt row prompt_trace lora_index is invalid.")
+    cloned["lora_index"] = index
     return cloned
 
 
@@ -144,7 +149,11 @@ def _clone_loras(value):
             if not isinstance(strength, (int, float)) or isinstance(strength, bool):
                 raise ScenePlanError(f"Scene Prompt row lora {key} must be a number.")
             strengths[key] = float(strength)
-        result.append({"name": name, **strengths, "model_mode": model_mode})
+        result.append({
+            "name": name, **strengths, "model_mode": model_mode,
+            "positive_parts": _require_string_list(item["positive_parts"], "Scene Prompt row lora positive_parts"),
+            "negative_parts": _require_string_list(item["negative_parts"], "Scene Prompt row lora negative_parts"),
+        })
     return result
 
 
@@ -189,6 +198,7 @@ def _clone_row(row):
             "current_positive_parts": _require_string_list(callback["current_positive_parts"], "Scene Prompt callback current_positive_parts"),
             "current_negative_parts": _require_string_list(callback["current_negative_parts"], "Scene Prompt callback current_negative_parts"),
             "current_source_node_ids": _require_string_list(callback["current_source_node_ids"], "Scene Prompt callback current_source_node_ids"),
+            "current_loras": _clone_loras(callback["current_loras"]),
         })
     cloned = {
         "labels": _require_string_list(row["labels"], "Scene Prompt row labels"),
@@ -211,6 +221,9 @@ def _clone_row(row):
         cloned["model_links"] = _clone_model_links(row["model_links"])
     if "loras" in row:
         cloned["loras"] = _clone_loras(row["loras"])
+    if "prompt_trace" in cloned and cloned["prompt_trace"]["lora_index"] is not None:
+        if cloned["prompt_trace"]["lora_index"] >= len(cloned.get("loras", [])):
+            raise ScenePlanError("Scene Prompt row prompt_trace lora_index is invalid.")
     return cloned
 
 
@@ -356,14 +369,18 @@ def with_prompt_trace(
     added_positive_parts=None,
     added_negative_parts=None,
     kind="delta",
+    lora_index=None,
 ):
     """Attach runtime-only prompt provenance for the immediately preceding Scene node."""
     current = _clone_row(row)
     before = _clone_row(before_row if before_row is not None else empty_row())
     if kind not in PROMPT_TRACE_KINDS:
         raise ScenePlanError("Scene Prompt row prompt_trace kind is invalid.")
+    if lora_index is not None and (type(lora_index) is not int or lora_index < 0):
+        raise ScenePlanError("Scene Prompt row prompt_trace lora_index is invalid.")
     current["prompt_trace"] = {
         "kind": kind,
+        "lora_index": lora_index,
         "before_positive_parts": list(before["positive_parts"]),
         "before_negative_parts": list(before["negative_parts"]),
         "added_positive_parts": _require_string_list(
@@ -442,6 +459,7 @@ def append_callback(plan, callback_node_id, config, frequency, timeout_seconds, 
             "current_positive_parts": list(row["positive_parts"]),
             "current_negative_parts": list(row["negative_parts"]),
             "current_source_node_ids": list(row["source_node_ids"]),
+            "current_loras": _clone_loras(row.get("loras", [])),
         }
         return {**row, "callbacks": [*row["callbacks"], descriptor]}
     return mark_prompt_passthrough(transform(plan, add))

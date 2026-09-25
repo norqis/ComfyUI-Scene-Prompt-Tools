@@ -444,7 +444,12 @@ function testNonSceneQueueSkipsRunPreparation() {
 
 function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     let previousCalls = 0;
-    const node = { sceneRefreshTimer: 0, onRemoved() { previousCalls += 1; } };
+    let loraModalCleanupCalls = 0;
+    const node = {
+        sceneRefreshTimer: 0,
+        sceneLoraDetailsCleanup() { loraModalCleanupCalls += 1; },
+        onRemoved() { previousCalls += 1; },
+    };
     const context = {
         Set,
         clearTimeout() {},
@@ -463,6 +468,7 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     };
     vm.createContext(context);
     vm.runInContext(functionSource("popupContextReferencesNode"), context);
+    vm.runInContext(functionSource("closeSceneLoraDetails"), context);
     vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
     context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
     context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
@@ -470,6 +476,8 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     assert.equal(previousCalls, 1);
     assert.equal(context.closeCalls, 1);
     assert.equal(context.expandCancels, 1);
+    assert.equal(loraModalCleanupCalls, 1, "node removal disposes an open LoRA modal exactly once");
+    assert.equal(node.sceneLoraDetailsCleanup, null);
     assert.equal(context.sceneTitleSyncNodes.has(node), false);
     assert.equal(context.sceneLoadedRefreshNodes.has(node), false);
     assert.equal(context.sceneDownstreamRefreshSources.has(node), false);
@@ -494,6 +502,7 @@ function testWorkflowTabLoadDoesNotCancelExpandRun() {
         cancelSceneBatchRunForNode() { context.cancellations += 1; },
     };
     vm.createContext(context);
+    vm.runInContext(functionSource("closeSceneLoraDetails"), context);
     vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
     context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
     node.onRemoved();

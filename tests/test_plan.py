@@ -34,15 +34,21 @@ def prompt_row(label):
 
 
 class ScenePlanTests(unittest.TestCase):
-    def test_lora_descriptors_require_a_known_model_mode_in_version_five(self):
-        self.assertEqual(plan_module.PLAN_VERSION, 5)
-        descriptor = {"name": "lora", "strength_model": 1.0, "strength_clip": 1.0, "model_mode": "Anima"}
+    def test_lora_descriptors_require_a_known_model_mode_in_version_six(self):
+        self.assertEqual(plan_module.PLAN_VERSION, 6)
+        descriptor = {"name": "lora", "strength_model": 1.0, "strength_clip": 1.0, "model_mode": "Anima", "positive_parts": [], "negative_parts": []}
         for mode in ("Illustrious", "Anima"):
             row = {**empty_row(), "loras": [{**descriptor, "model_mode": mode}]}
             self.assertEqual(make_plan([{"row": row, "count": 1}])["rows"][0]["row"]["loras"][0]["model_mode"], mode)
         for mode in (None, "Unknown", "", 1):
             with self.subTest(mode=mode), self.assertRaises(ScenePlanError):
                 make_plan([{"row": {**empty_row(), "loras": [{**descriptor, "model_mode": mode}]}, "count": 1}])
+        for invalid in (None, "prompt", [1]):
+            with self.subTest(invalid=invalid), self.assertRaises(ScenePlanError):
+                make_plan([{"row": {**empty_row(), "loras": [{**descriptor, "positive_parts": invalid}]}, "count": 1}])
+        without_text = {key: value for key, value in descriptor.items() if key != "negative_parts"}
+        with self.assertRaises(ScenePlanError):
+            make_plan([{"row": {**empty_row(), "loras": [without_text]}, "count": 1}])
         del descriptor["model_mode"]
         with self.assertRaises(ScenePlanError):
             make_plan([{"row": {**empty_row(), "loras": [descriptor]}, "count": 1}])

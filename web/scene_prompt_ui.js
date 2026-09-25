@@ -3992,13 +3992,13 @@ function hideNonSceneRoleWidgets(node) {
 
 function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeName)
-        ? new Set(["scope"])
+        ? new Set(["scope", "model_mode"])
         : SCENE_PROMPT_DELETE_NODE_NAMES.has(nodeName)
             ? new Set(["positive", "negative"])
         : SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)
-            ? new Set(["lora_name", "strength_model", "strength_clip", "model_mode"])
+            ? new Set(["lora_name", "strength_model", "strength_clip", "model_mode", "positive", "negative"])
         : isSceneExpandNodeName(nodeName)
             ? new Set([
                 "timestamp_dir", "prefix", "counter_position", "model_mode", "replace_underscores", "convert_anima_weights",
@@ -4896,6 +4896,181 @@ function sceneExpandConfigureValues(config) {
         converted[0] = 0;
     }
     return { ...config, widgets_values: converted };
+}
+
+const SCENE_LORA_STORED_WIDGET_NAMES = ["lora_name", "strength_model", "strength_clip", "model_mode", "positive", "negative"];
+
+function sceneLoraStoredValues(node) {
+    return SCENE_LORA_STORED_WIDGET_NAMES.map((name) => {
+        const widget = findWidget(node, name);
+        if (node.inputs?.some((input) => input.name === name && input.link != null)) return null;
+        return widget?.value ?? (name === "positive" || name === "negative" ? "" : null);
+    });
+}
+
+function sceneLoraConfigureValues(node, config) {
+    const stored = config?.widgets_values;
+    if (!Array.isArray(stored)) return config;
+    const named = Object.fromEntries(SCENE_LORA_STORED_WIDGET_NAMES.map((name, index) => [name, stored[index]]));
+    const values = (node.widgets || []).map((widget) => {
+        if (widget.sceneRole === "lora_details") return null;
+        if (!(widget.name in named)) return widget.value;
+        const value = named[widget.name];
+        return value === undefined ? widget.value : value;
+    });
+    return { ...config, widgets_values: values };
+}
+
+function sceneLoraSplitPrompt(value) {
+    const parts = [];
+    let start = 0;
+    const stack = [];
+    const closing = { "(": ")", "[": "]", "{": "}", "<": ">" };
+    for (let i = 0; i < value.length; i++) {
+        const char = value[i];
+        if (closing[char]) stack.push(closing[char]);
+        else if (char === stack.at(-1)) stack.pop();
+        else if ((char === "," || char === "\n") && !stack.length) {
+            parts.push(value.slice(start, i));
+            start = i + 1;
+        }
+    }
+    parts.push(value.slice(start));
+    return parts;
+}
+
+function sceneLoraWordIdentity(value) {
+    let word = String(value || "").trim();
+    while (word.startsWith("(") && word.endsWith(")")) {
+        word = word.slice(1, -1).replace(/:\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/u, "").trim();
+    }
+    return word.toLocaleLowerCase();
+}
+
+function injectSceneLoraWord(node, value) {
+    const word = String(value || "").trim();
+    const widget = findWidget(node, "positive");
+    if (!word || !widget) return false;
+    const current = String(widget.value || "");
+    const identity = sceneLoraWordIdentity(word);
+    if (sceneLoraSplitPrompt(current).some((part) => sceneLoraWordIdentity(part) === identity)) return false;
+    const separator = !current.trim() || /[,\n]\s*$/u.test(current) ? "" : ", ";
+    return setWidgetValue(node, "positive", `${current.trim() ? current : ""}${separator}${word}`);
+}
+
+function closeSceneLoraDetails(node) {
+    node.sceneLoraDetailsCleanup?.();
+    node.sceneLoraDetailsCleanup = null;
+}
+
+async function openSceneLoraDetails(node) {
+    closeSceneLoraDetails(node);
+    injectStyle();
+    const overlay = document.createElement("div");
+    overlay.className = "pc-lora-overlay";
+    const dialog = document.createElement("div");
+    dialog.className = "pc-lora-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "LoRA 詳細確認");
+    const title = document.createElement("strong");
+    title.textContent = "LoRA 詳細確認";
+    const close = document.createElement("button");
+    close.className = "pc-button";
+    close.type = "button";
+    close.textContent = "閉じる";
+    const head = document.createElement("div");
+    head.className = "pc-lora-head";
+    head.append(title, close);
+    const content = document.createElement("div");
+    content.className = "pc-lora-content";
+    content.textContent = "情報を取得しています…";
+    dialog.append(head, content);
+    overlay.append(dialog);
+    document.body.append(overlay);
+    const onKey = (event) => { if (event.key === "Escape") closeSceneLoraDetails(node); };
+    const cleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+    node.sceneLoraDetailsCleanup = cleanup;
+    close.onclick = () => closeSceneLoraDetails(node);
+    overlay.onclick = (event) => { if (event.target === overlay) closeSceneLoraDetails(node); };
+    document.addEventListener("keydown", onKey);
+    close.focus();
+    const selectedName = String(findWidget(node, "lora_name")?.value || "").trim();
+    try {
+        if (!selectedName) throw new Error("LoRAを選択してください。");
+        const response = await api.fetchApi(`/scene_prompt/loras/info?name=${encodeURIComponent(selectedName)}`);
+        const local = await readApiJson(response, "LoRA情報を取得できませんでした");
+        if (!response.ok) throw new Error(local.error || "LoRA情報を取得できませんでした。");
+        let version = null;
+        let civitaiError = "";
+        if (local.sha256) {
+            try {
+                const civitaiResponse = await fetch(`https://civitai.com/api/v1/model-versions/by-hash/${encodeURIComponent(local.sha256)}`);
+                if (!civitaiResponse.ok) throw new Error(`HTTP ${civitaiResponse.status}`);
+                version = await civitaiResponse.json();
+            } catch (_error) {
+                civitaiError = "Civitai情報を取得できませんでした。";
+            }
+        }
+        if (node.sceneLoraDetailsCleanup !== cleanup) return;
+        content.replaceChildren();
+        const filename = document.createElement("div");
+        filename.textContent = local.name || selectedName;
+        content.append(filename);
+        if (Number.isSafeInteger(Number(version?.modelId)) && Number(version.modelId) > 0
+            && Number.isSafeInteger(Number(version?.id)) && Number(version.id) > 0) {
+            const link = document.createElement("a");
+            link.href = `https://civitai.com/models/${version.modelId}?modelVersionId=${version.id}`;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "Civitaiで見る";
+            content.append(link);
+        } else if (civitaiError) {
+            const message = document.createElement("div");
+            message.textContent = civitaiError;
+            content.append(message);
+        }
+        const label = document.createElement("strong");
+        label.textContent = "Trigger Words";
+        content.append(label);
+        const words = [...(Array.isArray(version?.trainedWords) ? version.trainedWords : []),
+            ...(Array.isArray(local.trigger_phrases) ? local.trigger_phrases : [])];
+        const unique = [...new Map(words.map((word) => String(word || "").trim()).filter(Boolean)
+            .map((word) => [sceneLoraWordIdentity(word), word])).values()];
+        if (!unique.length) {
+            const empty = document.createElement("div");
+            empty.textContent = "登録された Trigger Word はありません。";
+            content.append(empty);
+        }
+        for (const word of unique) {
+            const row = document.createElement("div");
+            row.className = "pc-lora-word";
+            const text = document.createElement("span");
+            text.textContent = word;
+            const inject = document.createElement("button");
+            inject.className = "pc-button";
+            inject.type = "button";
+            inject.textContent = "注入";
+            inject.onclick = () => injectSceneLoraWord(node, word);
+            row.append(text, inject);
+            content.append(row);
+        }
+    } catch (error) {
+        if (node.sceneLoraDetailsCleanup === cleanup) content.textContent = error.message;
+    }
+}
+
+function ensureSceneLoraControls(node) {
+    const button = addSceneButton(node, "lora_details", "詳細確認", () => openSceneLoraDetails(node));
+    applyWidgetLabel(findWidget(node, "positive"), "ポジティブテキスト");
+    applyWidgetLabel(findWidget(node, "negative"), "ネガティブテキスト");
+    const order = ["lora_name", "strength_model", "strength_clip", "lora_details", "positive", "negative", "model_mode"];
+    const rank = (widget) => order.indexOf(widget.sceneRole === "lora_details" ? "lora_details" : widget.name);
+    const previous = new Map(node.widgets.map((widget, index) => [widget, node.widgets_values?.[index] ?? widget.value]));
+    node.widgets.sort((a, b) => (rank(a) >= 0 ? rank(a) : order.length) - (rank(b) >= 0 ? rank(b) : order.length));
+    if (Array.isArray(node.widgets_values)) node.widgets_values = node.widgets.map((widget) => previous.get(widget));
+    button.serialize = false;
+    node.setDirtyCanvas?.(true, true);
 }
 
 function isSceneExpandNode(node) {
@@ -10619,6 +10794,9 @@ function attachSceneUtilityNode(node, nodeName) {
     if (SCENE_APPLY_MODEL_NODE_NAMES.has(nodeName)) {
         moveScenePromptInputFirst(node);
     }
+    if (SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)) {
+        ensureSceneLoraControls(node);
+    }
     if (SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)) {
         installSceneEmptyLatentWidgetSyncHandlers(node);
     }
@@ -10663,6 +10841,7 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         this.sceneRefreshTimer = null;
         this.scenePendingRefreshOptions = null;
         invalidatePopupRequests(this);
+        closeSceneLoraDetails(this);
         if (popupContextReferencesNode(activePopupContext, this)) {
             closeAllPopups();
         }
@@ -11125,6 +11304,26 @@ app.registerExtension({
             nodeType.prototype.configure = function (...args) {
                 args[0] = sceneExpandConfigureValues(args[0]);
                 return configure?.apply(this, args);
+            };
+        }
+
+        if (nodeData.name === "SceneApplyLora") {
+            const configure = nodeType.prototype.configure;
+            const serialize = nodeType.prototype.serialize;
+            nodeType.prototype.configure = function (...args) {
+                const stored = args[0]?.widgets_values;
+                args[0] = sceneLoraConfigureValues(this, args[0]);
+                const result = configure?.apply(this, args);
+                if (Array.isArray(stored)) {
+                    SCENE_LORA_STORED_WIDGET_NAMES.forEach((name, index) => {
+                        if (stored[index] !== undefined) setWidgetValue(this, name, stored[index], { silent: true });
+                    });
+                }
+                return result;
+            };
+            nodeType.prototype.serialize = function (...args) {
+                const serialized = serialize?.apply(this, args);
+                return serialized ? { ...serialized, widgets_values: sceneLoraStoredValues(this) } : serialized;
             };
         }
 

@@ -2003,12 +2003,18 @@ class ScenePromptReverse:
         def reverse_row(row, _item):
             input_positive = list(row.get("positive_parts", []))
             input_negative = list(row.get("negative_parts", []))
+            loras = [dict(descriptor) for descriptor in row.get("loras", [])]
+            reverse_lora_indices = []
+            trace = row.get("prompt_trace")
             if scope == REVERSE_SCOPE_PREVIOUS and isinstance(row.get("prompt_trace"), dict):
-                trace = row["prompt_trace"]
                 if trace.get("kind") == "passthrough":
                     positive_parts, negative_parts = input_positive, input_negative
                 elif trace.get("kind") == "whole":
                     positive_parts, negative_parts = input_negative, input_positive
+                    reverse_lora_indices = range(len(loras))
+                elif trace.get("lora_index") is not None:
+                    positive_parts, negative_parts = input_positive, input_negative
+                    reverse_lora_indices = [trace["lora_index"]]
                 else:
                     positive_parts, negative_parts = _merge_positive_negative_parts(
                         trace.get("before_positive_parts", []),
@@ -2019,11 +2025,23 @@ class ScenePromptReverse:
             else:
                 positive_parts = input_negative
                 negative_parts = input_positive
+                reverse_lora_indices = range(len(loras))
+            for index in reverse_lora_indices:
+                loras[index]["positive_parts"], loras[index]["negative_parts"] = (
+                    loras[index]["negative_parts"], loras[index]["positive_parts"]
+                )
             next_row = {
                 **row,
                 "positive_parts": positive_parts,
                 "negative_parts": negative_parts,
+                **({"loras": loras} if "loras" in row else {}),
             }
+            if scope == REVERSE_SCOPE_PREVIOUS and isinstance(trace, dict) and trace.get("lora_index") is not None and trace["kind"] == "delta":
+                index = trace["lora_index"]
+                return with_prompt_trace(
+                    next_row, row, loras[index]["positive_parts"], loras[index]["negative_parts"],
+                    lora_index=index,
+                )
             return with_prompt_trace(next_row, row, positive_parts, negative_parts, kind="whole")
 
         plan = transform(scene_prompt, reverse_row)
@@ -2063,7 +2081,15 @@ class ScenePromptDelete:
         }
 
         def delete_row(row, _item):
-            return {**row, **{side: _delete_prompt_parts(row[side], values) for side, values in keys.items()}}
+            loras = [
+                {**descriptor, **{side: _delete_prompt_parts(descriptor[side], values) for side, values in keys.items()}}
+                for descriptor in row.get("loras", [])
+            ]
+            return {
+                **row,
+                **{side: _delete_prompt_parts(row[side], values) for side, values in keys.items()},
+                **({"loras": loras} if "loras" in row else {}),
+            }
 
         plan = mark_prompt_passthrough(transform(scene_prompt, delete_row))
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
@@ -2085,6 +2111,7 @@ class ScenePromptToText:
                 "current_index": ("INT", {"default": 0, "min": 0, "max": MAX_SAFE_INTEGER, "hidden": True}),
                 "seed_base": ("INT", {"default": 0, "min": 0, "max": SEED_MAX, "hidden": True}),
                 "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
+                "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
@@ -2093,29 +2120,35 @@ class ScenePromptToText:
         }
 
     @classmethod
-    def IS_CHANGED(cls, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", **kwargs):
+    def IS_CHANGED(cls, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", model_mode=MODEL_MODE_ILLUSTRIOUS, **kwargs):
         return "|".join([_scene_prompt_change_key(scene_prompt), scope, str(current_index),
-                         _seed_change_key(seed_base), str(_scene_bool(seed_base_literal)), str(run_handle)])
+                         _seed_change_key(seed_base), str(_scene_bool(seed_base_literal)), str(run_handle),
+                         _normalize_model_mode(model_mode)])
 
-    def to_text(self, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", unique_id=None):
+    def to_text(self, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", unique_id=None, model_mode=MODEL_MODE_ILLUSTRIOUS):
         if scope not in TEXT_SCOPE_CHOICES:
             raise ValueError("Scene Prompt To Text の対象が不正です。")
+        model_mode = _normalize_model_mode(model_mode)
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
         positive, negative = row.get("positive_parts", []), row.get("negative_parts", [])
+        loras = row.get("loras", [])
         trace = row.get("prompt_trace")
         if scope == TEXT_SCOPE_PREVIOUS and isinstance(trace, dict):
             if trace["kind"] == "passthrough":
                 positive, negative = [], []
+                loras = []
             elif trace["kind"] == "delta":
-                positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
+                if trace["lora_index"] is not None:
+                    positive, negative = [], []
+                    loras = [loras[trace["lora_index"]]]
+                else:
+                    positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
+                    loras = []
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + item["global_index"]) % SEED_MODULO
-        positive, negative = _merge_positive_negative_parts(
-            _expand_prompt_parts(positive, seed, "positive"),
-            _expand_prompt_parts(negative, seed, "negative"), [], [],
-        )
+        positive, negative = _resolve_prompt_parts(positive, negative, loras, model_mode, seed)
         return _join_unique(positive, ", "), _join_unique(negative, ", ")
 
 
@@ -2298,6 +2331,8 @@ class SceneApplyLora:
             "optional": {
                 "scene_prompt": (SCENE_PROMPT_TYPE,),
                 "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
+                "positive": ("STRING", {"default": "", "multiline": True, "display_name": "ポジティブテキスト", "label": "ポジティブテキスト"}),
+                "negative": ("STRING", {"default": "", "multiline": True, "display_name": "ネガティブテキスト", "label": "ネガティブテキスト"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -2307,17 +2342,25 @@ class SceneApplyLora:
         }
 
     @classmethod
-    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, model_mode=MODEL_MODE_ILLUSTRIOUS, **kwargs):
+    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative="", **kwargs):
         del kwargs
-        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip)), _normalize_model_mode(model_mode)])
+        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip)), _normalize_model_mode(model_mode), str(positive), str(negative)])
 
-    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS):
+    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative=""):
         name = str(lora_name or "").strip()
         if not name:
             raise ValueError("LoRAを選択してください。")
-        descriptor = {"name": name, "strength_model": float(strength_model), "strength_clip": float(strength_clip), "model_mode": _normalize_model_mode(model_mode)}
-        plan = transform(scene_prompt, lambda row, _item: {**row, "loras": [*row.get("loras", []), descriptor]})
-        return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
+        positive_parts, negative_parts = _split_prompt(positive), _split_prompt(negative)
+        descriptor = {
+            "name": name, "strength_model": float(strength_model), "strength_clip": float(strength_clip),
+            "model_mode": _normalize_model_mode(model_mode),
+            "positive_parts": positive_parts, "negative_parts": negative_parts,
+        }
+        plan = transform(scene_prompt, lambda row, _item: {
+            **with_prompt_trace(row, row, positive_parts, negative_parts, lora_index=len(row.get("loras", []))),
+            "loras": [*row.get("loras", []), descriptor],
+        })
+        return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 
 class ScenePromptCallbackDiscord:
@@ -2433,12 +2476,28 @@ class ScenePromptCallback:
         return (with_source_node(plan, source_node_id or unique_id),)
 
 
-def _callback_prompts(positive_parts, negative_parts, seed, model_mode=None, replace_underscores=None, convert_anima_weights=None):
+def _matching_lora_parts(loras, model_mode):
+    positive_parts, negative_parts = [], []
+    for descriptor in loras:
+        if descriptor["model_mode"] == model_mode:
+            positive_parts.extend(descriptor["positive_parts"])
+            negative_parts.extend(descriptor["negative_parts"])
+    return positive_parts, negative_parts
+
+
+def _resolve_prompt_parts(positive_parts, negative_parts, loras, model_mode, seed):
+    lora_positive, lora_negative = _matching_lora_parts(loras, model_mode)
     positive_parts, negative_parts = _merge_positive_negative_parts(
-        _expand_prompt_parts(positive_parts, seed, "positive"),
-        _expand_prompt_parts(negative_parts, seed, "negative"),
-        [], [],
+        positive_parts, negative_parts, lora_positive, lora_negative,
     )
+    return _merge_positive_negative_parts(
+        _expand_prompt_parts(positive_parts, seed, "positive"),
+        _expand_prompt_parts(negative_parts, seed, "negative"), [], [],
+    )
+
+
+def _callback_prompts(positive_parts, negative_parts, seed, model_mode=None, replace_underscores=None, convert_anima_weights=None, loras=()):
+    positive_parts, negative_parts = _resolve_prompt_parts(positive_parts, negative_parts, loras, model_mode, seed)
     positive = _join_unique(positive_parts, ", ")
     negative = _join_unique(negative_parts, ", ")
     replace_underscores, convert_anima_weights = _expand_conversion_options(
@@ -2484,6 +2543,7 @@ def _dispatch_row_callbacks(
             model_mode,
             replace_underscores,
             convert_anima_weights,
+            descriptor.get("current_loras", []),
         )
         values = {
             "current_positive": current_positive,
@@ -2706,13 +2766,8 @@ class ScenePromptExpand:
         global_index = int(item.get("global_index", 0) or 0)
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + global_index) % SEED_MODULO
-        positive_parts = _expand_prompt_parts(row.get("positive_parts", []), seed, "positive")
-        negative_parts = _expand_prompt_parts(row.get("negative_parts", []), seed, "negative")
-        positive_parts, negative_parts = _merge_positive_negative_parts(
-            positive_parts,
-            negative_parts,
-            [],
-            [],
+        positive_parts, negative_parts = _resolve_prompt_parts(
+            row.get("positive_parts", []), row.get("negative_parts", []), row.get("loras", []), model_mode, seed,
         )
         positive = _join_unique(positive_parts, separator)
         negative = _join_unique(negative_parts, separator)

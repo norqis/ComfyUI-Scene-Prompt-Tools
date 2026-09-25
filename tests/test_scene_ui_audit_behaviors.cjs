@@ -159,6 +159,7 @@ const expandContext = {
     isSceneExpandNodeName: (name) => name === "ScenePrompterExpand",
     rebindSceneBatchRunNode() { return null; }, setWidgetValue() {}, ensureSceneExpandControls() {},
     SCENE_APPLY_MODEL_NODE_NAMES: new Set(),
+    SCENE_APPLY_LORA_NODE_NAMES: new Set(), ensureSceneLoraControls() {},
     SCENE_PROMPT_TO_TEXT_NODE_NAMES: new Set(["ScenePromptToText"]),
     SCENE_PROMPT_DELETE_NODE_NAMES: new Set(["ScenePromptDelete"]),
     SCENE_EMPTY_LATENT_NODE_NAMES: new Set(), SCENE_PROMPT_REVERSE_NODE_NAMES: new Set(),
@@ -212,6 +213,7 @@ assert.deepEqual(
 
 const applyModelContext = {
     SCENE_APPLY_MODEL_NODE_NAMES: new Set(["SceneApplyModel"]),
+    SCENE_APPLY_LORA_NODE_NAMES: new Set(), ensureSceneLoraControls() {},
     app: { graph: { links: {}, setDirtyCanvas() {} }, canvas: { setDirty() {} } },
     injectStyle() {}, applySceneWidgetLabels() {}, installSceneConnectionWatcher() {},
     isSceneExpandNodeName() { return false; },
