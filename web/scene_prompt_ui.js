@@ -7294,7 +7294,7 @@ function sceneExpandCountLabel(node) {
         return totalLabel;
     }
     if (status === "pending" || run.preparing || !run.snapshotReady) {
-        return `準備中（全${totalLabel}）`;
+        return totalImages === null ? "準備中" : `準備中 ${totalImages}枚`;
     }
     if (status === "active" || status === "stopping" || status === "blocked") {
         const completed = Math.min(Math.max(0, Number(run.nextIndex)), totalBatches);
@@ -7543,7 +7543,8 @@ function drawSceneExpandCount(ctx, node, width, y, height) {
         widget.sceneTotalCount = totalBatches;
         widget.value = sceneExpandCountLabel(node);
     }
-    const text = `生成 ${widget?.value || "0回"}`;
+    const label = widget?.value || "0回";
+    const text = label.startsWith("準備中") ? `生成${label}` : `生成 ${label}`;
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, y, drawWidth, height);

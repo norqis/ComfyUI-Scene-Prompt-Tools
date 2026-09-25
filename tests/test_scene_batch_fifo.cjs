@@ -287,6 +287,7 @@ testQueuedPrefixesStayWithTheirTabs()
     .then(testPresetFailureDoesNotQueue)
     .then(testPresetRunCountDisplay)
     .then(testExpandCountTracksCompletedRuns)
+    .then(testExpandCountDrawText)
     .then(testRunRefreshAndResetUpdateCount)
     .then(testMismatchedSuccessDoesNotAdvanceExpandProgress)
     .then(testPresetErrorMarksOnlyTargetReference)
@@ -529,13 +530,13 @@ async function testExpandCountTracksCompletedRuns() {
     assert.equal(displayContext.sceneExpandCountLabel(node), "80回 / 80枚", "past runs never supply the next run's count");
     run.active = true;
     run.preparing = true;
-    assert.equal(displayContext.sceneExpandCountLabel(node), "準備中（全80回 / 80枚）");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "準備中 80枚");
     run.preparing = false;
     assert.equal(displayContext.sceneExpandCountLabel(node), "0 / 80");
     run.nextIndex = 1;
     assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "only a matching success advances the display");
     run.status = "pending";
-    assert.equal(displayContext.sceneExpandCountLabel(node), "準備中（全80回 / 80枚）", "re-queued work is preparation, not prior progress");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "準備中 80枚", "re-queued work is preparation, not prior progress");
     run.status = "active";
     otherRun.active = true;
     assert.equal(displayContext.sceneExpandCountLabel(otherNode), "11 / 12", "each Expand tab reads its own run");
@@ -549,6 +550,66 @@ async function testExpandCountTracksCompletedRuns() {
     assert.equal(displayContext.sceneExpandCountLabel(node), "80 / 80", "completion shows completed batches without repeating image totals");
     run.active = false;
     assert.equal(displayContext.sceneExpandCountLabel(node), "80回 / 80枚", "cancelled or failed runs reset to the idle plan count");
+}
+
+async function testExpandCountDrawText() {
+    const run = { preparing: true, snapshotReady: true, nextIndex: 1, total: 2, totalImages: 6, status: "active" };
+    const widget = { sceneRole: "expand_total_count", value: "" };
+    const node = { run, widgets: [widget] };
+    const drawn = [];
+    const displayContext = {
+        Math,
+        Number,
+        sceneWidgetDrawWidth() { return 220; },
+        findSceneWidget(target, role) {
+            return target.widgets.find((item) => item.sceneRole === role);
+        },
+        sceneExpandCounts(target) {
+            return !target.run || target.run.snapshotReady
+                ? { totalBatches: 2, totalImages: 6 }
+                : { totalBatches: 2, totalImages: null };
+        },
+        sceneBatchRunForNode(target) { return target.run || null; },
+        sceneBatchRunStatus(targetRun) { return targetRun?.status || "idle"; },
+        formatSceneExpandCounts(totalBatches, totalImages) {
+            return `${totalBatches}回 / ${totalImages}枚`;
+        },
+        fitCanvasText(_ctx, text) { return text; },
+    };
+    vm.createContext(displayContext);
+    vm.runInContext(functionSource("sceneExpandCountLabel"), displayContext);
+    vm.runInContext(functionSource("drawSceneExpandCount"), displayContext);
+    const ctx = {
+        save() {},
+        beginPath() {},
+        rect() {},
+        clip() {},
+        fillText(text) { drawn.push(text); },
+        restore() {},
+    };
+    const draw = () => {
+        displayContext.drawSceneExpandCount(ctx, node, 220, 0, 20);
+        return drawn.at(-1);
+    };
+
+    assert.equal(displayContext.sceneExpandCountLabel(node), "準備中 6枚");
+    assert.equal(draw(), "生成準備中 6枚");
+
+    run.snapshotReady = false;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "準備中");
+    assert.equal(draw(), "生成準備中");
+
+    node.run = null;
+    assert.equal(draw(), "生成 2回 / 6枚");
+
+    node.run = run;
+    run.snapshotReady = true;
+    run.preparing = false;
+    run.status = "active";
+    assert.equal(draw(), "生成 1 / 2");
+
+    run.status = "stopping";
+    assert.equal(draw(), "生成 1 / 2");
 }
 
 async function testRunRefreshAndResetUpdateCount() {
