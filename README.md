@@ -114,7 +114,7 @@ Repeated tags keep the spelling with the highest explicit `(tag:weight)` value; 
 
 ## Text Output and Tag Deletion
 
-**Scene Prompt To Text** outputs the current planned row as ordinary `positive` and `negative` strings. Choose **全てのノード** for the complete row or **直前のノードのみ** for the immediately preceding node's additions. A preceding structural node supplies its whole row; a node that only passes prompts through supplies empty strings in the latter mode. An unconnected input produces empty strings at index 0.
+**Scene Prompt To Text** outputs the current planned row as ordinary `positive` and `negative` strings. Choose **全てのノード** for the complete row or **直前のノードのみ** for the immediately preceding node's additions. Set **モデル種別** to include matching Scene Apply LoRA prompt text. A preceding structural node supplies its whole row; a node that only passes prompts through supplies empty strings in the latter mode. An unconnected input produces empty strings at index 0.
 
 Normal Queue sends share one fresh starting seed across Expand and To Text nodes without changing their saved generation indexes. Continuous generation synchronizes To Text with the selected Expand's index and seed. Choices resolve before duplicate removal and negative precedence. Execution-path PNGs keep the Scene branches needed by each text consumer and rebase each consumer's index and seed separately, including Presets.
 
@@ -145,6 +145,8 @@ Checkpoint Loader (Simple) -> Scene Apply Model -> Scene Apply LoRA -> Scene Pro
 Connect MODEL, CLIP, and VAE from a checkpoint loader to **Scene Apply Model**. Separate diffusion-model, CLIP, and VAE loaders can also be connected. Connect Expand's MODEL and CLIP outputs to the corresponding sampler and text-encode inputs, and its VAE output to VAE Decode. The loader nodes are evaluated only when their Scene path is selected.
 
 **Scene Apply LoRA** uses ComfyUI's standard `models/loras` list and stores its relative model path. Set **モデル種別** to `Illustrious` or `Anima` on each LoRA and on **Scene Prompt Expand**; both default to `Illustrious`. Expand loads only matching LoRAs, preserving their path order. With no matches, it returns the original MODEL and CLIP. If several **Scene Apply Model** nodes occur on one path, the last model bundle wins. The nodes may appear in either visual order while preserving the matching LoRAs' relative order. Scene Apply LoRA can be saved inside a Preset, including its model setting; older Presets without the setting use `Illustrious`. Scene Apply Model stays in the outer workflow because its MODEL, CLIP, and VAE links point to external loader nodes.
+
+Enter optional **ポジティブテキスト** and **ネガティブテキスト** on Scene Apply LoRA to add them only when its model type matches the selected Expand or To Text model type. **詳細確認** looks up the selected LoRA's local metadata and Civitai page when clicked. Its Trigger Words have **注入** buttons that add a word to the positive text only when it is not already present.
 
 ## Callbacks
 

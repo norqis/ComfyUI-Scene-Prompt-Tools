@@ -3992,7 +3992,7 @@ function hideNonSceneRoleWidgets(node) {
 
 function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeName)
-        ? new Set(["scope"])
+        ? new Set(["scope", "model_mode"])
         : SCENE_PROMPT_DELETE_NODE_NAMES.has(nodeName)
             ? new Set(["positive", "negative"])
         : SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
