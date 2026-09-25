@@ -90,6 +90,32 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         self.assertEqual(self.text(self.nodes.ScenePromptDelete().delete()[0]), ('', ''))
         self.assertEqual(self.text(self.nodes.ScenePromptDelete().delete('', '', source)[0]), self.text(source))
 
+    def test_delete_cache_key_tracks_plan_and_both_fields(self):
+        changed = self.nodes.ScenePromptDelete.IS_CHANGED
+        baseline = changed()
+        self.assertEqual(baseline, changed(scene_prompt=None, positive='', negative=''))
+        for values in ({'scene_prompt': self.build('different')}, {'positive': 'bald'}, {'negative': 'bald'}):
+            self.assertNotEqual(baseline, changed(**values))
+        self.assertNotEqual(changed(positive='a|b', negative='c'), changed(positive='a', negative='b|c'))
+
+    def test_text_replay_uses_own_default_index_and_requires_reproducible_seed(self):
+        handle = self.runs.create_run_context('default')
+        plan = self.build('{red|blue}', node_id='source')
+        self.nodes.ScenePromptToText().to_text(plan, seed_base=17, run_handle=handle, unique_id='1')
+        prompt = {'1': {'class_type': 'ScenePromptToText', 'inputs': {'seed_base': 17}},
+                  '2': {'class_type': 'Save', 'inputs': {'text': ['1', 0]}}}
+        info = {'run_handle': handle, 'file_index': 4, 'seed': 999}
+        replay = self.nodes._text_replay_items(prompt, '2', info)['1']
+        self.assertEqual((replay['row_index'], replay['repeat_index'], replay['seed']), (0, 1, 17))
+        prompt['1']['inputs']['seed_base'] = 0
+        with self.assertRaisesRegex(ValueError, 'seed_base'):
+            self.nodes._text_replay_items(prompt, '2', info)
+        prompt['1']['inputs']['seed_base_literal'] = True
+        self.assertEqual(self.nodes._text_replay_items(prompt, '2', info)['1']['seed'], 0)
+        prompt['1']['inputs']['current_index'] = 1
+        with self.assertRaises(IndexError):
+            self.nodes._text_replay_items(prompt, '2', info)
+
     def test_delete_choice_slots_nested_and_empty_choices(self):
         examples = {
             '{bald}': '{}', '{bald|bald}': '{|}', '{bald||hair}': '{||hair}',
@@ -121,9 +147,9 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         return workflow
 
     def test_png_rebases_each_plan_independently_with_and_without_preset_expansion(self):
-        for in_preset in (False, True):
-            for expand_contents in ((False, True) if in_preset else (False,)):
-                with self.subTest(in_preset=in_preset, expand_contents=expand_contents):
+        for expand_index in (2, 3):
+            for in_preset, expand_contents in ((False, False), (True, False), (True, True)):
+                with self.subTest(expand_index=expand_index, in_preset=in_preset, expand_contents=expand_contents):
                     handle = self.runs.create_run_context('default')
                     prompt = {}
                     plans = {}
@@ -149,7 +175,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                         self.presets.save_preset({'preset_id': preset_id, 'name': preset_id, 'output_node_id': '81', 'api_graph': {'output': inner}, 'workflow': self.workflow(inner)})
                         prompt['22'] = {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': preset_id}}
                     prompt.update({
-                        '30': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['21', 0], 'current_index': 2, 'seed_base': 100}},
+                        '30': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['21', 0], 'current_index': expand_index, 'seed_base': 100}},
                         '31': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['22', 0], 'current_index': 2, 'seed_base': 100}},
                         '32': {'class_type': 'TestImage', 'inputs': {'latent': ['30', 4], 'positive': ['31', 0]}},
                         '33': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['32', 0], 'scene_info': ['30', 2]}},
@@ -165,11 +191,11 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                         source = '__scene_preset_source'
                         plans['22'] = self.presets._scene_node_value(graph, source, snapshots, set())
                     expected_text = self.nodes.ScenePromptToText().to_text(plans['22'], current_index=2, seed_base=100, run_handle=handle, unique_id='31')
-                    expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=plans['21'], current_index=2, seed_base=100, run_handle=handle, unique_id='30', prompt=prompt)
+                    expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=plans['21'], current_index=expand_index, seed_base=100, run_handle=handle, unique_id='30', prompt=prompt)
                     saved, extra = self.nodes._metadata_for_save_mode(prompt, {'workflow': self.workflow(prompt)}, '33', self.nodes.SAVE_METADATA_EXECUTION_PATH, expanded[2], expand_preset_contents=expand_contents)
                     self.assertNotIn('1', saved)
                     self.assertNotIn('99', saved)
-                    self.assertEqual(saved['30']['inputs']['current_index'], 0)
+                    self.assertEqual(saved['30']['inputs']['current_index'], expand_index - 2)
                     expected_index = 2 if in_preset and not expand_contents else 1
                     self.assertEqual(saved['31']['inputs']['current_index'], expected_index)
                     self.assertEqual(saved['31']['inputs']['seed_base'], 102 - expected_index)
@@ -193,7 +219,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             '2': {'class_type': 'SceneApplyModel', 'inputs': {'scene_prompt': ['1', 0]}},
             '3': {'class_type': 'SceneApplyModel', 'inputs': {'scene_prompt': ['2', 0]}},
             '4': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['3', 0]}},
-            '5': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['2', 0], 'scope': self.nodes.TEXT_SCOPE_PREVIOUS}},
+            '5': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['2', 0], 'scope': self.nodes.TEXT_SCOPE_PREVIOUS, 'seed_base': 123}},
             '6': {'class_type': 'Save', 'inputs': {'text': ['5', 0], 'info': ['4', 2]}},
         }
         self.assertEqual(self.text(first, scope=self.nodes.TEXT_SCOPE_PREVIOUS, run_handle=handle, unique_id='5'), ('', ''))

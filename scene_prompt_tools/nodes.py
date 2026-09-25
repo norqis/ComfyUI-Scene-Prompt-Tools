@@ -678,10 +678,17 @@ def _text_replay_items(prompt, save_id, scene_info):
         plan = get_run_plan_reference(run_handle, node_id) if run_handle else None
         if plan is None:
             raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
-        item = _scene_prompt_item_for_index(None, int(scene_info["file_index"]) - 1, normalized=plan, strict=True)
+        inputs = node.get("inputs", {})
+        item = _scene_prompt_item_for_index(None, inputs.get("current_index", 0), normalized=plan, strict=True)
+        seed_base = int(inputs.get("seed_base") or 0)
+        literal = _scene_bool(inputs.get("seed_base_literal", False))
+        if not literal and seed_base <= 0:
+            raise ValueError(f"Scene Prompt To Text {node_id} の自動シードを再現できません。生成経路の保存には正の seed_base または seed_base_literal が必要です。")
+        base_seed = seed_base % SEED_MODULO if literal else _auto_seed_base(seed_base)
         result[node_id] = {
             "_plan_ref": plan, "row_index": item["row_index"], "repeat_index": item["repeat_index"],
-            "source_node_ids": item["row"].get("source_node_ids", []), "seed": scene_info["seed"],
+            "source_node_ids": item["row"].get("source_node_ids", []),
+            "seed": (base_seed + item["global_index"]) % SEED_MODULO,
         }
     return result
 
@@ -2044,6 +2051,10 @@ class ScenePromptDelete:
                 "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
+
+    @classmethod
+    def IS_CHANGED(cls, scene_prompt=None, positive="", negative="", **kwargs):
+        return json.dumps([_scene_prompt_change_key(scene_prompt), positive, negative], ensure_ascii=False)
 
     def delete(self, positive="", negative="", scene_prompt=None, unique_id=None, source_node_id="", source_node_name=""):
         keys = {

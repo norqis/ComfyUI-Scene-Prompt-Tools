@@ -1635,9 +1635,9 @@ NODE_CLASS_MAPPINGS = {
         graph = {
             "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "{bald|hair}, coat", "negative_base": "{coat|bad}"}},
             "2": {"class_type": "ScenePromptDelete", "inputs": {"scene_prompt": ["1", 0], "positive": "bald", "negative": ""}},
-            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 3}},
-            "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0], "current_index": 0, "run_id": "text-http", "seed_base": 100, "timestamp_dir": False}},
-            "5": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["3", 0], "scope": "全てのノード", "current_index": 0, "seed_base": 100}},
+            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 4}},
+            "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0], "current_index": 3, "run_id": "", "seed_base": 100, "timestamp_dir": False}},
+            "5": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["3", 0], "scope": "全てのノード", "current_index": 2, "seed_base": 100}},
             "6": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
             "7": {"class_type": "TestSceneTextImage", "inputs": {"image": ["6", 0], "positive": ["5", 0], "negative": ["5", 1], "log_path": str(marker)}},
             "8": {"class_type": "SceneSaveImage", "inputs": {"images": ["7", 0], "scene_info": ["4", 2], "path": "text-runtime", "metadata_mode": "生成経路ノードのみ"}},
@@ -1649,7 +1649,7 @@ NODE_CLASS_MAPPINGS = {
             for node_id in ("1", "2", "3"): del cached[node_id]
             for node_id in ("4", "5"):
                 cached[node_id]["inputs"].pop("scene_prompt")
-                cached[node_id]["inputs"].update(current_index=2, seed_base=200)
+                cached[node_id]["inputs"].update(current_index=3 if node_id == "4" else 2, seed_base=200)
             self._queue_callback_graph(cached, handle, workflow)
             expected = json.loads(marker.read_text(encoding="utf-8"))
             self.assertNotIn("bald", expected[0])
