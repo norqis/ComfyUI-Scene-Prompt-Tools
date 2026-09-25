@@ -717,8 +717,8 @@ try {
                     { name: "strength_model", type: "number", value: 0.8, options: {} },
                     { name: "strength_clip", type: "number", value: 0.7, options: {} },
                     { name: "model_mode", type: "combo", value: "Anima", options: {} },
-                    { name: "positive", type: "text", value: "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", options: {} },
-                    { name: "negative", type: "text", value: "bad", options: {} },
+                    { name: "positive", type: "text", value: "", options: {} },
+                    { name: "negative", type: "text", value: "", options: {} },
                 ];
                 this.widgets_values = this.widgets.map((widget) => widget.value);
             }
@@ -733,6 +733,11 @@ try {
         await window.__scenePromptExtension.beforeRegisterNodeDef(SceneApplyLoraNode, { name: "SceneApplyLora" });
         const applyLora = new SceneApplyLoraNode();
         applyLora.onNodeCreated();
+        for (const [name, value] of [["positive", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra"], ["negative", "bad"]]) {
+            const widget = applyLora.widgets.find((candidate) => candidate.name === name);
+            widget.value = value;
+            applyLora.widgets_values[applyLora.widgets.indexOf(widget)] = value;
+        }
         const savedLora = applyLora.serialize();
         const restoredLora = new SceneApplyLoraNode();
         restoredLora.onNodeCreated();
@@ -746,6 +751,7 @@ try {
         linkedLora.configure({ widgets_values: ["linked.safetensors", 0.6, 0.5, null, "front", "back"] });
         window.__sceneApplyLoraRoundTrip = {
             visible: applyLora.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+            labels: ["positive", "negative"].map((name) => applyLora.widgets.find((widget) => widget.name === name).label),
             saved: savedLora.widgets_values,
             restored: restoredLora.serialize().widgets_values,
             legacy: legacyLora.serialize().widgets_values,
@@ -758,9 +764,10 @@ try {
     });
     const loraRoundTrip = await page.evaluate(() => window.__sceneApplyLoraRoundTrip);
     assert.deepEqual(loraRoundTrip.visible, ["lora_name", "strength_model", "strength_clip", "詳細確認", "positive", "negative", "model_mode"]);
+    assert.deepEqual(loraRoundTrip.labels, ["ポジティブテキスト", "ネガティブテキスト"]);
     assert.deepEqual(loraRoundTrip.saved, ["style.safetensors", 0.8, 0.7, "Anima", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "bad"]);
     assert.deepEqual(loraRoundTrip.restored, loraRoundTrip.saved);
-    assert.deepEqual(loraRoundTrip.legacy, ["old.safetensors", 0.4, 0.3, "Illustrious", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "bad"]);
+    assert.deepEqual(loraRoundTrip.legacy, ["old.safetensors", 0.4, 0.3, "Illustrious", "", ""]);
     assert.deepEqual(loraRoundTrip.linked, ["linked.safetensors", 0.6, 0.5, null, "front", "back"]);
     assert.deepEqual(loraRoundTrip.copied, loraRoundTrip.linked);
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("/scene_prompt/loras/info?"))), false);

@@ -5062,8 +5062,8 @@ async function openSceneLoraDetails(node) {
 
 function ensureSceneLoraControls(node) {
     const button = addSceneButton(node, "lora_details", "詳細確認", () => openSceneLoraDetails(node));
-    applyWidgetLabel(findWidget(node, "positive"), "ポジティブ");
-    applyWidgetLabel(findWidget(node, "negative"), "ネガティブ");
+    applyWidgetLabel(findWidget(node, "positive"), "ポジティブテキスト");
+    applyWidgetLabel(findWidget(node, "negative"), "ネガティブテキスト");
     const order = ["lora_name", "strength_model", "strength_clip", "lora_details", "positive", "negative", "model_mode"];
     const rank = (widget) => order.indexOf(widget.sceneRole === "lora_details" ? "lora_details" : widget.name);
     const previous = new Map(node.widgets.map((widget, index) => [widget, node.widgets_values?.[index] ?? widget.value]));
