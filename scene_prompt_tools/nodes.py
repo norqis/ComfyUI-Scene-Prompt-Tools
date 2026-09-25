@@ -2298,6 +2298,8 @@ class SceneApplyLora:
             "optional": {
                 "scene_prompt": (SCENE_PROMPT_TYPE,),
                 "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
+                "positive": ("STRING", {"default": "", "multiline": True, "display_name": "ポジティブ"}),
+                "negative": ("STRING", {"default": "", "multiline": True, "display_name": "ネガティブ"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -2307,17 +2309,25 @@ class SceneApplyLora:
         }
 
     @classmethod
-    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, model_mode=MODEL_MODE_ILLUSTRIOUS, **kwargs):
+    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative="", **kwargs):
         del kwargs
-        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip)), _normalize_model_mode(model_mode)])
+        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip)), _normalize_model_mode(model_mode), str(positive), str(negative)])
 
-    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS):
+    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative=""):
         name = str(lora_name or "").strip()
         if not name:
             raise ValueError("LoRAを選択してください。")
-        descriptor = {"name": name, "strength_model": float(strength_model), "strength_clip": float(strength_clip), "model_mode": _normalize_model_mode(model_mode)}
-        plan = transform(scene_prompt, lambda row, _item: {**row, "loras": [*row.get("loras", []), descriptor]})
-        return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
+        positive_parts, negative_parts = _split_prompt(positive), _split_prompt(negative)
+        descriptor = {
+            "name": name, "strength_model": float(strength_model), "strength_clip": float(strength_clip),
+            "model_mode": _normalize_model_mode(model_mode),
+            "positive_parts": positive_parts, "negative_parts": negative_parts,
+        }
+        plan = transform(scene_prompt, lambda row, _item: {
+            **with_prompt_trace(row, row, positive_parts, negative_parts),
+            "loras": [*row.get("loras", []), descriptor],
+        })
+        return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 
 class ScenePromptCallbackDiscord:
@@ -2433,10 +2443,20 @@ class ScenePromptCallback:
         return (with_source_node(plan, source_node_id or unique_id),)
 
 
-def _callback_prompts(positive_parts, negative_parts, seed, model_mode=None, replace_underscores=None, convert_anima_weights=None):
+def _matching_lora_parts(loras, model_mode):
+    positive_parts, negative_parts = [], []
+    for descriptor in loras:
+        if descriptor["model_mode"] == model_mode:
+            positive_parts.extend(descriptor["positive_parts"])
+            negative_parts.extend(descriptor["negative_parts"])
+    return positive_parts, negative_parts
+
+
+def _callback_prompts(positive_parts, negative_parts, seed, model_mode=None, replace_underscores=None, convert_anima_weights=None, loras=()):
+    lora_positive, lora_negative = _matching_lora_parts(loras, model_mode)
     positive_parts, negative_parts = _merge_positive_negative_parts(
-        _expand_prompt_parts(positive_parts, seed, "positive"),
-        _expand_prompt_parts(negative_parts, seed, "negative"),
+        _expand_prompt_parts([*positive_parts, *lora_positive], seed, "positive"),
+        _expand_prompt_parts([*negative_parts, *lora_negative], seed, "negative"),
         [], [],
     )
     positive = _join_unique(positive_parts, ", ")
@@ -2484,6 +2504,7 @@ def _dispatch_row_callbacks(
             model_mode,
             replace_underscores,
             convert_anima_weights,
+            descriptor.get("current_loras", []),
         )
         values = {
             "current_positive": current_positive,
@@ -2706,8 +2727,9 @@ class ScenePromptExpand:
         global_index = int(item.get("global_index", 0) or 0)
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + global_index) % SEED_MODULO
-        positive_parts = _expand_prompt_parts(row.get("positive_parts", []), seed, "positive")
-        negative_parts = _expand_prompt_parts(row.get("negative_parts", []), seed, "negative")
+        lora_positive, lora_negative = _matching_lora_parts(row.get("loras", []), model_mode)
+        positive_parts = _expand_prompt_parts([*row.get("positive_parts", []), *lora_positive], seed, "positive")
+        negative_parts = _expand_prompt_parts([*row.get("negative_parts", []), *lora_negative], seed, "negative")
         positive_parts, negative_parts = _merge_positive_negative_parts(
             positive_parts,
             negative_parts,

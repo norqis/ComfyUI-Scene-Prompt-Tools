@@ -213,7 +213,7 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         })
         self.assertEqual(row["loras"], [{
             "name": "style/example.safetensors", "strength_model": 0.8, "strength_clip": 0.7,
-            "model_mode": "Illustrious",
+            "model_mode": "Illustrious", "positive_parts": [], "negative_parts": [],
         }])
         expanded = self.nodes.ScenePromptExpand().expand(
             current_index=0, timestamp_dir=False, scene_prompt=plan,
@@ -232,7 +232,7 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
 
         self.assertEqual(plan["rows"][0]["row"]["loras"], [{
             "name": "style/example.safetensors", "strength_model": 0.8, "strength_clip": 0.7,
-            "model_mode": "Illustrious",
+            "model_mode": "Illustrious", "positive_parts": [], "negative_parts": [],
         }])
 
     def test_scene_prompt_before_model_and_lora_reaches_expand(self):
