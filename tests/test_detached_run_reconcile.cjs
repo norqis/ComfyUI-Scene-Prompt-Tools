@@ -84,6 +84,153 @@ function reconcileContext(responses) {
     return context;
 }
 
+function detachedUiReleaseContext(responses = []) {
+    const workflow = { path: "workflows/first.json" };
+    const graph = {};
+    const button = { sceneRole: "expand_run_all", name: "停止処理中" };
+    const count = { sceneRole: "expand_total_count", value: "1 / 2" };
+    const node = {
+        id: 17,
+        graph,
+        widgets: [{ name: "run_id", value: "" }, button, count],
+        setDirtyCanvas() {},
+    };
+    const foreignNode = {
+        id: 17,
+        graph: {},
+        widgets: [
+            { name: "run_id", value: "" },
+            { sceneRole: "expand_run_all", name: "別ワークフロー" },
+            { sceneRole: "expand_total_count", value: "別件数" },
+        ],
+    };
+    graph.getNodeById = () => node;
+    const run = {
+        runId: "stopped-run",
+        nodeId: 17,
+        node,
+        graph,
+        workflow,
+        currentPromptId: "stopped-prompt",
+        controlsResetPending: false,
+        nextIndex: 1,
+        total: 2,
+        snapshotReady: true,
+    };
+    const next = { runId: "next-run" };
+    const context = {
+        Map,
+        Set,
+        Object,
+        String,
+        Array,
+        Number,
+        Math,
+        encodeURIComponent,
+        console: { warn() {} },
+        app: {
+            graph,
+            canvas: { setDirty() {} },
+            extensionManager: { workflow: { activeWorkflow: workflow } },
+        },
+        sceneBatchRun: null,
+        sceneBatchRunsById: new Map([[run.runId, run], [next.runId, next]]),
+        sceneBatchDetachedRuns: new Map([[run.runId, run]]),
+        sceneBatchFinalizingRuns: new Set(),
+        sceneBatchPendingRuns: [next],
+        sceneBatchPendingReleases: new Map([[
+            run.currentPromptId,
+            { runId: run.runId, timer: { name: "terminal-timeout" } },
+        ]]),
+        sceneBatchTerminalEvents: new Map([[run.currentPromptId, { type: "success" }]]),
+        SCENE_DETACHED_RETRY_MS: 30_000,
+        requests: [],
+        released: [],
+        activationSnapshots: [],
+        scheduled: [],
+        api: {
+            async fetchApi(url) {
+                context.requests.push(url);
+                return responses.shift();
+            },
+        },
+        async readApiJson(value) { return value.payload; },
+        setTimeout(callback, delay) {
+            const timer = { callback, delay };
+            context.scheduled.push(timer);
+            return timer;
+        },
+        clearTimeout(timer) {
+            context.scheduled = context.scheduled.filter((entry) => entry !== timer);
+        },
+        findWidget(target, name) { return target?.widgets?.find((widget) => widget.name === name); },
+        findSceneWidget(target, role) { return target?.widgets?.find((widget) => widget.sceneRole === role); },
+        sceneExpandCounts() { return { totalBatches: 2, totalImages: null }; },
+        resetSceneExpandRunControls() { throw new Error("controls were already reset by Stop"); },
+        clearPendingSceneBatchReleasesForRun() {},
+        releaseSceneBatchPlan(runId) { context.released.push(runId); },
+        refreshSceneBatchRunNode() {},
+        showSceneBatchError() {},
+        activateNextSceneBatchRun() {
+            context.activationSnapshots.push({ button: button.name, count: count.value });
+            context.sceneBatchRun = context.sceneBatchPendingRuns.shift() || null;
+        },
+    };
+    vm.createContext(context);
+    for (const name of [
+        "sceneBatchNodeRunId",
+        "sceneWorkflowManager",
+        "sceneActiveWorkflow",
+        "sceneWorkflowsMatch",
+        "sceneBatchRunForNode",
+        "sceneBatchRunStatus",
+        "sceneNodeForRun",
+        "markSceneNodeChanged",
+        "updateSceneExpandButton",
+        "sceneExpandCountLabel",
+        "updateSceneExpandCountWidget",
+        "clearDetachedSceneBatchRun",
+        "scenePromptIdFromValue",
+        "releasePendingSceneBatchPlan",
+        "sceneQueueContainsPrompt",
+        "markSceneBatchReleaseBlocked",
+        "releaseDetachedSceneBatchRun",
+        "scheduleDetachedSceneBatchReconcile",
+        "reconcileDetachedSceneBatchRun",
+    ]) vm.runInContext(functionSource(name), context);
+    return { context, run, next, node, foreignNode, button, count };
+}
+
+function assertDetachedUiReleased(fixture) {
+    const { context, run, next, foreignNode, button, count } = fixture;
+    assert.equal(context.sceneBatchDetachedRuns.has(run.runId), false);
+    assert.equal(button.name, "連続生成", "the completed stopped run returns to its idle button label");
+    assert.equal(count.value, "2回", "the completed stopped run returns to its idle count");
+    assert.deepEqual(
+        context.activationSnapshots,
+        [{ button: "連続生成", count: "2回" }],
+        "the stopped node is redrawn before the next FIFO run activates",
+    );
+    assert.equal(context.sceneBatchRun, next);
+    assert.equal(foreignNode.widgets[1].name, "別ワークフロー");
+    assert.equal(foreignNode.widgets[2].value, "別件数");
+}
+
+function testTerminalEventReleaseRestoresDetachedUiAndActivatesNext() {
+    const fixture = detachedUiReleaseContext();
+    fixture.context.releasePendingSceneBatchPlan({ prompt_id: fixture.run.currentPromptId });
+    assertDetachedUiReleased(fixture);
+}
+
+async function testHistoryReconcileReleaseRestoresDetachedUiAndActivatesNext() {
+    const fixture = detachedUiReleaseContext([
+        response({ "stopped-prompt": { status: { status_str: "success", completed: true } } }),
+    ]);
+    assert.equal(await fixture.context.reconcileDetachedSceneBatchRun(fixture.run), true);
+    assert.deepEqual(fixture.context.requests, ["/history/stopped-prompt"]);
+    assertDetachedUiReleased(fixture);
+}
+
 async function testHistoryTerminalReleasesOnceAndResumesFifo() {
     const context = reconcileContext([response({ "prompt-1": { status: {} } })]);
     assert.equal(context.sceneQueueContainsPrompt({ "prompt-1": { status: {} } }, "prompt-1"), true);
@@ -354,6 +501,8 @@ function testWorkflowTabLoadDoesNotCancelExpandRun() {
 }
 
 Promise.resolve()
+    .then(testTerminalEventReleaseRestoresDetachedUiAndActivatesNext)
+    .then(testHistoryReconcileReleaseRestoresDetachedUiAndActivatesNext)
     .then(testHistoryTerminalReleasesOnceAndResumesFifo)
     .then(testAbsentFromHistoryAndQueueReleases)
     .then(testStillQueuedAndFetchFailureRemainBlocked)
