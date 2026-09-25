@@ -48,7 +48,7 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(self.nodes.ScenePromptToText().to_text(changed, scope=self.nodes.TEXT_SCOPE_PREVIOUS,
                                                                  seed_base=7, seed_base_literal=True), ("one, two", "bad"))
         self.assertEqual(self.nodes.ScenePromptToText().to_text(changed, seed_base=7,
-                                                                 seed_base_literal=True), ("base", ""))
+                                                                 seed_base_literal=True), ("base, one, two", "bad"))
         self.assertNotEqual(node.IS_CHANGED("lora", positive="one"), node.IS_CHANGED("lora", positive="two"))
         legacy = node.apply_lora("lora", scene_prompt=plan)[0]
         self.assertEqual(legacy["rows"][0]["row"]["loras"][0]["positive_parts"], [])
@@ -79,6 +79,72 @@ class SceneLoraPromptTests(unittest.TestCase):
             self.nodes._dispatch_row_callbacks(row, {"global_index": 0, "total_batches": 1}, 7,
                                                "Illustrious", "", "base, later", "")
         self.assertEqual(calls[0]["current_positive"], "base")
+
+    def test_to_text_model_filter_and_delete_modify_descriptors(self):
+        plan = add_prompt(self.prompt, "base", "base", "base-negative", node_id="1")
+        plan = self.nodes.SceneApplyLora().apply_lora("ill", scene_prompt=plan, positive="ill-text", negative="ill-negative")[0]
+        plan = self.nodes.SceneApplyLora().apply_lora("anima", scene_prompt=plan, model_mode="Anima",
+                                                      positive="anima-text", negative="anima-negative")[0]
+        text = self.nodes.ScenePromptToText()
+        self.assertEqual(text.to_text(plan), ("base, ill-text", "base-negative, ill-negative"))
+        self.assertEqual(text.to_text(plan, model_mode="Anima"), ("base, anima-text", "base-negative, anima-negative"))
+        self.assertEqual(text.to_text(plan, scope=self.nodes.TEXT_SCOPE_PREVIOUS), ("", ""))
+        self.assertEqual(text.to_text(plan, scope=self.nodes.TEXT_SCOPE_PREVIOUS, model_mode="Anima"),
+                         ("anima-text", "anima-negative"))
+        self.assertNotEqual(text.IS_CHANGED(plan, model_mode="Anima"), text.IS_CHANGED(plan))
+        deleted = self.nodes.ScenePromptDelete().delete(
+            "base, ill-text, anima-text", "ill-negative, anima-negative", plan,
+        )[0]
+        self.assertEqual(text.to_text(deleted), ("", "base-negative"))
+        self.assertEqual(text.to_text(deleted, model_mode="Anima"), ("", "base-negative"))
+        self.assertEqual(deleted["rows"][0]["row"]["loras"][0]["positive_parts"], [])
+        self.assertEqual(deleted["rows"][0]["row"]["loras"][1]["negative_parts"], [])
+
+    def test_reverse_all_and_previous_keep_model_filter_and_chain(self):
+        plan = add_prompt(self.prompt, "base", "base-pos", "base-neg", node_id="1")
+        plan = self.nodes.SceneApplyLora().apply_lora("ill", scene_prompt=plan,
+                                                      positive="ill-pos", negative="ill-neg")[0]
+        plan = self.nodes.SceneApplyLora().apply_lora("anima", scene_prompt=plan, model_mode="Anima",
+                                                      positive="anima-pos", negative="anima-neg")[0]
+        text = self.nodes.ScenePromptToText()
+        reverse = self.nodes.ScenePromptReverse()
+        previous = reverse.reverse(plan, self.nodes.REVERSE_SCOPE_PREVIOUS)[0]
+        self.assertEqual(text.to_text(previous), ("base-pos, ill-pos", "base-neg, ill-neg"))
+        self.assertEqual(text.to_text(previous, model_mode="Anima"), ("base-pos, anima-neg", "base-neg, anima-pos"))
+        self.assertEqual(text.to_text(previous, scope=self.nodes.TEXT_SCOPE_PREVIOUS, model_mode="Anima"),
+                         ("anima-neg", "anima-pos"))
+        self.assertEqual(text.to_text(previous, scope=self.nodes.TEXT_SCOPE_PREVIOUS), ("", ""))
+        self.assertEqual(previous["rows"][0]["row"]["prompt_trace"]["lora_index"], 1)
+        again = reverse.reverse(previous, self.nodes.REVERSE_SCOPE_PREVIOUS)[0]
+        self.assertEqual(text.to_text(again, model_mode="Anima"), text.to_text(plan, model_mode="Anima"))
+        all_reversed = reverse.reverse(plan)[0]
+        self.assertEqual(text.to_text(all_reversed), ("base-neg, ill-neg", "base-pos, ill-pos"))
+        self.assertEqual(text.to_text(all_reversed, model_mode="Anima"),
+                         ("base-neg, anima-neg", "base-pos, anima-pos"))
+        whole_previous = reverse.reverse(all_reversed, self.nodes.REVERSE_SCOPE_PREVIOUS)[0]
+        self.assertEqual(text.to_text(whole_previous, model_mode="Anima"), text.to_text(plan, model_mode="Anima"))
+
+    def test_callback_snapshot_stays_fixed_when_later_delete_edits_lora(self):
+        plan = self.nodes.SceneApplyLora().apply_lora("ill", positive="trigger")[0]
+        plan = self.plan.append_callback(plan, "cb", {"type": "dummy"}, "every", 1, "continue")
+        deleted = self.nodes.ScenePromptDelete().delete("trigger", "", plan)[0]
+        row = deleted["rows"][0]["row"]
+        self.assertEqual(row["loras"][0]["positive_parts"], [])
+        self.assertEqual(row["callbacks"][0]["current_loras"][0]["positive_parts"], ["trigger"])
+        calls = []
+        with patch.object(self.nodes, "dispatch_callback", side_effect=lambda config, values, timeout, **kw: calls.append(values)):
+            self.nodes._dispatch_row_callbacks(row, {"global_index": 0, "total_batches": 1}, 7,
+                                               "Illustrious", "", "", "")
+        self.assertEqual(calls[0]["current_positive"], "trigger")
+        self.assertEqual(calls[0]["all_positive"], "")
+
+    def test_trace_lora_index_is_strict(self):
+        plan = self.nodes.SceneApplyLora().apply_lora("ill", positive="trigger")[0]
+        for invalid in (-1, True, "0", 1):
+            broken = json.loads(json.dumps(plan))
+            broken["rows"][0]["row"]["prompt_trace"]["lora_index"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(self.plan.ScenePlanError):
+                self.plan.normalize_plan(broken)
 
     def test_negative_choice_blocks_matching_positive_after_expansion(self):
         plan = add_prompt(self.prompt, "base", "red, blue", "", node_id="1")
