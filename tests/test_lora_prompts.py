@@ -74,6 +74,12 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(self.expand(plan, "Illustrious")[:2], ("base", ""))
         self.assertEqual(self.nodes.ScenePromptToText().to_text(plan, model_mode="Anima"),
                          ("base, typed, chosen", "typed-negative, blocked"))
+        reversed_plan = self.nodes.ScenePromptReverse().reverse(plan)[0]
+        self.assertEqual(self.nodes.ScenePromptToText().to_text(reversed_plan, model_mode="Anima"),
+                         ("typed-negative, blocked", "base, typed, chosen"))
+        deleted = self.nodes.ScenePromptDelete().delete("chosen", "blocked", plan)[0]
+        self.assertEqual(self.nodes.ScenePromptToText().to_text(deleted, model_mode="Anima"),
+                         ("base, typed", "typed-negative"))
         changed = self.nodes.SceneApplyLora.IS_CHANGED
         self.assertNotEqual(changed("anima", positive_json=selected("Positive", "chosen")),
                             changed("anima", positive_json=selected("Positive", "different")))
