@@ -38,7 +38,7 @@ from .presets import (
     snapshot_presets_for_run,
 )
 from .storage import prompt_data_directory
-from .lora_metadata import read_lora_info
+from .lora_metadata import list_loras, read_lora_info
 
 
 set_run_expiration_callback(release_scene_preset_snapshot)
@@ -616,6 +616,14 @@ def define_routes():
         return
     _ROUTES_DEFINED = True
     setattr(PromptServer.instance, "_scene_prompt_routes_defined", True)
+
+    @PromptServer.instance.routes.get("/scene_prompt/loras/list")
+    async def scene_prompt_lora_list(request):
+        del request
+        try:
+            return web.json_response(await asyncio.to_thread(list_loras))
+        except OSError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
 
     @PromptServer.instance.routes.get("/scene_prompt/loras/info")
     async def scene_prompt_lora_info(request):

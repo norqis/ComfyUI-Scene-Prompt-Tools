@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_scene_prompt_reverse import add_prompt, load_modules
+from test_prompt_choices import selection_item
 
 
 class SceneLoraPromptTests(unittest.TestCase):
@@ -54,6 +55,29 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(legacy["rows"][0]["row"]["loras"][0]["positive_parts"], [])
         self.assertEqual(self.expand(legacy)[:2], ("base", ""))
         self.assertEqual(self.plan.normalize_plan(json.loads(json.dumps(changed)))["rows"][0]["row"]["loras"][0]["positive_parts"], ["one", "two"])
+
+    def test_selected_candidates_follow_model_and_existing_text(self):
+        selected = lambda category, prompt: json.dumps({"version": 1, "categories": {
+            category: [selection_item(prompt, category_key=category, category_label=category,
+                                      category_path=[category])],
+        }})
+        plan = add_prompt(self.prompt, "base", "base", "", node_id="1")
+        plan = self.nodes.SceneApplyLora().apply_lora(
+            "anima", scene_prompt=plan, model_mode="Anima", positive="typed", negative="typed-negative",
+            positive_json=selected("Positive", "chosen"), negative_json=selected("Negative", "blocked"),
+            category_order="Positive,Negative",
+        )[0]
+        row = plan["rows"][0]["row"]
+        self.assertEqual(row["loras"][0]["positive_parts"], ["typed", "chosen"])
+        self.assertEqual(row["loras"][0]["negative_parts"], ["typed-negative", "blocked"])
+        self.assertEqual(self.expand(plan, "Anima")[:2], ("base, typed, chosen", "typed-negative, blocked"))
+        self.assertEqual(self.expand(plan, "Illustrious")[:2], ("base", ""))
+        self.assertEqual(self.nodes.ScenePromptToText().to_text(plan, model_mode="Anima"),
+                         ("base, typed, chosen", "typed-negative, blocked"))
+        changed = self.nodes.SceneApplyLora.IS_CHANGED
+        self.assertNotEqual(changed("anima", positive_json=selected("Positive", "chosen")),
+                            changed("anima", positive_json=selected("Positive", "different")))
+        self.assertNotEqual(changed("anima", category_order="A,B"), changed("anima", category_order="B,A"))
 
     def test_callback_snapshot_sees_only_prior_matching_lora_text(self):
         plan = add_prompt(self.prompt, "base", "base", "", node_id="1")
@@ -184,6 +208,45 @@ class SceneLoraPromptTests(unittest.TestCase):
 
 
 class LoraMetadataTests(unittest.TestCase):
+    def test_catalog_reads_local_titles_without_hashing_weights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            titled = root / "titled.safetensors"
+            malformed = root / "malformed.safetensors"
+            output_only = root / "output.safetensors"
+            header = json.dumps({"__metadata__": {"modelspec.title": "Display Title",
+                                                  "ss_output_name": "Secondary"}}).encode()
+            titled.write_bytes(struct.pack("<Q", len(header)) + header + b"weights")
+            header = json.dumps({"__metadata__": {"ss_output_name": "Output Name"}}).encode()
+            output_only.write_bytes(struct.pack("<Q", len(header)) + header + b"weights")
+            malformed.write_bytes(b"invalid")
+            from comfy_stubs import install_torch_stub
+            install_torch_stub()
+            import types
+            folder_paths = types.ModuleType("folder_paths")
+            sys.modules["folder_paths"] = folder_paths
+            folder_paths.get_filename_list = lambda category: [
+                "folder/titled.safetensors", "output.safetensors", "malformed.safetensors", "missing.safetensors",
+            ]
+            folder_paths.get_full_path = lambda category, name: str(root / name.split("/")[-1])
+            package_name = "scene_lora_catalog_test"
+            package = type(sys)(package_name)
+            package.__path__ = [str(Path(__file__).resolve().parents[1] / "scene_prompt_tools")]
+            sys.modules[package_name] = package
+            metadata = importlib.import_module(f"{package_name}.lora_metadata")
+            with patch.object(metadata.hashlib, "sha256", side_effect=AssertionError("catalog hashed a model")):
+                catalog = metadata.list_loras()
+                self.assertEqual(metadata.list_loras(), catalog)
+            self.assertEqual([(item["path"], item["title"], item["source"]) for item in catalog], [
+                ("folder/titled.safetensors", "Display Title", "local"),
+                ("output.safetensors", "Output Name", "local"),
+                ("malformed.safetensors", "malformed", "filename"),
+                ("missing.safetensors", "missing", "filename"),
+            ])
+            self.assertEqual(catalog[0]["size"], titled.stat().st_size)
+            self.assertEqual(catalog[0]["mtime_ns"], titled.stat().st_mtime_ns)
+            self.assertIsNone(catalog[-1]["size"])
+
     def test_header_only_metadata_and_cached_sha(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -206,6 +269,7 @@ class LoraMetadataTests(unittest.TestCase):
             info = metadata.read_lora_info(path.name)
             self.assertEqual(info["trigger_phrases"], ["local trigger", "trained word"])
             self.assertEqual(len(info["sha256"]), 64)
+            self.assertEqual((info["size"], info["mtime_ns"]), (path.stat().st_size, path.stat().st_mtime_ns))
             self.assertEqual(metadata.read_lora_info(path.name), info)
             with self.assertRaises(ValueError):
                 metadata.read_lora_info("missing.safetensors")
