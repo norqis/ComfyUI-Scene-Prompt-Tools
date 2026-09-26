@@ -98,6 +98,7 @@ window.__favoriteMock = favoriteMock;
 window.__releaseFavoriteSave = () => releaseFavoriteSave?.();
 let releaseDelayedItems = null;
 let releaseDelayedLoraInfo = null;
+let releaseDelayedLoraList = null;
 const baseItem = {
   id: "summer",
   label: "Summer",
@@ -165,6 +166,11 @@ export const api = {
   },
   fetchApi: async (url, options = {}) => {
     calls.push({ url, options });
+    if (url === "/scene_prompt/loras/list" && window.__delayNextSceneLoraList) {
+      window.__delayNextSceneLoraList = false;
+      await new Promise((resolveDelay) => { releaseDelayedLoraList = resolveDelay; });
+      releaseDelayedLoraList = null;
+    }
     if (url.startsWith("/scene_prompt/loras/info?") && window.__delayNextSceneLoraInfo) {
       window.__delayNextSceneLoraInfo = false;
       await new Promise((resolveDelay) => { releaseDelayedLoraInfo = resolveDelay; });
@@ -220,6 +226,8 @@ window.__releaseScenePromptItems = () => releaseDelayedItems?.();
 window.__scenePromptItemsDelayed = () => !!releaseDelayedItems;
 window.__releaseSceneLoraInfo = () => releaseDelayedLoraInfo?.();
 window.__sceneLoraInfoDelayed = () => !!releaseDelayedLoraInfo;
+window.__releaseSceneLoraList = () => releaseDelayedLoraList?.();
+window.__sceneLoraListDelayed = () => !!releaseDelayedLoraList;
 `;
 const customScriptsAutocompleteModule = `
 const upstreamStyle = document.createElement("style");
@@ -935,6 +943,26 @@ try {
     assert.match(loraCandidateRoundTrip.negativeList, /1候補/u);
     assert.deepEqual(loraCandidateRoundTrip.restored, loraCandidateRoundTrip.stored, "both LoRA candidate lists survive save and reload");
     await page.keyboard.press("Escape");
+    const positiveBeforeStaleDetails = await page.evaluate(() => {
+        const node = window.__sceneLoraTestNode;
+        const widget = node.widgets.find((entry) => entry.name === "lora_name");
+        widget.value = "stale.safetensors";
+        node.widgets_values[node.widgets.indexOf(widget)] = widget.value;
+        window.__delayNextSceneLoraInfo = true;
+        node.widgets.find((entry) => entry.sceneRole === "lora_details").callback();
+        return node.widgets.find((entry) => entry.name === "positive").value;
+    });
+    await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
+    await page.evaluate(() => {
+        const node = window.__sceneLoraTestNode;
+        const widget = node.widgets.find((entry) => entry.name === "lora_name");
+        widget.value = "folder/other.safetensors";
+        node.widgets_values[node.widgets.indexOf(widget)] = widget.value;
+        window.__releaseSceneLoraInfo();
+    });
+    await page.getByRole("dialog", { name: "LoRA 詳細確認" }).waitFor({ state: "hidden" });
+    assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((entry) => entry.name === "positive").value), positiveBeforeStaleDetails,
+        "a stale LoRA cannot expose Trigger Words to inject into the new selection");
     await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback());
     await loraDialog.waitFor();
@@ -1959,6 +1987,56 @@ try {
     await page.waitForFunction(() => window.__restoredLoraNode.sceneLoraSummary?.title === "Civitai Style");
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 0,
         "reload restores the cached name from the cheap catalog without hashing");
+
+    await page.evaluate(() => localStorage.removeItem("scene_prompt_lora_names_v1"));
+    await page.addInitScript(() => { window.__delayNextSceneLoraList = true; });
+    await page.reload();
+    await page.waitForFunction(() => window.__scenePromptBrowserReady === true);
+    await page.evaluate(async () => {
+        class BootstrapLoraNode {
+            constructor() {
+                this.id = 44; this.type = "SceneApplyLora"; this.comfyClass = "SceneApplyLora";
+                this.size = [380, 240]; this.graph = window.app.graph;
+                this.inputs = [{ name: "scene_prompt", link: null }]; this.outputs = [{ name: "scene_prompt", links: [] }];
+                this.widgets = [
+                    { name: "lora_name", type: "combo", value: "style.safetensors", options: {} },
+                    { name: "strength_model", type: "number", value: 1, options: {} },
+                    { name: "strength_clip", type: "number", value: 1, options: {} },
+                    { name: "model_mode", type: "combo", value: "Anima", options: {} },
+                    { name: "positive", type: "text", value: "", options: {} },
+                    { name: "negative", type: "text", value: "", options: {} },
+                    { name: "positive_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
+                    { name: "negative_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
+                    { name: "category_order", type: "text", value: "", options: {} },
+                ];
+                this.widgets_values = this.widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget); return widget;
+            }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = size; }
+            serialize() { return { widgets_values: this.widgets_values }; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(BootstrapLoraNode, { name: "SceneApplyLora" });
+        window.__bootstrapLoraNode = new BootstrapLoraNode();
+        window.__bootstrapLoraNode.onNodeCreated();
+    });
+    await page.waitForFunction(() => window.__sceneLoraListDelayed());
+    await page.evaluate(() => {
+        window.__delayNextSceneLoraInfo = true;
+        window.__bootstrapLoraNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback();
+    });
+    await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
+    await page.evaluate(() => window.__releaseSceneLoraList());
+    await page.evaluate(() => { window.__bootstrapLoraNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback(); });
+    const bootstrapPicker = page.getByRole("dialog", { name: "LoRAを選択" });
+    await bootstrapPicker.getByRole("button", { name: /style\.safetensors/u }).click();
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 1,
+        "catalog arrival cannot start a second metadata and hash lookup for the same path");
+    await page.evaluate(() => window.__releaseSceneLoraInfo());
+    await page.waitForFunction(() => window.__bootstrapLoraNode.sceneLoraSummary.title === "Civitai Style");
 
     customScriptsAutocompleteAvailable = false;
     const unavailablePage = await browser.newPage();

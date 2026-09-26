@@ -5030,7 +5030,7 @@ function sceneLoraDisplay(item) {
 async function resolveSceneLora(item) {
     const cached = cachedSceneLora(item);
     if (cached?.title) return cached;
-    const key = sceneLoraCacheKey(item);
+    const key = item.path;
     if (sceneLoraResolutions.has(key)) return sceneLoraResolutions.get(key);
     const resolution = resolveSceneLoraUncached(item);
     sceneLoraResolutions.set(key, resolution);
@@ -5129,6 +5129,7 @@ async function openSceneLoraPicker(node) {
             source.textContent = display.source;
             row.append(path, title, source);
             row.onclick = async () => {
+                closeSceneLoraDetails(node);
                 setWidgetValue(node, "lora_name", item.path);
                 updateSceneLoraSummary(node);
                 closeSceneLoraPicker(node);
@@ -5190,6 +5191,10 @@ async function openSceneLoraDetails(node) {
         const item = sceneLoraCatalogItem(selectedName);
         const result = await resolveSceneLora(item);
         if (node.sceneLoraDetailsCleanup !== cleanup) return;
+        if (String(findWidget(node, "lora_name")?.value || "").trim() !== selectedName) {
+            closeSceneLoraDetails(node);
+            return;
+        }
         content.replaceChildren();
         const filename = document.createElement("div");
         filename.textContent = selectedName;
@@ -5232,7 +5237,13 @@ async function openSceneLoraDetails(node) {
             inject.className = "pc-button";
             inject.type = "button";
             inject.textContent = "注入";
-            inject.onclick = () => injectSceneLoraWord(node, word);
+            inject.onclick = () => {
+                if (String(findWidget(node, "lora_name")?.value || "").trim() !== selectedName) {
+                    closeSceneLoraDetails(node);
+                    return;
+                }
+                injectSceneLoraWord(node, word);
+            };
             row.append(text, inject);
             content.append(row);
         }
