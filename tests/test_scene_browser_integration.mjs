@@ -97,6 +97,7 @@ const favoriteMock = { loadStatuses: [], saveStatuses: [], delayNextSave: false,
 window.__favoriteMock = favoriteMock;
 window.__releaseFavoriteSave = () => releaseFavoriteSave?.();
 let releaseDelayedItems = null;
+let releaseDelayedLoraInfo = null;
 const baseItem = {
   id: "summer",
   label: "Summer",
@@ -164,6 +165,11 @@ export const api = {
   },
   fetchApi: async (url, options = {}) => {
     calls.push({ url, options });
+    if (url.startsWith("/scene_prompt/loras/info?") && window.__delayNextSceneLoraInfo) {
+      window.__delayNextSceneLoraInfo = false;
+      await new Promise((resolveDelay) => { releaseDelayedLoraInfo = resolveDelay; });
+      releaseDelayedLoraInfo = null;
+    }
     if (url.includes("/scene_prompt/items") && options.method !== "POST" && window.__delayNextScenePromptItems) {
       window.__delayNextScenePromptItems = false;
       await new Promise((resolveDelay) => { releaseDelayedItems = resolveDelay; });
@@ -212,6 +218,8 @@ window.__scenePromptListeners = listeners;
 window.__delayScenePromptItems = () => { window.__delayNextScenePromptItems = true; };
 window.__releaseScenePromptItems = () => releaseDelayedItems?.();
 window.__scenePromptItemsDelayed = () => !!releaseDelayedItems;
+window.__releaseSceneLoraInfo = () => releaseDelayedLoraInfo?.();
+window.__sceneLoraInfoDelayed = () => !!releaseDelayedLoraInfo;
 `;
 const customScriptsAutocompleteModule = `
 const upstreamStyle = document.createElement("style");
@@ -822,10 +830,11 @@ try {
     assert.deepEqual(toTextLegacy.reloaded, ["直前のノードのみ", 7, 12345, true, "Anima"],
         "a selected fifth value round-trips without shifting legacy values");
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("/scene_prompt/loras/info?"))), false);
-    await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => route.fulfill({
+    let civitaiLookupCount = 0;
+    await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => { civitaiLookupCount += 1; return route.fulfill({
         status: 200, contentType: "application/json",
         body: JSON.stringify({ id: 20, modelId: 10, name: "Version One", model: { name: "Civitai Style" }, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle"] }),
-    }));
+    }); });
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
     const loraPicker = page.getByRole("dialog", { name: "LoRAを選択" });
     await loraPicker.getByRole("button", { name: /style\.safetensors/u }).waitFor();
@@ -840,7 +849,7 @@ try {
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 1);
     assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values[0]), "style.safetensors",
         "the execution value stays the relative file path");
-    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback());
+    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback(); });
     const loraDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
     await loraDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
     assert.equal(await loraDialog.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"),
@@ -884,6 +893,21 @@ try {
     await page.waitForFunction(() => window.__sceneLoraTestNode.sceneLoraSummary.title === "Civitai Style");
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 4,
         "offline name lookup retries on a later selection");
+    await page.evaluate(() => {
+        window.__sceneLoraCatalog[1].mtime_ns = 9;
+        window.__delayNextSceneLoraInfo = true;
+        window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback();
+    });
+    const lookupsBeforeConcurrentDetails = civitaiLookupCount;
+    await loraPicker.getByRole("button", { name: /other\.safetensors/u }).click();
+    await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
+    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback(); });
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 5,
+        "selection and details share the in-flight metadata and hash lookup");
+    await page.evaluate(() => window.__releaseSceneLoraInfo());
+    await page.getByRole("dialog", { name: "LoRA 詳細確認" }).getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    assert.equal(civitaiLookupCount, lookupsBeforeConcurrentDetails + 1, "selection and details share one Civitai request");
+    await page.keyboard.press("Escape");
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
     await page.locator(".pc-popup").getByText("Outfit", { exact: false }).click();
     await page.getByTitle("summer dress", { exact: true }).click();
@@ -1898,6 +1922,43 @@ try {
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
     await page.waitForTimeout(50);
     assert.equal((await releaseCalls(page)).length, 0);
+
+    await page.reload();
+    await page.waitForFunction(() => window.__scenePromptBrowserReady === true);
+    await page.evaluate(async () => {
+        class RestoredLoraNode {
+            constructor() {
+                this.id = 43; this.type = "SceneApplyLora"; this.comfyClass = "SceneApplyLora";
+                this.size = [380, 240]; this.graph = window.app.graph;
+                this.inputs = [{ name: "scene_prompt", link: null }]; this.outputs = [{ name: "scene_prompt", links: [] }];
+                this.widgets = [
+                    { name: "lora_name", type: "combo", value: "style.safetensors", options: {} },
+                    { name: "strength_model", type: "number", value: 1, options: {} },
+                    { name: "strength_clip", type: "number", value: 1, options: {} },
+                    { name: "model_mode", type: "combo", value: "Anima", options: {} },
+                    { name: "positive", type: "text", value: "", options: {} },
+                    { name: "negative", type: "text", value: "", options: {} },
+                    { name: "positive_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
+                    { name: "negative_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
+                    { name: "category_order", type: "text", value: "", options: {} },
+                ];
+                this.widgets_values = this.widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget); return widget;
+            }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = size; }
+            serialize() { return { widgets_values: this.widgets_values }; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(RestoredLoraNode, { name: "SceneApplyLora" });
+        window.__restoredLoraNode = new RestoredLoraNode();
+        window.__restoredLoraNode.onNodeCreated();
+    });
+    await page.waitForFunction(() => window.__restoredLoraNode.sceneLoraSummary?.title === "Civitai Style");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 0,
+        "reload restores the cached name from the cheap catalog without hashing");
 
     customScriptsAutocompleteAvailable = false;
     const unavailablePage = await browser.newPage();

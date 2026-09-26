@@ -4961,6 +4961,24 @@ function injectSceneLoraWord(node, value) {
 const SCENE_LORA_CACHE_KEY = "scene_prompt_lora_names_v1";
 const SCENE_LORA_CACHE_LIMIT = 120;
 let sceneLoraCatalog = [];
+let sceneLoraCatalogRequest = null;
+const sceneLoraNodes = new Set();
+const sceneLoraResolutions = new Map();
+
+function loadSceneLoraCatalog() {
+    if (sceneLoraCatalogRequest) return sceneLoraCatalogRequest;
+    const request = (async () => {
+        const response = await api.fetchApi("/scene_prompt/loras/list");
+        const data = await readApiJson(response, "LoRA一覧を取得できませんでした");
+        if (!response.ok) throw new Error(data.error || "LoRA一覧を取得できませんでした。");
+        sceneLoraCatalog = Array.isArray(data) ? data : [];
+        for (const node of sceneLoraNodes) updateSceneLoraSummary(node);
+        return sceneLoraCatalog;
+    })();
+    sceneLoraCatalogRequest = request;
+    void request.finally(() => { if (sceneLoraCatalogRequest === request) sceneLoraCatalogRequest = null; }).catch(() => {});
+    return request;
+}
 
 function sceneLoraCacheKey(item) {
     return `${item.path || item.name || ""}\u0000${item.size ?? ""}\u0000${item.mtime_ns ?? ""}`;
@@ -5012,6 +5030,15 @@ function sceneLoraDisplay(item) {
 async function resolveSceneLora(item) {
     const cached = cachedSceneLora(item);
     if (cached?.title) return cached;
+    const key = sceneLoraCacheKey(item);
+    if (sceneLoraResolutions.has(key)) return sceneLoraResolutions.get(key);
+    const resolution = resolveSceneLoraUncached(item);
+    sceneLoraResolutions.set(key, resolution);
+    try { return await resolution; }
+    finally { if (sceneLoraResolutions.get(key) === resolution) sceneLoraResolutions.delete(key); }
+}
+
+async function resolveSceneLoraUncached(item) {
     const response = await api.fetchApi(`/scene_prompt/loras/info?name=${encodeURIComponent(item.path)}`);
     const local = await readApiJson(response, "LoRA情報を取得できませんでした");
     if (!response.ok) throw new Error(local.error || "LoRA情報を取得できませんでした。");
@@ -5113,10 +5140,7 @@ async function openSceneLoraPicker(node) {
     };
     search.oninput = render;
     try {
-        const response = await api.fetchApi("/scene_prompt/loras/list");
-        const data = await readApiJson(response, "LoRA一覧を取得できませんでした");
-        if (!response.ok) throw new Error(data.error || "LoRA一覧を取得できませんでした。");
-        sceneLoraCatalog = Array.isArray(data) ? data : [];
+        await loadSceneLoraCatalog();
         if (node.sceneLoraPickerCleanup === cleanup) { updateSceneLoraSummary(node); render(); }
     } catch (error) {
         if (node.sceneLoraPickerCleanup === cleanup) list.textContent = error.message;
@@ -10979,6 +11003,8 @@ function attachSceneUtilityNode(node, nodeName) {
     }
     if (SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)) {
         ensureSceneLoraControls(node);
+        sceneLoraNodes.add(node);
+        void loadSceneLoraCatalog().catch(() => {});
         installScenePromptWidgetSyncHandlers(node);
     }
     if (SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)) {
@@ -11032,6 +11058,7 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         invalidatePopupRequests(this);
         closeSceneLoraDetails(this);
         if (typeof closeSceneLoraPicker === "function") closeSceneLoraPicker(this);
+        if (typeof sceneLoraNodes !== "undefined") sceneLoraNodes.delete(this);
         if (popupContextReferencesNode(activePopupContext, this)) {
             closeAllPopups();
         }
@@ -11509,6 +11536,7 @@ app.registerExtension({
                         if (stored[index] !== undefined) setWidgetValue(this, name, stored[index], { silent: true });
                     });
                 }
+                updateSceneLoraSummary(this);
                 return result;
             };
             nodeType.prototype.serialize = function (...args) {
