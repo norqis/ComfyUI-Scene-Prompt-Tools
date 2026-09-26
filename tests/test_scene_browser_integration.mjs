@@ -127,6 +127,11 @@ const promptItems = [baseItem, weightItem, nestedItem, ...Array.from({ length: 6
   label: "Summer " + index,
   prompt: "summer dress " + index,
 }))];
+const loraCatalog = [
+  { path: "style.safetensors", title: "Local Style", source: "local", size: 100, mtime_ns: 1 },
+  { path: "folder/other.safetensors", title: "Other Local", source: "local", size: 200, mtime_ns: 2 },
+];
+window.__sceneLoraCatalog = loraCatalog;
 const savedPrompt = { id: "browser-set", name: "Browser Set", description: "", items: [baseItem] };
 export const api = {
   clientId: "browser-client",
@@ -167,8 +172,11 @@ export const api = {
     let payload = { items: [] };
     let status = 200;
     if (url.includes("/scene_prompt/items")) payload = { items: promptItems };
+    if (url === "/scene_prompt/loras/list") payload = loraCatalog;
     if (url.startsWith("/scene_prompt/loras/info?")) payload = {
-      name: "style.safetensors", sha256: "A".repeat(64), trigger_phrases: ["Local Tag", "BELLE ZZZ"],
+      name: decodeURIComponent(url.split("name=")[1] || ""), sha256: "A".repeat(64), trigger_phrases: ["Local Tag", "BELLE ZZZ"],
+      size: loraCatalog.find((item) => url.includes(encodeURIComponent(item.path)))?.size,
+      mtime_ns: loraCatalog.find((item) => url.includes(encodeURIComponent(item.path)))?.mtime_ns,
     };
     if (url === "/scene_prompt/items" && options.method === "POST") {
       const request = JSON.parse(options.body || "{}");
@@ -719,6 +727,9 @@ try {
                     { name: "model_mode", type: "combo", value: "Anima", options: {} },
                     { name: "positive", type: "text", value: "", options: {} },
                     { name: "negative", type: "text", value: "", options: {} },
+                    { name: "positive_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
+                    { name: "negative_json", type: "text", value: '{"version":1,"categories":{}}', options: {} },
+                    { name: "category_order", type: "text", value: "", options: {} },
                 ];
                 this.widgets_values = this.widgets.map((widget) => widget.value);
             }
@@ -796,12 +807,13 @@ try {
         node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
     });
     const loraRoundTrip = await page.evaluate(() => window.__sceneApplyLoraRoundTrip);
-    assert.deepEqual(loraRoundTrip.visible, ["lora_name", "strength_model", "strength_clip", "詳細確認", "positive", "negative", "model_mode"]);
-    assert.deepEqual(loraRoundTrip.labels, ["ポジティブテキスト", "ネガティブテキスト"]);
-    assert.deepEqual(loraRoundTrip.saved, ["style.safetensors", 0.8, 0.7, "Anima", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "bad"]);
+    assert.deepEqual(loraRoundTrip.visible, ["model_mode", "LoRA", "LoRAを選択", "strength_model", "strength_clip", "詳細確認", "positive", "ポジティブ候補", "ポジティブ選択済み", "negative", "ネガティブ候補", "ネガティブ選択済み"]);
+    assert.deepEqual(loraRoundTrip.labels, ["positiveテキスト", "negativeテキスト"]);
+    const emptyLoraSelection = '{"version":1,"categories":{}}';
+    assert.deepEqual(loraRoundTrip.saved, ["style.safetensors", 0.8, 0.7, "Anima", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "bad", emptyLoraSelection, emptyLoraSelection, ""]);
     assert.deepEqual(loraRoundTrip.restored, loraRoundTrip.saved);
-    assert.deepEqual(loraRoundTrip.legacy, ["old.safetensors", 0.4, 0.3, "Illustrious", "", ""]);
-    assert.deepEqual(loraRoundTrip.linked, ["linked.safetensors", 0.6, 0.5, null, "front", "back"]);
+    assert.deepEqual(loraRoundTrip.legacy, ["old.safetensors", 0.4, 0.3, "Illustrious", "", "", emptyLoraSelection, emptyLoraSelection, ""]);
+    assert.deepEqual(loraRoundTrip.linked, ["linked.safetensors", 0.6, 0.5, null, "front", "back", emptyLoraSelection, emptyLoraSelection, ""]);
     assert.deepEqual(loraRoundTrip.copied, loraRoundTrip.linked);
     const toTextLegacy = await page.evaluate(() => window.__sceneToTextLegacyRoundTrip);
     assert.deepEqual(toTextLegacy.visible, ["scope", "model_mode"]);
@@ -812,14 +824,30 @@ try {
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("/scene_prompt/loras/info?"))), false);
     await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => route.fulfill({
         status: 200, contentType: "application/json",
-        body: JSON.stringify({ id: 20, modelId: 10, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle"] }),
+        body: JSON.stringify({ id: 20, modelId: 10, name: "Version One", model: { name: "Civitai Style" }, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle"] }),
     }));
+    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
+    const loraPicker = page.getByRole("dialog", { name: "LoRAを選択" });
+    await loraPicker.getByRole("button", { name: /style\.safetensors/u }).waitFor();
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 0,
+        "opening the picker reads only the cheap local catalog");
+    await loraPicker.getByRole("searchbox", { name: "パス・名前で検索" }).fill("folder/");
+    assert.equal(await loraPicker.locator(".pc-lora-row").count(), 1, "path search narrows the list");
+    await loraPicker.getByRole("searchbox", { name: "パス・名前で検索" }).fill("Local Style");
+    assert.equal(await loraPicker.locator(".pc-lora-row").count(), 1, "display-name search narrows the list");
+    await loraPicker.locator(".pc-lora-row").click();
+    await page.waitForFunction(() => window.__sceneLoraTestNode.sceneLoraSummary?.title === "Civitai Style");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 1);
+    assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values[0]), "style.safetensors",
+        "the execution value stays the relative file path");
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback());
     const loraDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
     await loraDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
     assert.equal(await loraDialog.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"),
         "https://civitai.com/models/10?modelVersionId=20");
     assert.equal(await loraDialog.locator(".pc-lora-word").count(), 4, "local and Civitai words are deduplicated");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 1,
+        "details reuse the selected LoRA cache");
     const injectWord = async (word) => loraDialog.locator(".pc-lora-word")
         .filter({ has: page.locator("span").filter({ hasText: new RegExp(`^${word}$`, "i") }) })
         .getByRole("button", { name: "注入" }).click();
@@ -833,6 +861,57 @@ try {
     assert.equal(afterInjection[5], "bad", "injection leaves negative unchanged");
     await page.keyboard.press("Escape");
     assert.equal(await page.getByRole("dialog", { name: "LoRA 詳細確認" }).count(), 0);
+    await page.evaluate(() => { window.__sceneLoraCatalog[0].mtime_ns = 3; window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback(); });
+    await loraPicker.getByRole("button", { name: /style\.safetensors/u }).waitFor();
+    assert.equal(await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-title").textContent(), "Local Style",
+        "changed file metadata invalidates the Civitai display name");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 1,
+        "refreshing the catalog does not hash files");
+    await loraPicker.locator(".pc-lora-row").first().click();
+    await page.waitForFunction(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length === 2);
+    await page.waitForFunction(() => window.__sceneLoraTestNode.sceneLoraSummary.title === "Civitai Style");
+    await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => route.fulfill({ status: 503, body: "offline" }), { times: 1 });
+    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
+    const offlineLookup = page.waitForResponse((response) => response.url().includes("/model-versions/by-hash/") && response.status() === 503);
+    await loraPicker.getByRole("button", { name: /other\.safetensors/u }).click();
+    await offlineLookup;
+    await page.waitForFunction(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length === 3);
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]").some((entry) => entry.key.startsWith("folder/other.safetensors") && !entry.title));
+    assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.sceneLoraSummary.title), "Other Local", "offline Civitai uses labelled local title");
+    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
+    await loraPicker.getByRole("button", { name: /other\.safetensors/u }).click();
+    await page.waitForFunction(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length === 4);
+    await page.waitForFunction(() => window.__sceneLoraTestNode.sceneLoraSummary.title === "Civitai Style");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), 4,
+        "offline name lookup retries on a later selection");
+    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
+    await page.locator(".pc-popup").getByText("Outfit", { exact: false }).click();
+    await page.getByTitle("summer dress", { exact: true }).click();
+    const loraPositive = await page.evaluate(() => {
+        const node = window.__sceneLoraTestNode;
+        return { selected: JSON.parse(node.widgets.find((widget) => widget.name === "positive_json").value),
+            list: node.widgets.find((widget) => widget.sceneRole === "positive_selected_list").value };
+    });
+    assert.equal(loraPositive.selected.categories.Outfit[0].id, "summer", "LoRA positive candidate is stored");
+    assert.match(loraPositive.list, /1候補/u, "selected LoRA candidate appears beside its field");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "negative_open").callback());
+    await page.locator(".pc-popup").getByText("Outfit", { exact: false }).click();
+    await page.getByTitle("summer dress", { exact: true }).click();
+    const loraCandidateRoundTrip = await page.evaluate(() => {
+        const node = window.__sceneLoraTestNode;
+        const stored = node.serialize().widgets_values;
+        const copy = new node.constructor();
+        copy.onNodeCreated();
+        copy.configure(node.serialize());
+        return { stored, restored: copy.serialize().widgets_values,
+            negativeList: node.widgets.find((widget) => widget.sceneRole === "negative_selected_list").value };
+    });
+    assert.equal(JSON.parse(loraCandidateRoundTrip.stored[7]).categories.Outfit[0].id, "summer", "LoRA negative candidate is stored");
+    assert.match(loraCandidateRoundTrip.negativeList, /1候補/u);
+    assert.deepEqual(loraCandidateRoundTrip.restored, loraCandidateRoundTrip.stored, "both LoRA candidate lists survive save and reload");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback());
     await loraDialog.waitFor();
     await page.evaluate(() => window.__sceneLoraTestNode.onRemoved());

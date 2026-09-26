@@ -801,7 +801,7 @@ function writeState(node, state, options = {}) {
     }
     clearSceneComputedCaches(node);
     refreshNode(node, { expand: true, reserveSelectedListLine: !!options.reserveSelectedListLine });
-    if (isScenePromptNode(node)) {
+    if (isScenePromptNode(node) || isSceneApplyLoraNode(node)) {
         refreshDownstreamSceneNodes(node);
     }
     if (options.fitHeight) {
@@ -1319,7 +1319,7 @@ function preflightPromptItemReplacement(node, originalItem, updatedItem, options
     }
 
     for (const graphNode of graphNodes()) {
-        if (isScenePromptNode(graphNode)) {
+        if (isScenePromptNode(graphNode) || isSceneApplyLoraNode(graphNode)) {
             for (const stateWidgetName of selectionStateWidgetNames(graphNode)) {
                 replacePromptItemInState(
                     readStateFromWidget(graphNode, stateWidgetName),
@@ -1355,7 +1355,7 @@ function replacePromptItemEverywhere(originalItem, updatedItem) {
 
     let anyChanged = false;
     for (const graphNode of graphNodes()) {
-        if (isScenePromptNode(graphNode)) {
+        if (isScenePromptNode(graphNode) || isSceneApplyLoraNode(graphNode)) {
             let nodeChanged = false;
             const previousStateWidgetName = activeStateWidgetName(graphNode);
             for (const stateWidgetName of selectionStateWidgetNames(graphNode)) {
@@ -3998,7 +3998,7 @@ function hideSceneUtilityWidgets(node, nodeName) {
         : SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
         ? new Set(["path", "metadata_mode", "expand_preset_contents"])
         : SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)
-            ? new Set(["lora_name", "strength_model", "strength_clip", "model_mode", "positive", "negative"])
+            ? new Set(["strength_model", "strength_clip", "model_mode", "positive", "negative"])
         : isSceneExpandNodeName(nodeName)
             ? new Set([
                 "timestamp_dir", "prefix", "counter_position", "model_mode", "replace_underscores", "convert_anima_weights",
@@ -4898,13 +4898,13 @@ function sceneExpandConfigureValues(config) {
     return { ...config, widgets_values: converted };
 }
 
-const SCENE_LORA_STORED_WIDGET_NAMES = ["lora_name", "strength_model", "strength_clip", "model_mode", "positive", "negative"];
+const SCENE_LORA_STORED_WIDGET_NAMES = ["lora_name", "strength_model", "strength_clip", "model_mode", "positive", "negative", "positive_json", "negative_json", "category_order"];
 
 function sceneLoraStoredValues(node) {
     return SCENE_LORA_STORED_WIDGET_NAMES.map((name) => {
         const widget = findWidget(node, name);
         if (node.inputs?.some((input) => input.name === name && input.link != null)) return null;
-        return widget?.value ?? (name === "positive" || name === "negative" ? "" : null);
+        return widget?.value ?? (["positive", "negative", "category_order"].includes(name) ? "" : ["positive_json", "negative_json"].includes(name) ? '{"version":1,"categories":{}}' : null);
     });
 }
 
@@ -4958,6 +4958,171 @@ function injectSceneLoraWord(node, value) {
     return setWidgetValue(node, "positive", `${current.trim() ? current : ""}${separator}${word}`);
 }
 
+const SCENE_LORA_CACHE_KEY = "scene_prompt_lora_names_v1";
+const SCENE_LORA_CACHE_LIMIT = 120;
+let sceneLoraCatalog = [];
+
+function sceneLoraCacheKey(item) {
+    return `${item.path || item.name || ""}\u0000${item.size ?? ""}\u0000${item.mtime_ns ?? ""}`;
+}
+
+function readSceneLoraCache() {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(SCENE_LORA_CACHE_KEY) || "[]");
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (_error) {
+        return [];
+    }
+}
+
+function cachedSceneLora(item) {
+    if (item.size == null || item.mtime_ns == null) return null;
+    return readSceneLoraCache().find((entry) => entry.key === sceneLoraCacheKey(item)) || null;
+}
+
+function saveSceneLoraCache(item, local, version) {
+    const key = sceneLoraCacheKey(item);
+    const title = String(version?.model?.name || "").trim();
+    const entry = {
+        key, title, versionName: String(version?.name || "").trim(),
+        modelId: version?.modelId, versionId: version?.id,
+        trainedWords: Array.isArray(version?.trainedWords) ? version.trainedWords : [],
+        localWords: Array.isArray(local?.trigger_phrases) ? local.trigger_phrases : [],
+        source: title ? "Civitai" : (item.source || "ファイル名"),
+    };
+    if (item.size != null && item.mtime_ns != null) {
+        const entries = readSceneLoraCache().filter((existing) => existing.key !== key);
+        entries.unshift(entry);
+        try { localStorage.setItem(SCENE_LORA_CACHE_KEY, JSON.stringify(entries.slice(0, SCENE_LORA_CACHE_LIMIT))); } catch (_error) {}
+    }
+    return entry;
+}
+
+function sceneLoraCatalogItem(path) {
+    return sceneLoraCatalog.find((item) => item.path === path) || { path, title: path.split(/[\\/]/u).at(-1) || path, source: "ファイル名" };
+}
+
+function sceneLoraDisplay(item) {
+    const cached = cachedSceneLora(item);
+    const source = item.source === "local" ? "ローカル情報" : "ファイル名";
+    return { title: cached?.title || item.title || item.path.split(/[\\/]/u).at(-1) || item.path,
+        source: cached?.title ? "Civitai" : source, versionName: cached?.versionName || "" };
+}
+
+async function resolveSceneLora(item) {
+    const cached = cachedSceneLora(item);
+    if (cached?.title) return cached;
+    const response = await api.fetchApi(`/scene_prompt/loras/info?name=${encodeURIComponent(item.path)}`);
+    const local = await readApiJson(response, "LoRA情報を取得できませんでした");
+    if (!response.ok) throw new Error(local.error || "LoRA情報を取得できませんでした。");
+    const actual = { ...item, size: local.size ?? item.size, mtime_ns: local.mtime_ns ?? item.mtime_ns };
+    const current = cachedSceneLora(actual);
+    if (current?.title) return current;
+    let version = null;
+    if (local.sha256) {
+        try {
+            const civitai = await fetch(`https://civitai.com/api/v1/model-versions/by-hash/${encodeURIComponent(local.sha256)}`);
+            if (civitai.ok) version = await civitai.json();
+        } catch (_error) {}
+    }
+    return saveSceneLoraCache(actual, local, version);
+}
+
+function updateSceneLoraSummary(node) {
+    const path = String(findWidget(node, "lora_name")?.value || "").trim();
+    const item = sceneLoraCatalogItem(path);
+    const display = sceneLoraDisplay(item);
+    node.sceneLoraSummary = { path: path || "未選択", ...display };
+    node.setDirtyCanvas?.(true, true);
+}
+
+function closeSceneLoraPicker(node) {
+    node.sceneLoraPickerCleanup?.();
+    node.sceneLoraPickerCleanup = null;
+}
+
+async function openSceneLoraPicker(node) {
+    closeSceneLoraPicker(node);
+    injectStyle();
+    const overlay = document.createElement("div");
+    overlay.className = "pc-lora-overlay";
+    const dialog = document.createElement("div");
+    dialog.className = "pc-lora-dialog pc-lora-picker";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "LoRAを選択");
+    const head = document.createElement("div");
+    head.className = "pc-lora-head";
+    const heading = document.createElement("strong");
+    heading.textContent = "LoRAを選択";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "pc-button";
+    close.textContent = "閉じる";
+    head.append(heading, close);
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "pc-lora-search";
+    search.placeholder = "パス・名前で検索";
+    search.setAttribute("aria-label", "パス・名前で検索");
+    const list = document.createElement("div");
+    list.className = "pc-lora-list";
+    list.textContent = "LoRAを読み込んでいます…";
+    dialog.append(head, search, list);
+    overlay.append(dialog);
+    document.body.append(overlay);
+    const onKey = (event) => { if (event.key === "Escape") closeSceneLoraPicker(node); };
+    const cleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+    node.sceneLoraPickerCleanup = cleanup;
+    close.onclick = () => closeSceneLoraPicker(node);
+    overlay.onclick = (event) => { if (event.target === overlay) closeSceneLoraPicker(node); };
+    document.addEventListener("keydown", onKey);
+    search.focus();
+    const render = () => {
+        const query = search.value.trim().toLocaleLowerCase();
+        const shown = sceneLoraCatalog.filter((item) => {
+            const display = sceneLoraDisplay(item);
+            return `${item.path} ${display.title} ${display.versionName}`.toLocaleLowerCase().includes(query);
+        });
+        list.replaceChildren();
+        if (!shown.length) { list.textContent = "該当するLoRAはありません。"; return; }
+        for (const item of shown) {
+            const display = sceneLoraDisplay(item);
+            const row = document.createElement("button");
+            row.type = "button";
+            row.className = "pc-lora-row";
+            const path = document.createElement("span");
+            path.className = "pc-lora-path";
+            path.textContent = item.path;
+            const title = document.createElement("strong");
+            title.className = "pc-lora-title";
+            title.textContent = display.title;
+            const source = document.createElement("small");
+            source.className = "pc-lora-source";
+            source.textContent = display.source;
+            row.append(path, title, source);
+            row.onclick = async () => {
+                setWidgetValue(node, "lora_name", item.path);
+                updateSceneLoraSummary(node);
+                closeSceneLoraPicker(node);
+                try { await resolveSceneLora(item); } catch (_error) {}
+                if (String(findWidget(node, "lora_name")?.value || "") === item.path) updateSceneLoraSummary(node);
+            };
+            list.append(row);
+        }
+    };
+    search.oninput = render;
+    try {
+        const response = await api.fetchApi("/scene_prompt/loras/list");
+        const data = await readApiJson(response, "LoRA一覧を取得できませんでした");
+        if (!response.ok) throw new Error(data.error || "LoRA一覧を取得できませんでした。");
+        sceneLoraCatalog = Array.isArray(data) ? data : [];
+        if (node.sceneLoraPickerCleanup === cleanup) { updateSceneLoraSummary(node); render(); }
+    } catch (error) {
+        if (node.sceneLoraPickerCleanup === cleanup) list.textContent = error.message;
+    }
+}
+
 function closeSceneLoraDetails(node) {
     node.sceneLoraDetailsCleanup?.();
     node.sceneLoraDetailsCleanup = null;
@@ -4998,43 +5163,35 @@ async function openSceneLoraDetails(node) {
     const selectedName = String(findWidget(node, "lora_name")?.value || "").trim();
     try {
         if (!selectedName) throw new Error("LoRAを選択してください。");
-        const response = await api.fetchApi(`/scene_prompt/loras/info?name=${encodeURIComponent(selectedName)}`);
-        const local = await readApiJson(response, "LoRA情報を取得できませんでした");
-        if (!response.ok) throw new Error(local.error || "LoRA情報を取得できませんでした。");
-        let version = null;
-        let civitaiError = "";
-        if (local.sha256) {
-            try {
-                const civitaiResponse = await fetch(`https://civitai.com/api/v1/model-versions/by-hash/${encodeURIComponent(local.sha256)}`);
-                if (!civitaiResponse.ok) throw new Error(`HTTP ${civitaiResponse.status}`);
-                version = await civitaiResponse.json();
-            } catch (_error) {
-                civitaiError = "Civitai情報を取得できませんでした。";
-            }
-        }
+        const item = sceneLoraCatalogItem(selectedName);
+        const result = await resolveSceneLora(item);
         if (node.sceneLoraDetailsCleanup !== cleanup) return;
         content.replaceChildren();
         const filename = document.createElement("div");
-        filename.textContent = local.name || selectedName;
+        filename.textContent = selectedName;
         content.append(filename);
-        if (Number.isSafeInteger(Number(version?.modelId)) && Number(version.modelId) > 0
-            && Number.isSafeInteger(Number(version?.id)) && Number(version.id) > 0) {
+        if (result.title) {
+            const modelName = document.createElement("strong");
+            modelName.textContent = `${result.title}${result.versionName ? ` / ${result.versionName}` : ""}`;
+            content.append(modelName);
+        }
+        if (Number.isSafeInteger(Number(result.modelId)) && Number(result.modelId) > 0
+            && Number.isSafeInteger(Number(result.versionId)) && Number(result.versionId) > 0) {
             const link = document.createElement("a");
-            link.href = `https://civitai.com/models/${version.modelId}?modelVersionId=${version.id}`;
+            link.href = `https://civitai.com/models/${result.modelId}?modelVersionId=${result.versionId}`;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
             link.textContent = "Civitaiで見る";
             content.append(link);
-        } else if (civitaiError) {
+        } else {
             const message = document.createElement("div");
-            message.textContent = civitaiError;
+            message.textContent = "Civitaiの名前は未取得です。";
             content.append(message);
         }
         const label = document.createElement("strong");
         label.textContent = "Trigger Words";
         content.append(label);
-        const words = [...(Array.isArray(version?.trainedWords) ? version.trainedWords : []),
-            ...(Array.isArray(local.trigger_phrases) ? local.trigger_phrases : [])];
+        const words = [...result.trainedWords, ...result.localWords];
         const unique = [...new Map(words.map((word) => String(word || "").trim()).filter(Boolean)
             .map((word) => [sceneLoraWordIdentity(word), word])).values()];
         if (!unique.length) {
@@ -5061,15 +5218,41 @@ async function openSceneLoraDetails(node) {
 }
 
 function ensureSceneLoraControls(node) {
+    node.sceneDefaultStateWidgetName = "positive_json";
+    setActiveStateWidget(node, "positive_json");
+    if (!findSceneWidget(node, "lora_summary")) {
+        addSceneCustomWidget(node, {
+            type: "scene_lora_summary", name: "LoRA", value: "", serialize: false,
+            options: { serialize: false }, sceneRole: "lora_summary",
+            computeSize(width) { return [width, 60]; },
+            draw(ctx, drawNode, width, y) {
+                const summary = drawNode.sceneLoraSummary || { path: "未選択", title: "", source: "" };
+                ctx.save();
+                ctx.fillStyle = "#bbc8d8";
+                ctx.font = "11px sans-serif";
+                ctx.fillText(fitCanvasText(ctx, `パス  ${summary.path}`, width - 24), 12, y + 17);
+                ctx.fillStyle = "#f1f4fa";
+                ctx.font = "bold 12px sans-serif";
+                ctx.fillText(fitCanvasText(ctx, `名前  ${summary.title}`, width - 24), 12, y + 35);
+                ctx.fillStyle = "#9eb8d4";
+                ctx.font = "10px sans-serif";
+                ctx.fillText(summary.source, 12, y + 52);
+                ctx.restore();
+            },
+        });
+    }
+    addSceneButton(node, "lora_select", "LoRAを選択", () => openSceneLoraPicker(node));
     const button = addSceneButton(node, "lora_details", "詳細確認", () => openSceneLoraDetails(node));
-    applyWidgetLabel(findWidget(node, "positive"), "ポジティブテキスト");
-    applyWidgetLabel(findWidget(node, "negative"), "ネガティブテキスト");
-    const order = ["lora_name", "strength_model", "strength_clip", "lora_details", "positive", "negative", "model_mode"];
-    const rank = (widget) => order.indexOf(widget.sceneRole === "lora_details" ? "lora_details" : widget.name);
+    ensurePromptSelectionControls(node);
+    applyWidgetLabel(findWidget(node, "positive"), "positiveテキスト");
+    applyWidgetLabel(findWidget(node, "negative"), "negativeテキスト");
+    const order = ["model_mode", "lora_summary", "lora_select", "strength_model", "strength_clip", "lora_details", "positive", "positive_open", "positive_selected_list", "negative", "negative_open", "negative_selected_list"];
+    const rank = (widget) => order.indexOf(widget.sceneRole || widget.name);
     const previous = new Map(node.widgets.map((widget, index) => [widget, node.widgets_values?.[index] ?? widget.value]));
     node.widgets.sort((a, b) => (rank(a) >= 0 ? rank(a) : order.length) - (rank(b) >= 0 ? rank(b) : order.length));
     if (Array.isArray(node.widgets_values)) node.widgets_values = node.widgets.map((widget) => previous.get(widget));
     button.serialize = false;
+    updateSceneLoraSummary(node);
     node.setDirtyCanvas?.(true, true);
 }
 
@@ -9895,7 +10078,7 @@ function refreshSceneExpandNode(node, options = {}) {
 }
 
 function refreshNode(node, options = {}) {
-    if (isScenePromptNode(node)) {
+    if (isScenePromptNode(node) || isSceneApplyLoraNode(node)) {
         refreshScenePromptNode(node, options);
         return;
     }
@@ -10796,6 +10979,7 @@ function attachSceneUtilityNode(node, nodeName) {
     }
     if (SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)) {
         ensureSceneLoraControls(node);
+        installScenePromptWidgetSyncHandlers(node);
     }
     if (SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)) {
         installSceneEmptyLatentWidgetSyncHandlers(node);
@@ -10808,6 +10992,11 @@ function attachSceneUtilityNode(node, nodeName) {
     }
     hideSceneUtilityWidgets(node, nodeName);
     scheduleHideInternalDomWidgets();
+    if (SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)) {
+        installSceneResizeHandler(node, "fit_width");
+        refreshScenePromptNode(node, { fitHeight: true });
+        return;
+    }
     if (isSceneExpandNodeName(nodeName)) {
         refreshSceneExpandNode(node, { fitHeight: true });
     } else {
@@ -10842,6 +11031,7 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         this.scenePendingRefreshOptions = null;
         invalidatePopupRequests(this);
         closeSceneLoraDetails(this);
+        if (typeof closeSceneLoraPicker === "function") closeSceneLoraPicker(this);
         if (popupContextReferencesNode(activePopupContext, this)) {
             closeAllPopups();
         }

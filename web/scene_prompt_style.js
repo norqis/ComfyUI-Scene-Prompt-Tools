@@ -523,6 +523,23 @@ export function injectStyle() {
         }
         .pc-lora-word span { overflow-wrap: anywhere; }
         .pc-lora-dialog a { color: #9db8ec; }
+        .pc-lora-picker { width: min(660px, calc(100vw - 24px)); display: flex; flex-direction: column; }
+        .pc-lora-search {
+            box-sizing: border-box; width: 100%; margin: 12px 0 8px; padding: 9px 11px;
+            border: 1px solid #596271; border-radius: 5px; background: #151a21; color: #f3f5f9;
+            font: inherit;
+        }
+        .pc-lora-list { min-height: 80px; overflow-y: auto; display: grid; align-content: start; gap: 5px; }
+        .pc-lora-row {
+            display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px;
+            width: 100%; padding: 9px 11px; text-align: left; cursor: pointer;
+            border: 1px solid #3c4553; border-radius: 5px; background: #292f38; color: #edf1f8;
+            font: inherit;
+        }
+        .pc-lora-row:hover, .pc-lora-row:focus-visible { border-color: #8db5ef; background: #334052; }
+        .pc-lora-path { grid-column: 1 / -1; color: #b8c7d9; overflow-wrap: anywhere; }
+        .pc-lora-title { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+        .pc-lora-source { align-self: center; padding: 2px 6px; border-radius: 3px; background: #455366; color: #dceaff; white-space: nowrap; }
     `;
     if (!style.parentNode) {
         document.head.appendChild(style);
