@@ -89,7 +89,7 @@ const loraWidgets = [
     { name: "scene_prompt" },
 ];
 context.hideSceneUtilityWidgets({ widgets: loraWidgets }, "SceneApplyLora");
-assert.deepEqual(loraWidgets.map((widget) => widget.hidden), [false, false, false, false, true]);
+assert.deepEqual(loraWidgets.map((widget) => widget.hidden), [true, false, false, false, true]);
 
 vm.runInContext(functionSource("sceneExpandConfigureValues"), context);
 for (const seed of [0, 42]) {

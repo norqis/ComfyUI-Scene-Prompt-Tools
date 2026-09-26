@@ -193,6 +193,40 @@ class ScenePresetTests(unittest.TestCase):
             self.assertEqual("anima trigger" in result["result"][0], mode == "Anima")
             self.assertEqual("excluded tag" in result["result"][1], mode == "Anima")
 
+    def test_preset_lora_candidates_survive_replay_and_model_filter(self):
+        def selected(category, prompt):
+            return json.dumps({"version": 1, "categories": {category: [{
+                "id": f"{category}-item", "label": prompt, "prompt": prompt,
+                "category_path": [category], "category_key": category, "category_label": category,
+            }]}})
+
+        nodes = basic_nodes("base")
+        nodes["4"] = {"class_type": "SceneApplyLora", "inputs": {
+            "scene_prompt": ["2", 0], "lora_name": "style/example.safetensors",
+            "model_mode": "Anima", "positive": "typed", "negative": "typed-negative",
+            "positive_json": selected("Positive", "chosen"),
+            "negative_json": selected("Negative", "blocked"),
+            "category_order": "Positive,Negative",
+        }}
+        nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+        self.save("candidate-lora", nodes)
+        loaded = self.module.load_preset("candidate-lora")
+        self.assertEqual(loaded["api_graph"]["output"]["4"]["inputs"]["positive_json"],
+                         nodes["4"]["inputs"]["positive_json"])
+        upstream = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0])[0]
+        plan = self.module._evaluate_preset_scene(loaded, {}, upstream)
+        self.assertEqual(plan["rows"][0]["row"]["loras"][0]["positive_parts"], ["typed", "chosen"])
+        self.assertEqual(plan["rows"][0]["row"]["loras"][0]["negative_parts"], ["typed-negative", "blocked"])
+        for mode, expected, count in (
+            ("Anima", ("base, typed, chosen", "typed-negative, blocked"), 1),
+            ("Illustrious", ("base", ""), 0),
+        ):
+            result = self.nodes.ScenePromptExpand().expand(
+                seed_base=7, timestamp_dir=False, scene_prompt=plan, model_mode=mode,
+            )
+            self.assertEqual(result["result"][:2], expected)
+            self.assertEqual(len(result["expand"]), count)
+
     def test_save_prunes_root_and_extra_reroutes_for_removed_links(self):
         workflow = {
             "version": 1,

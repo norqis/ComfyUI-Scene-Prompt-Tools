@@ -22,6 +22,7 @@ from comfy.cli_args import args
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
 from .prompt import (
+    DEFAULT_CATEGORY_ORDER,
     DEFAULT_SELECTED_JSON,
     SCENE_PROMPT_TYPE,
     _compose_prompt_parts,
@@ -2331,8 +2332,11 @@ class SceneApplyLora:
             "optional": {
                 "scene_prompt": (SCENE_PROMPT_TYPE,),
                 "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
-                "positive": ("STRING", {"default": "", "multiline": True, "display_name": "ポジティブテキスト", "label": "ポジティブテキスト"}),
-                "negative": ("STRING", {"default": "", "multiline": True, "display_name": "ネガティブテキスト", "label": "ネガティブテキスト"}),
+                "positive": ("STRING", {"default": "", "multiline": True, "display_name": "positiveテキスト", "label": "positiveテキスト"}),
+                "negative": ("STRING", {"default": "", "multiline": True, "display_name": "negativeテキスト", "label": "negativeテキスト"}),
+                "positive_json": ("STRING", {"default": DEFAULT_SELECTED_JSON, "hidden": True}),
+                "negative_json": ("STRING", {"default": DEFAULT_SELECTED_JSON, "hidden": True}),
+                "category_order": ("STRING", {"default": DEFAULT_CATEGORY_ORDER, "hidden": True}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -2342,15 +2346,16 @@ class SceneApplyLora:
         }
 
     @classmethod
-    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative="", **kwargs):
+    def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative="", positive_json=DEFAULT_SELECTED_JSON, negative_json=DEFAULT_SELECTED_JSON, category_order=DEFAULT_CATEGORY_ORDER, **kwargs):
         del kwargs
-        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip)), _normalize_model_mode(model_mode), str(positive), str(negative)])
+        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip)), _normalize_model_mode(model_mode), str(positive), str(negative), str(positive_json), str(negative_json), str(category_order)])
 
-    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative=""):
+    def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative="", positive_json=DEFAULT_SELECTED_JSON, negative_json=DEFAULT_SELECTED_JSON, category_order=DEFAULT_CATEGORY_ORDER):
         name = str(lora_name or "").strip()
         if not name:
             raise ValueError("LoRAを選択してください。")
-        positive_parts, negative_parts = _split_prompt(positive), _split_prompt(negative)
+        positive_parts = _compose_prompt_parts(positive, positive_json, category_order, True, 0)
+        negative_parts = _compose_prompt_parts(negative, negative_json, category_order, True, 0)
         descriptor = {
             "name": name, "strength_model": float(strength_model), "strength_clip": float(strength_clip),
             "model_mode": _normalize_model_mode(model_mode),
