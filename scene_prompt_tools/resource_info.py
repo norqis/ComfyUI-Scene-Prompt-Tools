@@ -35,14 +35,15 @@ def _literal(nodes, raw, default):
         return default if raw is None else raw
     source = nodes.get(str(raw[0]))
     if not isinstance(source, dict):
-        return default
+        return None
     convert = _VALUE_TYPES.get(source.get("class_type"))
     if convert is None:
-        return default
+        return None
     try:
-        return convert(_node_inputs(source).get("value"))
+        value = _node_inputs(source).get("value")
+        return convert(value) if value is not None else None
     except (TypeError, ValueError):
-        return default
+        return None
 
 
 def connected_resources(api_graph, expand_node_id, user_id="default"):
@@ -52,7 +53,8 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
         raise ScenePresetError("生成グラフを取得できませんでした。")
     scene_nodes, _source = _scene_nodes_for_expand(nodes, expand_node_id)
     expand = nodes[str(expand_node_id)]
-    mode = _normalize_model_mode(_literal(nodes, _node_inputs(expand).get("model_mode"), MODEL_MODE_ILLUSTRIOUS))
+    raw_mode = _literal(nodes, _node_inputs(expand).get("model_mode"), MODEL_MODE_ILLUSTRIOUS)
+    mode = _normalize_model_mode(raw_mode) if raw_mode is not None else None
     models = OrderedDict()
     loras = OrderedDict()
     visited_sources = set()
@@ -67,16 +69,17 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
         if role not in models[key]["roles"]:
             models[key]["roles"].append(role)
 
-    def add_lora(name, model_mode, strength_model, strength_clip, role):
+    def add_lora(name, model_mode, strength_model, strength_clip, role, applies, unresolved=False):
         name = str(name or "")
-        entry = loras.setdefault(_resource_key(name), {"name": name, "variants": []})
+        entry = loras.setdefault(_resource_key(name), {"name": name, "variants": [], "unresolved": unresolved})
         variant = next((item for item in entry["variants"] if
                         item["model_mode"] == model_mode and
                         item["strength_model"] == strength_model and
-                        item["strength_clip"] == strength_clip), None)
+                        item["strength_clip"] == strength_clip and
+                        item["applies"] == applies), None)
         if variant is None:
             variant = {"model_mode": model_mode, "strength_model": strength_model,
-                       "strength_clip": strength_clip, "roles": [], "applies": model_mode is None or model_mode == mode}
+                       "strength_clip": strength_clip, "roles": [], "applies": applies}
             entry["variants"].append(variant)
         if role not in variant["roles"]:
             variant["roles"].append(role)
@@ -113,13 +116,13 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                 add_lora(inputs.get("lora_name"), None,
                          _literal(scope, inputs.get("strength_model"), 1.0),
                          _literal(scope, inputs.get("strength_clip"), 1.0 if kind == "LoraLoader" else None),
-                         source_role)
+                         source_role, True)
                 follow_source(scope, inputs.get(source_role), source_role)
         else:
             add_model("unresolved", kind or f"#{node_id}", role, kind or "Unknown")
 
     def visit_scene(scope, resource_nodes):
-        for node in scope.values():
+        for node_id, node in scope.items():
             if not isinstance(node, dict):
                 continue
             kind = node.get("class_type")
@@ -129,11 +132,16 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                     follow_source(resource_nodes, inputs.get(role), role)
             elif kind == "SceneApplyLora":
                 lora_name = _literal(resource_nodes, inputs.get("lora_name"), "")
-                lora_mode = _normalize_model_mode(_literal(resource_nodes, inputs.get("model_mode"), MODEL_MODE_ILLUSTRIOUS))
+                raw_lora_mode = _literal(resource_nodes, inputs.get("model_mode"), MODEL_MODE_ILLUSTRIOUS)
+                lora_mode = _normalize_model_mode(raw_lora_mode) if raw_lora_mode is not None else None
                 strength_model = _literal(resource_nodes, inputs.get("strength_model"), 1.0)
                 strength_clip = _literal(resource_nodes, inputs.get("strength_clip"), 1.0)
-                add_lora(lora_name, lora_mode, strength_model, strength_clip, "model")
-                add_lora(lora_name, lora_mode, strength_model, strength_clip, "clip")
+                unresolved = lora_name is None
+                if unresolved:
+                    lora_name = f"取得不可 (#{node_id})"
+                applies = lora_mode == mode if lora_mode is not None and mode is not None else None
+                add_lora(lora_name, lora_mode, strength_model, strength_clip, "model", applies, unresolved)
+                add_lora(lora_name, lora_mode, strength_model, strength_clip, "clip", applies, unresolved)
             elif kind == "ScenePresetReference":
                 preset_id = _literal(resource_nodes, inputs.get("preset_id"), "")
                 if preset_id in visiting_presets:

@@ -38,7 +38,7 @@ class ResourceInfoTests(unittest.TestCase):
         result = self.info.connected_resources(graph, "5")
         self.assertEqual(result["models"], [{"kind": "checkpoint", "name": "base.safetensors",
                                               "roles": ["model", "clip", "vae"], "source_class": "CheckpointLoaderSimple"}])
-        self.assertEqual(result["loras"], [{"name": "style.safetensors", "variants": [
+        self.assertEqual(result["loras"], [{"name": "style.safetensors", "unresolved": False, "variants": [
             {"model_mode": "Anima", "strength_model": 0.9, "strength_clip": 0.7,
              "roles": ["model", "clip"], "applies": True},
             {"model_mode": "Anima", "strength_model": 0.8, "strength_clip": 0.7,
@@ -127,6 +127,39 @@ class ResourceInfoTests(unittest.TestCase):
         }}
         result = self.info.connected_resources(graph, "3")
         self.assertEqual(len(result["loras"]), 1)
+
+    def test_unsupported_linked_strength_and_mode_do_not_invent_values(self):
+        graph = {"output": {
+            "1": node("SceneApplyLora", lora_name="style.safetensors",
+                      strength_model=["8", 0], strength_clip=1.0, model_mode="Anima"),
+            "2": node("ScenePrompterExpand", scene_prompt=["1", 0], model_mode="Anima"),
+            "8": node("MathFloat", value=0.25),
+        }}
+        result = self.info.connected_resources(graph, "2")
+        self.assertIsNone(result["loras"][0]["variants"][0]["strength_model"])
+        self.assertTrue(result["loras"][0]["variants"][0]["applies"])
+        graph["output"]["1"]["inputs"]["strength_model"] = 1.0
+        graph["output"]["2"]["inputs"]["model_mode"] = ["8", 0]
+        result = self.info.connected_resources(graph, "2")
+        self.assertIsNone(result["model_mode"])
+        self.assertIsNone(result["loras"][0]["variants"][0]["applies"])
+        graph["output"]["2"]["inputs"]["model_mode"] = "Anima"
+        graph["output"]["1"]["inputs"]["model_mode"] = ["8", 0]
+        result = self.info.connected_resources(graph, "2")
+        self.assertIsNone(result["loras"][0]["variants"][0]["model_mode"])
+        self.assertIsNone(result["loras"][0]["variants"][0]["applies"])
+
+    def test_malformed_or_missing_linked_primitive_is_reported(self):
+        graph = {"output": {
+            "1": node("SceneApplyLora", lora_name="style.safetensors", strength_model=["8", 0]),
+            "2": node("ScenePrompterExpand", scene_prompt=["1", 0]),
+            "8": node("PrimitiveFloat", value="not-a-number"),
+        }}
+        result = self.info.connected_resources(graph, "2")
+        self.assertIsNone(result["loras"][0]["variants"][0]["strength_model"])
+        del graph["output"]["8"]
+        with self.assertRaisesRegex(self.info.ScenePresetError, "見つかりません"):
+            self.info.connected_resources(graph, "2")
 
     def test_hash_is_opt_in_and_uses_selected_folder_only(self):
         model = Path(self.temp.name) / "model.safetensors"
