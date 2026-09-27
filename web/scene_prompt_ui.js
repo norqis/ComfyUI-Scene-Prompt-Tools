@@ -11066,7 +11066,12 @@ function refreshScenePresetReference(node, presets = scenePresetList || []) {
         return;
     }
     const preset = selectedScenePreset(node, presets);
-    node.scenePresetGraph = preset ? scenePresetDisplayGraphs.get(String(preset.preset_id)) || null : null;
+    const nextGraph = preset ? scenePresetDisplayGraphs.get(String(preset.preset_id)) || null : null;
+    if (node.scenePresetGraph !== nextGraph) {
+        node.scenePresetGraph = nextGraph;
+        clearSceneComputedCaches(node);
+        refreshDownstreamSceneNodes(node);
+    }
     button.name = preset ? `Preset: ${preset.name || preset.preset_id}` : "Presetを選択";
     node.setDirtyCanvas?.(true, true);
 }

@@ -883,6 +883,8 @@ async function testPresetDisplayCacheStaysPerReference() {
         String,
         findSceneWidget(node) { return node.widgets.find((widget) => widget.sceneRole === "scene_preset_select"); },
         findWidget(node, name) { return node.widgets.find((widget) => widget.name === name); },
+        clearSceneComputedCaches() {},
+        refreshDownstreamSceneNodes() {},
         scenePresetDisplayGraphs: new Map([
             ["A", { metadata: { preset_id: "A", sha256: "a" }, api_graph: { output: {} } }],
             ["B", { metadata: { preset_id: "B", sha256: "b" }, api_graph: { output: {} } }],
