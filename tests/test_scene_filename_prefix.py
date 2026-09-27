@@ -1757,6 +1757,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         right = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "20/30/right")
         plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=left, scene_prompt2=right)[0]
         info = {"_plan_ref": plan, "row_index": 1, "repeat_index": 1, "seed": 50, "source_node_ids": ["20/30/right", "expand"]}
+        info["_event_ref"] = self.nodes.item_for_normalized_plan(plan, 1)["event_ref"]
         preset_closed = {
             "20": {"class_type": "ScenePresetReference", "inputs": {}},
             "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
@@ -1797,6 +1798,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         normalized = self.nodes._normalize_scene_save_info(info)
         self.assertIs(normalized["_plan_ref"], plan)
         self.assertIs(normalized["_event_ref"], event_ref)
+        with self.assertRaisesRegex(ValueError, "選択イベントの参照"):
+            self.nodes._replay_expand_values({**info, "_event_ref": None}, full_prompt, aliases)
         with mock.patch.object(self.nodes, "replay_index_for_event", side_effect=self.nodes.ScenePlanError("event lost")):
             with self.assertRaisesRegex(ValueError, "event lost"):
                 self.nodes._replay_expand_values(info, full_prompt, aliases)
@@ -2052,6 +2055,23 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             {"current_index": 0, "seed_base": 91, "seed_base_literal": False},
         )
 
+    def test_v6_replay_without_event_ref_still_rebases_flat_rows(self):
+        plan = {"version": 6, "rows": [
+            {"row": {"source_node_ids": ["a"]}, "count": 2},
+            {"row": {"source_node_ids": ["b"]}, "count": 3},
+        ]}
+        info = {"_plan_ref": plan, "row_index": 1, "repeat_index": 2,
+                "seed": 103, "source_node_ids": ["b", "expand"]}
+        prompt = {
+            "a": {"class_type": "ScenePrompter", "inputs": {}},
+            "b": {"class_type": "ScenePrompter", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, prompt),
+            {"current_index": 1, "seed_base": 102, "seed_base_literal": False},
+        )
+
     def test_v7_replay_product_after_source_map_prunes_both_operands(self):
         left = self.nodes.ScenePromptQueue().queue(
             scene_prompt1=self.nodes.with_source_node(None, "a"),
@@ -2187,6 +2207,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         plan = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "scene")
         info = {
             "_plan_ref": plan,
+            "_event_ref": self.nodes.item_for_normalized_plan(plan, 0)["event_ref"],
             "row_index": 0,
             "repeat_index": 1,
             "seed": 0,
@@ -2224,7 +2245,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             for widgets, literal_index in layouts:
                 with self.subTest(seed=seed, widgets=widgets):
                     plan = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "scene")
-                    info = {"_plan_ref": plan, "row_index": 0, "repeat_index": 1, "seed": seed,
+                    info = {"_plan_ref": plan, "_event_ref": self.nodes.item_for_normalized_plan(plan, 0)["event_ref"],
+                            "row_index": 0, "repeat_index": 1, "seed": seed,
                             "source_node_ids": ["scene", "expand"]}
                     prompt = {
                         "scene": {"class_type": "ScenePrompter", "inputs": {}},

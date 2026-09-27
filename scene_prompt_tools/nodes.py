@@ -587,7 +587,9 @@ def _replay_expand_values(scene_info, full_prompt, source_aliases=None, retained
         return None
     plan = scene_info.get("_plan_ref")
     event_ref = scene_info.get("_event_ref")
-    if isinstance(plan, dict) and plan.get("version") == 7 and event_ref is not None:
+    if isinstance(plan, dict) and plan.get("version") == 7:
+        if event_ref is None:
+            raise ValueError("生成経路PNGを再現できません: 選択イベントの参照がありません。")
         selected_sources = _scene_source_ids(scene_info) if retained_source_ids is None else retained_source_ids
         visible_sources = _visible_scene_source_ids(full_prompt, source_aliases)
         try:
@@ -600,10 +602,7 @@ def _replay_expand_values(scene_info, full_prompt, source_aliases=None, retained
             "seed_base": seed_base,
             "seed_base_literal": seed_base == 0,
         }
-    try:
-        rows = plan.get("rows") if isinstance(plan, dict) else None
-    except ScenePlanError as exc:
-        raise ValueError("生成経路PNGを再現できません: 選択イベントの参照がありません。") from exc
+    rows = plan.get("rows") if isinstance(plan, dict) else None
     if not isinstance(rows, list):
         return None
     row_index = scene_info.get("row_index")
