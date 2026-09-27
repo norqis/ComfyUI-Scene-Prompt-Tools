@@ -37,23 +37,48 @@ class LazyScheduleTests(unittest.TestCase):
         self.assertEqual([item["repeat_index"] for item in items], list(range(1, 5)) + list(range(1, 7)))
         self.assertEqual([item["start_index"] for item in items], [0] * 4 + [4] * 6)
 
-    def test_socket_repeats_and_block_sizes(self):
+    def test_row_repeats_and_downstream_count_modes(self):
         left, right = branch("A"), branch("B")
         settings = '{"scene_prompt1":3,"scene_prompt2":2}'
-        self.assertEqual(labels(queue([left, right], input_repeats_json=settings)), list("AAABB"))
-        self.assertEqual(labels(queue([left, right], order_mode="alternate", input_repeats_json=settings)), list("ABABA"))
-        self.assertEqual(labels(queue([left, right], order_mode="alternate", alternate_block_size=2,
-                                      input_repeats_json=settings)), list("AABBA"))
-        self.assertEqual(labels(queue([left, right], order_mode="alternate", alternate_block_size=3,
-                                      input_repeats_json=settings)), list("AAABB"))
-        self.assertEqual(labels(queue([left, right], order_mode="alternate", alternate_block_size=MAX_SAFE_INTEGER,
-                                      input_repeats_json=settings)), list("AAABB"))
+        for mode in ("input_order", "alternate"):
+            for count_mode in ("multiply", "fixed"):
+                result = queue([left, right], order_mode=mode, alternate_block_size=2,
+                               input_repeats_json=settings, downstream_count_mode=count_mode)
+                with self.subTest(mode=mode, count_mode=count_mode):
+                    self.assertEqual(labels(result), list("AABB"))
+                    expected = list("AABB") * (10 if count_mode == "multiply" else 1)
+                    self.assertEqual(labels(multiply_count(result, 10)), expected)
+                    self.assertEqual(result["stats"]["row_count"], 2)
+        self.assertEqual(labels(queue([left, right], input_repeats_json=settings)), list("AB"))
+        self.assertEqual(labels(queue([left, right], input_repeats_json="malformed")), list("AB"))
+        self.assertEqual(queue([left, right], input_repeats_json=settings)["change_key"],
+                         queue([left, right])["change_key"])
 
-    def test_whole_socket_plan_repeats_and_count_repeats_cycle(self):
+    def test_multirow_repeats_each_event_and_count_repeats_cycle(self):
         multi = make_plan([{"row": {**empty_row(), "labels": [name]}, "count": 1} for name in ("a1", "a2")])
-        result = queue([multi, branch("b")], order_mode="alternate", input_repeats_json='{"scene_prompt1":3}')
-        self.assertEqual(labels(result), ["a1", "b", "a2", "a1", "a2", "a1", "a2"])
+        result = queue([multi, branch("b")], order_mode="alternate", alternate_block_size=2)
+        self.assertEqual(labels(result), ["a1", "a1", "b", "b", "a2", "a2"])
         self.assertEqual(labels(multiply_count(result, 2)), labels(result) * 2)
+        ordered = queue([multi, branch("b")], alternate_block_size=2)
+        self.assertEqual(labels(ordered), ["a1", "a1", "a2", "a2", "b", "b"])
+        self.assertEqual(labels(multiply_count(ordered, 2)), labels(ordered) * 2)
+
+    def test_three_matrix_rows_alternate_across_two_prompt_branches(self):
+        matrix_rows = [{**empty_row(), "name": name, "enabled": True} for name in "ABC"]
+        matrix = matrix_product(make_plan([{"row": empty_row(), "count": 1}]), matrix_rows, True)
+        def prompt_branch(name):
+            return transform(matrix, operation={
+                "kind": "prompt_add", "payload": [f"Prompt{name}", [name], [], False],
+            })
+        branches = [prompt_branch("A"), prompt_branch("B")]
+        one_cycle = [f"{row} / Prompt{prompt}" for row in "ABC" for prompt in "AB"]
+        for factor in (1, 2):
+            with self.subTest(factor=factor):
+                result = queue(branches, order_mode="alternate", alternate_block_size=factor)
+                expected = [label for label in one_cycle for _ in range(factor)]
+                self.assertEqual(labels(result), expected)
+                self.assertEqual(labels(multiply_count(result, 10)), expected * 10)
+                self.assertEqual(result["stats"]["row_count"], 6)
 
     def test_count_placement_and_uneven_streams(self):
         source = queue([branch("a", 2), branch("b", 3)], order_mode="alternate")
@@ -156,6 +181,38 @@ class LazyScheduleTests(unittest.TestCase):
         self.assertEqual(result["stats"]["total_batches"], 200_000_000)
         self.assertEqual(item_for_index(result, 199_999_999)["label"], "b")
 
+    def test_huge_row_repeat_is_lazy_and_preserves_occurrences(self):
+        result = queue([branch("a"), branch("b")], order_mode="alternate",
+                       alternate_block_size=100_000_000)
+        self.assertEqual(len(result["units"]), 1)
+        self.assertEqual(result["stats"]["total_batches"], 200_000_000)
+        self.assertEqual(result["stats"]["row_count"], 2)
+        for index, label, repeat in ((0, "a", 1), (99_999_999, "a", 100_000_000),
+                                     (100_000_000, "b", 1), (199_999_999, "b", 100_000_000)):
+            item = item_for_index(result, index)
+            self.assertEqual((item["label"], item["repeat_index"], item["count"]),
+                             (label, repeat, 100_000_000))
+
+    def test_row_repeat_replay_survives_pruning_and_serialization(self):
+        result = queue([branch("a"), branch("b")], order_mode="alternate", alternate_block_size=2)
+        restored = normalize_plan(json.loads(json.dumps(result)))
+        self.assertEqual(restored["change_key"], result["change_key"])
+        for index, expected in ((2, 0), (3, 1)):
+            event = item_for_index(restored, index)
+            self.assertEqual(replay_index_for_event(restored, event["event_ref"], {"b"}, {"a", "b"}), expected)
+        rows = [{**empty_row(), "name": name, "enabled": True} for name in ("x", "y")]
+        mapped = matrix_product(result, rows, True)
+        self.assertEqual(labels(mapped), ["a / x", "a / y", "a / x", "a / y",
+                                          "b / x", "b / y", "b / x", "b / y"])
+        event = item_for_index(mapped, 5)
+        self.assertEqual(replay_index_for_event(mapped, event["event_ref"], {"b"}, {"a", "b"}), 1)
+
+    def test_empty_queue_row_repeats_and_fixed_count(self):
+        for count_mode in ("multiply", "fixed"):
+            result = queue([], alternate_block_size=2, downstream_count_mode=count_mode)
+            expected = ["Scene"] * (20 if count_mode == "multiply" else 2)
+            self.assertEqual(labels(multiply_count(result, 10)), expected)
+
     def test_schedule_depth_limit_accepts_256_and_rejects_257(self):
         from scene_prompt_tools.schedule import _plan, _unit
         unit = _unit("run", row=empty_row(), count=1)
@@ -170,11 +227,9 @@ class LazyScheduleTests(unittest.TestCase):
         locked_input = queue([branch("a")])
         with self.assertRaises(ScenePlanError):
             queue([locked_input], order_mode="bogus")
-        with self.assertRaises(ScenePlanError):
-            queue([locked_input], input_repeats_json='{"unknown":2}')
-        for invalid in ('[]', '{"scene_prompt1":true}', '{"scene_prompt1":-1}', '{"scene_prompt11":2}'):
-            with self.subTest(invalid=invalid), self.assertRaises(ScenePlanError):
-                queue([branch("a")], input_repeats_json=invalid)
+        for old_value in ('[]', '{"scene_prompt1":true}', '{"scene_prompt1":-1}', '{"scene_prompt11":2}', 'broken'):
+            with self.subTest(old_value=old_value):
+                self.assertEqual(labels(queue([branch("a")], input_repeats_json=old_value)), ["a"])
         with self.assertRaises(ScenePlanError):
             queue([branch("a")], alternate_block_size=0)
         with self.assertRaises(ScenePlanError):
@@ -238,22 +293,20 @@ class LazyScheduleTests(unittest.TestCase):
     def test_small_alternating_schedules_match_eager_reference(self):
         for a_count in range(4):
             for b_count in range(4):
-                for a_repeat in range(3):
-                    for block in (1, 2, 4):
-                        streams = [["a"] * a_count * a_repeat, ["b"] * b_count]
-                        expected = []
-                        position = [0, 0]
-                        while any(position[index] < len(stream) for index, stream in enumerate(streams)):
-                            for index, stream in enumerate(streams):
-                                expected.extend(stream[position[index]:position[index] + block])
-                                position[index] += block
-                        plan = queue([branch("a", a_count), branch("b", b_count)], order_mode="alternate",
-                                     alternate_block_size=block,
-                                     input_repeats_json=json.dumps({"scene_prompt1": a_repeat}))
-                        with self.subTest(a=a_count, b=b_count, repeat=a_repeat, block=block):
-                            self.assertEqual(labels(plan), expected)
-                            self.assertEqual(plan["stats"]["total_batches"], len(expected))
-                            self.assertEqual(plan["stats"]["total_images"], len(expected))
+                for block in (1, 2, 4):
+                    streams = [["a"] * a_count * block, ["b"] * b_count * block]
+                    expected = []
+                    position = [0, 0]
+                    while any(position[index] < len(stream) for index, stream in enumerate(streams)):
+                        for index, stream in enumerate(streams):
+                            expected.extend(stream[position[index]:position[index] + block])
+                            position[index] += block
+                    plan = queue([branch("a", a_count), branch("b", b_count)], order_mode="alternate",
+                                 alternate_block_size=block)
+                    with self.subTest(a=a_count, b=b_count, block=block):
+                        self.assertEqual(labels(plan), expected)
+                        self.assertEqual(plan["stats"]["total_batches"], len(expected))
+                        self.assertEqual(plan["stats"]["total_images"], len(expected))
 
 
 if __name__ == "__main__":

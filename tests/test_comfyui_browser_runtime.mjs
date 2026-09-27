@@ -448,7 +448,7 @@ window.__sceneSeedRuntimeTest = {
     });
     assert.deepEqual(modelModes.contract.expandWidgets.slice(0, 11), ["current_index", "run_id", "seed_base", "timestamp_dir", "prefix",
         "counter_position", "model_mode", "replace_underscores", "convert_anima_weights", "callback_failure_mode", "seed_base_literal"]);
-    assert.deepEqual(modelModes.contract.loraWidgets, ["model_mode", "LoRA", "LoRAを選択", "strength_model", "strength_clip", "詳細確認",
+    assert.deepEqual(modelModes.contract.loraWidgets, ["model_mode", "LoRAを選択", "strength_model", "strength_clip", "詳細確認",
         "positive", "ポジティブ候補", "ポジティブ選択済み", "negative", "ネガティブ候補", "ネガティブ選択済み",
         "lora_name", "positive_json", "negative_json", "category_order"]);
     assert.deepEqual(modelModes.contract.visible, [true, true]);

@@ -28,6 +28,7 @@ UNIT_KEYS = {
     "sequence": {"plan"},
     "alternate": {"inputs", "block_size"},
     "repeat": {"unit", "factor"},
+    "repeat_each": {"unit", "factor"},
     "count_fixed": {"unit"},
     "matrix_map": {"unit", "matrix_rows"},
     "product": {"left", "right"},
@@ -117,9 +118,10 @@ def _unit_stats(unit):
         return dict(unit["plan"]["stats"])
     if kind == "alternate":
         return _sum_stats(plan["stats"] for plan in unit["inputs"])
-    if kind == "repeat":
+    if kind in {"repeat", "repeat_each"}:
         stats = unit["unit"]["stats"]
-        factor = _old._require_int(unit["factor"], "Scene Prompt repeat factor", 0, MAX_SAFE_INTEGER)
+        factor = _old._require_int(unit["factor"], "Scene Prompt repeat factor",
+                                   1 if kind == "repeat_each" else 0, MAX_SAFE_INTEGER)
         return _stats(*(_safe(stats[key] * factor) for key in ("total_batches", "total_images", "unset_batches")), stats["row_count"])
     if kind == "count_fixed":
         return dict(unit["unit"]["stats"])
@@ -520,7 +522,7 @@ def multiply_count(plan, factor):
 
 def _contains_composite(unit):
     kind = unit["kind"]
-    if kind in {"alternate", "sequence"}:
+    if kind in {"alternate", "sequence", "repeat_each"}:
         return True
     if kind == "product":
         return any(_contains_composite(subunit) for plan in (unit["left"], unit["right"]) for subunit in plan["units"])
@@ -563,24 +565,15 @@ def _unwrap_run(unit):
 def _validate_queue_controls(order_mode, alternate_block_size, input_repeats_json, downstream_count_mode):
     if order_mode not in ("input_order", "alternate"):
         raise ScenePlanError("Scene Prompt Queue 並び順 is invalid.")
-    block = _old._require_int(alternate_block_size, "Scene Prompt Queue 交代する件数", 1, MAX_SAFE_INTEGER)
+    block = _old._require_int(alternate_block_size, "Scene Prompt Queue 1行の回数", 1, MAX_SAFE_INTEGER)
     if downstream_count_mode not in ("multiply", "fixed"):
         raise ScenePlanError("Scene Prompt Queue 後続Count is invalid.")
-    try:
-        factors = json.loads(input_repeats_json) if isinstance(input_repeats_json, str) else input_repeats_json
-    except (ValueError, TypeError) as exc:
-        raise ScenePlanError("Scene Prompt Queue 入力の繰り返し回数 must be JSON.") from exc
-    if not isinstance(factors, dict):
-        raise ScenePlanError("Scene Prompt Queue 入力の繰り返し回数 must be an object.")
-    for key, value in factors.items():
-        if key not in {f"scene_prompt{i}" for i in range(1, 11)}:
-            raise ScenePlanError("Scene Prompt Queue repeat socket is invalid.")
-        _old._require_int(value, f"Scene Prompt Queue {key} repeat", 0, MAX_SAFE_INTEGER)
-    return order_mode, block, factors, downstream_count_mode
+    # Keep the old widget argument for serialized workflows; it no longer affects output.
+    return order_mode, block, downstream_count_mode
 
 
 def queue(values, *, order_mode="input_order", alternate_block_size=1, input_repeats_json="{}", downstream_count_mode="multiply"):
-    mode, block, factors, count_mode = _validate_queue_controls(order_mode, alternate_block_size, input_repeats_json, downstream_count_mode)
+    mode, block, count_mode = _validate_queue_controls(order_mode, alternate_block_size, input_repeats_json, downstream_count_mode)
     slots = [(index, normalize_plan(value)) for index, value in enumerate(values, start=1) if value is not None]
     locked = any(plan["contains_queue_boundary"] for _, plan in slots)
     sources = [{
@@ -589,24 +582,23 @@ def queue(values, *, order_mode="input_order", alternate_block_size=1, input_rep
     } for index, plan in slots]
     if not slots:
         units = list(seed_plan()["units"])
+        if block > 1:
+            units = [_unit("repeat_each", unit=unit, factor=block) for unit in units]
         if count_mode == "fixed":
             units = [_unit("count_fixed", unit=unit) for unit in units]
     elif locked:
         units = [unit for _, plan in slots for unit in plan["units"]]
     else:
-        streams = []
-        for index, plan in slots:
-            factor = factors.get(f"scene_prompt{index}", 1)
-            if factor == 1:
-                streams.append(plan)
-            elif len(plan["units"]) == 1:
-                streams.append(_plan([_repeat(plan["units"][0], factor)]))
-            else:
-                streams.append(_plan([_repeat(_unit("sequence", plan=plan), factor)]))
+        streams = [
+            _plan([_unit("repeat_each", unit=unit, factor=block) for unit in plan["units"]])
+            if block > 1 else plan for _, plan in slots
+        ]
         if mode == "alternate":
             units = [_unit("alternate", inputs=streams, block_size=block)]
         else:
             units = [unit for stream in streams for unit in stream["units"]]
+            if block > 1:
+                units = [_unit("sequence", plan=_plan(units))]
         if count_mode == "fixed":
             units = [_unit("count_fixed", unit=unit) for unit in units]
     return mark_prompt_whole(_plan(units, sources, True))
@@ -683,6 +675,13 @@ def _select_unit(unit, index):
         item["repeat_index"] += cycle * item["count"]
         item["count"] *= unit["factor"]
         item["event_ref"] = (("repeat", cycle), *item["event_ref"])
+        return item
+    if kind == "repeat_each":
+        child_index, within = divmod(index, unit["factor"])
+        item = _select_unit(unit["unit"], child_index)
+        item["repeat_index"] = (item["repeat_index"] - 1) * unit["factor"] + within + 1
+        item["count"] *= unit["factor"]
+        item["event_ref"] = (("repeat_each", within), *item["event_ref"])
         return item
     if kind == "alternate":
         lengths = [plan["stats"]["total_batches"] for plan in unit["inputs"]]
@@ -770,7 +769,7 @@ def legacy_rows(plan):
             rows.append({"row": copy.deepcopy(unit["row"]), "count": unit["count"]})
         elif kind == "count_fixed":
             visit(unit["unit"])
-        elif kind == "repeat":
+        elif kind in {"repeat", "repeat_each"}:
             before = len(rows)
             visit(unit["unit"])
             for item in rows[before:]:
@@ -827,8 +826,8 @@ def _prune_unit(unit, selected_sources, visible_sources, pending_operations=()):
         child = _prune_unit(unit["unit"], selected_sources, visible_sources, (*unit["operations"], *pending_operations))
         return _unit("map", unit=child, operations=unit["operations"])
     child = _prune_unit(unit["unit"], selected_sources, visible_sources, pending_operations)
-    if kind == "repeat":
-        return _unit("repeat", unit=child, factor=unit["factor"])
+    if kind in {"repeat", "repeat_each"}:
+        return _unit(kind, unit=child, factor=unit["factor"])
     if kind == "count_fixed":
         return _unit("count_fixed", unit=child)
     if kind == "matrix_map":
@@ -865,6 +864,11 @@ def _rank_unit(unit, path):
         if type(cycle) is not int or not 0 <= cycle < unit["factor"]:
             raise ScenePlanError("Selected Scene Prompt repeat no longer exists.")
         return cycle * unit["unit"]["stats"]["total_batches"] + _rank_unit(unit["unit"], path[1:])
+    if kind == "repeat_each" and marker[0] == "repeat_each":
+        within = marker[1]
+        if type(within) is not int or not 0 <= within < unit["factor"]:
+            raise ScenePlanError("Selected Scene Prompt row repeat no longer exists.")
+        return _rank_unit(unit["unit"], path[1:]) * unit["factor"] + within
     if kind == "alternate" and marker[0] == "alternate":
         socket = marker[1]
         if type(socket) is not int or not 0 <= socket < len(unit["inputs"]):

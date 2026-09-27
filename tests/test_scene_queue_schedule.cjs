@@ -27,7 +27,7 @@ const ctx = {
 vm.createContext(ctx);
 for (const name of [
     "emptyScenePromptStats", "sceneStatNumber", "sceneStatProduct", "sceneStatSum", "sceneStatsResult", "sceneStatsMerge",
-    "sceneQueueRepeatFactors", "sceneSchedulePlan", "sceneScheduleRun", "sceneScheduleWrapper",
+    "sceneSchedulePlan", "sceneScheduleRun", "sceneScheduleWrapper", "sceneScheduleRepeatEach",
     "sceneScheduleSequence", "sceneScheduleAlternate", "sceneScheduleAtUnit", "sceneScheduleAt",
     "sceneSchedulePrefix", "sceneScheduleCount", "sceneScheduleMap", "sceneScheduleMatrix", "sceneScheduleQueue",
     "sceneScheduleHasComposite", "sceneScheduleMerge", "mergeScenePromptEntryPair",
@@ -43,24 +43,39 @@ const prefix = (plan, limit = plan.stats.total) => ctx.sceneSchedulePrefix(plan,
 
 const a = leaf("A");
 const b = leaf("B");
-for (const [block, expected] of [[1, "ABABA"], [2, "AABBA"], [3, "AAABB"]]) {
+const matrixPromptRows = ["A+PromptA", "A+PromptB", "B+PromptA", "B+PromptB", "C+PromptA", "C+PromptB"];
+const matrixPromptPlan = ctx.sceneSchedulePlan(matrixPromptRows.map((label) =>
+    ctx.sceneScheduleRun({ parts: [label], count: 1, row: {} })));
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(queue([matrixPromptPlan], controls("alternate"))))), matrixPromptRows);
+const doubledMatrixPromptRows = matrixPromptRows.flatMap((label) => [label, label]);
+const doubledMatrixPrompt = queue([matrixPromptPlan], controls("alternate", 2));
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(doubledMatrixPrompt))), doubledMatrixPromptRows,
+    "one Queue input repeats each Matrix and Prompt row");
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleCount(doubledMatrixPrompt, 2)))),
+    [...doubledMatrixPromptRows, ...doubledMatrixPromptRows], "Count repeats the full Matrix and Prompt cycle");
+for (const [block, expected] of [[1, "AB"], [2, "AABB"], [3, "AAABBB"]]) {
     const plan = queue([a, b], controls("alternate", block, '{"scene_prompt1":3,"scene_prompt2":2}'));
     assert.equal(prefix(plan).join(""), expected);
-    assert.equal(plan.stats.total, 5);
+    assert.equal(plan.stats.total, block * 2);
     assert.equal(prefix(ctx.sceneScheduleCount(plan, 2)).join(""), expected + expected);
 }
 const sequential = queue([a, b], controls("input_order", 1, '{"scene_prompt1":3,"scene_prompt2":2}'));
-assert.equal(prefix(ctx.sceneScheduleCount(sequential, 10)).join(""), "A".repeat(30) + "B".repeat(20));
+assert.equal(prefix(ctx.sceneScheduleCount(sequential, 10)).join(""), "A".repeat(10) + "B".repeat(10),
+    "factor one keeps the legacy input-order Count boundary");
+assert.equal(prefix(ctx.sceneScheduleCount(queue([a, b], controls("input_order", 2)), 10)).join(""), "AABB".repeat(10));
 const fixed = queue([a, b], controls("alternate", 1, '{"scene_prompt1":3,"scene_prompt2":2}', "fixed"));
-assert.equal(prefix(ctx.sceneScheduleCount(fixed, 10)).join(""), "ABABA");
+assert.equal(prefix(ctx.sceneScheduleCount(fixed, 10)).join(""), "AB");
+assert.equal(prefix(ctx.sceneScheduleCount(queue([a, b], controls("alternate", 2, "{}", "fixed")), 10)).join(""), "AABB");
 assert.equal(ctx.sceneScheduleCount(fixed, 0).stats.total, 0);
 assert.equal(ctx.sceneScheduleCount(queue([], controls("alternate", 1, "{}", "fixed")), 10).stats.total, 1,
     "a fixed Queue with no connections protects its seed event");
 assert.equal(ctx.sceneScheduleCount(queue([], controls()), 10).stats.total, 10);
+assert.equal(ctx.sceneScheduleCount(queue([], controls("input_order", 2)), 10).stats.total, 20,
+    "an empty Queue repeats its seed row before Count");
 
 const locked = queue([fixed, leaf("C")], controls("alternate", 4, '{"scene_prompt1":20}', "fixed"));
-assert.equal(prefix(ctx.sceneScheduleCount(locked, 2)).join(""), "ABABACC");
-assert.equal(locked.stats.total, 6, "locked Queue preserves upstream fixed units and appends ordinary units");
+assert.equal(prefix(ctx.sceneScheduleCount(locked, 2)).join(""), "ABCC");
+assert.equal(locked.stats.total, 3, "locked Queue preserves upstream fixed units and appends ordinary units");
 const matrix = ctx.sceneScheduleMatrix(queue([
     queue([leaf("b1"), leaf("b2")], controls("alternate")), leaf("b3", 2),
 ], controls()), [{ label: "x" }, { label: "y" }]);
@@ -112,7 +127,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(prefix(huge, 6))), ["A", "B", "A", "B
 
 Object.assign(ctx, {
     SCENE_QUEUE_CONTROL_DEFAULTS: controls(),
-    SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "input_repeats_json", "downstream_count_mode"],
+    SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "downstream_count_mode"],
     scenePresetDisplayGraphs: new Map(),
     scenePresetGraphNodes: (preset) => preset?.api_graph?.output || null,
     apiInput: (node, name) => node?.inputs?.[name],
@@ -133,9 +148,9 @@ assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleForPreset("in
 
 Object.assign(ctx, {
     SCENE_QUEUE_CONTROL_DEFAULTS: controls(),
-    SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "input_repeats_json", "downstream_count_mode"],
-    SCENE_WIDGET_LABELS: { order_mode: "並び順", alternate_block_size: "交代する件数",
-        input_repeats_json: "入力ごとの回数", downstream_count_mode: "後続Count" },
+    SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "downstream_count_mode"],
+    SCENE_WIDGET_LABELS: { order_mode: "並び順", alternate_block_size: "1行の回数",
+        downstream_count_mode: "後続Count" },
     isSceneNodeMuted: (node) => node.mode === 2,
     isSceneNodeBypassed: (node) => node.mode === 4,
     sceneBypassInputSource: (node) => node.upstream || null,
@@ -162,10 +177,12 @@ const widgets = [
 const receiving = { id: "receiving", kind: "queue", sources: [middle], widgets };
 assert.equal(ctx.syncSceneQueueControls(receiving), "upstream", "Queue → Prompt → Queue locks all controls");
 assert.deepEqual(widgets.map((widget) => widget.value), ["input_order", 1, "{}", "multiply"]);
-assert.ok(widgets.every((widget) => widget.disabled && widget.options.disabled));
+assert.ok(widgets.filter((widget) => widget.name !== "input_repeats_json")
+    .every((widget) => widget.disabled && widget.options.disabled));
+assert.equal(widgets[2].hidden, true, "legacy repeat widget stays hidden in its serialized slot");
 receiving.sources = [{ id: "ordinary", kind: "prompt" }];
 assert.equal(ctx.syncSceneQueueControls(receiving), "", "disconnecting upstream Queue unlocks controls");
-assert.equal(widgets[1].disabled, true, "block size is inactive until alternate mode is selected");
+assert.equal(widgets[1].disabled, false, "row repeat is active in input order mode");
 assert.deepEqual(widgets.map((widget) => widget.value), ["input_order", 1, "{}", "multiply"],
     "old nondefault settings do not reappear after unlocking");
 receiving.sources = [{ id: "bypass", kind: "queue", mode: 4, upstream: { id: "ordinary-2", kind: "prompt" } }];

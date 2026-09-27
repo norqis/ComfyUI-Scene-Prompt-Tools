@@ -214,44 +214,40 @@ class SceneLoraPromptTests(unittest.TestCase):
 
 
 class LoraMetadataTests(unittest.TestCase):
-    def test_catalog_reads_local_titles_without_hashing_weights(self):
+    def test_catalog_preserves_relative_paths_without_opening_models(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            titled = root / "titled.safetensors"
-            malformed = root / "malformed.safetensors"
-            output_only = root / "output.safetensors"
-            header = json.dumps({"__metadata__": {"modelspec.title": "Display Title",
-                                                  "ss_output_name": "Secondary"}}).encode()
-            titled.write_bytes(struct.pack("<Q", len(header)) + header + b"weights")
-            header = json.dumps({"__metadata__": {"ss_output_name": "Output Name"}}).encode()
-            output_only.write_bytes(struct.pack("<Q", len(header)) + header + b"weights")
-            malformed.write_bytes(b"invalid")
+            nested = root / "folder" / "titled.safetensors"
+            nested.parent.mkdir()
+            nested.write_bytes(b"model weights")
+            plain = root / "plain.ckpt"
+            plain.write_bytes(b"other weights")
             from comfy_stubs import install_torch_stub
             install_torch_stub()
             import types
             folder_paths = types.ModuleType("folder_paths")
             sys.modules["folder_paths"] = folder_paths
             folder_paths.get_filename_list = lambda category: [
-                "folder/titled.safetensors", "output.safetensors", "malformed.safetensors", "missing.safetensors",
+                "folder/titled.safetensors", "plain.ckpt", "missing.safetensors",
             ]
-            folder_paths.get_full_path = lambda category, name: str(root / name.split("/")[-1])
+            folder_paths.get_full_path = lambda category, name: str(root / name)
             package_name = "scene_lora_catalog_test"
             package = type(sys)(package_name)
             package.__path__ = [str(Path(__file__).resolve().parents[1] / "scene_prompt_tools")]
             sys.modules[package_name] = package
             metadata = importlib.import_module(f"{package_name}.lora_metadata")
-            with patch.object(metadata.hashlib, "sha256", side_effect=AssertionError("catalog hashed a model")):
+            with patch("builtins.open", side_effect=AssertionError("catalog opened a model")), \
+                    patch.object(metadata, "_read_metadata", side_effect=AssertionError("catalog read metadata")), \
+                    patch.object(metadata.hashlib, "sha256", side_effect=AssertionError("catalog hashed a model")):
                 catalog = metadata.list_loras()
                 self.assertEqual(metadata.list_loras(), catalog)
-            self.assertEqual([(item["path"], item["title"], item["source"]) for item in catalog], [
-                ("folder/titled.safetensors", "Display Title", "local"),
-                ("output.safetensors", "Output Name", "local"),
-                ("malformed.safetensors", "malformed", "filename"),
-                ("missing.safetensors", "missing", "filename"),
+            self.assertEqual(catalog, [
+                {"path": "folder/titled.safetensors", "size": nested.stat().st_size,
+                 "mtime_ns": nested.stat().st_mtime_ns},
+                {"path": "plain.ckpt", "size": plain.stat().st_size,
+                 "mtime_ns": plain.stat().st_mtime_ns},
+                {"path": "missing.safetensors", "size": None, "mtime_ns": None},
             ])
-            self.assertEqual(catalog[0]["size"], titled.stat().st_size)
-            self.assertEqual(catalog[0]["mtime_ns"], titled.stat().st_mtime_ns)
-            self.assertIsNone(catalog[-1]["size"])
 
     def test_header_only_metadata_and_cached_sha(self):
         with tempfile.TemporaryDirectory() as directory:

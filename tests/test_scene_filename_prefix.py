@@ -1815,7 +1815,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             alternate_block_size=2, unique_id="queue",
         )[0]
         info = self.nodes.ScenePromptExpand().expand(
-            current_index=1, seed_base=100, timestamp_dir=False,
+            current_index=2, seed_base=100, timestamp_dir=False,
             scene_prompt=plan, unique_id="expand",
         )[2]
         self.assertIn("_event_ref", info)
@@ -1831,7 +1831,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         full_prompt["expand"] = {"class_type": "ScenePrompterExpand", "inputs": {}}
         self.assertEqual(
             self.nodes._replay_expand_values(info, full_prompt),
-            {"current_index": 0, "seed_base": 101, "seed_base_literal": False},
+            {"current_index": 0, "seed_base": 102, "seed_base_literal": False},
         )
 
     def test_v7_replay_keeps_alternate_block_offset_after_pruning(self):
@@ -1892,7 +1892,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             {"current_index": 0, "seed_base": 203, "seed_base_literal": False},
         )
 
-    def test_v7_replay_preserves_explicit_sequence_repeat_cycle(self):
+    def test_v7_replay_preserves_each_row_repeat_in_alternate_cycle(self):
         plan_module = importlib.import_module(self.nodes.__package__ + ".plan")
         rows = []
         for node_id in ("a", "b"):
@@ -1904,7 +1904,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         other = self.nodes.with_source_node(None, "x")
         queued = self.nodes.ScenePromptQueue().queue(
             scene_prompt1=stream, scene_prompt2=other,
-            order_mode="alternate", input_repeats_json='{"scene_prompt1":3}',
+            order_mode="alternate", alternate_block_size=2,
             unique_id="queue",
         )[0]
         info = self.nodes.ScenePromptExpand().expand(
@@ -1912,8 +1912,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             scene_prompt=queued, unique_id="expand",
         )[2]
         markers = [part[0] for part in info["_event_ref"]]
-        self.assertIn("sequence", markers)
-        self.assertIn("repeat", markers)
+        self.assertIn("repeat_each", markers)
         full_prompt = {
             node_id: {"class_type": "ScenePrompter", "inputs": {}}
             for node_id in ("a", "b", "x")
@@ -1922,7 +1921,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         full_prompt["expand"] = {"class_type": "ScenePrompterExpand", "inputs": {}}
         self.assertEqual(
             self.nodes._replay_expand_values(info, full_prompt),
-            {"current_index": 1, "seed_base": 103, "seed_base_literal": False},
+            {"current_index": 0, "seed_base": 104, "seed_base_literal": False},
         )
 
     def test_v7_replay_fixed_queue_through_locked_queue_and_count(self):
@@ -2017,7 +2016,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         )[0]
         queued = self.nodes.ScenePromptQueue().queue(
             scene_prompt1=matrix, order_mode="alternate",
-            input_repeats_json='{"scene_prompt1":3}', unique_id="queue",
+            alternate_block_size=2, unique_id="queue",
         )[0]
         info = self.nodes.ScenePromptExpand().expand(
             current_index=3, seed_base=90, timestamp_dir=False,

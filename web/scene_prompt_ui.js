@@ -220,8 +220,7 @@ const SCENE_WIDGET_LABELS = {
     strength_model: "モデル強度",
     strength_clip: "CLIP強度",
     order_mode: "並び順",
-    alternate_block_size: "交代する件数",
-    input_repeats_json: "入力ごとの回数",
+    alternate_block_size: "1行の回数",
     downstream_count_mode: "後続Count",
 };
 const SCENE_NODE_DISPLAY_NAMES = {
@@ -4977,7 +4976,7 @@ const SCENE_LORA_CACHE_KEY = "scene_prompt_lora_names_v1";
 const SCENE_LORA_CACHE_LIMIT = 120;
 let sceneLoraCatalog = [];
 let sceneLoraCatalogRequest = null;
-const sceneLoraNodes = new Set();
+const sceneLoraSessionCache = new Map();
 const sceneLoraResolutions = new Map();
 
 function loadSceneLoraCatalog() {
@@ -4987,7 +4986,6 @@ function loadSceneLoraCatalog() {
         const data = await readApiJson(response, "LoRA一覧を取得できませんでした");
         if (!response.ok) throw new Error(data.error || "LoRA一覧を取得できませんでした。");
         sceneLoraCatalog = Array.isArray(data) ? data : [];
-        for (const node of sceneLoraNodes) updateSceneLoraSummary(node);
         return sceneLoraCatalog;
     })();
     sceneLoraCatalogRequest = request;
@@ -5010,19 +5008,23 @@ function readSceneLoraCache() {
 
 function cachedSceneLora(item) {
     if (item.size == null || item.mtime_ns == null) return null;
-    return readSceneLoraCache().find((entry) => entry.key === sceneLoraCacheKey(item)) || null;
+    const key = sceneLoraCacheKey(item);
+    if (sceneLoraSessionCache.has(key)) return sceneLoraSessionCache.get(key);
+    const cached = readSceneLoraCache().find((entry) => entry.key === key) || null;
+    if (cached?.title || cached?.status === "not_found") sceneLoraSessionCache.set(key, cached);
+    return cached?.title || cached?.status === "not_found" ? cached : null;
 }
 
-function saveSceneLoraCache(item, local, version) {
+function saveSceneLoraCache(item, local, version, status) {
     const key = sceneLoraCacheKey(item);
     const title = String(version?.model?.name || "").trim();
     const entry = {
-        key, title, versionName: String(version?.name || "").trim(),
+        key, title, status, versionName: String(version?.name || "").trim(),
         modelId: version?.modelId, versionId: version?.id,
         trainedWords: Array.isArray(version?.trainedWords) ? version.trainedWords : [],
         localWords: Array.isArray(local?.trigger_phrases) ? local.trigger_phrases : [],
-        source: title ? "Civitai" : (item.source || "ファイル名"),
     };
+    sceneLoraSessionCache.set(key, entry);
     if (item.size != null && item.mtime_ns != null) {
         const entries = readSceneLoraCache().filter((existing) => existing.key !== key);
         entries.unshift(entry);
@@ -5037,15 +5039,14 @@ function sceneLoraCatalogItem(path) {
 
 function sceneLoraDisplay(item) {
     const cached = cachedSceneLora(item);
-    const source = item.source === "local" ? "ローカル情報" : "ファイル名";
-    return { title: cached?.title || item.title || item.path.split(/[\\/]/u).at(-1) || item.path,
-        source: cached?.title ? "Civitai" : source, versionName: cached?.versionName || "" };
+    return { title: cached?.title || (cached?.status === "not_found" ? "Civitaiに登録なし" : "Civitai名を確認中…"),
+        source: cached?.title ? "Civitai" : "", versionName: cached?.versionName || "" };
 }
 
 async function resolveSceneLora(item) {
     const cached = cachedSceneLora(item);
-    if (cached?.title) return cached;
-    const key = item.path;
+    if (cached) return cached;
+    const key = sceneLoraCacheKey(item);
     if (sceneLoraResolutions.has(key)) return sceneLoraResolutions.get(key);
     const resolution = resolveSceneLoraUncached(item);
     sceneLoraResolutions.set(key, resolution);
@@ -5059,23 +5060,19 @@ async function resolveSceneLoraUncached(item) {
     if (!response.ok) throw new Error(local.error || "LoRA情報を取得できませんでした。");
     const actual = { ...item, size: local.size ?? item.size, mtime_ns: local.mtime_ns ?? item.mtime_ns };
     const current = cachedSceneLora(actual);
-    if (current?.title) return current;
+    if (current) return current;
     let version = null;
+    let status = "unavailable";
     if (local.sha256) {
-        try {
-            const civitai = await fetch(`https://civitai.com/api/v1/model-versions/by-hash/${encodeURIComponent(local.sha256)}`);
-            if (civitai.ok) version = await civitai.json();
-        } catch (_error) {}
+        const civitai = await fetch(`https://civitai.com/api/v1/model-versions/by-hash/${encodeURIComponent(local.sha256)}`);
+        if (civitai.status === 404) status = "not_found";
+        else if (civitai.ok) {
+            version = await civitai.json();
+            if (String(version?.model?.name || "").trim()) status = "found";
+        } else throw new Error(`Civitai HTTP ${civitai.status}`);
     }
-    return saveSceneLoraCache(actual, local, version);
-}
-
-function updateSceneLoraSummary(node) {
-    const path = String(findWidget(node, "lora_name")?.value || "").trim();
-    const item = sceneLoraCatalogItem(path);
-    const display = sceneLoraDisplay(item);
-    node.sceneLoraSummary = { path: path || "未選択", ...display };
-    node.setDirtyCanvas?.(true, true);
+    if (status === "unavailable") throw new Error("Civitai名を取得できませんでした。");
+    return saveSceneLoraCache(actual, local, version, status);
 }
 
 function closeSceneLoraPicker(node) {
@@ -5105,8 +5102,8 @@ async function openSceneLoraPicker(node) {
     const search = document.createElement("input");
     search.type = "search";
     search.className = "pc-lora-search";
-    search.placeholder = "パス・名前で検索";
-    search.setAttribute("aria-label", "パス・名前で検索");
+    search.placeholder = "パス・取得済みCivitai名で検索";
+    search.setAttribute("aria-label", "パス・取得済みCivitai名で検索");
     const list = document.createElement("div");
     list.className = "pc-lora-list";
     list.textContent = "LoRAを読み込んでいます…";
@@ -5114,21 +5111,66 @@ async function openSceneLoraPicker(node) {
     overlay.append(dialog);
     document.body.append(overlay);
     const onKey = (event) => { if (event.key === "Escape") closeSceneLoraPicker(node); };
-    const cleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+    let generation = 0;
+    let pending = [];
+    let busy = false;
+    let observer = null;
+    const cleanup = () => {
+        generation += 1;
+        pending = [];
+        observer?.disconnect();
+        document.removeEventListener("keydown", onKey);
+        overlay.remove();
+    };
     node.sceneLoraPickerCleanup = cleanup;
     close.onclick = () => closeSceneLoraPicker(node);
     overlay.onclick = (event) => { if (event.target === overlay) closeSceneLoraPicker(node); };
     document.addEventListener("keydown", onKey);
     search.focus();
+    const work = async () => {
+        if (busy) return;
+        busy = true;
+        while (pending.length && node.sceneLoraPickerCleanup === cleanup) {
+            const { item, row, title, source, revision } = pending.shift();
+            if (revision !== generation || !row.isConnected) continue;
+            try {
+                const result = await resolveSceneLora(item);
+                if (revision === generation && row.isConnected) {
+                    if (result.key !== sceneLoraCacheKey(item)) title.textContent = "ファイルが更新されました。再表示してください";
+                    else {
+                        title.textContent = result.title || "Civitaiに登録なし";
+                        source.textContent = result.title ? "Civitai" : "";
+                    }
+                }
+            } catch (_error) {
+                if (revision === generation && row.isConnected) title.textContent = "Civitai名を取得できませんでした";
+            }
+        }
+        busy = false;
+    };
     const render = () => {
+        generation += 1;
+        pending = [];
+        observer?.disconnect();
+        const revision = generation;
         const query = search.value.trim().toLocaleLowerCase();
         const shown = sceneLoraCatalog.filter((item) => {
-            const display = sceneLoraDisplay(item);
-            return `${item.path} ${display.title} ${display.versionName}`.toLocaleLowerCase().includes(query);
+            const cached = cachedSceneLora(item);
+            return `${item.path} ${cached?.title || ""} ${cached?.versionName || ""}`.toLocaleLowerCase().includes(query);
         });
         list.replaceChildren();
         if (!shown.length) { list.textContent = "該当するLoRAはありません。"; return; }
-        for (const item of shown) {
+        observer = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) continue;
+                observer.unobserve(entry.target);
+                const job = entry.target.sceneLoraJob;
+                if (job && job.revision === generation) pending.push(job);
+            }
+            void work();
+        }, { root: list });
+        for (const catalogItem of shown) {
+            const item = { ...catalogItem };
             const display = sceneLoraDisplay(item);
             const row = document.createElement("button");
             row.type = "button";
@@ -5142,14 +5184,16 @@ async function openSceneLoraPicker(node) {
             const source = document.createElement("small");
             source.className = "pc-lora-source";
             source.textContent = display.source;
-            row.append(path, title, source);
+            row.append(title, source, path);
+            if (!cachedSceneLora(item)) {
+                row.sceneLoraJob = { item, row, title, source, revision };
+                observer.observe(row);
+            }
             row.onclick = async () => {
                 closeSceneLoraDetails(node);
                 setWidgetValue(node, "lora_name", item.path);
-                updateSceneLoraSummary(node);
                 closeSceneLoraPicker(node);
                 try { await resolveSceneLora(item); } catch (_error) {}
-                if (String(findWidget(node, "lora_name")?.value || "") === item.path) updateSceneLoraSummary(node);
             };
             list.append(row);
         }
@@ -5157,7 +5201,7 @@ async function openSceneLoraPicker(node) {
     search.oninput = render;
     try {
         await loadSceneLoraCatalog();
-        if (node.sceneLoraPickerCleanup === cleanup) { updateSceneLoraSummary(node); render(); }
+        if (node.sceneLoraPickerCleanup === cleanup) render();
     } catch (error) {
         if (node.sceneLoraPickerCleanup === cleanup) list.textContent = error.message;
     }
@@ -5270,39 +5314,17 @@ async function openSceneLoraDetails(node) {
 function ensureSceneLoraControls(node) {
     node.sceneDefaultStateWidgetName = "positive_json";
     setActiveStateWidget(node, "positive_json");
-    if (!findSceneWidget(node, "lora_summary")) {
-        addSceneCustomWidget(node, {
-            type: "scene_lora_summary", name: "LoRA", value: "", serialize: false,
-            options: { serialize: false }, sceneRole: "lora_summary",
-            computeSize(width) { return [width, 60]; },
-            draw(ctx, drawNode, width, y) {
-                const summary = drawNode.sceneLoraSummary || { path: "未選択", title: "", source: "" };
-                ctx.save();
-                ctx.fillStyle = "#bbc8d8";
-                ctx.font = "11px sans-serif";
-                ctx.fillText(fitCanvasText(ctx, `パス  ${summary.path}`, width - 24), 12, y + 17);
-                ctx.fillStyle = "#f1f4fa";
-                ctx.font = "bold 12px sans-serif";
-                ctx.fillText(fitCanvasText(ctx, `名前  ${summary.title}`, width - 24), 12, y + 35);
-                ctx.fillStyle = "#9eb8d4";
-                ctx.font = "10px sans-serif";
-                ctx.fillText(summary.source, 12, y + 52);
-                ctx.restore();
-            },
-        });
-    }
     addSceneButton(node, "lora_select", "LoRAを選択", () => openSceneLoraPicker(node));
     const button = addSceneButton(node, "lora_details", "詳細確認", () => openSceneLoraDetails(node));
     ensurePromptSelectionControls(node);
     applyWidgetLabel(findWidget(node, "positive"), "positiveテキスト");
     applyWidgetLabel(findWidget(node, "negative"), "negativeテキスト");
-    const order = ["model_mode", "lora_summary", "lora_select", "strength_model", "strength_clip", "lora_details", "positive", "positive_open", "positive_selected_list", "negative", "negative_open", "negative_selected_list"];
+    const order = ["model_mode", "lora_select", "strength_model", "strength_clip", "lora_details", "positive", "positive_open", "positive_selected_list", "negative", "negative_open", "negative_selected_list"];
     const rank = (widget) => order.indexOf(widget.sceneRole || widget.name);
     const previous = new Map(node.widgets.map((widget, index) => [widget, node.widgets_values?.[index] ?? widget.value]));
     node.widgets.sort((a, b) => (rank(a) >= 0 ? rank(a) : order.length) - (rank(b) >= 0 ? rank(b) : order.length));
     if (Array.isArray(node.widgets_values)) node.widgets_values = node.widgets.map((widget) => previous.get(widget));
     button.serialize = false;
-    updateSceneLoraSummary(node);
     node.setDirtyCanvas?.(true, true);
 }
 
@@ -7192,6 +7214,14 @@ function sceneScheduleWrapper(kind, unit, factor = 1) {
     };
 }
 
+function sceneScheduleRepeatEach(plan, factor) {
+    return sceneSchedulePlan([{ kind: "repeat_each", plan, factor,
+        total: sceneStatProduct(plan.stats.total, factor),
+        totalImages: sceneStatProduct(plan.stats.totalImages, factor),
+        unsetBatches: sceneStatProduct(plan.stats.unsetBatches, factor),
+        rows: plan.stats.rows }], plan.boundary);
+}
+
 function sceneScheduleSequence(plan) {
     return { kind: "sequence", plan, ...plan.stats };
 }
@@ -7204,6 +7234,7 @@ function sceneScheduleAlternate(plans, blockSize) {
 function sceneScheduleAtUnit(unit, index) {
     if (unit.kind === "run") return unit.entry;
     if (unit.kind === "sequence") return sceneScheduleAt(unit.plan, index);
+    if (unit.kind === "repeat_each") return sceneScheduleAt(unit.plan, Math.floor(index / unit.factor));
     if (unit.kind === "repeat" || unit.kind === "fixed") {
         return unit.unit.total ? sceneScheduleAtUnit(unit.unit, index % unit.unit.total) : null;
     }
@@ -7308,7 +7339,7 @@ function sceneScheduleMatrix(plan, matrixRows) {
 }
 
 function sceneScheduleHasComposite(plan) {
-    const hasUnit = (unit) => unit.kind === "alternate" || unit.kind === "sequence"
+    const hasUnit = (unit) => unit.kind === "alternate" || unit.kind === "sequence" || unit.kind === "repeat_each"
         || (unit.unit && hasUnit(unit.unit))
         || (unit.left && sceneScheduleHasComposite(unit.left))
         || (unit.right && sceneScheduleHasComposite(unit.right));
@@ -7350,23 +7381,25 @@ function sceneScheduleMerge(left, right) {
 }
 
 function sceneScheduleQueue(plans, socketNames, controls) {
+    const factor = Math.max(1, Number(controls.alternate_block_size) || 1);
     if (!plans.length) {
         const seed = sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() });
+        const repeated = factor === 1 ? seed : sceneScheduleRepeatEach(sceneSchedulePlan([seed]), factor).units[0];
         return sceneSchedulePlan([controls.downstream_count_mode === "fixed"
-            ? sceneScheduleWrapper("fixed", seed) : seed], true);
+            ? sceneScheduleWrapper("fixed", repeated) : repeated], true);
     }
     if (plans.some((plan) => plan.boundary)) return sceneSchedulePlan(plans.flatMap((plan) => plan.units), true);
-    const repeats = sceneQueueRepeatFactors(controls.input_repeats_json);
-    const adjusted = plans.map((plan, index) => {
-        const factor = repeats[socketNames[index]] ?? 1;
-        if (factor === 1) return plan;
-        return sceneSchedulePlan([sceneScheduleWrapper("repeat", sceneScheduleSequence(plan), factor)]);
-    });
-    const units = controls.order_mode === "alternate"
-        ? [sceneScheduleAlternate(adjusted, Math.max(1, Number(controls.alternate_block_size) || 1))]
-        : adjusted.flatMap((plan) => plan.units);
-    return sceneSchedulePlan(controls.downstream_count_mode === "fixed"
-        ? units.map((unit) => sceneScheduleWrapper("fixed", unit)) : units, true);
+    const adjusted = factor === 1 ? plans : plans.map((plan) => sceneScheduleRepeatEach(plan, factor));
+    if (factor === 1 && controls.order_mode !== "alternate") {
+        const units = adjusted.flatMap((plan) => plan.units);
+        return sceneSchedulePlan(controls.downstream_count_mode === "fixed"
+            ? units.map((unit) => sceneScheduleWrapper("fixed", unit)) : units, true);
+    }
+    const cycle = controls.order_mode === "alternate"
+        ? sceneScheduleAlternate(adjusted, factor)
+        : sceneScheduleSequence(sceneSchedulePlan(adjusted.flatMap((plan) => plan.units)));
+    return sceneSchedulePlan([controls.downstream_count_mode === "fixed"
+        ? sceneScheduleWrapper("fixed", cycle) : cycle], true);
 }
 
 function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferredPreset = null) {
@@ -7517,18 +7550,7 @@ const SCENE_QUEUE_CONTROL_DEFAULTS = Object.freeze({
     input_repeats_json: "{}",
     downstream_count_mode: "multiply",
 });
-const SCENE_QUEUE_CONTROL_NAMES = Object.keys(SCENE_QUEUE_CONTROL_DEFAULTS);
-
-function sceneQueueRepeatFactors(value) {
-    try {
-        const parsed = JSON.parse(String(value || "{}"));
-        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return {};
-        return Object.fromEntries(Object.entries(parsed).filter(([name, count]) =>
-            SCENE_PROMPT_QUEUE_INPUT_NAMES.has(name) && Number.isSafeInteger(count) && count >= 0));
-    } catch {
-        return {};
-    }
-}
+const SCENE_QUEUE_CONTROL_NAMES = ["order_mode", "alternate_block_size", "downstream_count_mode"];
 
 function sceneQueueBoundaryInPreset(presetId, upstream, stack = new Set(), preferredPreset = null) {
     const id = String(presetId || "");
@@ -7604,9 +7626,8 @@ function syncSceneQueueControls(node) {
         const widget = findWidget(node, name);
         if (!widget) continue;
         widget.options = widget.options || {};
-        if (name !== "input_repeats_json") widget.sceneRole = name;
-        const disabled = !!lock || (name === "alternate_block_size"
-            && findWidget(node, "order_mode")?.value !== "alternate");
+        widget.sceneRole = name;
+        const disabled = !!lock;
         widget.disabled = disabled;
         widget.options.disabled = disabled;
         widget.label = lock ? `${SCENE_WIDGET_LABELS[name] || name}（${lock === "upstream" ? "上流Queueあり" : "Preset読み込み中"}）`
@@ -7616,53 +7637,11 @@ function syncSceneQueueControls(node) {
         }
     }
     const json = findWidget(node, "input_repeats_json");
-    if (json) hideWidget(json);
-    const edit = findSceneWidget(node, "queue_input_repeats");
-    if (edit) {
-        edit.disabled = !!lock;
-        edit.name = lock ? `入力ごとの回数（${lock === "upstream" ? "上流Queueあり" : "Preset読み込み中"}）` : "入力ごとの回数";
+    if (json) {
+        hideWidget(json);
+        if (json.value !== "{}") setWidgetValue(node, "input_repeats_json", "{}", { silent: true });
     }
     return lock;
-}
-
-function openSceneQueueRepeatsPopup(node) {
-    if (syncSceneQueueControls(node)) return;
-    const popup = openPopupShell(node, "Queue 入力ごとの回数", { hideReload: true, hideClear: true });
-    const list = document.createElement("div");
-    list.className = "pc-popup-list";
-    const repeats = sceneQueueRepeatFactors(findWidget(node, "input_repeats_json")?.value);
-    for (const { input } of connectedScenePromptSourcesForQueue(node)) {
-        const row = document.createElement("label");
-        row.className = "pc-candidate";
-        row.style.display = "flex";
-        row.style.alignItems = "center";
-        row.style.justifyContent = "space-between";
-        row.textContent = input.name;
-        const field = document.createElement("input");
-        field.type = "number";
-        field.min = "0";
-        field.step = "1";
-        field.className = "pc-searchbox";
-        field.style.width = "100px";
-        field.value = String(repeats[input.name] ?? 1);
-        field.addEventListener("change", () => {
-            const count = Number(field.value);
-            if (!Number.isSafeInteger(count) || count < 0) {
-                field.value = String(repeats[input.name] ?? 1);
-                return;
-            }
-            if (count === 1) delete repeats[input.name];
-            else repeats[input.name] = count;
-            setWidgetValue(node, "input_repeats_json", JSON.stringify(repeats));
-            clearSceneComputedCaches(node);
-            refreshDownstreamSceneNodes(node);
-            node.setDirtyCanvas?.(true, true);
-        });
-        row.appendChild(field);
-        list.appendChild(row);
-    }
-    if (!list.children.length) list.textContent = "scene_promptを接続してください";
-    popup.appendChild(list);
 }
 
 function connectedScenePromptSourcesForMerge(node) {
@@ -11456,7 +11435,6 @@ function attachScenePromptQueue(node) {
             widget.sceneQueueControlWrapped = true;
         }
     }
-    addSceneButton(node, "queue_input_repeats", "入力ごとの回数", () => openSceneQueueRepeatsPopup(node));
     syncSceneQueueControls(node);
     addScenePromptQueueListWidget(node);
     hideNonSceneRoleWidgets(node);
@@ -11564,8 +11542,6 @@ function attachSceneUtilityNode(node, nodeName) {
     }
     if (SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)) {
         ensureSceneLoraControls(node);
-        sceneLoraNodes.add(node);
-        void loadSceneLoraCatalog().catch(() => {});
         installScenePromptWidgetSyncHandlers(node);
     }
     if (SCENE_EMPTY_LATENT_NODE_NAMES.has(nodeName)) {
@@ -11619,7 +11595,6 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         invalidatePopupRequests(this);
         closeSceneLoraDetails(this);
         if (typeof closeSceneLoraPicker === "function") closeSceneLoraPicker(this);
-        if (typeof sceneLoraNodes !== "undefined") sceneLoraNodes.delete(this);
         if (popupContextReferencesNode(activePopupContext, this)) {
             closeAllPopups();
         }
@@ -12107,7 +12082,6 @@ app.registerExtension({
                 for (const name of SCENE_LORA_STORED_WIDGET_NAMES) {
                     if (Object.hasOwn(named, name)) setWidgetValue(this, name, named[name], { silent: true });
                 }
-                updateSceneLoraSummary(this);
                 return result;
             };
             nodeType.prototype.serialize = function (...args) {
