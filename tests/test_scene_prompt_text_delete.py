@@ -116,6 +116,35 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         with self.assertRaises(IndexError):
             self.nodes._text_replay_items(prompt, '2', info)
 
+    def test_v7_text_replay_uses_its_own_alternate_event_path(self):
+        handle = self.runs.create_run_context('default')
+        a = self.nodes.ScenePromptCounter().count(count=2, scene_prompt=self.build('A', node_id='a'))[0]
+        b = self.nodes.ScenePromptCounter().count(count=2, scene_prompt=self.build('B', node_id='b'))[0]
+        plan = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=a, scene_prompt2=b, order_mode='alternate', unique_id='queue',
+        )[0]
+        self.nodes.ScenePromptToText().to_text(plan, current_index=3, seed_base=10,
+                                                run_handle=handle, unique_id='text')
+        full_prompt = {
+            'a': {'class_type': 'ScenePrompter', 'inputs': {}},
+            'b': {'class_type': 'ScenePrompter', 'inputs': {}},
+            'queue': {'class_type': 'ScenePrompterQueue', 'inputs': {
+                'scene_prompt1': ['a', 0], 'scene_prompt2': ['b', 0],
+            }},
+            'text': {'class_type': 'ScenePromptToText', 'inputs': {
+                'scene_prompt': ['queue', 0], 'current_index': 3, 'seed_base': 10,
+            }},
+            'save': {'class_type': 'Save', 'inputs': {'text': ['text', 0]}},
+        }
+        info = self.nodes._text_replay_items(full_prompt, 'save', {'run_handle': handle})['text']
+        self.assertIn('_event_ref', info)
+        saved_prompt = {key: copy.deepcopy(full_prompt[key]) for key in ('b', 'queue', 'text', 'save')}
+        saved_prompt['queue']['inputs'].pop('scene_prompt1')
+        self.nodes._apply_text_replay_values(saved_prompt, None, {'text': info}, full_prompt)
+        self.assertEqual(saved_prompt['text']['inputs']['current_index'], 1)
+        self.assertEqual(saved_prompt['text']['inputs']['seed_base'], 12)
+        self.assertFalse(saved_prompt['text']['inputs']['seed_base_literal'])
+
     def test_delete_choice_slots_nested_and_empty_choices(self):
         examples = {
             '{bald}': '{}', '{bald|bald}': '{|}', '{bald||hair}': '{||hair}',
