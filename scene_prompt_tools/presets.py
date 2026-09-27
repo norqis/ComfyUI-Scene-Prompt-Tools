@@ -241,7 +241,10 @@ def _compact_preset_list_graph(api_graph):
     if not isinstance(nodes, dict):
         return copy.deepcopy(api_graph)
     compact_nodes = {}
-    scalar_inputs = {"matrix_json", "batch_size", "count", "preset_id", "reverse_scope"}
+    scalar_inputs = {
+        "matrix_json", "batch_size", "count", "preset_id", "reverse_scope",
+        "order_mode", "alternate_block_size", "downstream_count_mode",
+    }
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
             continue

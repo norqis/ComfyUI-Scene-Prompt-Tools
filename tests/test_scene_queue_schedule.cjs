@@ -145,6 +145,28 @@ const preset = { api_graph: { output: {
 } } };
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleForPreset("inner", leaf("A"), new Set(), preset)))),
     ["Ab1", "Ab2"], "Preset rehydration retains the internal Queue order and Prompt labels");
+const compactInner = { api_graph: { output: {
+    1: { class_type: "ScenePresetInput", inputs: {} },
+    2: { class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0] } },
+    3: { class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0] } },
+    4: { class_type: "ScenePrompterQueue", inputs: { scene_prompt1: ["2", 0], scene_prompt2: ["3", 0],
+        order_mode: "alternate", alternate_block_size: 3, downstream_count_mode: "multiply" } },
+    5: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
+} } };
+const compactOuter = { api_graph: { output: {
+    1: { class_type: "ScenePresetInput", inputs: {} },
+    2: { class_type: "ScenePresetReference", inputs: { scene_prompt: ["1", 0], preset_id: "compact-inner" } },
+    3: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["2", 0], count: 10 } },
+    4: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["3", 0] } },
+} } };
+ctx.scenePresetDisplayGraphs.set("compact-inner", compactInner);
+const multipliedPreset = ctx.sceneScheduleForPreset("compact-outer", leaf("A"), new Set(), compactOuter);
+assert.equal(multipliedPreset.stats.total, 60,
+    "a nested compact Preset retains alternate row repeat 3 before a downstream Count 10");
+compactInner.api_graph.output[4].inputs.downstream_count_mode = "fixed";
+const fixedPreset = ctx.sceneScheduleForPreset("compact-outer", leaf("A"), new Set(), compactOuter);
+assert.equal(fixedPreset.stats.total, 6,
+    "a nested compact Preset retains its fixed downstream Count mode");
 
 Object.assign(ctx, {
     SCENE_QUEUE_CONTROL_DEFAULTS: controls(),
