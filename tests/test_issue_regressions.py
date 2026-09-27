@@ -205,13 +205,22 @@ class OpenIssueRegressionTests(unittest.TestCase):
         graph = {"output": {
             "1": {"class_type": "ScenePresetInput", "inputs": {}},
             "2": {"class_type": "SceneMatrix", "inputs": {"scene_prompt": ["1", 0], "matrix_json": json.dumps(matrix)}},
-            "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            "3": {"class_type": "ScenePrompterQueue", "inputs": {
+                "scene_prompt1": ["2", 0], "order_mode": "alternate",
+                "alternate_block_size": 3, "downstream_count_mode": "multiply",
+                "input_repeats_json": '{"scene_prompt1":99}',
+            }},
+            "4": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["3", 0]}},
         }}
         compact = self.presets._compact_preset_list_graph(graph)
         encoded = compact["output"]["2"]["inputs"]["matrix_json"]
         self.assertLess(len(encoded), 500)
         parsed = json.loads(encoded)
         self.assertEqual([line["enabled"] for line in parsed["sets"]], [True, False])
+        self.assertEqual(compact["output"]["3"]["inputs"], {
+            "scene_prompt1": ["2", 0], "order_mode": "alternate",
+            "alternate_block_size": 3, "downstream_count_mode": "multiply",
+        })
 
 
 if __name__ == "__main__":
