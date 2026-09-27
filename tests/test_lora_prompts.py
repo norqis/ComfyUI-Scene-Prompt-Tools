@@ -129,7 +129,7 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(text.to_text(plan, model_mode="Anima"), text.to_text(plan))
         self.assertEqual(text.to_text(plan, scope=self.nodes.TEXT_SCOPE_PREVIOUS), ("", ""))
         self.assertEqual(text.to_text(plan, scope=self.nodes.TEXT_SCOPE_PREVIOUS, model_mode="Anima"), ("", ""))
-        self.assertEqual(text.IS_CHANGED(plan, model_mode="Anima"), text.IS_CHANGED(plan))
+        self.assertEqual(text.IS_CHANGED(plan, model_mode="Anima", seed_base=1), text.IS_CHANGED(plan, seed_base=1))
         deleted = self.nodes.ScenePromptDelete().delete(
             "base, ill-text, anima-text", "ill-negative, anima-negative", plan,
         )[0]
