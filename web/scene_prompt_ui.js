@@ -11143,8 +11143,8 @@ async function openSceneExpandResources(node) {
             card.className = "pc-resource-card";
             addText(card, `${modelLabels[model.kind] || model.kind}: ${model.name || "未指定"}`, "pc-resource-name");
             if (model.roles?.length) addText(card, `出力: ${model.roles.join(" / ")}`, "pc-resource-detail");
-            if (model.kind === "unresolved") addText(card, `${model.source_class || "読み込み元"} のファイル名は取得できません。`, "pc-resource-detail");
-            if (model.kind === "checkpoint" || model.kind === "diffusion_model") {
+            if (model.unresolved || model.kind === "unresolved") addText(card, `${model.source_class || "読み込み元"} のファイル名は取得できません。`, "pc-resource-detail");
+            if (!model.unresolved && (model.kind === "checkpoint" || model.kind === "diffusion_model")) {
                 addLookup(card, async () => {
                     const hashResponse = await api.fetchApi(`/scene_prompt/models/hash?kind=${encodeURIComponent(model.kind)}&name=${encodeURIComponent(model.name)}`);
                     const hashData = await readApiJson(hashResponse, "モデルを照合できませんでした");

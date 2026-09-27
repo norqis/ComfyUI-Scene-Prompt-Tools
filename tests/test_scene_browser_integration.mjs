@@ -2370,12 +2370,17 @@ try {
     await page.keyboard.press("Escape");
     await page.evaluate(() => {
         window.__sceneResourceResponse.model_mode = null;
+        window.__sceneResourceResponse.models = [{ kind: "diffusion_model", name: "取得不可 (#44)", unresolved: true, roles: ["model"], source_class: "UNETLoader" }];
         window.__sceneResourceResponse.loras = [{ name: "取得不可 (#45)", unresolved: true, variants: [
             { model_mode: null, strength_model: null, strength_clip: null, roles: ["model", "clip"], applies: null },
         ] }];
         window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback();
     });
     await resources.getByText("Expand のモデル: 取得不可").waitFor();
+    const unresolvedModel = resources.locator(".pc-resource-card").filter({ hasText: "取得不可 (#44)" });
+    assert.equal(await unresolvedModel.getByText("UNETLoader のファイル名は取得できません。").count(), 1);
+    assert.equal(await unresolvedModel.getByRole("button", { name: "Civitaiを確認" }).count(), 0,
+        "an unresolved linked diffusion model is not hashed as a real file");
     const unresolvedLora = resources.locator(".pc-resource-card").filter({ hasText: "取得不可 (#45)" });
     assert.equal(await unresolvedLora.getByText(/モデル強度 取得不可/u).count(), 1);
     assert.equal(await unresolvedLora.getByText(/適用可否を取得不可/u).count(), 1);
@@ -2384,6 +2389,7 @@ try {
     await page.keyboard.press("Escape");
     await page.evaluate(() => {
         window.__sceneResourceResponse.model_mode = "Anima";
+        window.__sceneResourceResponse.models = [{ kind: "checkpoint", name: "illustration.safetensors", roles: ["model", "clip", "vae"], source_class: "CheckpointLoaderSimple" }];
         window.__scenePromptPopupTestHooks.installSceneNodeRemovalCleanup(window.__sceneResourceExpand, "ScenePrompterExpand");
         window.__delayNextSceneModelHash = true;
         window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback();
