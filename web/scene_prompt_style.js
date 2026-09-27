@@ -523,6 +523,14 @@ export function injectStyle() {
         }
         .pc-lora-word span { overflow-wrap: anywhere; }
         .pc-lora-dialog a { color: #9db8ec; }
+        .pc-resource-dialog { width: min(720px, calc(100vw - 24px)); }
+        .pc-resource-section { display: grid; gap: 7px; }
+        .pc-resource-section > strong { padding-bottom: 3px; border-bottom: 1px solid #4a505b; }
+        .pc-resource-mode { color: #bfd7fb; }
+        .pc-resource-card { display: grid; gap: 6px; min-width: 0; padding: 9px 11px; border: 1px solid #3c4553; border-radius: 5px; background: #292f38; }
+        .pc-resource-name { overflow-wrap: anywhere; font-weight: 600; }
+        .pc-resource-detail { color: #bbc7d7; overflow-wrap: anywhere; }
+        .pc-resource-card .pc-button { justify-self: start; }
         .pc-lora-picker { width: min(660px, calc(100vw - 24px)); display: flex; flex-direction: column; }
         .pc-lora-search {
             box-sizing: border-box; width: 100%; margin: 12px 0 8px; padding: 9px 11px;

@@ -11017,10 +11017,171 @@ function ensurePromptMatrixControls(node) {
 }
 
 function ensureSceneExpandControls(node) {
-    addSceneButton(node, "expand_run_all", "連続生成", () => startSceneBatchRun(node));
+    const info = addSceneButton(node, "expand_resources", "生成情報", () => openSceneExpandResources(node));
+    const run = addSceneButton(node, "expand_run_all", "連続生成", () => startSceneBatchRun(node));
+    const infoIndex = node.widgets.indexOf(info);
+    const runIndex = node.widgets.indexOf(run);
+    if (infoIndex > runIndex) {
+        node.widgets.splice(infoIndex, 1);
+        node.widgets.splice(node.widgets.indexOf(run), 0, info);
+    }
     addSceneExpandCountWidget(node);
     updateSceneExpandButton(node);
     updateSceneExpandCountWidget(node);
+}
+
+function closeSceneExpandResources(node) {
+    node.sceneExpandResourcesCleanup?.();
+    node.sceneExpandResourcesCleanup = null;
+}
+
+function sceneResourceLink(version) {
+    const modelId = Number(version?.modelId);
+    const versionId = Number(version?.versionId ?? version?.id);
+    if (!Number.isSafeInteger(modelId) || modelId <= 0 || !Number.isSafeInteger(versionId) || versionId <= 0) return null;
+    const link = document.createElement("a");
+    link.href = `https://civitai.com/models/${modelId}?modelVersionId=${versionId}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "Civitaiで見る";
+    return link;
+}
+
+async function openSceneExpandResources(node) {
+    closeSceneExpandResources(node);
+    injectStyle();
+    const overlay = document.createElement("div");
+    overlay.className = "pc-lora-overlay";
+    const dialog = document.createElement("div");
+    dialog.className = "pc-lora-dialog pc-resource-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "生成情報");
+    const head = document.createElement("div");
+    head.className = "pc-lora-head";
+    const title = document.createElement("strong");
+    title.textContent = "生成情報";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "pc-button";
+    close.textContent = "閉じる";
+    head.append(title, close);
+    const content = document.createElement("div");
+    content.className = "pc-lora-content";
+    content.textContent = "接続情報を確認しています…";
+    dialog.append(head, content);
+    overlay.append(dialog);
+    document.body.append(overlay);
+    const onKey = (event) => { if (event.key === "Escape") closeSceneExpandResources(node); };
+    const cleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+    node.sceneExpandResourcesCleanup = cleanup;
+    close.onclick = () => closeSceneExpandResources(node);
+    overlay.onclick = (event) => { if (event.target === overlay) closeSceneExpandResources(node); };
+    document.addEventListener("keydown", onKey);
+    close.focus();
+
+    const addText = (parent, value, className = "") => {
+        const line = document.createElement("div");
+        line.className = className;
+        line.textContent = value;
+        parent.append(line);
+        return line;
+    };
+    const addSection = (label) => {
+        const section = document.createElement("section");
+        section.className = "pc-resource-section";
+        const heading = document.createElement("strong");
+        heading.textContent = label;
+        section.append(heading);
+        content.append(section);
+        return section;
+    };
+    const addLookup = (card, lookup) => {
+        const result = document.createElement("div");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "pc-button";
+        button.textContent = "Civitaiを確認";
+        button.onclick = async () => {
+            button.disabled = true;
+            result.textContent = "照合しています…";
+            try {
+                const version = await lookup();
+                if (node.sceneExpandResourcesCleanup !== cleanup) return;
+                result.replaceChildren();
+                const link = sceneResourceLink(version);
+                if (link) {
+                    if (version.title) addText(result, version.title);
+                    result.append(link);
+                } else result.textContent = "Civitaiに該当する情報がありません。";
+            } catch (error) {
+                if (node.sceneExpandResourcesCleanup === cleanup) result.textContent = error.message || "Civitaiを確認できませんでした。";
+            } finally {
+                if (node.sceneExpandResourcesCleanup === cleanup) button.disabled = false;
+            }
+        };
+        card.append(button, result);
+    };
+
+    try {
+        if (typeof app.graphToPrompt !== "function") throw new Error("現在の接続情報を取得できません。");
+        const apiGraph = await app.graphToPrompt();
+        if (node.sceneExpandResourcesCleanup !== cleanup) return;
+        const response = await api.fetchApi("/scene_prompt/expand/resources", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_graph: apiGraph, expand_node_id: String(node.id) }),
+        });
+        const data = await readApiJson(response, "生成情報を取得できませんでした");
+        if (!response.ok) throw new Error(data.error || "生成情報を取得できませんでした。");
+        if (node.sceneExpandResourcesCleanup !== cleanup) return;
+        content.replaceChildren();
+        addText(content, `Expand のモデル: ${data.model_mode || "未設定"}`, "pc-resource-mode");
+        const modelSection = addSection("モデル・CLIP・VAE");
+        const modelLabels = { checkpoint: "Checkpoint", diffusion_model: "拡散モデル", clip: "CLIP", vae: "VAE", unresolved: "読み込み元" };
+        for (const model of data.models || []) {
+            const card = document.createElement("div");
+            card.className = "pc-resource-card";
+            addText(card, `${modelLabels[model.kind] || model.kind}: ${model.name || "未指定"}`, "pc-resource-name");
+            if (model.roles?.length) addText(card, `出力: ${model.roles.join(" / ")}`, "pc-resource-detail");
+            if (model.kind === "unresolved") addText(card, `${model.source_class || "読み込み元"} のファイル名は取得できません。`, "pc-resource-detail");
+            if (model.kind === "checkpoint" || model.kind === "diffusion_model") {
+                addLookup(card, async () => {
+                    const hashResponse = await api.fetchApi(`/scene_prompt/models/hash?kind=${encodeURIComponent(model.kind)}&name=${encodeURIComponent(model.name)}`);
+                    const hashData = await readApiJson(hashResponse, "モデルを照合できませんでした");
+                    if (!hashResponse.ok) throw new Error(hashData.error || "モデルを照合できませんでした。");
+                    const civitai = await fetch(`https://civitai.com/api/v1/model-versions/by-hash/${encodeURIComponent(hashData.sha256)}`);
+                    if (civitai.status === 404) return null;
+                    if (!civitai.ok) throw new Error(`Civitai HTTP ${civitai.status}`);
+                    const version = await civitai.json();
+                    return { ...version, title: version.model?.name };
+                });
+            }
+            modelSection.append(card);
+        }
+        if (!data.models?.length) addText(modelSection, "接続されたモデルはありません。");
+        const loraSection = addSection("LoRA");
+        for (const lora of data.loras || []) {
+            const card = document.createElement("div");
+            card.className = "pc-resource-card";
+            addText(card, lora.name, "pc-resource-name");
+            for (const variant of lora.variants || []) {
+                const roles = variant.roles || ["model", "clip"];
+                const strengths = [
+                    roles.includes("model") ? `モデル強度 ${variant.strength_model}` : "",
+                    roles.includes("clip") ? `CLIP強度 ${variant.strength_clip}` : "",
+                ].filter(Boolean);
+                addText(card, [variant.model_mode || "標準LoRA", ...strengths, variant.applies ? "適用対象" : "モデル種別が異なるため適用外"].join(" / "), "pc-resource-detail");
+            }
+            addLookup(card, async () => {
+                const result = await resolveSceneLora(sceneLoraCatalogItem(lora.name));
+                return { ...result, versionId: result.versionId };
+            });
+            loraSection.append(card);
+        }
+        if (!data.loras?.length) addText(loraSection, "接続されたLoRAはありません。");
+    } catch (error) {
+        if (node.sceneExpandResourcesCleanup === cleanup) content.textContent = error.message || "生成情報を取得できませんでした。";
+    }
 }
 
 async function loadScenePresetList(force = false) {
