@@ -1910,7 +1910,7 @@ class ScenePromptQueue:
     def INPUT_TYPES(cls):
         optional = {
             "order_mode": (("input_order", "alternate"), {"default": "input_order", "display_name": "並び順"}),
-            "alternate_block_size": ("INT", {"default": 1, "min": 1, "max": MAX_SAFE_INTEGER, "display_name": "交代する件数"}),
+            "alternate_block_size": ("INT", {"default": 1, "min": 1, "max": MAX_SAFE_INTEGER, "display_name": "1行の回数"}),
             "input_repeats_json": ("STRING", {"default": "{}", "display_name": "入力の繰り返し回数", "hidden": True}),
             "downstream_count_mode": (("multiply", "fixed"), {"default": "multiply", "display_name": "後続Count"}),
         }
@@ -1934,7 +1934,7 @@ class ScenePromptQueue:
     def IS_CHANGED(cls, **kwargs):
         parts = []
         from .plan import _validate_queue_controls
-        mode, block, factors, count_mode = _validate_queue_controls(
+        mode, block, count_mode = _validate_queue_controls(
             kwargs.get("order_mode", "input_order"), kwargs.get("alternate_block_size", 1),
             kwargs.get("input_repeats_json", "{}"), kwargs.get("downstream_count_mode", "multiply"),
         )
@@ -1942,7 +1942,7 @@ class ScenePromptQueue:
             isinstance(kwargs.get(name), dict) and kwargs[name].get("contains_queue_boundary") is True
             for name in SCENE_PROMPT_INPUT_NAMES
         )
-        parts.append(json.dumps(["input_order", 1, {}, "multiply"] if locked else [mode, block, factors, count_mode], sort_keys=True))
+        parts.append(json.dumps(["input_order", 1, {}, "multiply"] if locked else [mode, block, {}, count_mode], sort_keys=True))
         for name in SCENE_PROMPT_INPUT_NAMES:
             value = kwargs.get(name)
             if isinstance(value, dict):

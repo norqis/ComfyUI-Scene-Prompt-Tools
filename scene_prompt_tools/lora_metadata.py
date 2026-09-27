@@ -12,7 +12,6 @@ import folder_paths
 
 MAX_HEADER_BYTES = 8 * 1024 * 1024
 _CACHE = OrderedDict()
-_TITLE_CACHE = OrderedDict()
 _CACHE_LOCK = threading.Lock()
 
 
@@ -80,38 +79,15 @@ def read_lora_info(name):
 
 
 def list_loras():
-    """List selectable LoRAs with local titles, without reading model weights."""
+    """List selectable LoRA paths and file identity without opening model files."""
     result = []
     for name in folder_paths.get_filename_list("loras"):
-        title = os.path.splitext(os.path.basename(name.replace("\\", "/")))[0]
-        item = {"path": name, "title": title, "source": "filename", "size": None, "mtime_ns": None}
+        item = {"path": name, "size": None, "mtime_ns": None}
         path = folder_paths.get_full_path("loras", name)
         if path:
             try:
                 stat = os.stat(path)
                 item["size"], item["mtime_ns"] = stat.st_size, stat.st_mtime_ns
-                if name.lower().endswith(".safetensors"):
-                    key = (path, stat.st_size, stat.st_mtime_ns)
-                    with _CACHE_LOCK:
-                        cached = _TITLE_CACHE.get(key)
-                        if cached is not None:
-                            _TITLE_CACHE.move_to_end(key)
-                    if cached is None:
-                        try:
-                            with open(path, "rb") as stream:
-                                metadata = _read_metadata(stream)
-                            local_title = next((value.strip() for field in ("modelspec.title", "ss_output_name")
-                                                if isinstance((value := metadata.get(field)), str) and value.strip()), "")
-                        except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
-                            local_title = ""
-                        cached = (local_title, "local" if local_title else "filename")
-                        with _CACHE_LOCK:
-                            _TITLE_CACHE[key] = cached
-                            _TITLE_CACHE.move_to_end(key)
-                            while len(_TITLE_CACHE) > 256:
-                                _TITLE_CACHE.popitem(last=False)
-                    if cached[0]:
-                        item["title"], item["source"] = cached
             except OSError:
                 pass
         result.append(item)
