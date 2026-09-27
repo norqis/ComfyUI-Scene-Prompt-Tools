@@ -63,6 +63,23 @@ class LazyScheduleTests(unittest.TestCase):
         self.assertEqual(labels(ordered), ["a1", "a1", "a2", "a2", "b", "b"])
         self.assertEqual(labels(multiply_count(ordered, 2)), labels(ordered) * 2)
 
+    def test_three_matrix_rows_alternate_across_two_prompt_branches(self):
+        matrix_rows = [{**empty_row(), "name": name, "enabled": True} for name in "ABC"]
+        matrix = matrix_product(make_plan([{"row": empty_row(), "count": 1}]), matrix_rows, True)
+        def prompt_branch(name):
+            return transform(matrix, operation={
+                "kind": "prompt_add", "payload": [f"Prompt{name}", [name], [], False],
+            })
+        branches = [prompt_branch("A"), prompt_branch("B")]
+        one_cycle = [f"{row} / Prompt{prompt}" for row in "ABC" for prompt in "AB"]
+        for factor in (1, 2):
+            with self.subTest(factor=factor):
+                result = queue(branches, order_mode="alternate", alternate_block_size=factor)
+                expected = [label for label in one_cycle for _ in range(factor)]
+                self.assertEqual(labels(result), expected)
+                self.assertEqual(labels(multiply_count(result, 10)), expected * 10)
+                self.assertEqual(result["stats"]["row_count"], 6)
+
     def test_count_placement_and_uneven_streams(self):
         source = queue([branch("a", 2), branch("b", 3)], order_mode="alternate")
         self.assertEqual(labels(source), ["a", "b", "a", "b", "b"])
