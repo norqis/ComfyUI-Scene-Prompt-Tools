@@ -114,13 +114,13 @@ Repeated tags keep the spelling with the highest explicit `(tag:weight)` value; 
 
 ## Queue order and counts
 
-**Scene Prompt Queue** accepts up to ten connected Scene plans. **並び順** selects **入力順** (finish each input in socket order) or **交互** (take turns between inputs). With **交互**, **交代する件数** sets how many batches to take from one input before moving to the next; exhausted inputs are skipped. **入力ごとの回数** repeats each socket's *complete incoming plan*, so an input containing two batches with a repeat of 3 produces six batches. These controls default to input order, a block size of 1, and one repeat per input, preserving the behavior of saved workflows that lack them.
+**Scene Prompt Queue** accepts up to ten connected Scene plans. **並び順** selects **入力順** (finish each input in socket order) or **交互** (take turns between inputs). **1行の回数** repeats each generated row before moving on. For example, two single-row inputs A and B with a value of 2 produce `A,A,B,B`. With multiple rows per input, **交互** moves to the next input after the repeated row. The default value of 1 preserves the order and count behavior of older workflows. The former per-input repeat setting is no longer used.
 
 **後続Count** applies to the whole configurable Queue: **乗算** (the default) lets a later Scene Prompt Count multiply its output; **固定** keeps that Queue's batches at their specified counts. Count 0 still produces no batches in either mode. A Count placed *before* Queue has already changed its incoming plan and is unaffected by this setting.
 
-For example, connect one-batch inputs A and B, then set A's repeat to 3 and B's to 2. **入力順** produces `A,A,A,B,B`; **交互** with block size 1 produces `A,B,A,B,A`, and block size 3 produces `A,A,A,B,B`. A later Count 10 leaves the five-batch sequence unchanged with **固定**. With **乗算**, it produces `A×30 → B×20` in input order, or repeats the *complete* five-batch alternating sequence ten times.
+For example, connect one-row inputs A and B and set **1行の回数** to 2. A later Count 10 leaves `A,A,B,B` unchanged with **固定**. With **乗算**, it produces `(A,A,B,B) × 10`.
 
-If any connected input has already passed through a Queue, the receiving Queue becomes an ordered join: **all four settings are greyed out** and it preserves the incoming sequences and their Count behavior. This also applies when Scene Prompt, Reroute, or Preset Reference nodes sit between the two Queues. Disconnecting the upstream Queue makes the settings available again.
+If any connected input has already passed through a Queue, the receiving Queue becomes an ordered join: its settings are greyed out and it preserves the incoming sequences and their Count behavior. This also applies when Scene Prompt, Reroute, or Preset Reference nodes sit between the two Queues. Disconnecting the upstream Queue makes the settings available again.
 
 ## Text Output and Tag Deletion
 
@@ -156,7 +156,7 @@ Connect MODEL, CLIP, and VAE from a checkpoint loader to **Scene Apply Model**. 
 
 **Scene Apply LoRA** uses ComfyUI's standard `models/loras` list and stores its relative model path. Set **モデル種別** to `Illustrious` or `Anima` on each LoRA and on **Scene Prompt Expand**; both default to `Illustrious`. Expand loads only matching LoRAs, preserving their path order. With no matches, it returns the original MODEL and CLIP. If several **Scene Apply Model** nodes occur on one path, the last model bundle wins. The nodes may appear in either visual order while preserving the matching LoRAs' relative order. Scene Apply LoRA can be saved inside a Preset, including its model setting; older Presets without the setting use `Illustrious`. Scene Apply Model stays in the outer workflow because its MODEL, CLIP, and VAE links point to external loader nodes.
 
-Scene Apply LoRA shows the selected file path and display name separately. **LoRAを選択** opens a searchable list; opening it reads local file names and metadata only. Selecting a LoRA looks up its Civitai name when available and caches it for that exact file version. **詳細確認** shows its Civitai page and Trigger Words. **注入** adds a Trigger Word to **positiveテキスト** once. **ポジティブ候補** and **ネガティブ候補** add selected prompt candidates beside the corresponding text fields. LoRA text and candidates apply only when its model type matches the selected Expand or To Text model type.
+**LoRAを選択** opens a searchable list. Visible rows load the actual Civitai model title by file hash in the background and cache it for that file version; unresolved or unavailable titles show an explicit status rather than a filename presented as a title. Search matches paths and titles already retrieved. The node does not show a separate path/name summary; **詳細確認** shows the selected LoRA's Civitai page and Trigger Words. **注入** adds a Trigger Word to **positiveテキスト** once. **ポジティブ候補** and **ネガティブ候補** add selected prompt candidates beside the corresponding text fields. LoRA text and candidates apply only when its model type matches the selected Expand or To Text model type.
 
 ## Callbacks
 
@@ -204,7 +204,7 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Prompt | Adds base prompts and selected prompt candidates. |
 | Scene Matrix | Creates one variation for each enabled row. |
 | Scene Prompt Merge | Creates every combination of two Scene plans. |
-| Scene Prompt Queue | Orders up to ten Scene plans, with optional alternating blocks, per-input repeats, and downstream Count policy. |
+| Scene Prompt Queue | Orders up to ten Scene plans, repeats each row as requested, and applies the downstream Count policy. |
 | Scene Prompt Count | Repeats countable Scene batches; Count 0 suppresses every batch. |
 | Scene Prompt To Text | Outputs the current row or previous node contribution as positive/negative strings. |
 | Scene Prompt Delete | Removes exact tags from each prompt side, preserving empty choice slots. |
