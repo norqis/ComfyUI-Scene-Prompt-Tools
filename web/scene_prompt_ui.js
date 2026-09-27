@@ -11170,7 +11170,7 @@ async function openSceneExpandResources(node) {
                     roles.includes("model") ? `モデル強度 ${variant.strength_model ?? "取得不可"}` : "",
                     roles.includes("clip") ? `CLIP強度 ${variant.strength_clip ?? "取得不可"}` : "",
                 ].filter(Boolean);
-                const mode = variant.model_mode ?? (variant.applies === true && !lora.unresolved ? "標準LoRA" : "モデル種別 取得不可");
+                const mode = variant.model_mode ?? (variant.applies === true ? "標準LoRA" : "モデル種別 取得不可");
                 const applicability = variant.applies == null ? "適用可否を取得不可" : variant.applies ? "適用対象" : "モデル種別が異なるため適用外";
                 addText(card, [mode, ...strengths, applicability].join(" / "), "pc-resource-detail");
             }

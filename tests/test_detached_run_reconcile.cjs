@@ -445,9 +445,11 @@ function testNonSceneQueueSkipsRunPreparation() {
 function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     let previousCalls = 0;
     let loraModalCleanupCalls = 0;
+    let resourceModalCleanupCalls = 0;
     const node = {
         sceneRefreshTimer: 0,
         sceneLoraDetailsCleanup() { loraModalCleanupCalls += 1; },
+        sceneExpandResourcesCleanup() { resourceModalCleanupCalls += 1; },
         onRemoved() { previousCalls += 1; },
     };
     const context = {
@@ -469,6 +471,7 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     vm.createContext(context);
     vm.runInContext(functionSource("popupContextReferencesNode"), context);
     vm.runInContext(functionSource("closeSceneLoraDetails"), context);
+    vm.runInContext(functionSource("closeSceneExpandResources"), context);
     vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
     context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
     context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
@@ -477,7 +480,9 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     assert.equal(context.closeCalls, 1);
     assert.equal(context.expandCancels, 1);
     assert.equal(loraModalCleanupCalls, 1, "node removal disposes an open LoRA modal exactly once");
+    assert.equal(resourceModalCleanupCalls, 1, "node removal disposes an open resource modal exactly once");
     assert.equal(node.sceneLoraDetailsCleanup, null);
+    assert.equal(node.sceneExpandResourcesCleanup, null);
     assert.equal(context.sceneTitleSyncNodes.has(node), false);
     assert.equal(context.sceneLoadedRefreshNodes.has(node), false);
     assert.equal(context.sceneDownstreamRefreshSources.has(node), false);
@@ -503,6 +508,7 @@ function testWorkflowTabLoadDoesNotCancelExpandRun() {
     };
     vm.createContext(context);
     vm.runInContext(functionSource("closeSceneLoraDetails"), context);
+    vm.runInContext(functionSource("closeSceneExpandResources"), context);
     vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
     context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
     node.onRemoved();

@@ -2373,6 +2373,7 @@ try {
         window.__sceneResourceResponse.models = [{ kind: "diffusion_model", name: "取得不可 (#44)", unresolved: true, roles: ["model"], source_class: "UNETLoader" }];
         window.__sceneResourceResponse.loras = [{ name: "取得不可 (#45)", unresolved: true, variants: [
             { model_mode: null, strength_model: null, strength_clip: null, roles: ["model", "clip"], applies: null },
+            { model_mode: null, strength_model: 0.7, strength_clip: null, roles: ["model"], applies: true },
         ] }];
         window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback();
     });
@@ -2384,6 +2385,8 @@ try {
     const unresolvedLora = resources.locator(".pc-resource-card").filter({ hasText: "取得不可 (#45)" });
     assert.equal(await unresolvedLora.getByText(/モデル強度 取得不可/u).count(), 1);
     assert.equal(await unresolvedLora.getByText(/適用可否を取得不可/u).count(), 1);
+    assert.equal(await unresolvedLora.getByText(/標準LoRA \/ モデル強度 0.7 \/ 適用対象/u).count(), 1,
+        "an unknown linked filename does not erase a known standard LoRA mode");
     assert.equal(await unresolvedLora.getByRole("button", { name: "Civitaiを確認" }).count(), 0,
         "an unresolved linked LoRA is not mistaken for a real file");
     await page.keyboard.press("Escape");
