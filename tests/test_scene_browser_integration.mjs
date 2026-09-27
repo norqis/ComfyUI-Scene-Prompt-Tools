@@ -656,8 +656,9 @@ try {
         class LGraphNode {
             serialize() { return { widgets_values: structuredClone(this.widgets_values) }; }
             configure(serialized) {
+                const widgets = this.widgets.filter((widget) => widget.serialize !== false);
                 for (const [index, value] of (serialized.widgets_values || []).entries()) {
-                    this.widgets[index].value = structuredClone(value);
+                    if (widgets[index]) widgets[index].value = structuredClone(value);
                 }
                 this.widgets_values = structuredClone(serialized.widgets_values || []);
             }
@@ -776,14 +777,38 @@ try {
         linkedLora.onNodeCreated();
         linkedLora.inputs.push({ name: "model_mode", link: 17 });
         linkedLora.configure({ widgets_values: ["linked.safetensors", 0.6, 0.5, null, "front", "back"] });
+        const oldSixLora = new SceneApplyLoraNode();
+        oldSixLora.onNodeCreated();
+        oldSixLora.configure({ widgets_values: ["yuzu.safetensors", null, null, "Illustrious", "Yuzu Soft style", ""] });
+        const namedSixLora = new SceneApplyLoraNode();
+        namedSixLora.onNodeCreated();
+        namedSixLora.configure({ widgets_values: ["wrong.safetensors", 1, 1, "Anima", "wrong", "wrong"], widgets_values_named: {
+            lora_name: "yuzu.safetensors", strength_model: null, strength_clip: null,
+            model_mode: "Illustrious", positive: "Yuzu Soft style", negative: "",
+        } });
+        const displayNineLora = new SceneApplyLoraNode();
+        displayNineLora.onNodeCreated();
+        displayNineLora.configure({ widgets_values: ["Anima", 0.4, 0.3, "display positive", "display negative", "display.safetensors",
+            '{"version":1,"categories":{}}', '{"version":1,"categories":{}}', ""] });
+        const namedRoundTrip = new SceneApplyLoraNode();
+        namedRoundTrip.onNodeCreated();
+        namedRoundTrip.configure(JSON.parse(JSON.stringify(namedSixLora.serialize())));
         window.__sceneApplyLoraRoundTrip = {
             visible: applyLora.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+            serializableOrder: applyLora.widgets.filter((widget) => widget.serialize !== false).map((widget) => widget.name),
             labels: ["positive", "negative"].map((name) => applyLora.widgets.find((widget) => widget.name === name).label),
             saved: savedLora.widgets_values,
             restored: restoredLora.serialize().widgets_values,
             legacy: legacyLora.serialize().widgets_values,
             linked: linkedLora.serialize().widgets_values,
             copied: (() => { const copy = new SceneApplyLoraNode(); copy.onNodeCreated(); copy.configure(linkedLora.serialize()); return copy.serialize().widgets_values; })(),
+            oldSix: oldSixLora.serialize().widgets_values,
+            namedSix: namedSixLora.serialize().widgets_values,
+            displayNine: displayNineLora.serialize().widgets_values,
+            namedRoundTrip: namedRoundTrip.serialize().widgets_values,
+            namedFields: namedSixLora.serialize().widgets_values_named,
+            oldSixPositiveJson: oldSixLora.widgets.find((widget) => widget.name === "positive_json").value,
+            namedSixPositiveJson: namedSixLora.widgets.find((widget) => widget.name === "positive_json").value,
         };
         class ScenePromptToTextNode extends LGraphNode {
             constructor() {
@@ -824,6 +849,7 @@ try {
     });
     const loraRoundTrip = await page.evaluate(() => window.__sceneApplyLoraRoundTrip);
     assert.deepEqual(loraRoundTrip.visible, ["model_mode", "LoRA", "LoRAを選択", "strength_model", "strength_clip", "詳細確認", "positive", "ポジティブ候補", "ポジティブ選択済み", "negative", "ネガティブ候補", "ネガティブ選択済み"]);
+    assert.deepEqual(loraRoundTrip.serializableOrder, ["model_mode", "strength_model", "strength_clip", "positive", "negative", "lora_name", "positive_json", "negative_json", "category_order"]);
     assert.deepEqual(loraRoundTrip.labels, ["positiveテキスト", "negativeテキスト"]);
     const emptyLoraSelection = '{"version":1,"categories":{}}';
     assert.deepEqual(loraRoundTrip.saved, ["style.safetensors", 0.8, 0.7, "Anima", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "bad", emptyLoraSelection, emptyLoraSelection, ""]);
@@ -831,6 +857,15 @@ try {
     assert.deepEqual(loraRoundTrip.legacy, ["old.safetensors", 0.4, 0.3, "Illustrious", "", "", emptyLoraSelection, emptyLoraSelection, ""]);
     assert.deepEqual(loraRoundTrip.linked, ["linked.safetensors", 0.6, 0.5, null, "front", "back", emptyLoraSelection, emptyLoraSelection, ""]);
     assert.deepEqual(loraRoundTrip.copied, loraRoundTrip.linked);
+    const yuzuValues = ["yuzu.safetensors", null, null, "Illustrious", "Yuzu Soft style", "", emptyLoraSelection, emptyLoraSelection, ""];
+    assert.deepEqual(loraRoundTrip.oldSix, yuzuValues, "v0.6.3 six-value workflow keeps the positive prompt and linked strengths");
+    assert.deepEqual(loraRoundTrip.namedSix, yuzuValues, "named widget fields override stale positional values");
+    assert.deepEqual(loraRoundTrip.namedRoundTrip, yuzuValues, "LoRA settings survive JSON save/load");
+    assert.equal(loraRoundTrip.namedFields.positive, "Yuzu Soft style");
+    assert.equal(loraRoundTrip.namedFields.strength_model, null);
+    assert.equal(JSON.parse(loraRoundTrip.oldSixPositiveJson).version, 1);
+    assert.equal(JSON.parse(loraRoundTrip.namedSixPositiveJson).version, 1);
+    assert.deepEqual(loraRoundTrip.displayNine, ["display.safetensors", 0.4, 0.3, "Anima", "display positive", "display negative", emptyLoraSelection, emptyLoraSelection, ""]);
     const toTextLegacy = await page.evaluate(() => window.__sceneToTextLegacyRoundTrip);
     assert.deepEqual(toTextLegacy.visible, ["scope", "model_mode"]);
     assert.deepEqual(toTextLegacy.restored, ["直前のノードのみ", 7, 12345, true, "Illustrious"],

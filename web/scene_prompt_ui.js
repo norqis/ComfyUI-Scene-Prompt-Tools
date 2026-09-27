@@ -4903,6 +4903,7 @@ function sceneExpandConfigureValues(config) {
 }
 
 const SCENE_LORA_STORED_WIDGET_NAMES = ["lora_name", "strength_model", "strength_clip", "model_mode", "positive", "negative", "positive_json", "negative_json", "category_order"];
+const SCENE_LORA_DISPLAY_WIDGET_NAMES = ["model_mode", "strength_model", "strength_clip", "positive", "negative", "lora_name", "positive_json", "negative_json", "category_order"];
 
 function sceneLoraStoredValues(node) {
     return SCENE_LORA_STORED_WIDGET_NAMES.map((name) => {
@@ -4912,17 +4913,27 @@ function sceneLoraStoredValues(node) {
     });
 }
 
-function sceneLoraConfigureValues(node, config) {
-    const stored = config?.widgets_values;
-    if (!Array.isArray(stored)) return config;
-    const named = Object.fromEntries(SCENE_LORA_STORED_WIDGET_NAMES.map((name, index) => [name, stored[index]]));
-    const values = (node.widgets || []).map((widget) => {
-        if (widget.sceneRole === "lora_details") return null;
-        if (!(widget.name in named)) return widget.value;
-        const value = named[widget.name];
-        return value === undefined ? widget.value : value;
-    });
-    return { ...config, widgets_values: values };
+function sceneLoraConfiguredValues(config) {
+    const stored = Array.isArray(config?.widgets_values) ? config.widgets_values : [];
+    const displayOrder = stored.length >= SCENE_LORA_STORED_WIDGET_NAMES.length
+        && (stored[0] === "Illustrious" || stored[0] === "Anima");
+    const names = displayOrder ? SCENE_LORA_DISPLAY_WIDGET_NAMES : SCENE_LORA_STORED_WIDGET_NAMES;
+    const named = Object.fromEntries(names.slice(0, stored.length).map((name, index) => [name, stored[index]]));
+    const savedNames = config?.widgets_values_named;
+    if (savedNames && typeof savedNames === "object" && !Array.isArray(savedNames)) {
+        for (const name of SCENE_LORA_STORED_WIDGET_NAMES) {
+            if (Object.hasOwn(savedNames, name)) named[name] = savedNames[name];
+        }
+    }
+    return named;
+}
+
+function sceneLoraConfigureValues(node, config, named) {
+    if (!config || (!Array.isArray(config.widgets_values) && !config.widgets_values_named)) return config;
+    const widgets = (node.widgets || []).filter((widget) => widget.serialize !== false);
+    const values = widgets.map((widget) => Object.hasOwn(named, widget.name) ? named[widget.name] : widget.value);
+    const namedValues = Object.fromEntries(widgets.map((widget, index) => [widget.name, values[index]]));
+    return { ...config, widgets_values: values, widgets_values_named: { ...config.widgets_values_named, ...namedValues } };
 }
 
 function sceneLoraSplitPrompt(value) {
@@ -12090,20 +12101,21 @@ app.registerExtension({
             const configure = nodeType.prototype.configure;
             const serialize = nodeType.prototype.serialize;
             nodeType.prototype.configure = function (...args) {
-                const stored = args[0]?.widgets_values;
-                args[0] = sceneLoraConfigureValues(this, args[0]);
+                const named = sceneLoraConfiguredValues(args[0]);
+                args[0] = sceneLoraConfigureValues(this, args[0], named);
                 const result = configure?.apply(this, args);
-                if (Array.isArray(stored)) {
-                    SCENE_LORA_STORED_WIDGET_NAMES.forEach((name, index) => {
-                        if (stored[index] !== undefined) setWidgetValue(this, name, stored[index], { silent: true });
-                    });
+                for (const name of SCENE_LORA_STORED_WIDGET_NAMES) {
+                    if (Object.hasOwn(named, name)) setWidgetValue(this, name, named[name], { silent: true });
                 }
                 updateSceneLoraSummary(this);
                 return result;
             };
             nodeType.prototype.serialize = function (...args) {
                 const serialized = serialize?.apply(this, args);
-                return serialized ? { ...serialized, widgets_values: sceneLoraStoredValues(this) } : serialized;
+                if (!serialized) return serialized;
+                const values = sceneLoraStoredValues(this);
+                return { ...serialized, widgets_values: values,
+                    widgets_values_named: Object.fromEntries(SCENE_LORA_STORED_WIDGET_NAMES.map((name, index) => [name, values[index]])) };
             };
         }
 

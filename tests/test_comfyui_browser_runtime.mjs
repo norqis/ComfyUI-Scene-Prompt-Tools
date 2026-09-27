@@ -301,6 +301,49 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(result.legacyAfterFirst, result.legacy, "a second configure must not alter v0.3 values");
     assert.equal(result.legacyFilename, false);
     console.log("real ComfyUI LGraphNode legacy choice widget round-trip passed");
+    const loraErrors = [];
+    page.on("console", (message) => {
+        if (message.type() === "error" && message.text().includes("Sceneノードの初期化に失敗しました")) {
+            loraErrors.push(message.text());
+        }
+    });
+    const oldLora = await page.evaluate(async () => {
+        const app = window.app;
+        const results = [];
+        for (const withNamed of [false, true]) {
+            app.graph.clear();
+            const node = window.LiteGraph.createNode("SceneApplyLora");
+            app.graph.add(node);
+            const workflow = app.graph.serialize();
+            const saved = workflow.nodes.find((entry) => String(entry.id) === String(node.id));
+            saved.widgets_values = ["style.safetensors", null, null, "Illustrious", "Yuzu Soft style", ""];
+            if (withNamed) {
+                saved.widgets_values_named = {
+                    lora_name: "style.safetensors", strength_model: null, strength_clip: null,
+                    model_mode: "Illustrious", positive: "Yuzu Soft style", negative: "",
+                };
+            } else {
+                delete saved.widgets_values_named;
+            }
+            await app.loadGraphData(workflow, true, true);
+            const restored = app.graph.getNodeById(node.id);
+            const read = (name) => restored.widgets.find((widget) => widget.name === name)?.value;
+            const serialized = restored.serialize();
+            results.push({ withNamed, positive: read("positive"), positiveJson: read("positive_json"),
+                strengthModel: read("strength_model"), strengthClip: read("strength_clip"),
+                savedPositive: serialized.widgets_values_named?.positive });
+        }
+        return results;
+    });
+    for (const item of oldLora) {
+        assert.equal(item.positive, "Yuzu Soft style", `old six-widget LoRA positive must load (named=${item.withNamed})`);
+        assert.equal(JSON.parse(item.positiveJson).version, 1, "old positive text must not shift into selection JSON");
+        assert.equal(item.savedPositive, "Yuzu Soft style");
+        assert.equal(item.strengthModel, null);
+        assert.equal(item.strengthClip, null);
+    }
+    assert.deepEqual(loraErrors, [], "old Scene Apply LoRA workflow must not log an initialization failure");
+    console.log("real ComfyUI six-widget Scene Apply LoRA workflow load passed");
     const conversionRoundTrips = await page.evaluate(() => {
         const make = () => {
             const node = window.LiteGraph.createNode("ScenePrompterExpand");
@@ -405,7 +448,9 @@ window.__sceneSeedRuntimeTest = {
     });
     assert.deepEqual(modelModes.contract.expandWidgets.slice(0, 11), ["current_index", "run_id", "seed_base", "timestamp_dir", "prefix",
         "counter_position", "model_mode", "replace_underscores", "convert_anima_weights", "callback_failure_mode", "seed_base_literal"]);
-    assert.deepEqual(modelModes.contract.loraWidgets, ["lora_name", "strength_model", "strength_clip", "model_mode"]);
+    assert.deepEqual(modelModes.contract.loraWidgets, ["model_mode", "LoRA", "LoRAを選択", "strength_model", "strength_clip", "詳細確認",
+        "positive", "ポジティブ候補", "ポジティブ選択済み", "negative", "ネガティブ候補", "ネガティブ選択済み",
+        "lora_name", "positive_json", "negative_json", "category_order"]);
     assert.deepEqual(modelModes.contract.visible, [true, true]);
     for (const result of modelModes.linked) {
         for (const inputs of [result.first, result.second]) {
@@ -757,7 +802,7 @@ window.__sceneSeedRuntimeTest = {
         return { textId: text.id, expandId: expand.id, deleteId: deletion.id, visible: text.widgets.filter(widget => !widget.hidden).map(widget => widget.name), deleteVisible: deletion.widgets.filter(widget => !widget.hidden).map(widget => widget.name), samplerId: sampler.id, seedIndex: sampler.widgets.findIndex((widget) => widget.name === "seed") };
     });
     assert.equal(seedRequests.length, 5, "two normal submissions and three batch submissions reach the API");
-    assert.deepEqual(seedNodes.visible, ["scope"]);
+    assert.deepEqual(seedNodes.visible, ["scope", "model_mode"]);
     assert.deepEqual(seedNodes.deleteVisible, ["positive", "negative"]);
     for (const [index, request] of seedRequests.entries()) {
         const text = request.prompt[String(seedNodes.textId)];
