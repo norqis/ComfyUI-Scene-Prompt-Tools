@@ -11135,7 +11135,7 @@ async function openSceneExpandResources(node) {
         if (!response.ok) throw new Error(data.error || "生成情報を取得できませんでした。");
         if (node.sceneExpandResourcesCleanup !== cleanup) return;
         content.replaceChildren();
-        addText(content, `Expand のモデル: ${data.model_mode || "未設定"}`, "pc-resource-mode");
+        addText(content, `Expand のモデル: ${data.model_mode ?? "取得不可"}`, "pc-resource-mode");
         const modelSection = addSection("モデル・CLIP・VAE");
         const modelLabels = { checkpoint: "Checkpoint", diffusion_model: "拡散モデル", clip: "CLIP", vae: "VAE", unresolved: "読み込み元" };
         for (const model of data.models || []) {
@@ -11167,15 +11167,14 @@ async function openSceneExpandResources(node) {
             for (const variant of lora.variants || []) {
                 const roles = variant.roles || ["model", "clip"];
                 const strengths = [
-                    roles.includes("model") ? `モデル強度 ${variant.strength_model}` : "",
-                    roles.includes("clip") ? `CLIP強度 ${variant.strength_clip}` : "",
+                    roles.includes("model") ? `モデル強度 ${variant.strength_model ?? "取得不可"}` : "",
+                    roles.includes("clip") ? `CLIP強度 ${variant.strength_clip ?? "取得不可"}` : "",
                 ].filter(Boolean);
-                addText(card, [variant.model_mode || "標準LoRA", ...strengths, variant.applies ? "適用対象" : "モデル種別が異なるため適用外"].join(" / "), "pc-resource-detail");
+                const mode = variant.model_mode ?? (variant.applies === true && !lora.unresolved ? "標準LoRA" : "モデル種別 取得不可");
+                const applicability = variant.applies == null ? "適用可否を取得不可" : variant.applies ? "適用対象" : "モデル種別が異なるため適用外";
+                addText(card, [mode, ...strengths, applicability].join(" / "), "pc-resource-detail");
             }
-            addLookup(card, async () => {
-                const result = await resolveSceneLora(sceneLoraCatalogItem(lora.name));
-                return { ...result, versionId: result.versionId };
-            });
+            if (!lora.unresolved) addLookup(card, async () => resolveSceneLora(sceneLoraCatalogItem(lora.name)));
             loraSection.append(card);
         }
         if (!data.loras?.length) addText(loraSection, "接続されたLoRAはありません。");
@@ -11794,6 +11793,7 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         this.scenePendingRefreshOptions = null;
         invalidatePopupRequests(this);
         closeSceneLoraDetails(this);
+        closeSceneExpandResources(this);
         if (typeof closeSceneLoraPicker === "function") closeSceneLoraPicker(this);
         if (popupContextReferencesNode(activePopupContext, this)) {
             closeAllPopups();

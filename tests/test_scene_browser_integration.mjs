@@ -99,6 +99,7 @@ window.__releaseFavoriteSave = () => releaseFavoriteSave?.();
 let releaseDelayedItems = null;
 let releaseDelayedLoraInfo = null;
 let releaseDelayedLoraList = null;
+let releaseDelayedModelHash = null;
 const baseItem = {
   id: "summer",
   label: "Summer",
@@ -177,6 +178,11 @@ export const api = {
       await new Promise((resolveDelay) => { releaseDelayedLoraInfo = resolveDelay; });
       releaseDelayedLoraInfo = null;
     }
+    if (url.startsWith("/scene_prompt/models/hash?") && window.__delayNextSceneModelHash) {
+      window.__delayNextSceneModelHash = false;
+      await new Promise((resolveDelay) => { releaseDelayedModelHash = resolveDelay; });
+      releaseDelayedModelHash = null;
+    }
     if (url.includes("/scene_prompt/items") && options.method !== "POST" && window.__delayNextScenePromptItems) {
       window.__delayNextScenePromptItems = false;
       await new Promise((resolveDelay) => { releaseDelayedItems = resolveDelay; });
@@ -231,6 +237,8 @@ window.__releaseSceneLoraInfo = () => releaseDelayedLoraInfo?.();
 window.__sceneLoraInfoDelayed = () => !!releaseDelayedLoraInfo;
 window.__releaseSceneLoraList = () => releaseDelayedLoraList?.();
 window.__sceneLoraListDelayed = () => !!releaseDelayedLoraList;
+window.__releaseSceneModelHash = () => releaseDelayedModelHash?.();
+window.__sceneModelHashDelayed = () => !!releaseDelayedModelHash;
 `;
 const customScriptsAutocompleteModule = `
 const upstreamStyle = document.createElement("style");
@@ -333,6 +341,7 @@ const server = http.createServer(async (request, response) => {
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset,\n`
                 + `  ensureSceneExpandControls,\n`
+                + `  installSceneNodeRemovalCleanup,\n`
                 + `  pendingDesktopNotifications() { return sceneDesktopNotificationRequests.size; },\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
                 + `};\n`;
@@ -2359,6 +2368,34 @@ try {
         return JSON.parse(call.options.body).expand_node_id;
     }), "230", "resource discovery targets only the clicked Expand");
     await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+        window.__sceneResourceResponse.model_mode = null;
+        window.__sceneResourceResponse.loras = [{ name: "取得不可 (#45)", unresolved: true, variants: [
+            { model_mode: null, strength_model: null, strength_clip: null, roles: ["model", "clip"], applies: null },
+        ] }];
+        window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback();
+    });
+    await resources.getByText("Expand のモデル: 取得不可").waitFor();
+    const unresolvedLora = resources.locator(".pc-resource-card").filter({ hasText: "取得不可 (#45)" });
+    assert.equal(await unresolvedLora.getByText(/モデル強度 取得不可/u).count(), 1);
+    assert.equal(await unresolvedLora.getByText(/適用可否を取得不可/u).count(), 1);
+    assert.equal(await unresolvedLora.getByRole("button", { name: "Civitaiを確認" }).count(), 0,
+        "an unresolved linked LoRA is not mistaken for a real file");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+        window.__sceneResourceResponse.model_mode = "Anima";
+        window.__scenePromptPopupTestHooks.installSceneNodeRemovalCleanup(window.__sceneResourceExpand, "ScenePrompterExpand");
+        window.__delayNextSceneModelHash = true;
+        window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback();
+    });
+    await resources.getByText("Checkpoint: illustration.safetensors").waitFor();
+    await resources.getByRole("button", { name: "Civitaiを確認" }).first().click();
+    await page.waitForFunction(() => window.__sceneModelHashDelayed());
+    await page.evaluate(() => window.__sceneResourceExpand.onRemoved());
+    assert.equal(await resources.count(), 0, "removing Expand closes its resource modal");
+    await page.evaluate(() => window.__releaseSceneModelHash());
+    await page.waitForTimeout(50);
+    assert.equal(await resources.count(), 0, "a late hash response cannot reopen a removed node's modal");
     await page.evaluate(() => { window.app.graphToPrompt = window.__originalResourceGraphToPrompt; });
     await checkFavorites(browser, `http://127.0.0.1:${address.port}/`);
     console.log("Scene Prompt browser integration tests passed.");
