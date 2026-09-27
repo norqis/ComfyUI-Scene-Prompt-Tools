@@ -16,9 +16,6 @@ MIN_BATCH_SIZE = 1
 
 PLAN_KEYS = {"type", "version", "units", "sources", "contains_queue_boundary", "stats", "change_key"}
 PLAN_BUILD_ITEM_KEYS = {"row", "count"}
-PLAN_ITEM_KEYS = {
-    "row", "count", "start_index", "row_index", "label", "queue_index", "source_id", "source_title",
-}
 ROW_KEYS = {
     "labels", "positive_parts", "negative_parts", "path_parts", "filename_parts", "display_labels", "display_label_groups", "set_refs", "source_node_ids", "source_node_names", "callbacks",
 }
@@ -250,11 +247,6 @@ def row_label(row):
     labels = [item.strip() for item in row["labels"] if item.strip()]
     path_parts = [item.strip() for item in row["path_parts"] if item.strip()]
     return " / ".join(labels) or "/".join(path_parts) or "Scene"
-
-
-def _row_batch_size(row):
-    latent = row.get("latent")
-    return latent["batch_size"] if latent else 1
 
 
 def _clone_sources(sources):

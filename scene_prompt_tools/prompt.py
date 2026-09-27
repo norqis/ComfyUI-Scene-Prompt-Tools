@@ -3,7 +3,7 @@ import math
 import random
 import re
 from collections import OrderedDict
-from .plan import normalize_plan, transform, with_prompt_trace, with_source_node
+from .plan import transform, with_source_node
 
 
 DEFAULT_CATEGORY_ORDER = ""
