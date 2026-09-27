@@ -46,6 +46,11 @@ def _literal(nodes, raw, default):
         return None
 
 
+def _filename(nodes, raw, node_id):
+    value = _literal(nodes, raw, "")
+    return (str(value), False) if value is not None else (f"取得不可 (#{node_id})", True)
+
+
 def connected_resources(api_graph, expand_node_id, user_id="default"):
     """Summarize distinct resources in the selected Expand's Scene ancestry."""
     nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
@@ -62,10 +67,11 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
     visited_presets = set()
     visiting_presets = set()
 
-    def add_model(kind, name, role, source_class):
+    def add_model(kind, name, role, source_class, unresolved=False):
         key = (kind, _resource_key(name))
         if key not in models:
-            models[key] = {"kind": kind, "name": str(name), "roles": [], "source_class": source_class}
+            models[key] = {"kind": kind, "name": str(name), "roles": [],
+                           "source_class": source_class, "unresolved": unresolved}
         if role not in models[key]["roles"]:
             models[key]["roles"].append(role)
 
@@ -94,32 +100,38 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
         visited_sources.add(key)
         node = scope.get(node_id)
         if not isinstance(node, dict):
-            add_model("unresolved", f"#{node_id}", role, "Unknown")
+            add_model("unresolved", f"#{node_id}", role, "Unknown", True)
             return
         kind = node.get("class_type")
         inputs = _node_inputs(node)
         if kind in {"CheckpointLoaderSimple", "CheckpointLoader"}:
-            add_model("checkpoint", inputs.get("ckpt_name", ""), role, kind)
+            name, unresolved = _filename(scope, inputs.get("ckpt_name"), node_id)
+            add_model("checkpoint", name, role, kind, unresolved)
         elif kind in {"UNETLoader", "DiffusionModelLoader"}:
-            add_model("diffusion_model", inputs.get("unet_name", inputs.get("model_name", "")), role, kind)
+            name, unresolved = _filename(scope, inputs.get("unet_name", inputs.get("model_name")), node_id)
+            add_model("diffusion_model", name, role, kind, unresolved)
         elif kind == "CLIPLoader":
-            add_model("clip", inputs.get("clip_name", ""), role, kind)
+            name, unresolved = _filename(scope, inputs.get("clip_name"), node_id)
+            add_model("clip", name, role, kind, unresolved)
         elif kind in {"DualCLIPLoader", "TripleCLIPLoader"}:
             for field in ("clip_name1", "clip_name2", "clip_name3"):
-                if inputs.get(field):
-                    add_model("clip", inputs[field], role, kind)
+                if field in inputs:
+                    name, unresolved = _filename(scope, inputs[field], node_id)
+                    add_model("clip", name, role, kind, unresolved)
         elif kind == "VAELoader":
-            add_model("vae", inputs.get("vae_name", ""), role, kind)
+            name, unresolved = _filename(scope, inputs.get("vae_name"), node_id)
+            add_model("vae", name, role, kind, unresolved)
         elif kind in {"LoraLoader", "LoraLoaderModelOnly"}:
             source_role = "model" if slot == 0 else "clip"
             if kind == "LoraLoaderModelOnly" or slot in (0, 1):
-                add_lora(inputs.get("lora_name"), None,
+                name, unresolved = _filename(scope, inputs.get("lora_name"), node_id)
+                add_lora(name, None,
                          _literal(scope, inputs.get("strength_model"), 1.0),
                          _literal(scope, inputs.get("strength_clip"), 1.0 if kind == "LoraLoader" else None),
-                         source_role, True)
+                         source_role, True, unresolved)
                 follow_source(scope, inputs.get(source_role), source_role)
         else:
-            add_model("unresolved", kind or f"#{node_id}", role, kind or "Unknown")
+            add_model("unresolved", kind or f"#{node_id}", role, kind or "Unknown", True)
 
     def visit_scene(scope, resource_nodes):
         for node_id, node in scope.items():

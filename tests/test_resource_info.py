@@ -37,7 +37,8 @@ class ResourceInfoTests(unittest.TestCase):
         }}
         result = self.info.connected_resources(graph, "5")
         self.assertEqual(result["models"], [{"kind": "checkpoint", "name": "base.safetensors",
-                                              "roles": ["model", "clip", "vae"], "source_class": "CheckpointLoaderSimple"}])
+                                              "roles": ["model", "clip", "vae"],
+                                              "source_class": "CheckpointLoaderSimple", "unresolved": False}])
         self.assertEqual(result["loras"], [{"name": "style.safetensors", "unresolved": False, "variants": [
             {"model_mode": "Anima", "strength_model": 0.9, "strength_clip": 0.7,
              "roles": ["model", "clip"], "applies": True},
@@ -127,6 +128,43 @@ class ResourceInfoTests(unittest.TestCase):
         }}
         result = self.info.connected_resources(graph, "3")
         self.assertEqual(len(result["loras"]), 1)
+
+    def test_linked_loader_filenames_are_resolved_or_marked_unavailable(self):
+        graph = {"output": {
+            "1": node("SceneApplyModel", model=["5", 0], clip=["5", 1], vae=["5", 2]),
+            "2": node("SceneApplyLora", scene_prompt=["1", 0], lora_name="scene.safetensors"),
+            "3": node("ScenePrompterExpand", scene_prompt=["2", 0]),
+            "5": node("CheckpointLoaderSimple", ckpt_name=["9", 0]),
+            "9": node("PrimitiveString", value="base.safetensors"),
+        }}
+        result = self.info.connected_resources(graph, "3")
+        self.assertEqual(result["models"][0]["name"], "base.safetensors")
+        self.assertFalse(result["models"][0]["unresolved"])
+        graph["output"]["9"] = node("CustomString", value="other.safetensors")
+        result = self.info.connected_resources(graph, "3")
+        self.assertTrue(result["models"][0]["unresolved"])
+        self.assertEqual(result["models"][0]["name"], "取得不可 (#5)")
+
+    def test_linked_diffusion_and_standard_lora_filenames(self):
+        graph = {"output": {
+            "1": node("SceneApplyModel", model=["5", 0], clip=["8", 0], vae=["7", 0]),
+            "2": node("ScenePrompterExpand", scene_prompt=["1", 0]),
+            "5": node("LoraLoaderModelOnly", model=["6", 0], lora_name=["9", 0], strength_model=0.7),
+            "6": node("UNETLoader", unet_name=["10", 0]),
+            "7": node("VAELoader", vae_name="vae.safetensors"),
+            "8": node("CLIPLoader", clip_name="clip.safetensors"),
+            "9": node("PrimitiveString", value="style.safetensors"),
+            "10": node("PrimitiveString", value="diffusion.safetensors"),
+        }}
+        result = self.info.connected_resources(graph, "2")
+        self.assertEqual(next(item for item in result["models"] if item["kind"] == "diffusion_model")["name"],
+                         "diffusion.safetensors")
+        self.assertEqual(result["loras"][0]["name"], "style.safetensors")
+        graph["output"]["9"] = node("CustomString", value="other.safetensors")
+        graph["output"]["10"] = node("CustomString", value="other.safetensors")
+        result = self.info.connected_resources(graph, "2")
+        self.assertTrue(next(item for item in result["models"] if item["kind"] == "diffusion_model")["unresolved"])
+        self.assertTrue(result["loras"][0]["unresolved"])
 
     def test_unsupported_linked_strength_and_mode_do_not_invent_values(self):
         graph = {"output": {
