@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 from scene_prompt_tools.plan import (
-    ScenePlanError, append_callback, empty_row, item_for_index, make_plan, matrix_product,
+    MAX_SAFE_INTEGER, ScenePlanError, append_callback, empty_row, item_for_index, make_plan, matrix_product,
     merge, multiply_count, normalize_plan, queue, replay_index_for_event, transform,
     with_source_node,
 )
@@ -44,6 +44,8 @@ class LazyScheduleTests(unittest.TestCase):
         self.assertEqual(labels(queue([left, right], order_mode="alternate", alternate_block_size=2,
                                       input_repeats_json=settings)), list("AABBA"))
         self.assertEqual(labels(queue([left, right], order_mode="alternate", alternate_block_size=3,
+                                      input_repeats_json=settings)), list("AAABB"))
+        self.assertEqual(labels(queue([left, right], order_mode="alternate", alternate_block_size=MAX_SAFE_INTEGER,
                                       input_repeats_json=settings)), list("AAABB"))
 
     def test_whole_socket_plan_repeats_and_count_repeats_cycle(self):
@@ -169,6 +171,33 @@ class LazyScheduleTests(unittest.TestCase):
             queue([locked_input], order_mode="bogus")
         with self.assertRaises(ScenePlanError):
             queue([locked_input], input_repeats_json='{"unknown":2}')
+        for invalid in ('[]', '{"scene_prompt1":true}', '{"scene_prompt1":-1}', '{"scene_prompt11":2}'):
+            with self.subTest(invalid=invalid), self.assertRaises(ScenePlanError):
+                queue([branch("a")], input_repeats_json=invalid)
+        with self.assertRaises(ScenePlanError):
+            queue([branch("a")], alternate_block_size=0)
+        with self.assertRaises(ScenePlanError):
+            queue([branch("a")], downstream_count_mode="other")
+
+    def test_ten_sockets_and_zero_length_inputs(self):
+        streams = [branch(str(index), 0 if index % 3 == 0 else 1) for index in range(10)]
+        plan = queue(streams, order_mode="alternate")
+        self.assertEqual(labels(plan), [str(index) for index in range(10) if index % 3 != 0])
+        self.assertEqual(plan["stats"]["row_count"], 10)
+
+    def test_schema_rejects_wrong_statistics_fingerprint_and_cycles(self):
+        plan = queue([branch("a"), branch("b")], order_mode="alternate")
+        for broken in (
+            {**json.loads(json.dumps(plan)), "stats": {**plan["stats"], "total_batches": True}},
+            {**json.loads(json.dumps(plan)), "change_key": "wrong"},
+            {**json.loads(json.dumps(plan)), "extra": 1},
+        ):
+            with self.assertRaises(ScenePlanError):
+                normalize_plan(broken)
+        cyclic = json.loads(json.dumps(plan))
+        cyclic["units"][0]["unit"]["inputs"][0] = cyclic
+        with self.assertRaises(ScenePlanError):
+            normalize_plan(cyclic)
 
     def test_small_alternating_schedules_match_eager_reference(self):
         for a_count in range(4):
