@@ -988,8 +988,8 @@ def _scene_node_value_impl(
         return result
     if class_type == "ScenePromptToText" and not preset_stack:
         kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
-        kwargs["run_handle"] = run_handle
-        kwargs["unique_id"] = node_id
+        kwargs["run_handle"] = ""
+        kwargs["unique_id"] = None
         result = ScenePromptToText().to_text(**kwargs)
         memo[node_id] = result
         return result

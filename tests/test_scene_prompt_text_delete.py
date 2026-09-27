@@ -28,15 +28,20 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
     def text(self, plan=None, **kwargs):
         return self.nodes.ScenePromptToText().to_text(scene_prompt=plan, seed_base=123, **kwargs)
 
-    def test_to_text_selects_one_row_and_repeat_with_strict_bounds(self):
+    def test_to_text_selects_one_row_and_cycles_shorter_plans(self):
         a, b, c = [self.build(value, node_id=value) for value in ('A', 'B', 'C')]
         b = self.nodes.ScenePromptCounter().count(count=2, scene_prompt=b)[0]
         plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=a, scene_prompt2=b, scene_prompt3=c)[0]
         self.assertEqual([self.text(plan, current_index=i) for i in range(4)], [('A', ''), ('B', ''), ('B', ''), ('C', '')])
-        for index in (-1, 4):
-            with self.assertRaises(IndexError): self.text(plan, current_index=index)
+        self.assertEqual([self.text(plan, current_index=i) for i in range(4, 8)],
+                         [('A', ''), ('B', ''), ('B', ''), ('C', '')])
+        for index in (-1, True, 1.5):
+            with self.subTest(index=index), self.assertRaisesRegex(ValueError, '生成番号'):
+                self.text(plan, current_index=index)
         self.assertEqual(self.text(), ('', ''))
-        with self.assertRaises(IndexError): self.text(current_index=1)
+        self.assertEqual(self.text(current_index=1), ('', ''))
+        empty = self.nodes.ScenePromptCounter().count(scene_prompt=self.build('x'), count=0)[0]
+        with self.assertRaises(IndexError): self.text(empty)
         self.assertFalse(hasattr(self.nodes.ScenePromptToText, 'OUTPUT_IS_LIST'))
         self.assertNotIn('ScenePromptToText', self.nodes.SCENE_NODE_TYPES)
         self.assertNotIn('ScenePromptToText', self.presets.SAFE_NODE_CLASSES)
@@ -114,8 +119,8 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         prompt['1']['inputs']['seed_base_literal'] = True
         self.assertEqual(self.nodes._text_replay_items(prompt, '2', info)['1']['seed'], 0)
         prompt['1']['inputs']['current_index'] = 1
-        with self.assertRaises(IndexError):
-            self.nodes._text_replay_items(prompt, '2', info)
+        cycled = self.nodes._text_replay_items(prompt, '2', info)['1']
+        self.assertEqual((cycled['row_index'], cycled['repeat_index'], cycled['seed']), (0, 1, 1))
 
     def test_v7_text_replay_uses_its_own_alternate_event_path(self):
         handle = self.runs.create_run_context('default')
@@ -309,10 +314,14 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         with mock.patch.object(self.nodes.ScenePromptToText, 'to_text', observed):
             result = self.presets.snapshot_presets_for_run(handle, {'output': api}, '5')
         self.assertEqual(len(calls), 1)
-        self.assertEqual((calls[0]['run_handle'], calls[0]['unique_id']), (handle, '3'))
+        self.assertEqual((calls[0]['run_handle'], calls[0]['unique_id']), ('', None))
+        self.assertIsNone(self.runs.get_run_plan_reference(handle, '3'))
         self.assertEqual(result['total_images'], 1)
         plan = self.presets._scene_node_value(api, '4', {}, set(), run_handle=handle)
         self.assertEqual(self.text(plan), ('hair', 'worse'))
+        counted = self.nodes.ScenePromptCounter().count(scene_prompt=plan, count=2)[0]
+        self.assertEqual(self.text(counted), ('hair', 'worse'))
+        self.assertEqual(self.nodes.ScenePromptExpand().expand(scene_prompt=counted, seed_base=123)[:2], ('hair', 'worse'))
         for invalid in (True, -1, 2, '0'):
             api['4']['inputs']['positive'] = ['3', invalid]
             with self.subTest(slot=invalid), self.assertRaisesRegex(self.presets.ScenePresetResolutionError, '出力番号'):

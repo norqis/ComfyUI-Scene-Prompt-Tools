@@ -1669,6 +1669,8 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(payload["exec_total_count"], "1")
 
     def test_http_prepare_resolves_to_text_into_delete(self):
+        from PIL import Image
+        marker = self.base / "text-delete-cycle.json"
         graph = {
             "1": {"class_type": "ScenePrompter", "inputs": {
                 **_scene_prompt_inputs(), "positive_base": "bald, hair", "negative_base": "bad, worse",
@@ -1682,19 +1684,48 @@ NODE_CLASS_MAPPINGS = {
             "4": {"class_type": "ScenePromptDelete", "inputs": {
                 "scene_prompt": ["1", 0], "positive": ["3", 0], "negative": ["3", 1],
             }},
-            "5": {"class_type": "ScenePrompterExpand", "inputs": {
-                "scene_prompt": ["4", 0], "current_index": 0, "seed_base": 123,
-                "run_id": "", "timestamp_dir": False,
+            "5": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["4", 0], "count": 2}},
+            "6": {"class_type": "ScenePrompterExpand", "inputs": {
+                "scene_prompt": ["5", 0], "current_index": 0, "seed_base": 123,
+                "run_id": "text-delete-cycle", "timestamp_dir": False,
+            }},
+            "7": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "8": {"class_type": "TestSceneTextImage", "inputs": {
+                "image": ["7", 0], "positive": ["6", 0], "negative": ["6", 1], "log_path": str(marker),
+            }},
+            "9": {"class_type": "SceneSaveImage", "inputs": {
+                "images": ["8", 0], "scene_info": ["6", 2], "path": "text-delete-cycle",
+                "metadata_mode": "生成経路ノードのみ",
             }},
         }
-        prepared = self._request("/scene_prompt/runs/prepare", {
-            "api_graph": {"output": graph}, "expand_node_id": "5",
-            "workflow": _workflow_for_graph(graph),
-        })
-        self.assertEqual(prepared["total_images"], 1)
-        self.assertTrue(self._request("/scene_prompt/runs/release", {
-            "run_handle": prepared["run_handle"],
-        })["released"])
+        handle, workflow = self._prepare_callback_run(graph, "6")
+        try:
+            self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), ["hair", "worse"])
+            cached = copy.deepcopy(graph)
+            cached["3"]["inputs"].pop("scene_prompt")
+            cached["3"]["inputs"]["current_index"] = 1
+            cached["6"]["inputs"]["current_index"] = 1
+            self._queue_callback_graph(cached, handle, workflow)
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), ["hair", "worse"])
+            files = list((self.base / "output" / "text-delete-cycle").glob("*.png"))
+            self.assertEqual(len(files), 2)
+            with Image.open(max(files, key=lambda path: path.stat().st_mtime_ns)) as image:
+                replay = json.loads(image.text["prompt"])
+                replay_workflow = json.loads(image.text["workflow"])
+            self.assertIn("2", replay, "The To Text source is required to replay Delete")
+            self.assertEqual(replay["3"]["inputs"].get("scene_prompt"), ["2", 0])
+            self.assertEqual(replay["4"]["inputs"].get("positive"), ["3", 0])
+            self.assertEqual(replay["3"]["inputs"]["current_index"], 0)
+            replay["9"]["inputs"]["path"] = "text-delete-cycle-replay"
+            replay_handle, replay_workflow = self._prepare_callback_run(replay, "6", replay_workflow)
+            try:
+                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), ["hair", "worse"])
+            finally:
+                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_http_to_text_delete_cached_plan_and_execution_png_replay(self):
         from PIL import Image
