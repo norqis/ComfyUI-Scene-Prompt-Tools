@@ -2091,7 +2091,6 @@ class ScenePromptToText:
                 "current_index": ("INT", {"default": 0, "min": 0, "max": MAX_SAFE_INTEGER, "hidden": True}),
                 "seed_base": ("INT", {"default": 0, "min": 0, "max": SEED_MAX, "hidden": True}),
                 "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
-                "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
@@ -2100,35 +2099,29 @@ class ScenePromptToText:
         }
 
     @classmethod
-    def IS_CHANGED(cls, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", model_mode=MODEL_MODE_ILLUSTRIOUS, **kwargs):
+    def IS_CHANGED(cls, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", model_mode=None, **kwargs):
         return "|".join([_scene_prompt_change_key(scene_prompt), scope, str(current_index),
-                         _seed_change_key(seed_base), str(_scene_bool(seed_base_literal)), str(run_handle),
-                         _normalize_model_mode(model_mode)])
+                         _seed_change_key(seed_base), str(_scene_bool(seed_base_literal)), str(run_handle)])
 
-    def to_text(self, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", unique_id=None, model_mode=MODEL_MODE_ILLUSTRIOUS):
+    def to_text(self, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", unique_id=None, model_mode=None):
         if scope not in TEXT_SCOPE_CHOICES:
             raise ValueError("Scene Prompt To Text の対象が不正です。")
-        model_mode = _normalize_model_mode(model_mode)
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
         row = item["row"]
         positive, negative = row.get("positive_parts", []), row.get("negative_parts", [])
-        loras = row.get("loras", [])
         trace = row.get("prompt_trace")
         if scope == TEXT_SCOPE_PREVIOUS and isinstance(trace, dict):
             if trace["kind"] == "passthrough":
                 positive, negative = [], []
-                loras = []
             elif trace["kind"] == "delta":
                 if trace["lora_index"] is not None:
                     positive, negative = [], []
-                    loras = [loras[trace["lora_index"]]]
                 else:
                     positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
-                    loras = []
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + item["global_index"]) % SEED_MODULO
-        positive, negative = _resolve_prompt_parts(positive, negative, loras, model_mode, seed)
+        positive, negative = _resolve_prompt_parts(positive, negative, (), None, seed)
         return _join_unique(positive, ", "), _join_unique(negative, ", ")
 
 

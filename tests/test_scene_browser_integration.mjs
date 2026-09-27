@@ -864,25 +864,36 @@ try {
                     { name: "current_index", type: "number", value: 0, options: {} },
                     { name: "seed_base", type: "number", value: 0, options: {} },
                     { name: "seed_base_literal", type: "toggle", value: false, options: {} },
-                    { name: "model_mode", type: "combo", value: "Illustrious", options: {} },
                 ];
             }
-            serialize() { return { widgets_values: this.widgets.map((widget) => widget.value) }; }
+            configure(serialized) {
+                if (serialized.inputs) this.inputs = structuredClone(serialized.inputs);
+                super.configure(serialized);
+            }
+            serialize() { return { widgets_values: this.widgets.map((widget) => widget.value), inputs: structuredClone(this.inputs) }; }
+            removeInput(index) { this.inputs.splice(index, 1); }
             setDirtyCanvas() {}
         }
         await window.__scenePromptExtension.beforeRegisterNodeDef(ScenePromptToTextNode, { name: "ScenePromptToText" });
         const toText = new ScenePromptToTextNode();
         toText.onNodeCreated();
-        toText.configure({ widgets_values: ["直前のノードのみ", 7, 12345, true] });
+        toText.configure({ widgets_values: ["直前のノードのみ", 7, 12345, true, "Anima"],
+            widgets_values_named: { model_mode: "Anima" } });
         const legacyRestored = toText.serialize().widgets_values;
-        toText.widgets.find((widget) => widget.name === "model_mode").value = "Anima";
         const reloadedToText = new ScenePromptToTextNode();
         reloadedToText.onNodeCreated();
-        reloadedToText.configure(toText.serialize());
+        window.app.graph.links = { 211: { target_id: 0, target_slot: 0 } };
+        reloadedToText.id = 212;
+        reloadedToText.configure({ widgets_values: ["直前のノードのみ", 7, 12345, true, "Illustrious"],
+            widgets_values_named: { model_mode: "Illustrious" },
+            inputs: [{ name: "model_mode", type: "COMBO", link: 210 },
+                { name: "scene_prompt", type: "SCENE_PROMPT", link: 211 }] });
         window.__sceneToTextLegacyRoundTrip = {
             visible: toText.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
             restored: legacyRestored,
             reloaded: reloadedToText.serialize().widgets_values,
+            inputs: reloadedToText.inputs.map((input) => input.name),
+            linkTargetSlot: window.app.graph.links[211].target_slot,
         };
         window.__sceneLoraTestNode = applyLora;
         window.__scenePromptTestNode = node;
@@ -921,11 +932,11 @@ try {
     assert.equal(JSON.parse(loraRoundTrip.namedSixPositiveJson).version, 1);
     assert.deepEqual(loraRoundTrip.displayNine, ["display.safetensors", 0.4, 0.3, "Anima", "display positive", "display negative", emptyLoraSelection, emptyLoraSelection, ""]);
     const toTextLegacy = await page.evaluate(() => window.__sceneToTextLegacyRoundTrip);
-    assert.deepEqual(toTextLegacy.visible, ["scope", "model_mode"]);
-    assert.deepEqual(toTextLegacy.restored, ["直前のノードのみ", 7, 12345, true, "Illustrious"],
-        "legacy four-value To Text workflows retain index and seed and use the default model");
-    assert.deepEqual(toTextLegacy.reloaded, ["直前のノードのみ", 7, 12345, true, "Anima"],
-        "a selected fifth value round-trips without shifting legacy values");
+    assert.deepEqual(toTextLegacy.visible, ["scope"]);
+    assert.deepEqual(toTextLegacy.restored, ["直前のノードのみ", 7, 12345, true]);
+    assert.deepEqual(toTextLegacy.reloaded, ["直前のノードのみ", 7, 12345, true]);
+    assert.deepEqual(toTextLegacy.inputs, ["scene_prompt"]);
+    assert.equal(toTextLegacy.linkTargetSlot, 0);
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("/scene_prompt/loras/info?"))), false);
     let civitaiLookupCount = 0;
     await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => { civitaiLookupCount += 1; return route.fulfill({

@@ -124,7 +124,7 @@ If any connected input has already passed through a Queue, the receiving Queue b
 
 ## Text Output and Tag Deletion
 
-**Scene Prompt To Text** outputs the current planned row as ordinary `positive` and `negative` strings. Choose **全てのノード** for the complete row or **直前のノードのみ** for the immediately preceding node's additions. Set **モデル種別** to include matching Scene Apply LoRA prompt text. A preceding structural node supplies its whole row; a node that only passes prompts through supplies empty strings in the latter mode. An unconnected input produces empty strings at index 0.
+**Scene Prompt To Text** outputs the current planned row as ordinary `positive` and `negative` strings. Choose **全てのノード** for the complete row or **直前のノードのみ** for the immediately preceding node's additions. LoRA prompt text is not included. A preceding structural node supplies its whole row; a node that only passes prompts through supplies empty strings in the latter mode. An unconnected input produces empty strings at index 0.
 
 Normal Queue sends share one fresh starting seed across Expand and To Text nodes without changing their saved generation indexes. Continuous generation synchronizes To Text with the selected Expand's index and seed. Choices resolve before duplicate removal and negative precedence. Execution-path PNGs keep the Scene branches needed by each text consumer and rebase each consumer's index and seed separately, including Presets.
 

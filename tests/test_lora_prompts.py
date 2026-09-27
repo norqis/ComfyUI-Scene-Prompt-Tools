@@ -47,9 +47,9 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(node.INPUT_TYPES()["optional"]["negative"][1]["default"], "")
         changed = node.apply_lora("lora", scene_prompt=plan, positive="one, two", negative="bad")[0]
         self.assertEqual(self.nodes.ScenePromptToText().to_text(changed, scope=self.nodes.TEXT_SCOPE_PREVIOUS,
-                                                                 seed_base=7, seed_base_literal=True), ("one, two", "bad"))
+                                                                 seed_base=7, seed_base_literal=True), ("", ""))
         self.assertEqual(self.nodes.ScenePromptToText().to_text(changed, seed_base=7,
-                                                                 seed_base_literal=True), ("base, one, two", "bad"))
+                                                                 seed_base_literal=True), ("base", ""))
         self.assertNotEqual(node.IS_CHANGED("lora", positive="one"), node.IS_CHANGED("lora", positive="two"))
         legacy = node.apply_lora("lora", scene_prompt=plan)[0]
         self.assertEqual(legacy["rows"][0]["row"]["loras"][0]["positive_parts"], [])
@@ -72,14 +72,13 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(row["loras"][0]["negative_parts"], ["typed-negative", "blocked"])
         self.assertEqual(self.expand(plan, "Anima")[:2], ("base, typed, chosen", "typed-negative, blocked"))
         self.assertEqual(self.expand(plan, "Illustrious")[:2], ("base", ""))
-        self.assertEqual(self.nodes.ScenePromptToText().to_text(plan, model_mode="Anima"),
-                         ("base, typed, chosen", "typed-negative, blocked"))
+        self.assertEqual(self.nodes.ScenePromptToText().to_text(plan, model_mode="Anima"), ("base", ""))
         reversed_plan = self.nodes.ScenePromptReverse().reverse(plan)[0]
         self.assertEqual(self.nodes.ScenePromptToText().to_text(reversed_plan, model_mode="Anima"),
-                         ("typed-negative, blocked", "base, typed, chosen"))
+                         ("", "base"))
         deleted = self.nodes.ScenePromptDelete().delete("chosen", "blocked", plan)[0]
         self.assertEqual(self.nodes.ScenePromptToText().to_text(deleted, model_mode="Anima"),
-                         ("base, typed", "typed-negative"))
+                         ("base", ""))
         changed = self.nodes.SceneApplyLora.IS_CHANGED
         self.assertNotEqual(changed("anima", positive_json=selected("Positive", "chosen")),
                             changed("anima", positive_json=selected("Positive", "different")))
@@ -110,10 +109,10 @@ class SceneLoraPromptTests(unittest.TestCase):
                                                "Illustrious", "", "base, later", "")
         self.assertEqual(calls[0]["current_positive"], "base")
 
-    def test_to_text_model_filter_and_delete_modify_descriptors(self):
+    def test_to_text_ignores_lora_text_and_legacy_model_argument(self):
         schema = self.nodes.ScenePromptToText.INPUT_TYPES()
         self.assertEqual(list(schema["optional"]), [
-            "scene_prompt", "current_index", "seed_base", "seed_base_literal", "model_mode",
+            "scene_prompt", "current_index", "seed_base", "seed_base_literal",
         ])
         legacy_widgets_values = [self.nodes.TEXT_SCOPE_ALL, 2, 100, False]
         widget_names = ["scope", *[name for name in schema["optional"] if name != "scene_prompt"]]
@@ -121,27 +120,25 @@ class SceneLoraPromptTests(unittest.TestCase):
             "scope": self.nodes.TEXT_SCOPE_ALL, "current_index": 2,
             "seed_base": 100, "seed_base_literal": False,
         })
-        self.assertEqual(schema["optional"]["model_mode"][1]["default"], "Illustrious")
         plan = add_prompt(self.prompt, "base", "base", "base-negative", node_id="1")
         plan = self.nodes.SceneApplyLora().apply_lora("ill", scene_prompt=plan, positive="ill-text", negative="ill-negative")[0]
         plan = self.nodes.SceneApplyLora().apply_lora("anima", scene_prompt=plan, model_mode="Anima",
                                                       positive="anima-text", negative="anima-negative")[0]
         text = self.nodes.ScenePromptToText()
-        self.assertEqual(text.to_text(plan), ("base, ill-text", "base-negative, ill-negative"))
-        self.assertEqual(text.to_text(plan, model_mode="Anima"), ("base, anima-text", "base-negative, anima-negative"))
+        self.assertEqual(text.to_text(plan), ("base", "base-negative"))
+        self.assertEqual(text.to_text(plan, model_mode="Anima"), text.to_text(plan))
         self.assertEqual(text.to_text(plan, scope=self.nodes.TEXT_SCOPE_PREVIOUS), ("", ""))
-        self.assertEqual(text.to_text(plan, scope=self.nodes.TEXT_SCOPE_PREVIOUS, model_mode="Anima"),
-                         ("anima-text", "anima-negative"))
-        self.assertNotEqual(text.IS_CHANGED(plan, model_mode="Anima"), text.IS_CHANGED(plan))
+        self.assertEqual(text.to_text(plan, scope=self.nodes.TEXT_SCOPE_PREVIOUS, model_mode="Anima"), ("", ""))
+        self.assertEqual(text.IS_CHANGED(plan, model_mode="Anima"), text.IS_CHANGED(plan))
         deleted = self.nodes.ScenePromptDelete().delete(
             "base, ill-text, anima-text", "ill-negative, anima-negative", plan,
         )[0]
         self.assertEqual(text.to_text(deleted), ("", "base-negative"))
-        self.assertEqual(text.to_text(deleted, model_mode="Anima"), ("", "base-negative"))
+        self.assertEqual(text.to_text(deleted, model_mode="Anima"), text.to_text(deleted))
         self.assertEqual(deleted["rows"][0]["row"]["loras"][0]["positive_parts"], [])
         self.assertEqual(deleted["rows"][0]["row"]["loras"][1]["negative_parts"], [])
 
-    def test_reverse_all_and_previous_keep_model_filter_and_chain(self):
+    def test_reverse_all_and_previous_keep_base_text_and_chain(self):
         plan = add_prompt(self.prompt, "base", "base-pos", "base-neg", node_id="1")
         plan = self.nodes.SceneApplyLora().apply_lora("ill", scene_prompt=plan,
                                                       positive="ill-pos", negative="ill-neg")[0]
@@ -150,18 +147,17 @@ class SceneLoraPromptTests(unittest.TestCase):
         text = self.nodes.ScenePromptToText()
         reverse = self.nodes.ScenePromptReverse()
         previous = reverse.reverse(plan, self.nodes.REVERSE_SCOPE_PREVIOUS)[0]
-        self.assertEqual(text.to_text(previous), ("base-pos, ill-pos", "base-neg, ill-neg"))
-        self.assertEqual(text.to_text(previous, model_mode="Anima"), ("base-pos, anima-neg", "base-neg, anima-pos"))
+        self.assertEqual(text.to_text(previous), ("base-pos", "base-neg"))
+        self.assertEqual(text.to_text(previous, model_mode="Anima"), text.to_text(previous))
         self.assertEqual(text.to_text(previous, scope=self.nodes.TEXT_SCOPE_PREVIOUS, model_mode="Anima"),
-                         ("anima-neg", "anima-pos"))
+                         ("", ""))
         self.assertEqual(text.to_text(previous, scope=self.nodes.TEXT_SCOPE_PREVIOUS), ("", ""))
         self.assertEqual(previous["rows"][0]["row"]["prompt_trace"]["lora_index"], 1)
         again = reverse.reverse(previous, self.nodes.REVERSE_SCOPE_PREVIOUS)[0]
         self.assertEqual(text.to_text(again, model_mode="Anima"), text.to_text(plan, model_mode="Anima"))
         all_reversed = reverse.reverse(plan)[0]
-        self.assertEqual(text.to_text(all_reversed), ("base-neg, ill-neg", "base-pos, ill-pos"))
-        self.assertEqual(text.to_text(all_reversed, model_mode="Anima"),
-                         ("base-neg, anima-neg", "base-pos, anima-pos"))
+        self.assertEqual(text.to_text(all_reversed), ("base-neg", "base-pos"))
+        self.assertEqual(text.to_text(all_reversed, model_mode="Anima"), text.to_text(all_reversed))
         whole_previous = reverse.reverse(all_reversed, self.nodes.REVERSE_SCOPE_PREVIOUS)[0]
         self.assertEqual(text.to_text(whole_previous, model_mode="Anima"), text.to_text(plan, model_mode="Anima"))
 
