@@ -4935,6 +4935,42 @@ function sceneLoraConfigureValues(node, config, named) {
     return { ...config, widgets_values: values, widgets_values_named: { ...config.widgets_values_named, ...namedValues } };
 }
 
+function syncSceneLoraSelectLabel(node) {
+    const button = findSceneWidget(node, "lora_select");
+    if (!button) return;
+    const linked = node.inputs?.some((input) => input.name === "lora_name" && input.link != null);
+    const path = linked ? "" : String(findWidget(node, "lora_name")?.value || "").trim();
+    const prefix = "LoRAを選択";
+    const filename = path.split(/[\\/]/u).at(-1) || path;
+    const fullLabel = linked ? `${prefix}（入力接続）` : path ? `${prefix}: ${filename}` : prefix;
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    const maxWidth = Math.max(80, (node.size?.[0] || 300) - 40);
+    let label = fullLabel;
+    if (context) {
+        context.font = "14px Arial";
+        while (label.length > prefix.length + 2 && context.measureText(label).width > maxWidth) {
+            label = `${label.slice(0, -2)}…`;
+        }
+    }
+    applyWidgetLabel(button, label);
+    button.tooltip = linked ? "LoRA名は接続先から入力されます" : path;
+    button.options.tooltip = button.tooltip;
+    node.setDirtyCanvas?.(true, true);
+}
+
+function installSceneLoraNameSync(node) {
+    const widget = findWidget(node, "lora_name");
+    if (!widget || widget.sceneLoraNameSyncWrapped) return;
+    const originalCallback = widget.callback;
+    widget.callback = function (...args) {
+        const result = originalCallback?.apply(this, args);
+        syncSceneLoraSelectLabel(node);
+        return result;
+    };
+    widget.sceneLoraNameSyncWrapped = true;
+}
+
 function sceneLoraSplitPrompt(value) {
     const parts = [];
     let start = 0;
@@ -5325,6 +5361,8 @@ function ensureSceneLoraControls(node) {
     node.widgets.sort((a, b) => (rank(a) >= 0 ? rank(a) : order.length) - (rank(b) >= 0 ? rank(b) : order.length));
     if (Array.isArray(node.widgets_values)) node.widgets_values = node.widgets.map((widget) => previous.get(widget));
     button.serialize = false;
+    installSceneLoraNameSync(node);
+    syncSceneLoraSelectLabel(node);
     node.setDirtyCanvas?.(true, true);
 }
 
@@ -6429,6 +6467,7 @@ function installSceneConnectionWatcher(node) {
     const originalOnConnectionsChange = node.onConnectionsChange;
     node.onConnectionsChange = function () {
         const result = originalOnConnectionsChange?.apply(this, arguments);
+        if (isSceneApplyLoraNode(this)) syncSceneLoraSelectLabel(this);
         if (isScenePromptQueueNode(this)) syncSceneQueueControls(this);
         clearSceneComputedCaches(this);
         scheduleSceneNodeRefresh(this, { fitHeight: false }, 40);
@@ -12082,6 +12121,7 @@ app.registerExtension({
                 for (const name of SCENE_LORA_STORED_WIDGET_NAMES) {
                     if (Object.hasOwn(named, name)) setWidgetValue(this, name, named[name], { silent: true });
                 }
+                syncSceneLoraSelectLabel(this);
                 return result;
             };
             nodeType.prototype.serialize = function (...args) {

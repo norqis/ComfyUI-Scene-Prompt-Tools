@@ -790,6 +790,29 @@ try {
         displayNineLora.onNodeCreated();
         displayNineLora.configure({ widgets_values: ["Anima", 0.4, 0.3, "display positive", "display negative", "display.safetensors",
             '{"version":1,"categories":{}}', '{"version":1,"categories":{}}', ""] });
+        const emptyLora = new SceneApplyLoraNode();
+        emptyLora.widgets.find((widget) => widget.name === "lora_name").value = "";
+        emptyLora.onNodeCreated();
+        const emptyButton = emptyLora.widgets.find((widget) => widget.sceneRole === "lora_select");
+        const initialEmptyButton = { name: emptyButton.name, label: emptyButton.label, tooltip: emptyButton.tooltip };
+        const emptyName = emptyLora.widgets.find((widget) => widget.name === "lora_name");
+        emptyName.value = "folder\\updated.safetensors";
+        emptyName.callback?.(emptyName.value);
+        const changedButton = { name: emptyButton.name, label: emptyButton.label, tooltip: emptyButton.tooltip };
+        const linkedNameLora = new SceneApplyLoraNode();
+        linkedNameLora.onNodeCreated();
+        linkedNameLora.inputs.push({ name: "lora_name", link: 18 });
+        linkedNameLora.onConnectionsChange();
+        const longLora = new SceneApplyLoraNode();
+        longLora.onNodeCreated();
+        const longPath = `folder/${"very_long_lora_name_".repeat(6)}.safetensors`;
+        const longName = longLora.widgets.find((widget) => widget.name === "lora_name");
+        longName.value = longPath;
+        longName.callback?.(longPath);
+        const selectLabel = (node) => {
+            const widget = node.widgets.find((entry) => entry.sceneRole === "lora_select");
+            return { name: widget.name, label: widget.label, tooltip: widget.tooltip };
+        };
         const namedRoundTrip = new SceneApplyLoraNode();
         namedRoundTrip.onNodeCreated();
         namedRoundTrip.configure(JSON.parse(JSON.stringify(namedSixLora.serialize())));
@@ -809,6 +832,11 @@ try {
             namedFields: namedSixLora.serialize().widgets_values_named,
             oldSixPositiveJson: oldSixLora.widgets.find((widget) => widget.name === "positive_json").value,
             namedSixPositiveJson: namedSixLora.widgets.find((widget) => widget.name === "positive_json").value,
+            buttons: {
+                initial: selectLabel(applyLora), empty: initialEmptyButton, changed: changedButton, restored: selectLabel(restoredLora),
+                legacy: selectLabel(legacyLora), named: selectLabel(namedSixLora), linked: selectLabel(linkedNameLora),
+                long: selectLabel(longLora), longPath,
+            },
         };
         class ScenePromptToTextNode extends LGraphNode {
             constructor() {
@@ -853,6 +881,17 @@ try {
         "the LoRA node has no path, name, or Civitai summary widget on its canvas");
     assert.deepEqual(loraRoundTrip.serializableOrder, ["model_mode", "strength_model", "strength_clip", "positive", "negative", "lora_name", "positive_json", "negative_json", "category_order"]);
     assert.deepEqual(loraRoundTrip.labels, ["positiveテキスト", "negativeテキスト"]);
+    assert.deepEqual(loraRoundTrip.buttons.empty, { name: "LoRAを選択", label: "LoRAを選択", tooltip: "" });
+    assert.deepEqual(loraRoundTrip.buttons.changed,
+        { name: "LoRAを選択", label: "LoRAを選択: updated.safetensors", tooltip: "folder\\updated.safetensors" });
+    assert.deepEqual(loraRoundTrip.buttons.initial, { name: "LoRAを選択", label: "LoRAを選択: style.safetensors", tooltip: "style.safetensors" });
+    assert.deepEqual(loraRoundTrip.buttons.restored, loraRoundTrip.buttons.initial);
+    assert.equal(loraRoundTrip.buttons.legacy.label, "LoRAを選択: old.safetensors");
+    assert.equal(loraRoundTrip.buttons.named.label, "LoRAを選択: yuzu.safetensors");
+    assert.equal(loraRoundTrip.buttons.linked.label, "LoRAを選択（入力接続）");
+    assert.equal(loraRoundTrip.buttons.long.name, "LoRAを選択", "a visual label does not change the button's serialized name");
+    assert.match(loraRoundTrip.buttons.long.label, /^LoRAを選択: .*…$/u);
+    assert.equal(loraRoundTrip.buttons.long.tooltip, loraRoundTrip.buttons.longPath);
     const emptyLoraSelection = '{"version":1,"categories":{}}';
     assert.deepEqual(loraRoundTrip.saved, ["style.safetensors", 0.8, 0.7, "Anima", "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "bad", emptyLoraSelection, emptyLoraSelection, ""]);
     assert.deepEqual(loraRoundTrip.restored, loraRoundTrip.saved);
@@ -940,6 +979,11 @@ try {
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
     await loraPicker.locator(".pc-lora-row").last().locator(".pc-lora-title").getByText("Civitai Style").waitFor();
     await loraPicker.getByRole("button", { name: /other\.safetensors/u }).click();
+    assert.deepEqual(await page.evaluate(() => {
+        const widget = window.__sceneLoraTestNode.widgets.find((entry) => entry.sceneRole === "lora_select");
+        return { label: widget.label, tooltip: widget.tooltip };
+    }), { label: "LoRAを選択: other.safetensors", tooltip: "folder/other.safetensors" },
+    "picker selection updates the button before metadata lookup completes");
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]").some((entry) => entry.key.startsWith("folder/other.safetensors") && entry.title === "Civitai Style"));
     assert.ok(civitaiLookupCount >= 3, "offline name lookup retries on a later picker open");
     await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => route.fulfill({ status: 404, body: "missing" }), { times: 1 });
