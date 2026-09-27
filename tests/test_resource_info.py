@@ -32,13 +32,15 @@ class ResourceInfoTests(unittest.TestCase):
                       strength_model=0.8, strength_clip=0.7, model_mode="Anima"),
             "5": node("ScenePrompterExpand", scene_prompt=["4", 0], model_mode="Anima"),
             "8": node("CheckpointLoaderSimple", ckpt_name="base.safetensors"),
-            "9": node("PrimitiveFloat", value=0.8),
+            "9": node("PrimitiveFloat", value=0.9),
             "99": node("SceneApplyLora", lora_name="unrelated.safetensors", strength_model=2.0),
         }}
         result = self.info.connected_resources(graph, "5")
         self.assertEqual(result["models"], [{"kind": "checkpoint", "name": "base.safetensors",
                                               "roles": ["model", "clip", "vae"], "source_class": "CheckpointLoaderSimple"}])
         self.assertEqual(result["loras"], [{"name": "style.safetensors", "variants": [
+            {"model_mode": "Anima", "strength_model": 0.9, "strength_clip": 0.7,
+             "roles": ["model", "clip"], "applies": True},
             {"model_mode": "Anima", "strength_model": 0.8, "strength_clip": 0.7,
              "roles": ["model", "clip"], "applies": True},
         ]}])
@@ -66,6 +68,21 @@ class ResourceInfoTests(unittest.TestCase):
                          ["model", "clip"])
         self.assertEqual(next(item for item in result["loras"] if item["name"] == "second.safetensors")["variants"][0]["roles"],
                          ["model"])
+        self.assertIsNone(result["loras"][0]["variants"][0]["model_mode"])
+        self.assertTrue(result["loras"][0]["variants"][0]["applies"])
+
+    def test_all_connected_model_candidates_remain_visible_after_override(self):
+        graph = {"output": {
+            "1": node("ScenePrompter"),
+            "2": node("SceneApplyModel", scene_prompt=["1", 0], model=["6", 0], clip=["6", 1], vae=["6", 2]),
+            "3": node("SceneApplyModel", scene_prompt=["2", 0], model=["7", 0], clip=["7", 1], vae=["7", 2]),
+            "4": node("ScenePrompterExpand", scene_prompt=["3", 0]),
+            "6": node("CheckpointLoaderSimple", ckpt_name="first.safetensors"),
+            "7": node("CheckpointLoaderSimple", ckpt_name="second.safetensors"),
+        }}
+        result = self.info.connected_resources(graph, "4")
+        self.assertEqual({item["name"] for item in result["models"]},
+                         {"first.safetensors", "second.safetensors"})
 
     def test_nested_reused_preset_is_loaded_once(self):
         preset_graph = {"output": {
@@ -85,6 +102,31 @@ class ResourceInfoTests(unittest.TestCase):
             result = self.info.connected_resources(graph, "4")
         loaded.assert_called_once_with("nested", "default")
         self.assertEqual([item["name"] for item in result["loras"]], ["nested.safetensors"])
+
+    def test_nested_preset_cycle_is_rejected(self):
+        def preset(reference_id):
+            return {"schema_version": 1, "api_graph": {"output": {
+                "1": node("ScenePresetInput"),
+                "2": node("ScenePresetReference", scene_prompt=["1", 0], preset_id=reference_id),
+                "3": node("ScenePresetOutput", scene_prompt=["2", 0]),
+            }}}
+
+        graph = {"output": {
+            "1": node("ScenePresetReference", preset_id="a"),
+            "2": node("ScenePrompterExpand", scene_prompt=["1", 0]),
+        }}
+        with mock.patch.object(self.info, "load_preset", side_effect=lambda name, _user: preset("b" if name == "a" else "a")):
+            with self.assertRaisesRegex(self.info.ScenePresetError, "循環"):
+                self.info.connected_resources(graph, "2")
+
+    def test_windows_path_spelling_deduplicates_resources(self):
+        graph = {"output": {
+            "1": node("SceneApplyLora", lora_name=r"Folder\Style.safetensors"),
+            "2": node("SceneApplyLora", scene_prompt=["1", 0], lora_name="folder/style.safetensors"),
+            "3": node("ScenePrompterExpand", scene_prompt=["2", 0]),
+        }}
+        result = self.info.connected_resources(graph, "3")
+        self.assertEqual(len(result["loras"]), 1)
 
     def test_hash_is_opt_in_and_uses_selected_folder_only(self):
         model = Path(self.temp.name) / "model.safetensors"

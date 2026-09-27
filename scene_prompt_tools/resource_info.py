@@ -26,6 +26,10 @@ _MODEL_FOLDERS = {"checkpoint": "checkpoints", "diffusion_model": "diffusion_mod
 _VALUE_TYPES = {"PrimitiveFloat": float, "PrimitiveInt": int, "PrimitiveString": str}
 
 
+def _resource_key(name):
+    return str(name or "").replace("\\", "/").casefold()
+
+
 def _literal(nodes, raw, default):
     if not is_link(raw):
         return default if raw is None else raw
@@ -54,9 +58,10 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
     visited_sources = set()
     loaded_presets = {}
     visited_presets = set()
+    visiting_presets = set()
 
     def add_model(kind, name, role, source_class):
-        key = (kind, str(name))
+        key = (kind, _resource_key(name))
         if key not in models:
             models[key] = {"kind": kind, "name": str(name), "roles": [], "source_class": source_class}
         if role not in models[key]["roles"]:
@@ -64,14 +69,14 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
 
     def add_lora(name, model_mode, strength_model, strength_clip, role):
         name = str(name or "")
-        entry = loras.setdefault(name, {"name": name, "variants": []})
+        entry = loras.setdefault(_resource_key(name), {"name": name, "variants": []})
         variant = next((item for item in entry["variants"] if
                         item["model_mode"] == model_mode and
                         item["strength_model"] == strength_model and
                         item["strength_clip"] == strength_clip), None)
         if variant is None:
             variant = {"model_mode": model_mode, "strength_model": strength_model,
-                       "strength_clip": strength_clip, "roles": [], "applies": model_mode == mode}
+                       "strength_clip": strength_clip, "roles": [], "applies": model_mode is None or model_mode == mode}
             entry["variants"].append(variant)
         if role not in variant["roles"]:
             variant["roles"].append(role)
@@ -105,7 +110,7 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
         elif kind in {"LoraLoader", "LoraLoaderModelOnly"}:
             source_role = "model" if slot == 0 else "clip"
             if kind == "LoraLoaderModelOnly" or slot in (0, 1):
-                add_lora(inputs.get("lora_name"), mode,
+                add_lora(inputs.get("lora_name"), None,
                          _literal(scope, inputs.get("strength_model"), 1.0),
                          _literal(scope, inputs.get("strength_clip"), 1.0 if kind == "LoraLoader" else None),
                          source_role)
@@ -123,24 +128,26 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                 for role in ("model", "clip", "vae"):
                     follow_source(resource_nodes, inputs.get(role), role)
             elif kind == "SceneApplyLora":
-                add_lora(_literal(scope, inputs.get("lora_name"), ""),
-                         _normalize_model_mode(_literal(scope, inputs.get("model_mode"), MODEL_MODE_ILLUSTRIOUS)),
-                         _literal(scope, inputs.get("strength_model"), 1.0),
-                         _literal(scope, inputs.get("strength_clip"), 1.0), "model")
-                add_lora(_literal(scope, inputs.get("lora_name"), ""),
-                         _normalize_model_mode(_literal(scope, inputs.get("model_mode"), MODEL_MODE_ILLUSTRIOUS)),
-                         _literal(scope, inputs.get("strength_model"), 1.0),
-                         _literal(scope, inputs.get("strength_clip"), 1.0), "clip")
+                lora_name = _literal(resource_nodes, inputs.get("lora_name"), "")
+                lora_mode = _normalize_model_mode(_literal(resource_nodes, inputs.get("model_mode"), MODEL_MODE_ILLUSTRIOUS))
+                strength_model = _literal(resource_nodes, inputs.get("strength_model"), 1.0)
+                strength_clip = _literal(resource_nodes, inputs.get("strength_clip"), 1.0)
+                add_lora(lora_name, lora_mode, strength_model, strength_clip, "model")
+                add_lora(lora_name, lora_mode, strength_model, strength_clip, "clip")
             elif kind == "ScenePresetReference":
-                preset_id = _literal(scope, inputs.get("preset_id"), "")
+                preset_id = _literal(resource_nodes, inputs.get("preset_id"), "")
+                if preset_id in visiting_presets:
+                    raise ScenePresetError(f"Preset参照が循環しています: {preset_id}")
                 if preset_id not in loaded_presets:
                     loaded_presets[preset_id] = load_preset(preset_id, user_id)
                 if preset_id in visited_presets:
                     continue
-                visited_presets.add(preset_id)
+                visiting_presets.add(preset_id)
                 preset_nodes = _preset_nodes(loaded_presets[preset_id])
                 output_link = _validate_preset_graph(preset_nodes)["output_link"]
                 visit_scene(_scene_prompt_closure(preset_nodes, output_link[0]), preset_nodes)
+                visiting_presets.remove(preset_id)
+                visited_presets.add(preset_id)
 
     visit_scene(scene_nodes, nodes)
     return {"model_mode": mode, "models": list(models.values()), "loras": list(loras.values())}
