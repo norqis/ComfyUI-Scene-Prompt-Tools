@@ -3,6 +3,7 @@ import importlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_scene_prompt_reverse import load_modules, add_prompt
 from test_preset_metadata import outer_workflow, scene_prompt
@@ -27,15 +28,20 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
     def text(self, plan=None, **kwargs):
         return self.nodes.ScenePromptToText().to_text(scene_prompt=plan, seed_base=123, **kwargs)
 
-    def test_to_text_selects_one_row_and_repeat_with_strict_bounds(self):
+    def test_to_text_selects_one_row_and_cycles_shorter_plans(self):
         a, b, c = [self.build(value, node_id=value) for value in ('A', 'B', 'C')]
         b = self.nodes.ScenePromptCounter().count(count=2, scene_prompt=b)[0]
         plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=a, scene_prompt2=b, scene_prompt3=c)[0]
         self.assertEqual([self.text(plan, current_index=i) for i in range(4)], [('A', ''), ('B', ''), ('B', ''), ('C', '')])
-        for index in (-1, 4):
-            with self.assertRaises(IndexError): self.text(plan, current_index=index)
+        self.assertEqual([self.text(plan, current_index=i) for i in range(4, 8)],
+                         [('A', ''), ('B', ''), ('B', ''), ('C', '')])
+        for index in (-1, True, 1.5):
+            with self.subTest(index=index), self.assertRaisesRegex(ValueError, '生成番号'):
+                self.text(plan, current_index=index)
         self.assertEqual(self.text(), ('', ''))
-        with self.assertRaises(IndexError): self.text(current_index=1)
+        self.assertEqual(self.text(current_index=1), ('', ''))
+        empty = self.nodes.ScenePromptCounter().count(scene_prompt=self.build('x'), count=0)[0]
+        with self.assertRaises(IndexError): self.text(empty)
         self.assertFalse(hasattr(self.nodes.ScenePromptToText, 'OUTPUT_IS_LIST'))
         self.assertNotIn('ScenePromptToText', self.nodes.SCENE_NODE_TYPES)
         self.assertNotIn('ScenePromptToText', self.presets.SAFE_NODE_CLASSES)
@@ -113,8 +119,8 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         prompt['1']['inputs']['seed_base_literal'] = True
         self.assertEqual(self.nodes._text_replay_items(prompt, '2', info)['1']['seed'], 0)
         prompt['1']['inputs']['current_index'] = 1
-        with self.assertRaises(IndexError):
-            self.nodes._text_replay_items(prompt, '2', info)
+        cycled = self.nodes._text_replay_items(prompt, '2', info)['1']
+        self.assertEqual((cycled['row_index'], cycled['repeat_index'], cycled['seed']), (0, 1, 1))
 
     def test_v7_text_replay_uses_its_own_alternate_event_path(self):
         handle = self.runs.create_run_context('default')
@@ -282,6 +288,124 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         snapshot = self.presets.snapshot_presets_for_run(handle, {'output': outer}, '11')
         self.assertEqual(snapshot['total_batches'], 2)
         self.assertEqual([preset['preset_id'] for preset in snapshot['presets']], ['delete'])
+
+    def test_run_snapshot_resolves_to_text_into_delete_by_output_slot(self):
+        api = {
+            '1': scene_prompt('bald, hair'),
+            '2': scene_prompt('bald'),
+            '3': {'class_type': 'ScenePromptToText', 'inputs': {
+                'scene_prompt': ['2', 0], 'scope': self.nodes.TEXT_SCOPE_ALL,
+                'current_index': 0, 'seed_base': 123,
+                'run_handle': 'stale', 'unique_id': 'stale',
+            }},
+            '4': {'class_type': 'ScenePromptDelete', 'inputs': {
+                'scene_prompt': ['1', 0], 'positive': ['3', 0], 'negative': ['3', 1],
+            }},
+            '5': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['4', 0]}},
+        }
+        api['1']['inputs']['negative_base'] = 'bad, worse'
+        api['2']['inputs']['negative_base'] = 'bad'
+        handle = self.runs.create_run_context('default')
+        calls = []
+        original = self.nodes.ScenePromptToText.to_text
+        def observed(instance, **kwargs):
+            calls.append(kwargs)
+            return original(instance, **kwargs)
+        with mock.patch.object(self.nodes.ScenePromptToText, 'to_text', observed):
+            result = self.presets.snapshot_presets_for_run(handle, {'output': api}, '5')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((calls[0]['run_handle'], calls[0]['unique_id']), ('', None))
+        self.assertIsNone(self.runs.get_run_plan_reference(handle, '3'))
+        self.assertEqual(result['total_images'], 1)
+        plan = self.presets._scene_node_value(api, '4', {}, set(), run_handle=handle)
+        self.assertEqual(self.text(plan), ('hair', 'worse'))
+        counted = self.nodes.ScenePromptCounter().count(scene_prompt=plan, count=2)[0]
+        self.assertEqual(self.text(counted), ('hair', 'worse'))
+        self.assertEqual(self.nodes.ScenePromptExpand().expand(scene_prompt=counted, seed_base=123)[:2], ('hair', 'worse'))
+        for invalid in (True, -1, 2, '0'):
+            api['4']['inputs']['positive'] = ['3', invalid]
+            with self.subTest(slot=invalid), self.assertRaisesRegex(self.presets.ScenePresetResolutionError, '出力番号'):
+                self.presets._scene_node_value(api, '4', {}, set(), run_handle=handle)
+
+    def test_run_snapshot_supports_preset_reference_then_to_text_then_delete(self):
+        from test_scene_presets import basic_nodes
+
+        preset_graph = basic_nodes('bald')
+        saved = self.presets.save_preset({
+            'preset_id': 'text_source', 'name': 'text_source', 'output_node_id': '3',
+            'api_graph': {'output': preset_graph}, 'workflow': self.workflow(preset_graph),
+        })
+        api = {
+            '1': scene_prompt('bald, hair'),
+            '2': {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': 'text_source'}},
+            '3': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['2', 0], 'seed_base': 123}},
+            '4': {'class_type': 'ScenePromptDelete', 'inputs': {'scene_prompt': ['1', 0], 'positive': ['3', 0]}},
+            '5': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['4', 0]}},
+        }
+        handle = self.runs.create_run_context('default')
+        result = self.presets.snapshot_presets_for_run(handle, {'output': api}, '5')
+        self.assertEqual(result['total_images'], 1)
+        self.assertEqual([entry['preset_id'] for entry in result['presets']], ['text_source'])
+        plan = self.presets._scene_node_value(api, '4', {'text_source': saved}, set(), run_handle=handle)
+        self.assertEqual(self.text(plan), ('hair', ''))
+
+    def test_run_snapshot_evaluates_all_registered_scene_ancestors(self):
+        api = {
+            '1': scene_prompt('hair'),
+            '2': {'class_type': 'SceneMatrix', 'inputs': {
+                'scene_prompt': ['1', 0], 'matrix_json': self.nodes.DEFAULT_MATRIX_JSON,
+            }},
+            '3': {'class_type': 'ScenePath', 'inputs': {'scene_prompt': ['2', 0], 'path_name': 'test'}},
+            '4': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['3', 0]}},
+            '5': {'class_type': 'ScenePrompterMerge', 'inputs': {'scene_prompt1': ['4', 0], 'scene_prompt2': ['1', 0]}},
+            '6': {'class_type': 'ScenePromptReverse', 'inputs': {
+                'scene_prompt': ['5', 0], 'reverse_scope': self.nodes.REVERSE_SCOPE_ALL,
+            }},
+            '7': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['1', 0], 'seed_base': 13}},
+            '8': {'class_type': 'ScenePromptDelete', 'inputs': {
+                'scene_prompt': ['6', 0], 'negative': ['7', 0], 'positive': ['7', 1],
+            }},
+            '9': {'class_type': 'ScenePromptCounter', 'inputs': {'scene_prompt': ['8', 0], 'count': 2}},
+            '10': {'class_type': 'SceneEmptyLatent', 'inputs': {
+                'scene_prompt': ['9', 0], 'width': 16, 'height': 16, 'batch_size': 1,
+            }},
+            '11': {'class_type': 'SceneApplyModel', 'inputs': {
+                'scene_prompt': ['10', 0], 'model': ['unresolved-model', 0],
+                'clip': ['unresolved-clip', 0], 'vae': ['unresolved-vae', 0],
+            }},
+            '12': {'class_type': 'SceneApplyLora', 'inputs': {
+                'scene_prompt': ['11', 0], 'lora_name': 'style/example.safetensors',
+                'strength_model': 1.0, 'strength_clip': 1.0,
+            }},
+            '13': {'class_type': 'ScenePromptCallbackDiscord', 'inputs': {
+                'webhook_url': 'https://example.com/webhook', 'text': 'sample',
+            }},
+            '14': {'class_type': 'ScenePromptCallback', 'inputs': {
+                'scene_prompt': ['12', 0], 'callback': ['13', 0],
+            }},
+            '15': {'class_type': 'ScenePromptCallbackRequest', 'inputs': {
+                'method': 'GET', 'url': 'https://example.com/callback', 'text': '',
+            }},
+            '16': {'class_type': 'ScenePromptCallback', 'inputs': {
+                'scene_prompt': ['14', 0], 'callback': ['15', 0],
+            }},
+            '17': {'class_type': 'ScenePromptCallbackDesktop', 'inputs': {'title': 'sample', 'text': 'sample'}},
+            '18': {'class_type': 'ScenePromptCallback', 'inputs': {
+                'scene_prompt': ['16', 0], 'callback': ['17', 0],
+            }},
+            '19': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['18', 0]}},
+        }
+        reached = {node['class_type'] for node in api.values()}
+        self.assertEqual(reached - {'ScenePrompterExpand', 'ScenePromptToText', 'SceneApplyModel'},
+                         set(self.presets.SAFE_NODE_CLASSES) - {'ScenePresetReference'})
+        scene_nodes, source = self.presets._scene_nodes_for_expand(api, '19')
+        self.assertEqual(set(scene_nodes), set(api) - {'19'})
+        self.assertEqual(source, ['18', 0])
+        handle = self.runs.create_run_context('default')
+        with self.subTest('prepare'):
+            result = self.presets.snapshot_presets_for_run(handle, {'output': api}, '19')
+        self.assertEqual(result['total_images'], 2)
+        self.assertEqual(result['total_batches'], 2)
 
 
 if __name__ == '__main__':

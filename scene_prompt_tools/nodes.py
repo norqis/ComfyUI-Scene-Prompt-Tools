@@ -697,7 +697,8 @@ def _text_replay_items(prompt, save_id, scene_info):
         if plan is None:
             raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
         inputs = node.get("inputs", {})
-        item = _scene_prompt_item_for_index(None, inputs.get("current_index", 0), normalized=plan, strict=True)
+        requested_index = inputs.get("current_index", 0)
+        item = _text_item_for_index(plan, requested_index)
         seed_base = int(inputs.get("seed_base") or 0)
         literal = _scene_bool(inputs.get("seed_base_literal", False))
         if not literal and seed_base <= 0:
@@ -706,7 +707,7 @@ def _text_replay_items(prompt, save_id, scene_info):
         result[node_id] = {
             "_plan_ref": plan, "row_index": item["row_index"], "repeat_index": item["repeat_index"],
             "source_node_ids": item["row"].get("source_node_ids", []),
-            "seed": (base_seed + item["global_index"]) % SEED_MODULO,
+            "seed": (base_seed + requested_index) % SEED_MODULO,
         }
         if "event_ref" in item:
             result[node_id]["_event_ref"] = item["event_ref"]
@@ -1352,6 +1353,14 @@ def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, s
                 "停止後の状態が残っている場合は、ワークフローを再実行してください。"
             ) from None
         return {"row": {}, "count": 0, "total_batches": 0, "total_images": 0}
+
+
+def _text_item_for_index(plan, requested_index):
+    if type(requested_index) is not int or requested_index < 0:
+        raise ValueError("Scene Prompt To Text の生成番号が不正です。")
+    total = plan["stats"]["total_batches"]
+    selected_index = requested_index % total if total else requested_index
+    return _scene_prompt_item_for_index(None, selected_index, normalized=plan, strict=True)
 
 
 def _safe_path_part(value, default_name="untitled"):
@@ -2091,7 +2100,6 @@ class ScenePromptToText:
                 "current_index": ("INT", {"default": 0, "min": 0, "max": MAX_SAFE_INTEGER, "hidden": True}),
                 "seed_base": ("INT", {"default": 0, "min": 0, "max": SEED_MAX, "hidden": True}),
                 "seed_base_literal": ("BOOLEAN", {"default": False, "hidden": True}),
-                "model_mode": (MODEL_MODE_CHOICES, {"default": MODEL_MODE_ILLUSTRIOUS, "display_name": "モデル種別", "label": "モデル種別"}),
             },
             "hidden": {
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
@@ -2100,35 +2108,29 @@ class ScenePromptToText:
         }
 
     @classmethod
-    def IS_CHANGED(cls, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", model_mode=MODEL_MODE_ILLUSTRIOUS, **kwargs):
+    def IS_CHANGED(cls, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", model_mode=None, **kwargs):
         return "|".join([_scene_prompt_change_key(scene_prompt), scope, str(current_index),
-                         _seed_change_key(seed_base), str(_scene_bool(seed_base_literal)), str(run_handle),
-                         _normalize_model_mode(model_mode)])
+                         _seed_change_key(seed_base), str(_scene_bool(seed_base_literal)), str(run_handle)])
 
-    def to_text(self, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", unique_id=None, model_mode=MODEL_MODE_ILLUSTRIOUS):
+    def to_text(self, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", unique_id=None, model_mode=None):
         if scope not in TEXT_SCOPE_CHOICES:
             raise ValueError("Scene Prompt To Text の対象が不正です。")
-        model_mode = _normalize_model_mode(model_mode)
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
-        item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
+        item = _text_item_for_index(plan, current_index)
         row = item["row"]
         positive, negative = row.get("positive_parts", []), row.get("negative_parts", [])
-        loras = row.get("loras", [])
         trace = row.get("prompt_trace")
         if scope == TEXT_SCOPE_PREVIOUS and isinstance(trace, dict):
             if trace["kind"] == "passthrough":
                 positive, negative = [], []
-                loras = []
             elif trace["kind"] == "delta":
                 if trace["lora_index"] is not None:
                     positive, negative = [], []
-                    loras = [loras[trace["lora_index"]]]
                 else:
                     positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
-                    loras = []
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
-        seed = (base_seed + item["global_index"]) % SEED_MODULO
-        positive, negative = _resolve_prompt_parts(positive, negative, loras, model_mode, seed)
+        seed = (base_seed + current_index) % SEED_MODULO
+        positive, negative = _resolve_prompt_parts(positive, negative, (), None, seed)
         return _join_unique(positive, ", "), _join_unique(negative, ", ")
 
 

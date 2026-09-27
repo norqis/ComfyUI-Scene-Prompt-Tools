@@ -59,9 +59,8 @@ const toTextWidgets = [
     { name: "seed_base" },
 ];
 context.hideSceneUtilityWidgets({ widgets: toTextWidgets }, "ScenePromptToText");
-assert.deepEqual(toTextWidgets.map((widget) => widget.hidden), [false, false, true, true],
-    "To Text shows its model selector alongside scope while keeping runtime values hidden");
-assert.equal(toTextWidgets[1].value, "Illustrious", "showing the selector preserves its legacy default");
+assert.deepEqual(toTextWidgets.map((widget) => widget.hidden), [false, true, true, true],
+    "To Text shows only scope and hides a legacy model selector");
 
 const expandWidgets = [
     { name: "timestamp_dir" },

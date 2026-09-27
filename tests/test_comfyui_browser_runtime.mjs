@@ -463,6 +463,51 @@ window.__sceneSeedRuntimeTest = {
         assert.equal(result.linked, true);
     }
     console.log("real ComfyUI model widgets and linked old/current model mode round trips passed");
+    const toTextMigration = await page.evaluate(async () => {
+        const app = window.app;
+        app.graph.clear();
+        const text = window.LiteGraph.createNode("ScenePromptToText");
+        const scene = window.LiteGraph.createNode("ScenePrompter");
+        const primitive = window.LiteGraph.createNode("PrimitiveNode");
+        app.graph.add(text);
+        app.graph.add(scene);
+        app.graph.add(primitive);
+        scene.connect(0, text, text.inputs.findIndex((input) => input.name === "scene_prompt"));
+        const workflow = app.graph.serialize();
+        const saved = workflow.nodes.find((node) => String(node.id) === String(text.id));
+        saved.widgets_values = ["直前のノードのみ", 7, 12345, true, "Anima"];
+        saved.widgets_values_named = { model_mode: "Anima" };
+        const slot = saved.inputs.length;
+        const linkId = workflow.last_link_id + 1;
+        saved.inputs.push({ name: "model_mode", type: "COMBO", link: linkId, widget: { name: "model_mode" } });
+        workflow.links.push([linkId, primitive.id, 0, text.id, slot, "COMBO"]);
+        workflow.last_link_id = linkId;
+        const savedPrimitive = workflow.nodes.find((node) => String(node.id) === String(primitive.id));
+        savedPrimitive.outputs[0] = { ...savedPrimitive.outputs[0], type: "COMBO", links: [linkId] };
+        await app.loadGraphData(workflow, true, true);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const restored = app.graph.getNodeById(text.id);
+        const first = app.graph.serialize().nodes.find((node) => String(node.id) === String(text.id));
+        const api = await app.graphToPrompt();
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const second = app.graph.getNodeById(text.id);
+        return {
+            first: first.widgets_values,
+            second: app.graph.serialize().nodes.find((node) => String(node.id) === String(text.id)).widgets_values,
+            inputs: restored.inputs.map((input) => input.name),
+            secondInputs: second.inputs.map((input) => input.name),
+            visible: second.widgets.filter((widget) => !widget.hidden).map((widget) => widget.name),
+            apiInputs: api.output[String(text.id)]?.inputs,
+        };
+    });
+    assert.deepEqual(toTextMigration.first, ["直前のノードのみ", 7, 12345, true]);
+    assert.deepEqual(toTextMigration.second, toTextMigration.first);
+    assert.deepEqual(toTextMigration.inputs, ["scene_prompt", "scope", "current_index", "seed_base", "seed_base_literal"]);
+    assert.deepEqual(toTextMigration.secondInputs, toTextMigration.inputs);
+    assert.deepEqual(toTextMigration.visible, ["scope"]);
+    assert.equal(toTextMigration.apiInputs?.model_mode, undefined);
+    console.log("real ComfyUI legacy To Text model input and widget migration passed");
     const linkedTimeoutResults = await page.evaluate(async () => {
         const app = window.app;
         const results = [];
@@ -802,7 +847,7 @@ window.__sceneSeedRuntimeTest = {
         return { textId: text.id, expandId: expand.id, deleteId: deletion.id, visible: text.widgets.filter(widget => !widget.hidden).map(widget => widget.name), deleteVisible: deletion.widgets.filter(widget => !widget.hidden).map(widget => widget.name), samplerId: sampler.id, seedIndex: sampler.widgets.findIndex((widget) => widget.name === "seed") };
     });
     assert.equal(seedRequests.length, 5, "two normal submissions and three batch submissions reach the API");
-    assert.deepEqual(seedNodes.visible, ["scope", "model_mode"]);
+    assert.deepEqual(seedNodes.visible, ["scope"]);
     assert.deepEqual(seedNodes.deleteVisible, ["positive", "negative"]);
     for (const [index, request] of seedRequests.entries()) {
         const text = request.prompt[String(seedNodes.textId)];

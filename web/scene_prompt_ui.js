@@ -3995,7 +3995,7 @@ function hideNonSceneRoleWidgets(node) {
 
 function hideSceneUtilityWidgets(node, nodeName) {
     const visibleWidgets = SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeName)
-        ? new Set(["scope", "model_mode"])
+        ? new Set(["scope"])
         : SCENE_PROMPT_DELETE_NODE_NAMES.has(nodeName)
             ? new Set(["positive", "negative"])
         : SCENE_SAVE_IMAGE_NODE_NAMES.has(nodeName)
@@ -4116,6 +4116,17 @@ function syncInputLinkTargetSlots(node) {
         link.target_id = node.id;
         link.target_slot = index;
     });
+}
+
+function removeLegacyToTextModelInput(node) {
+    const index = node.inputs?.findIndex((input) => input.name === "model_mode") ?? -1;
+    if (index < 0) return;
+    if (typeof node.removeInput === "function") {
+        node.removeInput(index);
+    } else {
+        node.inputs.splice(index, 1);
+    }
+    syncInputLinkTargetSlots(node);
 }
 
 function moveScenePromptInputFirst(node) {
@@ -11723,6 +11734,9 @@ function attachSceneUtilityNode(node, nodeName) {
     injectStyle();
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
+    if (SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeName)) {
+        removeLegacyToTextModelInput(node);
+    }
     if (isSceneExpandNodeName(nodeName)) {
         const timeoutInput = node.inputs?.findIndex((input) => input.name === "callback_timeout_seconds");
         if (timeoutInput >= 0) {
@@ -12269,6 +12283,19 @@ app.registerExtension({
             nodeType.prototype.configure = function (...args) {
                 args[0] = sceneExpandConfigureValues(args[0]);
                 return configure?.apply(this, args);
+            };
+        }
+
+        if (SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeData.name)) {
+            const configure = nodeType.prototype.configure;
+            nodeType.prototype.configure = function (...args) {
+                const config = args[0];
+                if (Array.isArray(config?.widgets_values) && config.widgets_values.length > 4) {
+                    args[0] = { ...config, widgets_values: config.widgets_values.slice(0, 4) };
+                }
+                const result = configure?.apply(this, args);
+                removeLegacyToTextModelInput(this);
+                return result;
             };
         }
 

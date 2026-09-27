@@ -83,7 +83,7 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         positive = [self.nodes.ScenePromptToText().to_text(scene_prompt=plan, current_index=index,
                     seed_base=1, seed_base_literal=True)[0] for index in range(4)]
         self.assertIn("alpha", positive[0])
-        self.assertIn("lora-tag", positive[0])
+        self.assertNotIn("lora-tag", positive[0])
         self.assertEqual(positive[1], "beta")
         self.assertEqual(positive[2], positive[0])
 
