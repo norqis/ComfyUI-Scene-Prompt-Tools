@@ -1,4 +1,5 @@
 import unittest
+import copy
 import json
 import subprocess
 import sys
@@ -198,6 +199,41 @@ class LazyScheduleTests(unittest.TestCase):
         cyclic["units"][0]["unit"]["inputs"][0] = cyclic
         with self.assertRaises(ScenePlanError):
             normalize_plan(cyclic)
+
+    def test_consistently_fingerprinted_malformed_lazy_payloads_are_rejected(self):
+        from scene_prompt_tools.schedule import ScheduleUnit, _plan
+        base = queue([branch("a"), branch("b")], order_mode="alternate")
+        matrix_rows = [{**empty_row(), "name": "x", "enabled": True}]
+        matrix = matrix_product(base, matrix_rows, True)
+        malformed_matrix = {**matrix["units"][0], "matrix_rows": copy.deepcopy(matrix["units"][0]["matrix_rows"])}
+        malformed_matrix["matrix_rows"][0]["positive_parts"] = "not a list"
+        forged_matrix = _plan([ScheduleUnit(malformed_matrix)], boundary=True)
+        with self.assertRaises(ScenePlanError):
+            normalize_plan(json.loads(json.dumps(forged_matrix)))
+
+        mapped = transform(base, operation={"kind": "prompt_add", "payload": ["tail", [], [], False]})
+        malformed_map = {**mapped["units"][0], "operations": copy.deepcopy(mapped["units"][0]["operations"])}
+        malformed_map["operations"] = [{"kind": "callback", "payload": ["cb", {}, "never", 10, "続行"]}]
+        forged_map = _plan([ScheduleUnit(malformed_map)], boundary=True)
+        with self.assertRaises(ScenePlanError):
+            normalize_plan(json.loads(json.dumps(forged_map)))
+        malformed_map["operations"][0]["payload"] = ["cb", {}, "毎回", 10, "ignore"]
+        forged_map = _plan([ScheduleUnit(malformed_map)], boundary=True)
+        with self.assertRaises(ScenePlanError):
+            normalize_plan(json.loads(json.dumps(forged_map)))
+
+    def test_lazy_matrix_and_operation_copy_caller_payload(self):
+        base = queue([branch("a"), branch("b")], order_mode="alternate")
+        rows = [{**empty_row(), "name": "x", "enabled": True, "positive_parts": ["matrix-word"]}]
+        matrix = matrix_product(base, rows, True)
+        rows[0]["positive_parts"][0] = "mutated"
+        self.assertEqual(item_for_index(matrix, 0)["row"]["positive_parts"], ["a", "matrix-word"])
+
+        payload = ["tail", ["original"], [], False]
+        plan = transform(base, operation={"kind": "prompt_add", "payload": payload})
+        payload[1][0] = "mutated"
+        self.assertIn("original", item_for_index(plan, 0)["row"]["positive_parts"])
+        self.assertNotIn("mutated", item_for_index(plan, 0)["row"]["positive_parts"])
 
     def test_small_alternating_schedules_match_eager_reference(self):
         for a_count in range(4):

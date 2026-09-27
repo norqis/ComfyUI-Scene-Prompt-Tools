@@ -97,6 +97,10 @@ def _fingerprint(value):
 
 
 def _unit(kind, **values):
+    if kind == "matrix_map":
+        values["matrix_rows"] = _clone_matrix_rows(values["matrix_rows"])
+    elif kind == "map":
+        values["operations"] = [_clone_operation(operation) for operation in values["operations"]]
     data = {"kind": kind, **values}
     data["stats"] = _unit_stats(data)
     return ScheduleUnit(data)
@@ -230,14 +234,14 @@ def _validate_unit(value, depth, ancestors):
         data["left"] = _validate_plan(data["left"], depth + 1, ancestors)
         data["right"] = _validate_plan(data["right"], depth + 1, ancestors)
     elif kind == "matrix_map":
-        if not isinstance(data["matrix_rows"], list):
-            raise ScenePlanError("Scene Matrix rows must be a list.")
+        data["matrix_rows"] = _clone_matrix_rows(data["matrix_rows"])
         data["unit"] = _validate_unit(data["unit"], depth + 1, ancestors)
     elif kind == "map":
         if not isinstance(data["operations"], list) or any(not isinstance(op, dict) or set(op) != {"kind", "payload"} for op in data["operations"]):
             raise ScenePlanError("Scene Prompt map operations are invalid.")
         for operation in data["operations"]:
             _validate_operation(operation)
+        data["operations"] = [_clone_operation(operation) for operation in data["operations"]]
         data["unit"] = _validate_unit(data["unit"], depth + 1, ancestors)
     else:
         data["unit"] = _validate_unit(data["unit"], depth + 1, ancestors)
@@ -253,6 +257,26 @@ def _validate_stats(value):
         raise ScenePlanError("Scene Prompt schedule statistics are invalid.")
     for key in STATS_KEYS:
         _safe(value[key], f"Scene Prompt {key}")
+
+
+def _clone_matrix_rows(value):
+    if not isinstance(value, list):
+        raise ScenePlanError("Scene Matrix rows must be a list.")
+    result = []
+    needed = _old.ROW_KEYS - {"source_node_ids", "source_node_names", "callbacks"}
+    for row in value:
+        if not isinstance(row, dict) or type(row.get("enabled")) is not bool or row["enabled"] is not True:
+            raise ScenePlanError("Scene Matrix schedule row must be an enabled object.")
+        _old._require_string(row.get("name"), "Scene Matrix row name", allow_empty=False)
+        if not needed.issubset(row):
+            raise ScenePlanError("Scene Matrix schedule row has missing prompt fields.")
+        candidate = {key: row[key] for key in _old.ROW_KEYS if key in row}
+        candidate["source_node_ids"] = []
+        candidate["source_node_names"] = {}
+        candidate["callbacks"] = []
+        _old._clone_row(candidate)
+        result.append(copy.deepcopy(row))
+    return result
 
 
 def normalize_plan(value):
@@ -300,10 +324,15 @@ def _validate_operation(operation):
     else:
         valid = (isinstance(payload, (list, tuple)) and len(payload) == 5
                  and isinstance(payload[0], str) and isinstance(payload[1], dict)
-                 and isinstance(payload[2], str) and type(payload[3]) is int
-                 and payload[3] >= 1 and isinstance(payload[4], str))
+                 and payload[2] in {"初回", "毎回"} and type(payload[3]) is int
+                 and payload[3] >= 1 and payload[4] in {"続行", "停止"})
     if not valid:
         raise ScenePlanError("Scene Prompt map operation payload is invalid.")
+
+
+def _clone_operation(operation):
+    _validate_operation(operation)
+    return {"kind": operation["kind"], "payload": copy.deepcopy(operation["payload"])}
 
 
 def _map_unit(unit, operation):
@@ -459,7 +488,9 @@ def append_callback(plan, callback_node_id, config, frequency, timeout_seconds, 
     if not isinstance(config, dict):
         raise ScenePlanError("Scene Prompt callback config must be an object.")
     timeout = _old._require_int(timeout_seconds, "Scene Prompt callback timeout_seconds", 1)
-    source = _map_plan(plan, {"kind": "callback", "payload": (node_id, copy.deepcopy(config), frequency, timeout, failure_mode)})
+    frequency = {"first": "初回", "every": "毎回"}.get(frequency, frequency)
+    failure_mode = {"continue": "続行", "stop": "停止"}.get(failure_mode, failure_mode)
+    source = _map_plan(plan, {"kind": "callback", "payload": (node_id, config, frequency, timeout, failure_mode)})
     return mark_prompt_passthrough(source)
 
 
