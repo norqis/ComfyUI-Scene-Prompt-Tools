@@ -5169,7 +5169,8 @@ async function openSceneLoraPicker(node) {
             }
             void work();
         }, { root: list });
-        for (const item of shown) {
+        for (const catalogItem of shown) {
+            const item = { ...catalogItem };
             const display = sceneLoraDisplay(item);
             const row = document.createElement("button");
             row.type = "button";
