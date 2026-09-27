@@ -158,6 +158,8 @@ Connect MODEL, CLIP, and VAE from a checkpoint loader to **Scene Apply Model**. 
 
 **LoRAを選択** opens a searchable list. Visible rows load the actual Civitai model title by file hash in the background and cache it for that file version; unresolved or unavailable titles show an explicit status rather than a filename presented as a title. Search matches paths and titles already retrieved. The node does not show a separate path/name summary; **詳細確認** shows the selected LoRA's Civitai page and Trigger Words. **注入** adds a Trigger Word to **positiveテキスト** once. **ポジティブ候補** and **ネガティブ候補** add selected prompt candidates beside the corresponding text fields. LoRA text and candidates apply only when its model type matches the selected Expand or To Text model type.
 
+On **Scene Prompt Expand**, click **生成情報** above **連続生成** to inspect the resources connected to that Expand's Scene paths, including saved Presets. The read-only dialog lists each model file once: either a checkpoint or a separately loaded diffusion model, plus its CLIP and VAE files. It also groups repeated LoRA files and shows each distinct model type and MODEL/CLIP strength combination. The dialog describes the connected paths as they are now; it does not show a particular generation, prompt, or seed. **Civitaiを確認** looks up links for the model's main file (checkpoint or diffusion model) and LoRA files when requested. A separately loaded CLIP or VAE has no Civitai lookup in this dialog.
+
 ## Callbacks
 
 Use a callback to notify another service for a Scene batch. A configuration node creates a `callback` value; **Scene Prompt Callback** decides when it runs and passes `scene_prompt` through unchanged.

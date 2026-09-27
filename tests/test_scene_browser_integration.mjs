@@ -99,6 +99,7 @@ window.__releaseFavoriteSave = () => releaseFavoriteSave?.();
 let releaseDelayedItems = null;
 let releaseDelayedLoraInfo = null;
 let releaseDelayedLoraList = null;
+let releaseDelayedModelHash = null;
 const baseItem = {
   id: "summer",
   label: "Summer",
@@ -134,6 +135,7 @@ const loraCatalog = [
   { path: "folder/other.safetensors", title: "Other Local", source: "local", size: 200, mtime_ns: 2 },
 ];
 window.__sceneLoraCatalog = loraCatalog;
+window.__sceneResourceResponse = null;
 const savedPrompt = { id: "browser-set", name: "Browser Set", description: "", items: [baseItem] };
 export const api = {
   clientId: "browser-client",
@@ -176,6 +178,11 @@ export const api = {
       await new Promise((resolveDelay) => { releaseDelayedLoraInfo = resolveDelay; });
       releaseDelayedLoraInfo = null;
     }
+    if (url.startsWith("/scene_prompt/models/hash?") && window.__delayNextSceneModelHash) {
+      window.__delayNextSceneModelHash = false;
+      await new Promise((resolveDelay) => { releaseDelayedModelHash = resolveDelay; });
+      releaseDelayedModelHash = null;
+    }
     if (url.includes("/scene_prompt/items") && options.method !== "POST" && window.__delayNextScenePromptItems) {
       window.__delayNextScenePromptItems = false;
       await new Promise((resolveDelay) => { releaseDelayedItems = resolveDelay; });
@@ -190,6 +197,8 @@ export const api = {
       size: loraCatalog.find((item) => url.includes(encodeURIComponent(item.path)))?.size,
       mtime_ns: window.__sceneLoraInfoVersionOverride ?? loraCatalog.find((item) => url.includes(encodeURIComponent(item.path)))?.mtime_ns,
     };
+    if (url === "/scene_prompt/expand/resources" && window.__sceneResourceResponse) payload = window.__sceneResourceResponse;
+    if (url.startsWith("/scene_prompt/models/hash?")) payload = { sha256: "B".repeat(64), size: 100, mtime_ns: 1 };
     if (url === "/scene_prompt/items" && options.method === "POST") {
       const request = JSON.parse(options.body || "{}");
       if (request.name === "Failure") {
@@ -228,6 +237,8 @@ window.__releaseSceneLoraInfo = () => releaseDelayedLoraInfo?.();
 window.__sceneLoraInfoDelayed = () => !!releaseDelayedLoraInfo;
 window.__releaseSceneLoraList = () => releaseDelayedLoraList?.();
 window.__sceneLoraListDelayed = () => !!releaseDelayedLoraList;
+window.__releaseSceneModelHash = () => releaseDelayedModelHash?.();
+window.__sceneModelHashDelayed = () => !!releaseDelayedModelHash;
 `;
 const customScriptsAutocompleteModule = `
 const upstreamStyle = document.createElement("style");
@@ -329,6 +340,8 @@ const server = http.createServer(async (request, response) => {
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset,\n`
+                + `  ensureSceneExpandControls,\n`
+                + `  installSceneNodeRemovalCleanup,\n`
                 + `  pendingDesktopNotifications() { return sceneDesktopNotificationRequests.size; },\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
                 + `};\n`;
@@ -1876,6 +1889,7 @@ try {
         expand.configure({ widgets_values: [15, "saved-run", 41, true, "", false, false, 10, "続行", false] });
         expand.onNodeCreated();
         zeroReplayExpand.onNodeCreated();
+        window.__sceneResourceExpand = expand;
         window.app.graph._nodes.push(callback, request, desktop, expand, zeroReplayExpand);
         callback.title = "Before Matrix";
         window.__scenePromptPopupTestHooks.syncAllScenePromptNames();
@@ -2271,6 +2285,127 @@ try {
     const releases = await releaseCalls(closingPage);
     assert.equal(releases.length, 0, "pagehide preserves an accepted ordinary run for queued generation");
     await closingPage.close();
+    await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ id: 23, modelId: 12, model: { name: "Base Model" } }),
+    }));
+    const resourceSetup = await page.evaluate(() => {
+        const node = {
+            id: 230, type: "ScenePrompterExpand", title: "ScenePrompterExpand", graph: window.app.graph,
+            size: [300, 180], inputs: [], outputs: [],
+            widgets: [{ name: "model_mode", type: "combo", value: "Anima", options: {} }],
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options };
+                this.widgets.push(widget);
+                return widget;
+            },
+            addCustomWidget(widget) { this.widgets.push(widget); return widget; },
+            serialize() { return { widgets_values: this.widgets.filter((widget) => widget.serialize !== false).map((widget) => widget.value) }; },
+            setDirtyCanvas() {},
+        };
+        window.__sceneResourceExpand = node;
+        const before = node.serialize().widgets_values.slice(0, 11);
+        window.__scenePromptPopupTestHooks.ensureSceneExpandControls(node);
+        window.__scenePromptPopupTestHooks.ensureSceneExpandControls(node);
+        window.__sceneResourceResponse = {
+            model_mode: "Anima",
+            models: [
+                { kind: "diffusion_model", name: "anima.safetensors", roles: ["model"], source_class: "UNETLoader" },
+                { kind: "clip", name: "text-encoder.safetensors", roles: ["clip"], source_class: "CLIPLoader" },
+                { kind: "vae", name: "vae.safetensors", roles: ["vae"], source_class: "VAELoader" },
+            ],
+            loras: [{ name: "style.safetensors", variants: [
+                { model_mode: "Anima", strength_model: 0.8, strength_clip: 0.6, roles: ["model", "clip"], applies: true },
+                { model_mode: "Illustrious", strength_model: 1, strength_clip: 1, roles: ["model", "clip"], applies: false },
+            ] }],
+        };
+        window.__originalResourceGraphToPrompt = window.app.graphToPrompt;
+        window.app.graphToPrompt = async () => ({ output: { [node.id]: { class_type: "ScenePrompterExpand", inputs: {} } } });
+        return {
+            order: node.widgets.filter((widget) => ["expand_resources", "expand_run_all"].includes(widget.sceneRole)).map((widget) => widget.sceneRole),
+            counts: ["expand_resources", "expand_run_all"].map((role) => node.widgets.filter((widget) => widget.sceneRole === role).length),
+            serialized: node.serialize().widgets_values.slice(0, 11), before,
+            infoSerialize: node.widgets.find((widget) => widget.sceneRole === "expand_resources").serialize,
+        };
+    });
+    assert.deepEqual(resourceSetup.order, ["expand_resources", "expand_run_all"], "generation info stays directly above continuous generation");
+    assert.deepEqual(resourceSetup.counts, [1, 1], "hot reload does not duplicate Expand buttons");
+    assert.deepEqual(resourceSetup.serialized, resourceSetup.before, "the new button does not shift legacy saved settings");
+    assert.equal(resourceSetup.infoSerialize, false, "generation info is not serialized");
+    await page.evaluate(() => window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback());
+    const resources = page.getByRole("dialog", { name: "生成情報" });
+    await resources.getByText("Expand のモデル: Anima").waitFor();
+    assert.equal(await resources.getByText("拡散モデル: anima.safetensors").count(), 1);
+    assert.equal(await resources.getByText("CLIP: text-encoder.safetensors").count(), 1);
+    assert.equal(await resources.getByText("VAE: vae.safetensors").count(), 1);
+    assert.equal(await resources.getByText("style.safetensors", { exact: true }).count(), 1, "one LoRA card groups strength and mode variants");
+    assert.equal(await resources.getByText(/モデル種別が異なるため適用外/u).count(), 1);
+    const loraCard = resources.locator(".pc-resource-card").filter({ hasText: "style.safetensors" });
+    await loraCard.getByRole("button", { name: "Civitaiを確認" }).click();
+    await loraCard.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/models/hash?")).length), 0,
+        "opening the modal does not hash large diffusion models");
+    const modelCard = resources.locator(".pc-resource-card").filter({ hasText: "anima.safetensors" });
+    await modelCard.getByRole("button", { name: "Civitaiを確認" }).click();
+    await modelCard.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    assert.equal(await modelCard.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"), "https://civitai.com/models/12?modelVersionId=23");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/models/hash?")).length), 1);
+    await page.keyboard.press("Escape");
+    assert.equal(await resources.count(), 0);
+    await page.evaluate(() => {
+        window.__sceneResourceResponse.models = [{ kind: "checkpoint", name: "illustration.safetensors", roles: ["model", "clip", "vae"], source_class: "CheckpointLoaderSimple" }];
+        window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback();
+    });
+    const checkpointCard = resources.locator(".pc-resource-card").filter({ hasText: "illustration.safetensors" });
+    await checkpointCard.getByText("出力: model / clip / vae").waitFor();
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/models/hash?")).length), 1,
+        "checkpoint hashing also waits for its explicit confirmation");
+    await checkpointCard.getByRole("button", { name: "Civitaiを確認" }).click();
+    await checkpointCard.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/models/hash?")).length), 2);
+    assert.equal(await page.evaluate(() => {
+        const call = window.__scenePromptCalls.findLast((entry) => entry.url === "/scene_prompt/expand/resources");
+        return JSON.parse(call.options.body).expand_node_id;
+    }), "230", "resource discovery targets only the clicked Expand");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+        window.__sceneResourceResponse.model_mode = null;
+        window.__sceneResourceResponse.models = [{ kind: "diffusion_model", name: "取得不可 (#44)", unresolved: true, roles: ["model"], source_class: "UNETLoader" }];
+        window.__sceneResourceResponse.loras = [{ name: "取得不可 (#45)", unresolved: true, variants: [
+            { model_mode: null, strength_model: null, strength_clip: null, roles: ["model", "clip"], applies: null },
+            { model_mode: null, strength_model: 0.7, strength_clip: null, roles: ["model"], applies: true },
+        ] }];
+        window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback();
+    });
+    await resources.getByText("Expand のモデル: 取得不可").waitFor();
+    const unresolvedModel = resources.locator(".pc-resource-card").filter({ hasText: "取得不可 (#44)" });
+    assert.equal(await unresolvedModel.getByText("UNETLoader のファイル名は取得できません。").count(), 1);
+    assert.equal(await unresolvedModel.getByRole("button", { name: "Civitaiを確認" }).count(), 0,
+        "an unresolved linked diffusion model is not hashed as a real file");
+    const unresolvedLora = resources.locator(".pc-resource-card").filter({ hasText: "取得不可 (#45)" });
+    assert.equal(await unresolvedLora.getByText(/モデル強度 取得不可/u).count(), 1);
+    assert.equal(await unresolvedLora.getByText(/適用可否を取得不可/u).count(), 1);
+    assert.equal(await unresolvedLora.getByText(/標準LoRA \/ モデル強度 0.7 \/ 適用対象/u).count(), 1,
+        "an unknown linked filename does not erase a known standard LoRA mode");
+    assert.equal(await unresolvedLora.getByRole("button", { name: "Civitaiを確認" }).count(), 0,
+        "an unresolved linked LoRA is not mistaken for a real file");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+        window.__sceneResourceResponse.model_mode = "Anima";
+        window.__sceneResourceResponse.models = [{ kind: "checkpoint", name: "illustration.safetensors", roles: ["model", "clip", "vae"], source_class: "CheckpointLoaderSimple" }];
+        window.__scenePromptPopupTestHooks.installSceneNodeRemovalCleanup(window.__sceneResourceExpand, "ScenePrompterExpand");
+        window.__delayNextSceneModelHash = true;
+        window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback();
+    });
+    await resources.getByText("Checkpoint: illustration.safetensors").waitFor();
+    await resources.getByRole("button", { name: "Civitaiを確認" }).first().click();
+    await page.waitForFunction(() => window.__sceneModelHashDelayed());
+    await page.evaluate(() => window.__sceneResourceExpand.onRemoved());
+    assert.equal(await resources.count(), 0, "removing Expand closes its resource modal");
+    await page.evaluate(() => window.__releaseSceneModelHash());
+    await page.waitForTimeout(50);
+    assert.equal(await resources.count(), 0, "a late hash response cannot reopen a removed node's modal");
+    await page.evaluate(() => { window.app.graphToPrompt = window.__originalResourceGraphToPrompt; });
     await checkFavorites(browser, `http://127.0.0.1:${address.port}/`);
     console.log("Scene Prompt browser integration tests passed.");
 } finally {
