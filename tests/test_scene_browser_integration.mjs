@@ -2038,6 +2038,107 @@ try {
     await page.evaluate(() => window.__releaseSceneLoraInfo());
     await page.waitForFunction(() => window.__bootstrapLoraNode.sceneLoraSummary.title === "Civitai Style");
 
+    const queueControls = await page.evaluate(async () => {
+        class QueueNode {
+            constructor() {
+                this.id = 9001;
+                this.type = "ScenePrompterQueue";
+                this.comfyClass = "ScenePrompterQueue";
+                this.size = [360, 200];
+                this.graph = window.app.graph;
+                this.inputs = Array.from({ length: 10 }, (_, index) =>
+                    ({ name: `scene_prompt${index + 1}`, type: "SCENE_PROMPT", link: null }));
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                this.widgets = [
+                    { name: "order_mode", type: "combo", value: "alternate", options: {} },
+                    { name: "alternate_block_size", type: "number", value: 3, options: {} },
+                    { name: "input_repeats_json", type: "text", value: '{"scene_prompt1":3}', options: {} },
+                    { name: "downstream_count_mode", type: "combo", value: "fixed", options: {} },
+                ];
+                this.widgets_values = this.widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget);
+                return widget;
+            }
+            addCustomWidget(widget) { this.widgets.push(widget); return widget; }
+            addInput(name, type) { this.inputs.push({ name, type, link: null }); }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = size; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(QueueNode, { name: "ScenePrompterQueue" });
+        const graph = window.app.graph;
+        const previous = { id: 9002, type: "ScenePrompterQueue", inputs: [], outputs: [], graph };
+        const middle = { id: 9003, type: "ScenePrompter", inputs: [{ name: "scene_prompt", link: 90002 }], outputs: [], graph };
+        const queue = new QueueNode();
+        graph._nodes.push(previous, middle, queue);
+        graph.links = { ...(graph.links || {}), 90001: { id: 90001, origin_id: middle.id },
+            90002: { id: 90002, origin_id: previous.id } };
+        graph.getNodeById = (id) => graph._nodes.find((node) => String(node.id) === String(id));
+        queue.onNodeCreated();
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
+        queue.inputs[0].link = 90001;
+        queue.onConnectionsChange?.();
+        const locked = queue.widgets.slice(0, 4).map((widget) =>
+            ({ value: widget.value, disabled: widget.disabled, label: widget.label }));
+        queue.inputs[0].link = null;
+        queue.onConnectionsChange?.();
+        const unlocked = queue.widgets.slice(0, 4).map((widget) =>
+            ({ value: widget.value, disabled: widget.disabled }));
+        queue.widgets[0].value = "alternate";
+        queue.widgets[1].value = 2;
+        queue.widgets[2].value = '{"scene_prompt1":4}';
+        queue.widgets[3].value = "fixed";
+        queue.inputs[0].link = 90001;
+        window.__scenePromptExtension.afterConfigureGraph();
+        const reloaded = queue.widgets.slice(0, 4).map((widget) => widget.value);
+        const reference = {
+            id: 9004, type: "ScenePresetReference", graph,
+            inputs: [{ name: "scene_prompt", link: null }], outputs: [],
+            widgets: [{ name: "preset_id", value: "queue-preset" }],
+            scenePresetGraph: { api_graph: { output: {
+                1: { class_type: "ScenePresetInput", inputs: {} },
+                2: { class_type: "ScenePrompterQueue", inputs: {
+                    scene_prompt1: ["1", 0], order_mode: "alternate", alternate_block_size: 2,
+                    input_repeats_json: '{"scene_prompt1":3}', downstream_count_mode: "fixed",
+                } },
+                3: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+            } } },
+        };
+        graph._nodes.push(reference);
+        graph.links[90003] = { id: 90003, origin_id: reference.id };
+        queue.inputs[0].link = 90003;
+        window.__scenePromptExtension.afterConfigureGraph();
+        const presetLocked = queue.widgets.slice(0, 4).map((widget) =>
+            ({ value: widget.value, disabled: widget.disabled }));
+        reference.scenePresetGraph.api_graph.output[2] = {
+            class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0], prompt_name: "plain" },
+        };
+        queue.widgets.find((widget) => widget.name === "input_repeats_json").value = '{"scene_prompt1":4}';
+        window.__scenePromptExtension.afterConfigureGraph();
+        const plainPreset = queue.widgets.slice(0, 4).map((widget) =>
+            ({ value: widget.value, disabled: widget.disabled }));
+        return { locked, unlocked, reloaded, presetLocked, plainPreset };
+    });
+    assert.deepEqual(queueControls.locked.map(({ value }) => value), ["input_order", 1, "{}", "multiply"]);
+    assert.ok(queueControls.locked.every(({ disabled, label }) => disabled && label.includes("上流Queueあり")),
+        "Queue → Scene Prompt → Queue greys all four controls");
+    assert.equal(queueControls.unlocked[0].disabled, false);
+    assert.equal(queueControls.unlocked[1].disabled, true, "block size waits for alternate mode");
+    assert.equal(queueControls.unlocked[2].disabled, false);
+    assert.equal(queueControls.unlocked[3].disabled, false);
+    assert.deepEqual(queueControls.unlocked.map(({ value }) => value), ["input_order", 1, "{}", "multiply"],
+        "disconnect does not resurrect saved nondefaults");
+    assert.deepEqual(queueControls.reloaded, ["input_order", 1, "{}", "multiply"],
+        "graph reload normalizes all four saved Queue controls");
+    assert.deepEqual(queueControls.presetLocked.map(({ value }) => value), ["input_order", 1, "{}", "multiply"]);
+    assert.ok(queueControls.presetLocked.every(({ disabled }) => disabled),
+        "saved Preset-internal Queue locks all controls after rehydration");
+    assert.equal(queueControls.plainPreset[2].value, '{"scene_prompt1":4}',
+        "a Preset without an internal Queue keeps the outer per-socket repeat");
+    assert.equal(queueControls.plainPreset[2].disabled, false);
+
     customScriptsAutocompleteAvailable = false;
     const unavailablePage = await browser.newPage();
     await unavailablePage.goto(`http://127.0.0.1:${address.port}/`);

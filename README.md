@@ -112,6 +112,16 @@ Empty options are meaningful. Keep every `|` that represents a blank outcome.
 
 Repeated tags keep the spelling with the highest explicit `(tag:weight)` value; a plain tag counts as `1.0`. The winner stays at the first occurrence's position, and equal weights keep the first spelling. This applies separately to positive and negative prompts, including expanded choices. Negative tags still override positive tags regardless of weight. Only finite numeric colon weights are compared, using the outermost weight for nested forms; `(tag)`, `[tag]`, `(tag;1.4)`, and `<lora:tag:1>` remain distinct. Anima conversion runs after this selection.
 
+## Queue order and counts
+
+**Scene Prompt Queue** accepts up to ten connected Scene plans. **並び順** selects **入力順** (finish each input in socket order) or **交互** (take turns between inputs). With **交互**, **交代する件数** sets how many batches to take from one input before moving to the next; exhausted inputs are skipped. **入力ごとの回数** repeats each socket's *complete incoming plan*, so an input containing two batches with a repeat of 3 produces six batches. These controls default to input order, a block size of 1, and one repeat per input, preserving the behavior of saved workflows that lack them.
+
+**後続Count** applies to the whole configurable Queue: **乗算** (the default) lets a later Scene Prompt Count multiply its output; **固定** keeps that Queue's batches at their specified counts. Count 0 still produces no batches in either mode. A Count placed *before* Queue has already changed its incoming plan and is unaffected by this setting.
+
+For example, connect one-batch inputs A and B, then set A's repeat to 3 and B's to 2. **入力順** produces `A,A,A,B,B`; **交互** with block size 1 produces `A,B,A,B,A`, and block size 3 produces `A,A,A,B,B`. A later Count 10 leaves the five-batch sequence unchanged with **固定**. With **乗算**, it produces `A×30 → B×20` in input order, or repeats the *complete* five-batch alternating sequence ten times.
+
+If any connected input has already passed through a Queue, the receiving Queue becomes an ordered join: **all four settings are greyed out** and it preserves the incoming sequences and their Count behavior. This also applies when Scene Prompt, Reroute, or Preset Reference nodes sit between the two Queues. Disconnecting the upstream Queue makes the settings available again.
+
 ## Text Output and Tag Deletion
 
 **Scene Prompt To Text** outputs the current planned row as ordinary `positive` and `negative` strings. Choose **全てのノード** for the complete row or **直前のノードのみ** for the immediately preceding node's additions. Set **モデル種別** to include matching Scene Apply LoRA prompt text. A preceding structural node supplies its whole row; a node that only passes prompts through supplies empty strings in the latter mode. An unconnected input produces empty strings at index 0.
@@ -194,8 +204,8 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Prompt | Adds base prompts and selected prompt candidates. |
 | Scene Matrix | Creates one variation for each enabled row. |
 | Scene Prompt Merge | Creates every combination of two Scene plans. |
-| Scene Prompt Queue | Appends up to ten Scene plans in input order. |
-| Scene Prompt Count | Multiplies the generation count for each row. |
+| Scene Prompt Queue | Orders up to ten Scene plans, with optional alternating blocks, per-input repeats, and downstream Count policy. |
+| Scene Prompt Count | Repeats countable Scene batches; Count 0 suppresses every batch. |
 | Scene Prompt To Text | Outputs the current row or previous node contribution as positive/negative strings. |
 | Scene Prompt Delete | Removes exact tags from each prompt side, preserving empty choice slots. |
 | Scene Prompt Reverse | Swaps positive and negative prompts for the complete plan or only the immediately preceding Scene node. |

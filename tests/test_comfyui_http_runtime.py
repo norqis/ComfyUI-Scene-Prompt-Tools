@@ -788,6 +788,45 @@ NODE_CLASS_MAPPINGS = {
             payload["extra_data"] = extra_data
         return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
 
+    def test_queue_v7_alternating_count_modes_execute_in_final_order(self):
+        """Run real Queue -> Count -> Expand contracts in this isolated CPU server."""
+        for count_mode, expected in (
+            ("multiply", ["alpha", "beta"] * 3),
+            ("fixed", ["alpha", "beta"]),
+        ):
+            for index, prompt_text in enumerate(expected):
+                with self.subTest(count_mode=count_mode, index=index):
+                    marker = self.base / f"queue-v7-{count_mode}-{index}.json"
+                    first = {**_scene_prompt_inputs(), "positive_base": "alpha"}
+                    second = {**_scene_prompt_inputs(), "positive_base": "beta"}
+                    graph = {
+                        "1": {"class_type": "ScenePrompter", "inputs": first},
+                        "2": {"class_type": "ScenePrompter", "inputs": second},
+                        "3": {"class_type": "ScenePrompterQueue", "inputs": {
+                            "scene_prompt1": ["1", 0], "scene_prompt2": ["2", 0],
+                            "order_mode": "alternate", "alternate_block_size": 1,
+                            "input_repeats_json": "{}", "downstream_count_mode": count_mode,
+                        }},
+                        "4": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["3", 0], "count": 3}},
+                        "5": {"class_type": "ScenePrompterExpand", "inputs": {
+                            "scene_prompt": ["4", 0], "current_index": index, "seed_base": 1,
+                            "run_id": "", "timestamp_dir": False, "prefix": "",
+                        }},
+                        "6": {"class_type": "EmptyImage", "inputs": {
+                            "width": 16, "height": 16, "batch_size": 1, "color": 0,
+                        }},
+                        "7": {"class_type": "TestSceneTextImage", "inputs": {
+                            "image": ["6", 0], "positive": ["5", 0], "negative": ["5", 1],
+                            "log_path": str(marker),
+                        }},
+                        "8": {"class_type": "SceneSaveImage", "inputs": {
+                            "images": ["7", 0], "path": f"queue-v7-{count_mode}-{index}",
+                            "metadata_mode": "ワークフロー全体", "scene_info": ["5", 2],
+                        }},
+                    }
+                    self._queue_and_wait(graph)
+                    self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], prompt_text)
+
     def test_model_route_executes_only_the_selected_lazy_loader(self):
         marker = self.base / "selected-model-loaders.txt"
         graph = {

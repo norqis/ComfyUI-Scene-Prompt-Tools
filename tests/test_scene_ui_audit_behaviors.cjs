@@ -22,6 +22,13 @@ const previewContext = {
     emptyMatrixRow() { return {}; },
     scenePromptSourceCacheKey(node) { return node.id; },
     isSceneNodeMuted() { return false; }, isSceneNodeBypassed() { return false; },
+    isScenePresetReferenceNode() { return false; },
+    sceneQueueBoundaryInNode() { return false; },
+    sceneScheduleForNode(node) { return node; },
+    sceneSchedulePrefix(node, limit) {
+        return (node.sources || []).flatMap((source) =>
+            previewContext.scenePromptPreviewEntries(source, limit)).slice(0, limit);
+    },
     scenePromptInputSource(node) { return node.upstream || null; },
     isScenePromptNode(node) { return node.kind === "prompt"; },
     isScenePromptCallbackNode(node) { return node.kind === "callback"; },

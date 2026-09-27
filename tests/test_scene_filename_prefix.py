@@ -1757,6 +1757,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         right = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "20/30/right")
         plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=left, scene_prompt2=right)[0]
         info = {"_plan_ref": plan, "row_index": 1, "repeat_index": 1, "seed": 50, "source_node_ids": ["20/30/right", "expand"]}
+        info["_event_ref"] = self.nodes.item_for_normalized_plan(plan, 1)["event_ref"]
         preset_closed = {
             "20": {"class_type": "ScenePresetReference", "inputs": {}},
             "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
@@ -1774,11 +1775,439 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             {"current_index": 0, "seed_base": 50, "seed_base_literal": False},
         )
 
+    def test_v7_replay_uses_event_path_and_alias_aware_visible_sources(self):
+        plan = {"version": 7}
+        event_ref = (("top", 1), ("alternate", 0, 2, 1))
+        info = {
+            "_plan_ref": plan, "_event_ref": event_ref, "seed": 42,
+            "source_node_ids": ["20/30/right", "expand"],
+        }
+        full_prompt = {
+            "left": {"class_type": "ScenePrompter", "inputs": {}},
+            "right": {"class_type": "ScenePrompter", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        aliases = {"left": "20/30/left", "right": "20/30/right"}
+        with mock.patch.object(self.nodes, "replay_index_for_event", return_value=3) as rank:
+            values = self.nodes._replay_expand_values(info, full_prompt, aliases)
+        rank.assert_called_once_with(
+            plan, event_ref, {"20/30/right", "expand"},
+            {"20/30/left", "20/30/right", "expand"},
+        )
+        self.assertEqual(values, {"current_index": 3, "seed_base": 39, "seed_base_literal": False})
+        normalized = self.nodes._normalize_scene_save_info(info)
+        self.assertIs(normalized["_plan_ref"], plan)
+        self.assertIs(normalized["_event_ref"], event_ref)
+        with self.assertRaisesRegex(ValueError, "選択イベントの参照"):
+            self.nodes._replay_expand_values({**info, "_event_ref": None}, full_prompt, aliases)
+        with mock.patch.object(self.nodes, "replay_index_for_event", side_effect=self.nodes.ScenePlanError("event lost")):
+            with self.assertRaisesRegex(ValueError, "event lost"):
+                self.nodes._replay_expand_values(info, full_prompt, aliases)
+
+    def test_v7_alternate_replay_prunes_branch_added_by_map(self):
+        common = self.nodes.with_source_node(
+            self.nodes.transform(None, lambda row, _item: {**row, "positive_parts": ["A"]}), "a",
+        )
+        b1 = self.nodes.with_source_node(common, "b1")
+        b2 = self.nodes.with_source_node(common, "b2")
+        plan = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=b1, scene_prompt2=b2, order_mode="alternate",
+            alternate_block_size=2, unique_id="queue",
+        )[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=1, seed_base=100, timestamp_dir=False,
+            scene_prompt=plan, unique_id="expand",
+        )[2]
+        self.assertIn("_event_ref", info)
+        with self.assertRaisesRegex(ValueError, "選択イベントの参照"):
+            self.nodes._replay_expand_values({**info, "_event_ref": None}, {
+                "a": {"class_type": "ScenePrompter", "inputs": {}},
+            })
+        full_prompt = {
+            node_id: {"class_type": "ScenePrompter", "inputs": {}}
+            for node_id in ("a", "b1", "b2")
+        }
+        full_prompt["queue"] = {"class_type": "ScenePrompterQueue", "inputs": {}}
+        full_prompt["expand"] = {"class_type": "ScenePrompterExpand", "inputs": {}}
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, full_prompt),
+            {"current_index": 0, "seed_base": 101, "seed_base_literal": False},
+        )
+
+    def test_v7_replay_keeps_alternate_block_offset_after_pruning(self):
+        a = self.nodes.multiply_count(self.nodes.with_source_node(None, "a"), 3)
+        b = self.nodes.multiply_count(self.nodes.with_source_node(None, "b"), 3)
+        full_prompt = {
+            "a": {"class_type": "ScenePrompter", "inputs": {}},
+            "b": {"class_type": "ScenePrompter", "inputs": {}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        for block_size, original_index in ((2, 3), (3, 4)):
+            with self.subTest(block_size=block_size):
+                queued = self.nodes.ScenePromptQueue().queue(
+                    scene_prompt1=a, scene_prompt2=b, order_mode="alternate",
+                    alternate_block_size=block_size, unique_id="queue",
+                )[0]
+                info = self.nodes.ScenePromptExpand().expand(
+                    current_index=original_index, seed_base=100, timestamp_dir=False,
+                    scene_prompt=queued, unique_id="expand",
+                )[2]
+                self.assertEqual(
+                    self.nodes._replay_expand_values(info, full_prompt),
+                    {"current_index": 1, "seed_base": 99 + original_index,
+                     "seed_base_literal": False},
+                )
+
+    def test_v7_product_replay_keeps_both_selected_operands(self):
+        def source(node_id):
+            return self.nodes.with_source_node(
+                self.nodes.transform(None, lambda row, _item: {**row, "positive_parts": [node_id]}), node_id,
+            )
+
+        left = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=source("a"), scene_prompt2=source("b"),
+            order_mode="alternate", unique_id="left_queue",
+        )[0]
+        right = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=source("x"), scene_prompt2=source("y"), unique_id="right_queue",
+        )[0]
+        merged = self.nodes.ScenePromptMerge().merge(left, right, unique_id="merge")[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=3, seed_base=200, timestamp_dir=False,
+            scene_prompt=merged, unique_id="expand",
+        )[2]
+        full_prompt = {
+            node_id: {"class_type": "ScenePrompter", "inputs": {}}
+            for node_id in ("a", "b", "x", "y")
+        }
+        full_prompt.update({
+            "left_queue": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "right_queue": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "merge": {"class_type": "ScenePrompterMerge", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        })
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, full_prompt),
+            {"current_index": 0, "seed_base": 203, "seed_base_literal": False},
+        )
+
+    def test_v7_replay_preserves_explicit_sequence_repeat_cycle(self):
+        plan_module = importlib.import_module(self.nodes.__package__ + ".plan")
+        rows = []
+        for node_id in ("a", "b"):
+            row = plan_module.empty_row()
+            row["positive_parts"] = [node_id]
+            row["source_node_ids"] = [node_id]
+            rows.append({"row": row, "count": 1})
+        stream = plan_module.make_plan(rows)
+        other = self.nodes.with_source_node(None, "x")
+        queued = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=stream, scene_prompt2=other,
+            order_mode="alternate", input_repeats_json='{"scene_prompt1":3}',
+            unique_id="queue",
+        )[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=4, seed_base=100, timestamp_dir=False,
+            scene_prompt=queued, unique_id="expand",
+        )[2]
+        markers = [part[0] for part in info["_event_ref"]]
+        self.assertIn("sequence", markers)
+        self.assertIn("repeat", markers)
+        full_prompt = {
+            node_id: {"class_type": "ScenePrompter", "inputs": {}}
+            for node_id in ("a", "b", "x")
+        }
+        full_prompt["queue"] = {"class_type": "ScenePrompterQueue", "inputs": {}}
+        full_prompt["expand"] = {"class_type": "ScenePrompterExpand", "inputs": {}}
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, full_prompt),
+            {"current_index": 1, "seed_base": 103, "seed_base_literal": False},
+        )
+
+    def test_v7_replay_fixed_queue_through_locked_queue_and_count(self):
+        def source(node_id):
+            return self.nodes.with_source_node(None, node_id)
+
+        fixed = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=source("a"), scene_prompt2=source("b"),
+            order_mode="alternate", downstream_count_mode="fixed", unique_id="queue_a",
+        )[0]
+        outer = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=fixed, scene_prompt2=source("c"),
+            order_mode="alternate", downstream_count_mode="fixed", unique_id="queue_c",
+        )[0]
+        counted = self.nodes.ScenePromptCounter().count(count=2, scene_prompt=outer)[0]
+        self.assertEqual(counted["stats"]["total_batches"], 4)
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=1, seed_base=50, timestamp_dir=False,
+            scene_prompt=counted, unique_id="expand",
+        )[2]
+        full_prompt = {
+            node_id: {"class_type": "ScenePrompter", "inputs": {}}
+            for node_id in ("a", "b", "c")
+        }
+        full_prompt.update({
+            "queue_a": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "queue_c": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        })
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, full_prompt),
+            {"current_index": 0, "seed_base": 51, "seed_base_literal": False},
+        )
+
+    def test_v7_replay_expanded_preset_aliases_keep_selected_branch(self):
+        first_id, second_id = "20/30/first", "20/30/second"
+        queued = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=self.nodes.with_source_node(None, first_id),
+            scene_prompt2=self.nodes.with_source_node(None, second_id),
+            order_mode="alternate", unique_id="20/30/queue",
+        )[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=1, seed_base=400, timestamp_dir=False,
+            scene_prompt=queued, unique_id="expand",
+        )[2]
+        expanded_prompt = {
+            "first": {"class_type": "ScenePrompter", "inputs": {}},
+            "second": {"class_type": "ScenePrompter", "inputs": {}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        aliases = {"first": first_id, "second": second_id, "queue": "20/30/queue"}
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, {
+                "20": {"class_type": "ScenePresetReference", "inputs": {}},
+                "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+            }),
+            {"current_index": 1, "seed_base": 400, "seed_base_literal": False},
+        )
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, expanded_prompt, aliases),
+            {"current_index": 0, "seed_base": 401, "seed_base_literal": False},
+        )
+
+    def test_v7_replay_preserves_duplicate_socket_identity(self):
+        shared = self.nodes.with_source_node(None, "a")
+        queued = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=shared, scene_prompt2=shared,
+            order_mode="alternate", unique_id="queue",
+        )[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=1, seed_base=70, timestamp_dir=False,
+            scene_prompt=queued, unique_id="expand",
+        )[2]
+        prompt = {
+            "a": {"class_type": "ScenePrompter", "inputs": {}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {
+                "scene_prompt1": ["a", 0], "scene_prompt2": ["a", 0],
+            }},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, prompt),
+            {"current_index": 1, "seed_base": 70, "seed_base_literal": False},
+        )
+
+    def test_v7_replay_keeps_matrix_rows_from_one_retained_source(self):
+        base = self.nodes.with_source_node(None, "a")
+        matrix = self.nodes.SceneMatrix().build(
+            json.dumps({"version": 1, "sets": [_matrix_line("one"), _matrix_line("two")]}),
+            scene_prompt=base, unique_id="matrix",
+        )[0]
+        queued = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=matrix, order_mode="alternate",
+            input_repeats_json='{"scene_prompt1":3}', unique_id="queue",
+        )[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=3, seed_base=90, timestamp_dir=False,
+            scene_prompt=queued, unique_id="expand",
+        )[2]
+        prompt = {
+            "a": {"class_type": "ScenePrompter", "inputs": {}},
+            "matrix": {"class_type": "SceneMatrix", "inputs": {}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, prompt),
+            {"current_index": 3, "seed_base": 90, "seed_base_literal": False},
+        )
+
+    def test_v7_replay_prunes_earlier_input_order_top_unit(self):
+        queued = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=self.nodes.with_source_node(None, "a"),
+            scene_prompt2=self.nodes.with_source_node(None, "b"),
+            unique_id="queue",
+        )[0]
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=1, seed_base=90, timestamp_dir=False,
+            scene_prompt=queued, unique_id="expand",
+        )[2]
+        prompt = {
+            "a": {"class_type": "ScenePrompter", "inputs": {}},
+            "b": {"class_type": "ScenePrompter", "inputs": {}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, prompt),
+            {"current_index": 0, "seed_base": 91, "seed_base_literal": False},
+        )
+
+    def test_v6_replay_without_event_ref_still_rebases_flat_rows(self):
+        plan = {"version": 6, "rows": [
+            {"row": {"source_node_ids": ["a"]}, "count": 2},
+            {"row": {"source_node_ids": ["b"]}, "count": 3},
+        ]}
+        info = {"_plan_ref": plan, "row_index": 1, "repeat_index": 2,
+                "seed": 103, "source_node_ids": ["b", "expand"]}
+        prompt = {
+            "a": {"class_type": "ScenePrompter", "inputs": {}},
+            "b": {"class_type": "ScenePrompter", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        }
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, prompt),
+            {"current_index": 1, "seed_base": 102, "seed_base_literal": False},
+        )
+
+    def test_v7_replay_product_after_source_map_prunes_both_operands(self):
+        left = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=self.nodes.with_source_node(None, "a"),
+            scene_prompt2=self.nodes.with_source_node(None, "b"),
+            order_mode="alternate", unique_id="left_queue",
+        )[0]
+        right = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=self.nodes.with_source_node(None, "x"),
+            scene_prompt2=self.nodes.with_source_node(None, "y"),
+            unique_id="right_queue",
+        )[0]
+        merged = self.nodes.with_source_node(
+            self.nodes.ScenePromptMerge().merge(left, right, unique_id="merge")[0], "after",
+        )
+        info = self.nodes.ScenePromptExpand().expand(
+            current_index=3, seed_base=300, timestamp_dir=False,
+            scene_prompt=merged, unique_id="expand",
+        )[2]
+        prompt = {
+            node_id: {"class_type": "ScenePrompter", "inputs": {}}
+            for node_id in ("a", "b", "x", "y", "after")
+        }
+        prompt.update({
+            "left_queue": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "right_queue": {"class_type": "ScenePrompterQueue", "inputs": {}},
+            "merge": {"class_type": "ScenePrompterMerge", "inputs": {}},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {}},
+        })
+        self.assertEqual(
+            self.nodes._replay_expand_values(info, prompt),
+            {"current_index": 0, "seed_base": 303, "seed_base_literal": False},
+        )
+
+    def test_v7_saved_execution_path_replays_after_queue_socket_is_removed(self):
+        def branch(node_id):
+            return self.nodes.with_source_node(
+                self.nodes.transform(None, lambda row, _item: {**row, "positive_parts": [node_id]}),
+                node_id,
+            )
+
+        a, b = branch("a"), branch("b")
+        queued = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=a, scene_prompt2=b, order_mode="alternate", unique_id="queue",
+        )[0]
+        original = self.nodes.ScenePromptExpand().expand(
+            current_index=1, seed_base=100, timestamp_dir=False,
+            scene_prompt=queued, unique_id="expand",
+        )
+        prompt = {
+            "a": {"class_type": "ScenePrompter", "inputs": {}},
+            "b": {"class_type": "ScenePrompter", "inputs": {}},
+            "queue": {"class_type": "ScenePrompterQueue", "inputs": {
+                "scene_prompt1": ["a", 0], "scene_prompt2": ["b", 0],
+                "order_mode": "alternate",
+            }},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {
+                "scene_prompt": ["queue", 0], "current_index": 1, "seed_base": 100,
+                "timestamp_dir": False,
+            }},
+            "save": {"class_type": "SceneSaveImage", "inputs": {
+                "images": ["expand", 4], "scene_info": ["expand", 2],
+            }},
+        }
+        saved_prompt, _ = self.nodes._metadata_for_save_mode(
+            prompt, None, "save", self.nodes.SAVE_METADATA_EXECUTION_PATH, original[2],
+        )
+        self.assertNotIn("a", saved_prompt)
+        self.assertNotIn("scene_prompt1", saved_prompt["queue"]["inputs"])
+        self.assertEqual(saved_prompt["queue"]["inputs"]["scene_prompt2"], ["b", 0])
+        self.assertEqual(saved_prompt["expand"]["inputs"]["current_index"], 0)
+        self.assertEqual(saved_prompt["expand"]["inputs"]["seed_base"], 101)
+        replay_plan = self.nodes.ScenePromptQueue().queue(
+            scene_prompt2=b, order_mode=saved_prompt["queue"]["inputs"]["order_mode"],
+            unique_id="queue",
+        )[0]
+        replay = self.nodes.ScenePromptExpand().expand(
+            scene_prompt=replay_plan, unique_id="expand",
+            **{key: saved_prompt["expand"]["inputs"][key]
+               for key in ("current_index", "seed_base", "seed_base_literal", "timestamp_dir")},
+        )
+        self.assertEqual((replay[0], replay[3]), (original[0], original[3]))
+
+    def test_v7_saved_product_path_retains_both_selected_operands(self):
+        def branch(node_id):
+            return self.nodes.with_source_node(
+                self.nodes.transform(None, lambda row, _item: {**row, "positive_parts": [node_id]}),
+                node_id,
+            )
+
+        left = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=branch("a"), scene_prompt2=branch("b"),
+            order_mode="alternate", unique_id="left_queue",
+        )[0]
+        right = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=branch("x"), scene_prompt2=branch("y"),
+            unique_id="right_queue",
+        )[0]
+        merged = self.nodes.ScenePromptMerge().merge(left, right, unique_id="merge")[0]
+        original = self.nodes.ScenePromptExpand().expand(
+            current_index=3, seed_base=500, timestamp_dir=False,
+            scene_prompt=merged, unique_id="expand",
+        )
+        prompt = {
+            node_id: {"class_type": "ScenePrompter", "inputs": {}}
+            for node_id in ("a", "b", "x", "y")
+        }
+        prompt.update({
+            "left_queue": {"class_type": "ScenePrompterQueue", "inputs": {
+                "scene_prompt1": ["a", 0], "scene_prompt2": ["b", 0], "order_mode": "alternate",
+            }},
+            "right_queue": {"class_type": "ScenePrompterQueue", "inputs": {
+                "scene_prompt1": ["x", 0], "scene_prompt2": ["y", 0],
+            }},
+            "merge": {"class_type": "ScenePrompterMerge", "inputs": {
+                "scene_prompt1": ["left_queue", 0], "scene_prompt2": ["right_queue", 0],
+            }},
+            "expand": {"class_type": "ScenePrompterExpand", "inputs": {
+                "scene_prompt": ["merge", 0], "current_index": 3, "seed_base": 500,
+            }},
+            "save": {"class_type": "SceneSaveImage", "inputs": {
+                "images": ["expand", 4], "scene_info": ["expand", 2],
+            }},
+        })
+        saved_prompt, _ = self.nodes._metadata_for_save_mode(
+            prompt, None, "save", self.nodes.SAVE_METADATA_EXECUTION_PATH, original[2],
+        )
+        self.assertEqual(set(saved_prompt), {"b", "y", "left_queue", "right_queue", "merge", "expand", "save"})
+        self.assertEqual(saved_prompt["expand"]["inputs"]["current_index"], 0)
+        self.assertEqual(saved_prompt["expand"]["inputs"]["seed_base"], 503)
+
     def test_literal_zero_seed_replays_after_wraparound(self):
         self.assertIn("seed_base_literal", self.nodes.ScenePromptExpand.INPUT_TYPES()["optional"])
         plan = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "scene")
         info = {
             "_plan_ref": plan,
+            "_event_ref": self.nodes.item_for_normalized_plan(plan, 0)["event_ref"],
             "row_index": 0,
             "repeat_index": 1,
             "seed": 0,
@@ -1816,7 +2245,8 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             for widgets, literal_index in layouts:
                 with self.subTest(seed=seed, widgets=widgets):
                     plan = self.nodes.with_source_node(self.nodes.transform(None, lambda row, _item: row), "scene")
-                    info = {"_plan_ref": plan, "row_index": 0, "repeat_index": 1, "seed": seed,
+                    info = {"_plan_ref": plan, "_event_ref": self.nodes.item_for_normalized_plan(plan, 0)["event_ref"],
+                            "row_index": 0, "repeat_index": 1, "seed": seed,
                             "source_node_ids": ["scene", "expand"]}
                     prompt = {
                         "scene": {"class_type": "ScenePrompter", "inputs": {}},

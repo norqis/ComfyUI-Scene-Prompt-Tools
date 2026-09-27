@@ -58,6 +58,35 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_alternate_paths_keep_prompt_model_lora_and_text_selection(self):
+        empty = '{"version":1,"categories":{}}'
+        first = self.prompt.ScenePrompt().build("A", "alpha", empty, "", empty, "", 0, False,
+                                                source_node_id="a", source_node_name="A")[0]
+        first = self.nodes.SceneApplyModel().apply_model(["model-a", 0], ["clip-a", 0], ["vae-a", 0], first,
+                                                         source_node_id="model-a", source_node_name="Model A")[0]
+        first = self.nodes.SceneApplyLora().apply_lora("style/example.safetensors", scene_prompt=first,
+                                                      positive="lora-tag", source_node_id="lora-a", source_node_name="LoRA A")[0]
+        second = self.prompt.ScenePrompt().build("B", "beta", empty, "", empty, "", 0, False,
+                                                 source_node_id="b", source_node_name="B")[0]
+        plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=first, scene_prompt2=second,
+                                                   order_mode="alternate", source_node_id="queue")[0]
+        plan = self.nodes.ScenePromptCounter().count(scene_prompt=plan, count=2)[0]
+        self.assertEqual(plan["stats"]["total_batches"], 4)
+        self.assertEqual([self.nodes.item_for_normalized_plan(plan, index)["row"]["labels"][0] for index in range(4)],
+                         ["A", "B", "A", "B"])
+        rows = [self.nodes.item_for_normalized_plan(plan, index)["row"] for index in range(4)]
+        self.assertEqual([row.get("model_links", {}).get("model") for row in rows],
+                         [["model-a", 0], None, ["model-a", 0], None])
+        self.assertEqual([len(row.get("loras", [])) for row in rows], [1, 0, 1, 0])
+        self.assertNotIn("b", rows[0]["source_node_ids"])
+        self.assertNotIn("a", rows[1]["source_node_ids"])
+        positive = [self.nodes.ScenePromptToText().to_text(scene_prompt=plan, current_index=index,
+                    seed_base=1, seed_base_literal=True)[0] for index in range(4)]
+        self.assertIn("alpha", positive[0])
+        self.assertIn("lora-tag", positive[0])
+        self.assertEqual(positive[1], "beta")
+        self.assertEqual(positive[2], positive[0])
+
     def test_every_transform_node_can_start_a_plan(self):
         matrix = self.nodes.SceneMatrix().build('{"version":1,"sets":[]}')[0]
         path = self.nodes.ScenePath().apply_path("folder")[0]

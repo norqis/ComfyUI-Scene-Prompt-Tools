@@ -43,6 +43,7 @@ function presetListRaceContext(...requests) {
         scenePresetListPromise: null,
         scenePresetListLatestPromise: null,
         scenePresetListCacheCurrent: false,
+        sceneGraphNodes: () => [],
         fetchCount: 0,
         api: { fetchApi: () => {
             context.fetchCount += 1;

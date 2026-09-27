@@ -45,6 +45,7 @@ from .plan import (
     ScenePlanError,
     empty_row,
     item_for_normalized_plan,
+    replay_index_for_event,
     matrix_product,
     merge,
     multiply_count,
@@ -585,6 +586,22 @@ def _replay_expand_values(scene_info, full_prompt, source_aliases=None, retained
     if not isinstance(scene_info, dict):
         return None
     plan = scene_info.get("_plan_ref")
+    event_ref = scene_info.get("_event_ref")
+    if isinstance(plan, dict) and plan.get("version") == 7:
+        if event_ref is None:
+            raise ValueError("生成経路PNGを再現できません: 選択イベントの参照がありません。")
+        selected_sources = _scene_source_ids(scene_info) if retained_source_ids is None else retained_source_ids
+        visible_sources = _visible_scene_source_ids(full_prompt, source_aliases)
+        try:
+            new_index = replay_index_for_event(plan, event_ref, selected_sources, visible_sources)
+        except ScenePlanError as exc:
+            raise ValueError(f"生成経路PNGを再現できません: {exc}") from exc
+        seed_base = (int(scene_info.get("seed", 0)) - new_index) % SEED_MODULO
+        return {
+            "current_index": new_index,
+            "seed_base": seed_base,
+            "seed_base_literal": seed_base == 0,
+        }
     rows = plan.get("rows") if isinstance(plan, dict) else None
     if not isinstance(rows, list):
         return None
@@ -691,6 +708,8 @@ def _text_replay_items(prompt, save_id, scene_info):
             "source_node_ids": item["row"].get("source_node_ids", []),
             "seed": (base_seed + item["global_index"]) % SEED_MODULO,
         }
+        if "event_ref" in item:
+            result[node_id]["_event_ref"] = item["event_ref"]
     return result
 
 
@@ -1326,7 +1345,7 @@ def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, s
         return item_for_normalized_plan(plan, current_index)
     except IndexError:
         if strict:
-            if plan["total_batches"] == 0:
+            if plan["stats"]["total_batches"] == 0:
                 raise IndexError("生成計画に生成対象がありません。") from None
             raise IndexError(
                 f"生成番号 {current_index} は生成計画の範囲外です。"
@@ -1767,6 +1786,8 @@ def _normalize_scene_save_info(value):
     # must stay by reference here and is intentionally absent from PNG JSON.
     if isinstance(value.get("_plan_ref"), dict):
         info["_plan_ref"] = value["_plan_ref"]
+    if "_event_ref" in value:
+        info["_event_ref"] = value["_event_ref"]
     return info
 
 class SceneMatrix:
@@ -1874,10 +1895,7 @@ class ScenePath:
 
     def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, unique_id=None, source_node_id="", source_node_name=""):
         label = str(path_name or "").strip() or "Scene Path"
-        plan = transform(
-            scene_prompt,
-            lambda row, _item: {**row, "path_parts": _append_path_part(row.get("path_parts", []), label, path_mode)},
-        )
+        plan = transform(scene_prompt, operation={"kind": "path_add", "payload": [label, path_mode]})
         return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 
 
@@ -1890,7 +1908,12 @@ class ScenePromptQueue:
 
     @classmethod
     def INPUT_TYPES(cls):
-        optional = {}
+        optional = {
+            "order_mode": (("input_order", "alternate"), {"default": "input_order", "display_name": "並び順"}),
+            "alternate_block_size": ("INT", {"default": 1, "min": 1, "max": MAX_SAFE_INTEGER, "display_name": "交代する件数"}),
+            "input_repeats_json": ("STRING", {"default": "{}", "display_name": "入力の繰り返し回数", "hidden": True}),
+            "downstream_count_mode": (("multiply", "fixed"), {"default": "multiply", "display_name": "後続Count"}),
+        }
         for index, name in enumerate(SCENE_PROMPT_INPUT_NAMES, start=1):
             optional[name] = (
                 SCENE_PROMPT_TYPE,
@@ -1910,6 +1933,16 @@ class ScenePromptQueue:
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         parts = []
+        from .plan import _validate_queue_controls
+        mode, block, factors, count_mode = _validate_queue_controls(
+            kwargs.get("order_mode", "input_order"), kwargs.get("alternate_block_size", 1),
+            kwargs.get("input_repeats_json", "{}"), kwargs.get("downstream_count_mode", "multiply"),
+        )
+        locked = any(
+            isinstance(kwargs.get(name), dict) and kwargs[name].get("contains_queue_boundary") is True
+            for name in SCENE_PROMPT_INPUT_NAMES
+        )
+        parts.append(json.dumps(["input_order", 1, {}, "multiply"] if locked else [mode, block, factors, count_mode], sort_keys=True))
         for name in SCENE_PROMPT_INPUT_NAMES:
             value = kwargs.get(name)
             if isinstance(value, dict):
@@ -1917,7 +1950,14 @@ class ScenePromptQueue:
         return "|".join(parts)
 
     def queue(self, unique_id=None, source_node_id="", source_node_name="", **kwargs):
-        return (with_source_node(queue([kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES]), source_node_id or unique_id, source_node_name),)
+        result = queue(
+            [kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES],
+            order_mode=kwargs.get("order_mode", "input_order"),
+            alternate_block_size=kwargs.get("alternate_block_size", 1),
+            input_repeats_json=kwargs.get("input_repeats_json", "{}"),
+            downstream_count_mode=kwargs.get("downstream_count_mode", "multiply"),
+        )
+        return (with_source_node(result, source_node_id or unique_id, source_node_name),)
 
 
 class ScenePromptMerge:
@@ -2000,52 +2040,7 @@ class ScenePromptReverse:
         source_node_name="",
     ):
         scope = _normalize_reverse_scope(reverse_scope)
-
-        def reverse_row(row, _item):
-            input_positive = list(row.get("positive_parts", []))
-            input_negative = list(row.get("negative_parts", []))
-            loras = [dict(descriptor) for descriptor in row.get("loras", [])]
-            reverse_lora_indices = []
-            trace = row.get("prompt_trace")
-            if scope == REVERSE_SCOPE_PREVIOUS and isinstance(row.get("prompt_trace"), dict):
-                if trace.get("kind") == "passthrough":
-                    positive_parts, negative_parts = input_positive, input_negative
-                elif trace.get("kind") == "whole":
-                    positive_parts, negative_parts = input_negative, input_positive
-                    reverse_lora_indices = range(len(loras))
-                elif trace.get("lora_index") is not None:
-                    positive_parts, negative_parts = input_positive, input_negative
-                    reverse_lora_indices = [trace["lora_index"]]
-                else:
-                    positive_parts, negative_parts = _merge_positive_negative_parts(
-                        trace.get("before_positive_parts", []),
-                        trace.get("before_negative_parts", []),
-                        trace.get("added_negative_parts", []),
-                        trace.get("added_positive_parts", []),
-                    )
-            else:
-                positive_parts = input_negative
-                negative_parts = input_positive
-                reverse_lora_indices = range(len(loras))
-            for index in reverse_lora_indices:
-                loras[index]["positive_parts"], loras[index]["negative_parts"] = (
-                    loras[index]["negative_parts"], loras[index]["positive_parts"]
-                )
-            next_row = {
-                **row,
-                "positive_parts": positive_parts,
-                "negative_parts": negative_parts,
-                **({"loras": loras} if "loras" in row else {}),
-            }
-            if scope == REVERSE_SCOPE_PREVIOUS and isinstance(trace, dict) and trace.get("lora_index") is not None and trace["kind"] == "delta":
-                index = trace["lora_index"]
-                return with_prompt_trace(
-                    next_row, row, loras[index]["positive_parts"], loras[index]["negative_parts"],
-                    lora_index=index,
-                )
-            return with_prompt_trace(next_row, row, positive_parts, negative_parts, kind="whole")
-
-        plan = transform(scene_prompt, reverse_row)
+        plan = transform(scene_prompt, operation={"kind": "reverse", "payload": scope})
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 
@@ -2076,23 +2071,7 @@ class ScenePromptDelete:
         return json.dumps([_scene_prompt_change_key(scene_prompt), positive, negative], ensure_ascii=False)
 
     def delete(self, positive="", negative="", scene_prompt=None, unique_id=None, source_node_id="", source_node_name=""):
-        keys = {
-            "positive_parts": {_prompt_override_key(part) for part in _split_prompt(positive)},
-            "negative_parts": {_prompt_override_key(part) for part in _split_prompt(negative)},
-        }
-
-        def delete_row(row, _item):
-            loras = [
-                {**descriptor, **{side: _delete_prompt_parts(descriptor[side], values) for side, values in keys.items()}}
-                for descriptor in row.get("loras", [])
-            ]
-            return {
-                **row,
-                **{side: _delete_prompt_parts(row[side], values) for side, values in keys.items()},
-                **({"loras": loras} if "loras" in row else {}),
-            }
-
-        plan = mark_prompt_passthrough(transform(scene_prompt, delete_row))
+        plan = mark_prompt_passthrough(transform(scene_prompt, operation={"kind": "delete", "payload": [positive, negative]}))
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 
@@ -2274,7 +2253,7 @@ class SceneEmptyLatent:
 
     def apply_latent(self, scene_prompt=None, width=512, height=512, batch_size=1, unique_id=None, source_node_id="", source_node_name=""):
         latent = _normalize_latent_config({"width": width, "height": height, "batch_size": batch_size})
-        plan = transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)})
+        plan = transform(scene_prompt, lambda row, _item: {**row, "latent": dict(latent)}, latent=latent)
         return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 
 
@@ -2310,7 +2289,7 @@ class SceneApplyModel:
         links = {"model": model, "clip": clip, "vae": vae}
         if not all(is_link(value) for value in links.values()):
             raise ValueError("Scene Apply ModelのMODEL、CLIP、VAEをすべて接続してください。")
-        plan = transform(scene_prompt, lambda row, _item: {**row, "model_links": {key: list(value) for key, value in links.items()}})
+        plan = transform(scene_prompt, operation={"kind": "model_set", "payload": {key: list(value) for key, value in links.items()}})
         return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 
 
@@ -2361,10 +2340,7 @@ class SceneApplyLora:
             "model_mode": _normalize_model_mode(model_mode),
             "positive_parts": positive_parts, "negative_parts": negative_parts,
         }
-        plan = transform(scene_prompt, lambda row, _item: {
-            **with_prompt_trace(row, row, positive_parts, negative_parts, lora_index=len(row.get("loras", []))),
-            "loras": [*row.get("loras", []), descriptor],
-        })
+        plan = transform(scene_prompt, operation={"kind": "lora_add", "payload": descriptor})
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 
@@ -2836,6 +2812,8 @@ class ScenePromptExpand:
             "run_handle": str(run_handle or ""),
             "_plan_ref": plan,
         }
+        if "event_ref" in item:
+            save_info["_event_ref"] = item["event_ref"]
 
         model_links = row.get("model_links")
         if model_links is None:

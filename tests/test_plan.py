@@ -34,8 +34,8 @@ def prompt_row(label):
 
 
 class ScenePlanTests(unittest.TestCase):
-    def test_lora_descriptors_require_a_known_model_mode_in_version_six(self):
-        self.assertEqual(plan_module.PLAN_VERSION, 6)
+    def test_lora_descriptors_require_a_known_model_mode_in_version_seven(self):
+        self.assertEqual(plan_module.PLAN_VERSION, 7)
         descriptor = {"name": "lora", "strength_model": 1.0, "strength_clip": 1.0, "model_mode": "Anima", "positive_parts": [], "negative_parts": []}
         for mode in ("Illustrious", "Anima"):
             row = {**empty_row(), "loras": [{**descriptor, "model_mode": mode}]}
@@ -192,21 +192,19 @@ class ScenePlanTests(unittest.TestCase):
         with self.assertRaises(ScenePlanError):
             normalize_plan(broken)
 
-    def test_normalize_uses_one_running_cursor_per_row(self):
+    def test_normalize_recomputes_unit_statistics_without_flattening_batches(self):
         row_count = 2_000
         plan = dict(make_plan([{"row": prompt_row(str(index)), "count": 1} for index in range(row_count)]))
         expected = list(range(row_count))
-        with mock.patch.object(plan_module, "_build_plan", wraps=plan_module._build_plan) as build_plan:
-            normalized = normalize_plan(plan)
+        normalized = normalize_plan(plan)
         self.assertEqual([item["start_index"] for item in normalized["rows"]], expected)
-        self.assertEqual(build_plan.call_count, 1)
+        self.assertEqual(normalized["stats"]["row_count"], row_count)
 
     def test_internal_plan_skips_revalidation(self):
         plan = make_plan([{"row": prompt_row("A"), "count": 1}])
-        with mock.patch.object(plan_module, "_build_plan", wraps=plan_module._build_plan) as build_plan:
+        with mock.patch("scene_prompt_tools.schedule._validate_plan", side_effect=AssertionError("must not validate")):
             normalized = normalize_plan(plan)
         self.assertIs(normalized, plan)
-        self.assertEqual(build_plan.call_count, 0)
 
 
 if __name__ == "__main__":
