@@ -39,6 +39,7 @@ from .presets import (
 )
 from .storage import prompt_data_directory
 from .lora_metadata import list_loras, read_lora_info
+from .resource_info import connected_resources, read_model_hash
 
 
 set_run_expiration_callback(release_scene_preset_snapshot)
@@ -635,6 +636,29 @@ def define_routes():
         except FileNotFoundError as exc:
             return web.json_response({"error": str(exc)}, status=404)
         except (OSError, json.JSONDecodeError) as exc:
+            return web.json_response({"error": str(exc)}, status=422)
+
+    @PromptServer.instance.routes.post("/scene_prompt/expand/resources")
+    async def scene_prompt_expand_resources(request):
+        try:
+            body = await request.json()
+            payload = await asyncio.to_thread(
+                connected_resources, body.get("api_graph"), body.get("expand_node_id"), _request_user_id(request)
+            )
+            return web.json_response(payload)
+        except (ScenePresetError, ValueError, TypeError, AttributeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+    @PromptServer.instance.routes.get("/scene_prompt/models/hash")
+    async def scene_prompt_model_hash(request):
+        try:
+            payload = await asyncio.to_thread(read_model_hash, request.query.get("kind", ""), request.query.get("name", ""))
+            return web.json_response(payload)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except FileNotFoundError as exc:
+            return web.json_response({"error": str(exc)}, status=404)
+        except OSError as exc:
             return web.json_response({"error": str(exc)}, status=422)
 
     @PromptServer.instance.routes.get("/scene_prompt/items")
