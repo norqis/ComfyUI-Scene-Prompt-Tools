@@ -183,7 +183,7 @@ class SceneLoraPromptTests(unittest.TestCase):
         plan = self.nodes.SceneApplyLora().apply_lora("ill", positive="trigger")[0]
         for invalid in (-1, True, "0", 1):
             broken = json.loads(json.dumps(plan))
-            broken["rows"][0]["row"]["prompt_trace"]["lora_index"] = invalid
+            broken["units"][0]["row"]["prompt_trace"]["lora_index"] = invalid
             with self.subTest(invalid=invalid), self.assertRaises(self.plan.ScenePlanError):
                 self.plan.normalize_plan(broken)
 

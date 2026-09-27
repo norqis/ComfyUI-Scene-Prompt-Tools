@@ -3,7 +3,7 @@ import math
 import random
 import re
 from collections import OrderedDict
-from .plan import make_plan, normalize_plan, with_prompt_trace, with_source_node
+from .plan import normalize_plan, transform, with_prompt_trace, with_source_node
 
 
 DEFAULT_CATEGORY_ORDER = ""
@@ -420,10 +420,6 @@ def _merge_positive_negative_parts(base_positive, base_negative, added_positive,
     return positive_parts, negative_parts
 
 
-def _normalize_scene_prompt_rows(value):
-    return normalize_plan(value)["rows"]
-
-
 class _ScenePromptBase:
     CATEGORY = "Scene/prompt"
     RETURN_TYPES = (SCENE_PROMPT_TYPE,)
@@ -571,33 +567,10 @@ class _ScenePromptBase:
             int(seed or 0) ^ 0x5F3759DF,
         )
 
-        rows = []
-        for item in _normalize_scene_prompt_rows(scene_prompt):
-            row = item["row"]
-            merged_positive_parts, merged_negative_parts = _merge_positive_negative_parts(
-                row.get("positive_parts", []),
-                row.get("negative_parts", []),
-                positive_parts,
-                negative_parts,
-            )
-            output_row = {
-                **row,
-                "labels": [*row.get("labels", []), label],
-                "positive_parts": merged_positive_parts,
-                "negative_parts": merged_negative_parts,
-                "path_parts": list(row.get("path_parts", [])),
-                "filename_parts": [*row.get("filename_parts", []), *([label] if filename_enabled else [])],
-                "display_labels": list(row.get("display_labels", [])),
-                "display_label_groups": list(row.get("display_label_groups", [])),
-                "set_refs": list(row.get("set_refs", [])),
-                "source_node_ids": list(row.get("source_node_ids", [])),
-                "source_node_names": dict(row.get("source_node_names", {})),
-                "callbacks": list(row.get("callbacks", [])),
-            }
-            output_row = with_prompt_trace(output_row, row, positive_parts, negative_parts)
-            rows.append({"row": output_row, "count": item["count"]})
-
-        return (with_source_node(make_plan(rows), source_node_id or unique_id, source_node_name),)
+        plan = transform(scene_prompt, operation={
+            "kind": "prompt_add", "payload": [label, positive_parts, negative_parts, bool(filename_enabled)],
+        })
+        return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 
 class ScenePrompt(_ScenePromptBase):

@@ -1131,7 +1131,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
                 raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
         plan = (
             _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id, preset_value_memo={})
-            if source is not None else {"total_images": 1, "total_batches": 1}
+            if source is not None else seed_plan()
         )
         response = {
             "presets": [
@@ -1142,8 +1142,8 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
                 }
                 for preset_id, preset in resolved.items()
             ],
-            "total_images": int(plan.get("total_images") or 0),
-            "total_batches": int(plan.get("total_batches") or 0),
+            "total_images": int(plan["stats"]["total_images"]),
+            "total_batches": int(plan["stats"]["total_batches"]),
         }
 
         with _PRESET_LOCK:
