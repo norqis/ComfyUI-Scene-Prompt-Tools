@@ -54,6 +54,9 @@ assert.equal(prefix(ctx.sceneScheduleCount(sequential, 10)).join(""), "A".repeat
 const fixed = queue([a, b], controls("alternate", 1, '{"scene_prompt1":3,"scene_prompt2":2}', "fixed"));
 assert.equal(prefix(ctx.sceneScheduleCount(fixed, 10)).join(""), "ABABA");
 assert.equal(ctx.sceneScheduleCount(fixed, 0).stats.total, 0);
+assert.equal(ctx.sceneScheduleCount(queue([], controls("alternate", 1, "{}", "fixed")), 10).stats.total, 1,
+    "a fixed Queue with no connections protects its seed event");
+assert.equal(ctx.sceneScheduleCount(queue([], controls()), 10).stats.total, 10);
 
 const locked = queue([fixed, leaf("C")], controls("alternate", 4, '{"scene_prompt1":20}', "fixed"));
 assert.equal(prefix(ctx.sceneScheduleCount(locked, 2)).join(""), "ABABACC");
@@ -85,6 +88,23 @@ const legacyMerge = ctx.sceneScheduleMerge(queue([leaf("a", 2), leaf("b")], cont
     queue([leaf("x", 2), leaf("y")], controls()));
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(legacyMerge))),
     ["ax", "ax", "ax", "ax", "ay", "ay", "bx", "bx", "by"]);
+const visibleRuns = Array.from({ length: 160 }, (_, index) =>
+    ctx.sceneScheduleRun({ parts: [`a${index}`], count: 1, row: {} }));
+const cappedSource = ctx.sceneSchedulePlan([...visibleRuns,
+    { kind: "tail", entry: null, total: 1, totalImages: 1, unsetBatches: 1, rows: 1 }]);
+const cappedMerge = ctx.sceneScheduleMerge(cappedSource, leaf("x"));
+assert.equal(cappedMerge.stats.total, 161, "legacy Merge retains exact totals after the preview prefix");
+assert.equal(prefix(cappedMerge, 160).length, 160, "the bounded 160-event prefix never resolves a tail");
+const rightRuns = Array.from({ length: 160 }, (_, index) =>
+    ctx.sceneScheduleRun({ parts: [`x${index}`], count: 1, row: {} }));
+const rightCapped = ctx.sceneSchedulePlan([...rightRuns,
+    { kind: "tail", entry: null, total: 1, totalImages: 1, unsetBatches: 1, rows: 1 }]);
+const largeLegacyMerge = ctx.sceneScheduleMerge(cappedSource, rightCapped);
+assert.equal(largeLegacyMerge.stats.total, 161 * 161);
+assert.equal(largeLegacyMerge.stats.totalImages, 161 * 161);
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(largeLegacyMerge, 160))),
+    Array.from({ length: 160 }, (_, index) => `a0x${index}`),
+    "both capped Merge operands keep the exact non-null first 160 events in legacy row order");
 const huge = ctx.sceneScheduleCount(queue([a, b], controls("alternate")), 100000000);
 assert.equal(huge.stats.total, 200000000);
 assert.equal(huge.units.length, 1, "large Counts keep a bounded schedule");

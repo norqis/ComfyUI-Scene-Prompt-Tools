@@ -7222,7 +7222,8 @@ function sceneScheduleAtUnit(unit, index) {
         let high = Math.ceil(Math.max(0, ...sizes) / k);
         const roundStart = (round) => round > Math.floor(Number.MAX_SAFE_INTEGER / k)
             ? Number.MAX_SAFE_INTEGER : k * round;
-        const through = (round) => sizes.reduce((sum, size) => sum + Math.min(size, roundStart(round)), 0);
+        const through = (round) => sizes.reduce((sum, size) =>
+            sum + Math.min(Number.MAX_SAFE_INTEGER - sum, size, roundStart(round)), 0);
         while (low < high) {
             const middle = Math.floor((low + high + 1) / 2);
             if (through(middle) <= index) low = middle;
@@ -7338,7 +7339,11 @@ function sceneScheduleMerge(left, right) {
 }
 
 function sceneScheduleQueue(plans, socketNames, controls) {
-    if (!plans.length) return sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })], true);
+    if (!plans.length) {
+        const seed = sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() });
+        return sceneSchedulePlan([controls.downstream_count_mode === "fixed"
+            ? sceneScheduleWrapper("fixed", seed) : seed], true);
+    }
     if (plans.some((plan) => plan.boundary)) return sceneSchedulePlan(plans.flatMap((plan) => plan.units), true);
     const repeats = sceneQueueRepeatFactors(controls.input_repeats_json);
     const adjusted = plans.map((plan, index) => {
@@ -7470,10 +7475,21 @@ function sceneScheduleForNode(node, seen = new Set()) {
         }
         return finish(base);
     }
-    const rows = scenePromptPreviewEntries(node, SCENE_QUEUE_DISPLAY_PREVIEW_ROWS);
-    const units = rows.map(sceneScheduleRun);
-    const visible = sceneSchedulePlan(units).stats;
     const full = scenePromptStats(node);
+    let rowLimit = SCENE_QUEUE_DISPLAY_PREVIEW_ROWS;
+    let rows = [];
+    let units = [];
+    let visible = emptyScenePromptStats();
+    do {
+        rows = scenePromptPreviewEntries(node, rowLimit);
+        units = rows.map(sceneScheduleRun);
+        visible = sceneSchedulePlan(units).stats;
+        if (visible.total >= Math.min(SCENE_QUEUE_DISPLAY_PREVIEW_ROWS, full.total)
+            || rows.length < rowLimit || rowLimit >= full.rows) break;
+        rowLimit = Math.min(full.rows, rowLimit * 2);
+    } while (true);
+    // Only the first 160 events are rendered. Keep their exact units and a
+    // scalar tail for totals; tail events are never requested by this preview.
     if (!full.error && full.total > visible.total) {
         units.push({ kind: "tail", entry: null,
             total: full.total - visible.total,
