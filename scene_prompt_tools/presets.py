@@ -26,6 +26,7 @@ from .nodes import (
     ScenePromptCounter,
     ScenePromptReverse,
     ScenePromptDelete,
+    ScenePromptToText,
     ScenePromptCallback,
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
@@ -923,6 +924,17 @@ def _scene_node_value_impl(
     next_stack = {*(node_stack or set()), node_id}
 
     def value(raw):
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            source = nodes.get(str(raw[0]), {})
+            if source.get("class_type") == "ScenePromptToText":
+                slot = raw[1]
+                if type(slot) is not int or slot not in (0, 1):
+                    raise ScenePresetError(f"{_node_label(raw[0], source)} の出力番号が不正です。")
+                result = _scene_node_value(
+                    nodes, raw[0], resolved, next_stack, input_values,
+                    user_id, run_handle, memo, preset_stack, preset_value_memo,
+                )
+                return result[slot]
         if not is_link(raw):
             return raw
         return _scene_node_value(
@@ -972,6 +984,13 @@ def _scene_node_value_impl(
             preset_stack,
             preset_value_memo,
         ))
+        memo[node_id] = result
+        return result
+    if class_type == "ScenePromptToText" and not preset_stack:
+        kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
+        kwargs["run_handle"] = run_handle
+        kwargs["unique_id"] = node_id
+        result = ScenePromptToText().to_text(**kwargs)
         memo[node_id] = result
         return result
     cls = SceneApplyModel if class_type == "SceneApplyModel" else SAFE_NODE_CLASSES.get(class_type)

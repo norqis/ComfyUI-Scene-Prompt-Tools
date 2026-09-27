@@ -1668,6 +1668,34 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(payload["exec_current_count"], "1")
             self.assertEqual(payload["exec_total_count"], "1")
 
+    def test_http_prepare_resolves_to_text_into_delete(self):
+        graph = {
+            "1": {"class_type": "ScenePrompter", "inputs": {
+                **_scene_prompt_inputs(), "positive_base": "bald, hair", "negative_base": "bad, worse",
+            }},
+            "2": {"class_type": "ScenePrompter", "inputs": {
+                **_scene_prompt_inputs(), "positive_base": "bald", "negative_base": "bad",
+            }},
+            "3": {"class_type": "ScenePromptToText", "inputs": {
+                "scene_prompt": ["2", 0], "scope": "全てのノード", "seed_base": 123,
+            }},
+            "4": {"class_type": "ScenePromptDelete", "inputs": {
+                "scene_prompt": ["1", 0], "positive": ["3", 0], "negative": ["3", 1],
+            }},
+            "5": {"class_type": "ScenePrompterExpand", "inputs": {
+                "scene_prompt": ["4", 0], "current_index": 0, "seed_base": 123,
+                "run_id": "", "timestamp_dir": False,
+            }},
+        }
+        prepared = self._request("/scene_prompt/runs/prepare", {
+            "api_graph": {"output": graph}, "expand_node_id": "5",
+            "workflow": _workflow_for_graph(graph),
+        })
+        self.assertEqual(prepared["total_images"], 1)
+        self.assertTrue(self._request("/scene_prompt/runs/release", {
+            "run_handle": prepared["run_handle"],
+        })["released"])
+
     def test_http_to_text_delete_cached_plan_and_execution_png_replay(self):
         from PIL import Image
         marker = self.base / "text-result.json"
