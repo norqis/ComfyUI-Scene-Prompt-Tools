@@ -180,9 +180,10 @@ const preset = { api_graph: { output: {
         order_mode: "alternate", alternate_block_size: 1, input_repeats_json: "{}", downstream_count_mode: "multiply" } },
     5: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
 } } };
+const compactPresetWeights = [2900, 7100, 0, 0, 0, 0, 0, 0, 0, 0];
 const randomPreset = { api_graph: { output: {
     1: { class_type: "ScenePresetInput", inputs: {} },
-    2: { class_type: "ScenePromptRandomRoute", inputs: { scene_prompt: ["1", 0], weights_json: JSON.stringify(randomWeights) } },
+    2: { class_type: "ScenePromptRandomRoute", inputs: { scene_prompt: ["1", 0], weights_json: JSON.stringify(compactPresetWeights) } },
     3: { class_type: "ScenePrompter", inputs: { scene_prompt: ["2", 0], prompt_name: "A" } },
     4: { class_type: "ScenePrompter", inputs: { scene_prompt: ["2", 1], prompt_name: "B" } },
     5: { class_type: "ScenePrompterQueue", inputs: { scene_prompt1: ["3", 0], scene_prompt2: ["4", 0] } },
@@ -191,6 +192,11 @@ const randomPreset = { api_graph: { output: {
 const randomPresetPlan = ctx.sceneScheduleForPreset("random-preset", leaf("X"), new Set(), randomPreset, "reference-42");
 assert.equal(randomPresetPlan.stats.total, 1, "Preset Random keeps one draw after Queue join");
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(randomPresetPlan))), ["ランダム候補"]);
+assert.deepEqual(JSON.parse(JSON.stringify(randomPresetPlan.units[0].plans.map((branch) =>
+    branch.randomGuards.at(-1).weights[branch.randomGuards.at(-1).armIndex]))), [2900, 7100],
+"compact Preset preview retains its nondefault saved Random percentages");
+assert.equal(ctx.sceneScheduleCount(randomPresetPlan, 10).stats.total, 10,
+    "Count after a compact Random Preset multiplies one draw per generation, not two alternatives");
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleForPreset("inner", leaf("A"), new Set(), preset)))),
     ["Ab1", "Ab2"], "Preset rehydration retains the internal Queue order and Prompt labels");
 const compactInner = { api_graph: { output: {
