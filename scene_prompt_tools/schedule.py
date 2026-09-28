@@ -870,6 +870,8 @@ def legacy_rows(plan):
     Executing a composite schedule never uses this view; materializing an
     alternating plan would change its grouping and make large Counts costly.
     """
+    if plan["random_guards"]:
+        raise ScenePlanError(f"Scene Prompt Random Route {plan['random_guards'][-1]['gate_id']} の分岐がQueueで合流していません。")
     if plan["stats"]["row_count"] > 100_000:
         raise ScenePlanError("This schedule has too many logical rows to list.")
     rows = []

@@ -3,7 +3,7 @@ import json
 import unittest
 
 from scene_prompt_tools.plan import (
-    ScenePlanError, item_for_normalized_plan, make_plan, multiply_count, normalize_plan,
+    ScenePlanError, append_callback, item_for_normalized_plan, make_plan, multiply_count, normalize_plan,
     queue, random_route, replay_index_for_event, seed_plan, transform,
 )
 
@@ -36,6 +36,8 @@ class RandomRouteScheduleTests(unittest.TestCase):
             queue([a, seed_plan()])
         with self.assertRaisesRegex(ScenePlanError, "分岐"):
             item_for_normalized_plan(a, 0, 100)
+        with self.assertRaisesRegex(ScenePlanError, "分岐"):
+            _ = a["rows"]
         with self.assertRaisesRegex(ScenePlanError, "Count"):
             multiply_count(a, 2)
         with self.assertRaisesRegex(ScenePlanError, "Matrix"):
@@ -74,6 +76,28 @@ class RandomRouteScheduleTests(unittest.TestCase):
         self.assertEqual(result["stats"]["total_batches"], 1_000_000)
         self.assertIn(item_for_normalized_plan(result, 999_999, 1_000_000)["row"]["positive_parts"], (["A"], ["B"]))
         self.assertEqual(normalize_plan(copy.deepcopy(result))["change_key"], result["change_key"])
+
+    def test_only_winning_model_lora_and_callback_survive_selection(self):
+        arms = self.route()
+        branches = []
+        for index, name in enumerate(("A", "B")):
+            branch = add(arms[index], name)
+            branch = transform(branch, operation={"kind": "model_set", "payload": {
+                "model": [name, 0], "clip": [name, 1], "vae": [name, 2],
+            }})
+            branch = transform(branch, operation={"kind": "lora_add", "payload": {
+                "name": f"{name}.safetensors", "model_mode": "Illustrious", "strength_model": 1.0,
+                "strength_clip": 1.0, "positive_parts": [name], "negative_parts": [],
+            }})
+            branch = append_callback(branch, f"callback_{name}", {"kind": "test"}, "every", 10, "continue")
+            branches.append(branch)
+        plan = queue(branches)
+        for seed in range(50):
+            row = item_for_normalized_plan(plan, 0, seed)["row"]
+            name = row["positive_parts"][0]
+            self.assertEqual(row["model_links"]["model"][0], name)
+            self.assertEqual([entry["name"] for entry in row["loras"]], [f"{name}.safetensors"])
+            self.assertEqual([entry["callback_node_id"] for entry in row["callbacks"]], [f"callback_{name}"])
 
     def test_replay_prunes_to_selected_branch_and_rebases_prior_rows(self):
         a, b, *_ = self.route(gate="route")
