@@ -2463,6 +2463,18 @@ try {
     await randomDialog.getByRole("button", { name: "閉じる" }).click();
     assert.equal(await page.evaluate(() => window.__sceneRandomTestNode.widgets[0].value), "[6000,3000,0,0,0,0,0,0,0,0]",
         "malformed percentages can be discarded without trapping the modal");
+    await page.evaluate(() => window.__sceneRandomTestNode.widgets.find((widget) => widget.sceneRole === "random_settings").callback());
+    await randomDialog.getByRole("spinbutton", { name: "scene_prompt1 の確率（%）" }).fill("0.29");
+    await randomDialog.getByRole("spinbutton", { name: "scene_prompt2 の確率（%）" }).fill("16.67");
+    await randomDialog.getByRole("spinbutton", { name: "scene_prompt3 の確率（%）" }).fill("83.04");
+    assert.match(await randomDialog.locator(".pc-random-total").textContent(), /100\.00%/u);
+    await randomDialog.getByRole("button", { name: "閉じる" }).click();
+    assert.equal(await page.evaluate(() => window.__sceneRandomTestNode.widgets[0].value), "[29,1667,8304,0,0,0,0,0,0,0]",
+        "two-decimal percentages persist as exact integer basis points");
+    await page.evaluate(() => window.__sceneRandomTestNode.widgets.find((widget) => widget.sceneRole === "random_settings").callback());
+    assert.equal(await randomDialog.getByRole("spinbutton", { name: "scene_prompt1 の確率（%）" }).inputValue(), "0.29");
+    assert.equal(await randomDialog.getByRole("spinbutton", { name: "scene_prompt2 の確率（%）" }).inputValue(), "16.67");
+    await randomDialog.getByRole("button", { name: "閉じる" }).click();
 
     console.log("Scene Prompt browser integration tests passed.");
 } finally {

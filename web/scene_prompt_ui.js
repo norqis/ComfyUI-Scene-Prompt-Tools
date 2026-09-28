@@ -11868,6 +11868,13 @@ function closeSceneRandomSettings(node) {
     node.sceneRandomSettingsCleanup = null;
 }
 
+function sceneRandomPercentToBasisPoints(value) {
+    const match = String(value).trim().match(/^(\d+)(?:\.(\d{1,2}))?$/u);
+    if (!match) return null;
+    const basisPoints = Number(match[1]) * 100 + Number((match[2] || "").padEnd(2, "0"));
+    return Number.isSafeInteger(basisPoints) && basisPoints >= 0 && basisPoints <= 10000 ? basisPoints : null;
+}
+
 function openSceneRandomSettings(node) {
     closeSceneRandomSettings(node);
     injectStyle();
@@ -11910,13 +11917,13 @@ function openSceneRandomSettings(node) {
     });
     let validFields = true;
     const update = () => {
-        const next = inputs.map((input) => Number(input.value) * 100);
-        const valid = next.every((value) => Number.isInteger(value) && value >= 0 && value <= 10000);
+        const next = inputs.map((input) => sceneRandomPercentToBasisPoints(input.value));
+        const valid = next.every((value) => value !== null);
         validFields = valid;
         const sum = next.reduce((value, weight) => value + weight, 0);
         total.textContent = `合計 ${(sum / 100).toFixed(2)}% / 100.00%${valid && sum === 10000 ? "" : " — 合計を100%にしてください"}`;
         total.classList.toggle("pc-random-invalid", !valid || sum !== 10000);
-        inputs.forEach((input, index) => input.classList.toggle("pc-random-invalid", !Number.isInteger(next[index]) || next[index] < 0 || next[index] > 10000));
+        inputs.forEach((input, index) => input.classList.toggle("pc-random-invalid", next[index] === null));
     };
     for (const input of inputs) input.addEventListener("input", update);
     dialog.append(head, fields, total);
@@ -11924,7 +11931,7 @@ function openSceneRandomSettings(node) {
     document.body.append(overlay);
     const applyAndClose = () => {
         if (validFields) {
-            const next = inputs.map((input) => Number(input.value) * 100);
+            const next = inputs.map((input) => sceneRandomPercentToBasisPoints(input.value));
             if (setWidgetValue(node, "weights_json", JSON.stringify(next))) {
                 syncSceneRandomRoute(node);
                 clearSceneComputedCaches(node);
