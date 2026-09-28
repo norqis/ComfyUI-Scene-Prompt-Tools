@@ -6824,7 +6824,8 @@ function scenePromptSourceLocalCacheKey(node) {
     }
     if (isScenePromptRandomRouteNode(node)) {
         return JSON.stringify({ type: "random_route", id: node?.id ?? null, mode: sceneNodeMode(node),
-            weights: findWidget(node, "weights_json")?.value, input: linkedInputKey(node, "scene_prompt"), upstream: upstreamKey });
+            weights: findWidget(node, "weights_json")?.value, preserve_join: Boolean(findWidget(node, "preserve_join")?.value),
+            input: linkedInputKey(node, "scene_prompt"), upstream: upstreamKey });
     }
     if (isSceneEmptyLatentNode(node)) {
         return JSON.stringify({
@@ -7579,9 +7580,9 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                 plan = sceneScheduleError("ランダム分岐の確率の合計を100%にしてください。");
             } else {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-                plan = !weights[outputSlot] ? sceneSchedulePlan([], base.boundary,
+            plan = !weights[outputSlot] ? sceneSchedulePlan([], base.boundary,
                     [...base.randomGuards, { gateId: `${instancePath}/${nodeId}`, armIndex: outputSlot, weights }])
-                    : weights.filter((weight) => weight > 0).length === 1 ? base
+                    : weights.filter((weight) => weight > 0).length === 1 && !apiInput(entry, "preserve_join") ? base
                         : sceneSchedulePlan(base.units, base.boundary,
                             [...base.randomGuards, { gateId: `${instancePath}/${nodeId}`, armIndex: outputSlot, weights }]);
             }
@@ -7631,7 +7632,8 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
             || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
         if (!weights[outputSlot]) return finish(sceneSchedulePlan([], base.boundary,
             [...base.randomGuards, { gateId: String(node.id), armIndex: outputSlot, weights }]));
-        if (weights.filter((weight) => weight > 0).length === 1) return finish(base);
+        if (weights.filter((weight) => weight > 0).length === 1 && !findWidget(node, "preserve_join")?.value)
+            return finish(base);
         return finish(sceneSchedulePlan(base.units, base.boundary,
             [...base.randomGuards, { gateId: String(node.id), armIndex: outputSlot, weights }]));
     }
@@ -7990,7 +7992,7 @@ function scenePromptLineageKey(node) {
             parts.push(`count:${scenePromptCounterCount(current)}`);
         }
         if (isScenePromptRandomRouteNode(current)) {
-            parts.push(`random:${findWidget(current, "weights_json")?.value || ""}`);
+            parts.push(`random:${findWidget(current, "weights_json")?.value || ""}:${Boolean(findWidget(current, "preserve_join")?.value)}`);
         }
         if (isScenePromptDeleteNode(current)) {
             parts.push(JSON.stringify([findWidget(current, "positive")?.value, findWidget(current, "negative")?.value]));
@@ -11957,6 +11959,7 @@ function attachScenePromptRandomRoute(node) {
     node.resizable = true;
     installSceneConnectionWatcher(node);
     hideWidget(findWidget(node, "weights_json"));
+    hideWidget(findWidget(node, "preserve_join"));
     addSceneButton(node, "random_settings", "確率を設定", () => openSceneRandomSettings(node));
     syncSceneRandomRoute(node);
     scheduleHideInternalDomWidgets();

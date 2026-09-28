@@ -197,6 +197,14 @@ assert.deepEqual(JSON.parse(JSON.stringify(randomPresetPlan.units[0].plans.map((
 "compact Preset preview retains its nondefault saved Random percentages");
 assert.equal(ctx.sceneScheduleCount(randomPresetPlan, 10).stats.total, 10,
     "Count after a compact Random Preset multiplies one draw per generation, not two alternatives");
+const frozenPreset = structuredClone(randomPreset);
+frozenPreset.api_graph.output[2].inputs.weights_json = JSON.stringify([10000, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+frozenPreset.api_graph.output[2].inputs.preserve_join = true;
+const frozenPlan = ctx.sceneScheduleForPreset("frozen-preset", leaf("X"), new Set(), frozenPreset, "reference-43");
+assert.equal(frozenPlan.units[0].kind, "random_choice",
+    "PNG replay's frozen 100/0 Random preserves the original Queue join");
+assert.equal(frozenPlan.boundary, true);
+assert.equal(ctx.sceneScheduleCount(frozenPlan, 10).stats.total, 10);
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleForPreset("inner", leaf("A"), new Set(), preset)))),
     ["Ab1", "Ab2"], "Preset rehydration retains the internal Queue order and Prompt labels");
 const compactInner = { api_graph: { output: {
