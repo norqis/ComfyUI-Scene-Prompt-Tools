@@ -55,6 +55,23 @@ class RandomRouteScheduleTests(unittest.TestCase):
         self.assertEqual(item_for_normalized_plan(outputs[1], 0, 5)["row"]["positive_parts"], ["base"])
         self.assertEqual(queue([outputs[1], outputs[0]])["stats"]["total_batches"], 1)
 
+    def test_frozen_multi_arm_gate_keeps_join_controls_disabled(self):
+        arm, *_ = random_route(seed_plan(), [10000] + [0] * 9, "frozen", preserve_join=True)
+        joined = queue([arm], order_mode="alternate", alternate_block_size=9, downstream_count_mode="fixed")
+        self.assertEqual(joined["stats"]["total_batches"], 1)
+        self.assertEqual(multiply_count(joined, 10)["stats"]["total_batches"], 10)
+
+    def test_zero_weight_arm_remains_inert_through_count_matrix_and_latent(self):
+        from scene_prompt_tools.plan import matrix_product
+        active, other, zero, *_ = self.route()
+        zero = multiply_count(zero, 100)
+        zero = matrix_product(zero, [], True)
+        zero = transform(zero, latent={"width": 16, "height": 16, "batch_size": 3})
+        self.assertEqual(zero["stats"]["total_batches"], 0)
+        self.assertEqual(queue([active, other, zero])["stats"]["total_batches"], 1)
+        with self.assertRaisesRegex(ScenePlanError, "出力1, 2"):
+            queue([zero])
+
     def test_nested_stack_lifo_and_crossed_gate_error(self):
         outer_a, outer_b, *_ = self.route(gate="outer")
         inner_a, inner_b, *_ = self.route(outer_a, gate="inner")

@@ -644,33 +644,46 @@ def _replay_expand_values(scene_info, full_prompt, source_aliases=None, retained
     }
 
 
-def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
+def _selected_random_routes(infos):
     selected = {}
     def read(path):
         for part in path:
             if isinstance(part, (tuple, list)) and len(part) == 3 and part[0] == "random_choice":
-                selected[str(part[1])] = part[2]
+                selected.setdefault(str(part[1]), set()).add(part[2])
             elif isinstance(part, (tuple, list)):
                 read(part)
     for info in infos:
         if isinstance(info, dict) and isinstance(info.get("_event_ref"), (tuple, list)):
             read(info["_event_ref"])
+    return selected
+
+
+def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
+    selected = _selected_random_routes(infos)
     aliases = source_aliases if isinstance(source_aliases, dict) else {}
     for node_id, node in prompt.items():
         if not isinstance(node, dict) or node.get("class_type") != "ScenePromptRandomRoute":
             continue
-        arm = selected.get(str(aliases.get(str(node_id), node_id)))
-        if arm is None:
+        arms = selected.get(str(aliases.get(str(node_id), node_id)))
+        if not arms or len(arms) != 1:
             continue
+        arm = next(iter(arms))
+        original_weights = _random_weights_json(node.get("inputs", {}).get("weights_json", DEFAULT_RANDOM_WEIGHTS_JSON))
         weights = [10000 if index == arm else 0 for index in range(10)]
         encoded = json.dumps(weights, separators=(",", ":"))
         node.setdefault("inputs", {})["weights_json"] = encoded
+        if sum(bool(weight) for weight in original_weights) > 1:
+            node["inputs"]["preserve_join"] = True
         if isinstance(workflow, dict):
             for visual in workflow.get("nodes", []):
                 if isinstance(visual, dict) and str(visual.get("id")) == str(node_id):
                     widgets = visual.get("widgets_values")
                     if isinstance(widgets, list) and widgets:
                         widgets[0] = encoded
+                        if len(widgets) < 2:
+                            widgets.append(bool(node["inputs"].get("preserve_join", False)))
+                        else:
+                            widgets[1] = bool(node["inputs"].get("preserve_join", False))
 
 
 def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_aliases=None):
@@ -986,6 +999,11 @@ def _metadata_for_save_mode(
 
     text_replay_items = _text_replay_items(prompt, unique_id, scene_info) if metadata_mode == SAVE_METADATA_EXECUTION_PATH else {}
     text_source_ids = {source_id for info in text_replay_items.values() for source_id in _scene_source_ids(info)}
+
+    if metadata_mode == SAVE_METADATA_EXECUTION_PATH and not expand_preset_contents and isinstance(prompt, dict):
+        has_reference = any(isinstance(node, dict) and node.get("class_type") == "ScenePresetReference" for node in prompt.values())
+        if has_reference and any("/" in gate_id for gate_id in _selected_random_routes([scene_info, *text_replay_items.values()])):
+            expand_preset_contents = True
 
     if expand_preset_contents and isinstance(prompt, dict):
         has_prompt_reference = any(
@@ -1951,7 +1969,7 @@ class ScenePath:
 
 
 class ScenePromptRandomRoute:
-    DESCRIPTION = "各画像の生成番号と開始シードから毎回抽選し、当選した1つの経路だけを生成計画へ通します。確率合計は100%です。"
+    DESCRIPTION = "Expandの各実行で開始シードから抽選し、当選した1つの経路だけを生成計画へ通します。同じlatent batch内の画像は同じ経路です。確率合計は100%です。"
     CATEGORY = "Scene/prompt"
     RETURN_TYPES = (SCENE_PROMPT_TYPE,) * 10
     RETURN_NAMES = SCENE_PROMPT_INPUT_NAMES
@@ -1961,25 +1979,30 @@ class ScenePromptRandomRoute:
     def INPUT_TYPES(cls):
         return {
             "required": {"weights_json": ("STRING", {"default": DEFAULT_RANDOM_WEIGHTS_JSON, "display_name": "確率設定", "hidden": True})},
-            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt"})},
+            "optional": {
+                "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt"}),
+                "preserve_join": ("BOOLEAN", {"default": False, "hidden": True}),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "prompt": "PROMPT",
+                "dynprompt": "DYNPROMPT",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
                 "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
     @classmethod
-    def IS_CHANGED(cls, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, **kwargs):
-        return json.dumps([_random_weights_json(weights_json), _scene_prompt_change_key(scene_prompt)], ensure_ascii=False)
+    def IS_CHANGED(cls, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, preserve_join=False, **kwargs):
+        return json.dumps([_random_weights_json(weights_json), _scene_prompt_change_key(scene_prompt), _scene_bool(preserve_join)], ensure_ascii=False)
 
-    def route(self, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, unique_id=None, prompt=None, source_node_id="", source_node_name=""):
+    def route(self, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, preserve_join=False, unique_id=None, prompt=None, dynprompt=None, source_node_id="", source_node_name=""):
         gate_id = str(source_node_id or unique_id or "").strip()
         weights = _random_weights_json(weights_json)
-        if isinstance(prompt, dict) and unique_id is not None:
+        if unique_id is not None and (dynprompt is not None or isinstance(prompt, dict)):
+            nodes = (dynprompt.get_node(node_id) for node_id in dynprompt.all_node_ids()) if dynprompt is not None else prompt.values()
             connected = {
-                raw[1] for node in prompt.values() if isinstance(node, dict)
+                raw[1] for node in nodes if isinstance(node, dict)
                 for raw in (node.get("inputs") or {}).values()
                 if is_link(raw) and str(raw[0]) == str(unique_id)
             }
@@ -1987,7 +2010,7 @@ class ScenePromptRandomRoute:
             if missing:
                 raise ScenePlanError(f"Scene Prompt Random Route #{gate_id}: 出力{', '.join(missing)}が未接続です。")
         plan = with_source_node(scene_prompt, gate_id, source_node_name)
-        return random_route(plan, weights, gate_id)
+        return random_route(plan, weights, gate_id, preserve_join=_scene_bool(preserve_join))
 
 
 class ScenePromptQueue:

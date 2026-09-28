@@ -225,6 +225,8 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
                     remapped[name] = list(upstream)
             else:
                 remapped[name] = [mapping[str(value[0])], value[1]]
+        if copied.get("class_type") == "ScenePromptRandomRoute":
+            remapped["source_node_id"] = f"{reference_source}/{original_id}"
         copied["inputs"] = remapped
         prompt[mapping[original_id]] = copied
         source_ids[mapping[original_id]] = f"{reference_source}/{original_id}"

@@ -488,7 +488,7 @@ def _apply_operation(row, operation):
 def _map_plan(plan, operation):
     _validate_operation(operation)
     source = normalize_plan(plan)
-    if source["random_guards"] and operation["kind"] == "latent_set":
+    if source["random_guards"] and operation["kind"] == "latent_set" and not _inert_random_arm(source):
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Empty Latent は使えません。")
     return _plan([_map_unit(unit, operation) for unit in source["units"]], source["sources"], source["contains_queue_boundary"], source["random_guards"])
 
@@ -551,10 +551,17 @@ def _repeat(unit, factor):
     return _unit("repeat", unit=unit, factor=factor)
 
 
+def _inert_random_arm(plan):
+    if not plan["random_guards"] or plan["stats"]["total_batches"] != 0:
+        return False
+    gate = plan["random_guards"][-1]
+    return gate["weights"][gate["arm_index"]] == 0
+
+
 def multiply_count(plan, factor):
     amount = _old._require_int(factor, "Scene Prompt count factor", 0, MAX_SAFE_INTEGER)
     source = normalize_plan(plan)
-    if source["random_guards"]:
+    if source["random_guards"] and not _inert_random_arm(source):
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Prompt Count は使えません。")
     units = []
     for unit in source["units"]:
@@ -564,7 +571,7 @@ def multiply_count(plan, factor):
             units.append(_unit("count_fixed", unit=_repeat(unit["unit"], 0)))
         else:
             units.append(_repeat(unit, amount))
-    return mark_prompt_passthrough(_plan(units, source["sources"], source["contains_queue_boundary"]))
+    return mark_prompt_passthrough(_plan(units, source["sources"], source["contains_queue_boundary"], source["random_guards"]))
 
 
 def _contains_composite(unit):
@@ -624,10 +631,14 @@ def _validate_queue_controls(order_mode, alternate_block_size, input_repeats_jso
 def queue(values, *, order_mode="input_order", alternate_block_size=1, input_repeats_json="{}", downstream_count_mode="multiply"):
     mode, block, count_mode = _validate_queue_controls(order_mode, alternate_block_size, input_repeats_json, downstream_count_mode)
     slots = [(index, normalize_plan(value)) for index, value in enumerate(values, start=1) if value is not None]
+    zero_guards = [plan["random_guards"][-1] for _, plan in slots if _inert_random_arm(plan)]
     slots = [(index, plan) for index, plan in slots if not (
-        plan["random_guards"] and not plan["random_guards"][-1]["weights"][plan["random_guards"][-1]["arm_index"]]
-        and plan["stats"]["total_batches"] == 0
+        _inert_random_arm(plan)
     )]
+    if zero_guards and not slots:
+        gate = zero_guards[0]
+        missing = [str(index + 1) for index, weight in enumerate(gate["weights"]) if weight]
+        raise ScenePlanError(f"Scene Prompt Random Route {gate['gate_id']} の出力{', '.join(missing)}が合流Queueに接続されていません。")
     guarded = [(index, plan) for index, plan in slots if plan["random_guards"]]
     if guarded:
         if len(guarded) != len(slots):
@@ -694,7 +705,7 @@ def _matrix_row(base, matrix_row):
 
 def matrix_product(plan, matrix_rows, configured):
     source = normalize_plan(plan)
-    if source["random_guards"]:
+    if source["random_guards"] and not _inert_random_arm(source):
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Matrix は使えません。")
     if not isinstance(matrix_rows, list) or type(configured) is not bool:
         raise ScenePlanError("Scene Matrix rows are invalid.")
@@ -720,7 +731,7 @@ def matrix_product(plan, matrix_rows, configured):
     return _plan(units, boundary=source["contains_queue_boundary"], guards=source["random_guards"])
 
 
-def random_route(plan, weights, gate_id):
+def random_route(plan, weights, gate_id, *, preserve_join=False):
     source = normalize_plan(plan)
     weights = validate_random_weights(weights)
     gate_id = _old._require_string(str(gate_id or "").strip(), "Scene Prompt Random Route ID", allow_empty=False)
@@ -730,7 +741,7 @@ def random_route(plan, weights, gate_id):
     for arm, weight in enumerate(weights):
         guard = {"gate_id": gate_id, "arm_index": arm, "weights": weights}
         outputs.append(_plan(source["units"] if weight else [], source["sources"] if weight else [], source["contains_queue_boundary"] if weight else False, [*source["random_guards"], guard]))
-    if sum(bool(weight) for weight in weights) == 1:
+    if sum(bool(weight) for weight in weights) == 1 and not preserve_join:
         arm = next(index for index, weight in enumerate(weights) if weight)
         outputs[arm] = source
     return tuple(outputs)
