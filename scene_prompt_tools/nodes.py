@@ -51,6 +51,8 @@ from .plan import (
     multiply_count,
     normalize_plan,
     queue,
+    random_route,
+    validate_random_weights,
     transform,
     mark_prompt_passthrough,
     mark_prompt_whole,
@@ -116,6 +118,14 @@ MODEL_WEIGHT_RE = re.compile(r"(:\s*)([+-]?(?:\d+(?:\.\d+)?|\.\d+))(?=\s*\))")
 
 DEFAULT_MATRIX_JSON = "{\"version\":1,\"sets\":[]}"
 SCENE_PROMPT_INPUT_NAMES = tuple(f"scene_prompt{index}" for index in range(1, 11))
+DEFAULT_RANDOM_WEIGHTS_JSON = "[10000,0,0,0,0,0,0,0,0,0]"
+
+
+def _random_weights_json(value):
+    try:
+        return validate_random_weights(json.loads(value))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ScenePlanError("Scene Prompt Random Route の確率設定が不正です。合計を100%にしてください。") from exc
 BAD_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 BAD_FILENAME_PREFIX_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]+')
 WINDOWS_RESERVED_PREFIX_RE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.IGNORECASE)
@@ -544,7 +554,7 @@ def _slice_workflow_for_output(
 
 
 SCENE_NODE_TYPES = {
-    "ScenePrompter", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePrompterExpand",
+    "ScenePrompter", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePromptRandomRoute", "ScenePrompterExpand",
     "ScenePromptCounter", "ScenePromptReverse", "ScenePromptDelete", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
     "SceneApplyModel", "SceneApplyLora",
     "ScenePromptCallback",
@@ -634,6 +644,35 @@ def _replay_expand_values(scene_info, full_prompt, source_aliases=None, retained
     }
 
 
+def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
+    selected = {}
+    def read(path):
+        for part in path:
+            if isinstance(part, (tuple, list)) and len(part) == 3 and part[0] == "random_choice":
+                selected[str(part[1])] = part[2]
+            elif isinstance(part, (tuple, list)):
+                read(part)
+    for info in infos:
+        if isinstance(info, dict) and isinstance(info.get("_event_ref"), (tuple, list)):
+            read(info["_event_ref"])
+    aliases = source_aliases if isinstance(source_aliases, dict) else {}
+    for node_id, node in prompt.items():
+        if not isinstance(node, dict) or node.get("class_type") != "ScenePromptRandomRoute":
+            continue
+        arm = selected.get(str(aliases.get(str(node_id), node_id)))
+        if arm is None:
+            continue
+        weights = [10000 if index == arm else 0 for index in range(10)]
+        encoded = json.dumps(weights, separators=(",", ":"))
+        node.setdefault("inputs", {})["weights_json"] = encoded
+        if isinstance(workflow, dict):
+            for visual in workflow.get("nodes", []):
+                if isinstance(visual, dict) and str(visual.get("id")) == str(node_id):
+                    widgets = visual.get("widgets_values")
+                    if isinstance(widgets, list) and widgets:
+                        widgets[0] = encoded
+
+
 def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_aliases=None):
     """Apply replay widgets only to the Expand that produced this image."""
     if not values or not isinstance(prompt, dict):
@@ -698,12 +737,12 @@ def _text_replay_items(prompt, save_id, scene_info):
             raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
         inputs = node.get("inputs", {})
         requested_index = inputs.get("current_index", 0)
-        item = _text_item_for_index(plan, requested_index)
         seed_base = int(inputs.get("seed_base") or 0)
         literal = _scene_bool(inputs.get("seed_base_literal", False))
         if not literal and seed_base <= 0:
             raise ValueError(f"Scene Prompt To Text {node_id} の自動シードを再現できません。生成経路の保存には正の seed_base または seed_base_literal が必要です。")
         base_seed = seed_base % SEED_MODULO if literal else _auto_seed_base(seed_base)
+        item = _text_item_for_index(plan, requested_index, (base_seed + requested_index) % SEED_MODULO)
         result[node_id] = {
             "_plan_ref": plan, "row_index": item["row_index"], "repeat_index": item["repeat_index"],
             "source_node_ids": item["row"].get("source_node_ids", []),
@@ -1028,6 +1067,7 @@ def _metadata_for_save_mode(
             saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
         )
         _apply_text_replay_values(saved_prompt, saved_extra["workflow"], text_replay_items, expanded_prompt, source_aliases)
+        _freeze_random_routes(saved_prompt, saved_extra["workflow"], [scene_info, *text_replay_items.values()], source_aliases)
         return saved_prompt, saved_extra
 
     if metadata_mode == SAVE_METADATA_WORKFLOW:
@@ -1059,6 +1099,8 @@ def _metadata_for_save_mode(
         scene_info,
         replay_values,
     )
+    _freeze_random_routes(saved_prompt, saved_extra.get("workflow") if isinstance(saved_extra, dict) else None,
+                          [scene_info, *text_replay_items.values()])
     _apply_text_replay_values(saved_prompt, saved_extra.get("workflow") if isinstance(saved_extra, dict) else None,
                               text_replay_items, prompt)
     return saved_prompt, saved_extra
@@ -1340,10 +1382,10 @@ def _scene_run_plan(run_handle, scene_prompt=None, unique_id=None):
     return set_run_plan_reference(run_handle, unique_id, normalize_plan(scene_prompt))
 
 
-def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False):
+def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False, seed=0):
     plan = normalized if normalized is not None else normalize_plan(scene_prompt)
     try:
-        return item_for_normalized_plan(plan, current_index)
+        return item_for_normalized_plan(plan, current_index, seed)
     except IndexError:
         if strict:
             if plan["stats"]["total_batches"] == 0:
@@ -1355,12 +1397,12 @@ def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, s
         return {"row": {}, "count": 0, "total_batches": 0, "total_images": 0}
 
 
-def _text_item_for_index(plan, requested_index):
+def _text_item_for_index(plan, requested_index, seed=0):
     if type(requested_index) is not int or requested_index < 0:
         raise ValueError("Scene Prompt To Text の生成番号が不正です。")
     total = plan["stats"]["total_batches"]
     selected_index = requested_index % total if total else requested_index
-    return _scene_prompt_item_for_index(None, selected_index, normalized=plan, strict=True)
+    return _scene_prompt_item_for_index(None, selected_index, normalized=plan, strict=True, seed=seed)
 
 
 def _safe_path_part(value, default_name="untitled"):
@@ -1908,6 +1950,46 @@ class ScenePath:
         return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 
 
+class ScenePromptRandomRoute:
+    DESCRIPTION = "各画像の生成番号と開始シードから毎回抽選し、当選した1つの経路だけを生成計画へ通します。確率合計は100%です。"
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,) * 10
+    RETURN_NAMES = SCENE_PROMPT_INPUT_NAMES
+    FUNCTION = "route"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"weights_json": ("STRING", {"default": DEFAULT_RANDOM_WEIGHTS_JSON, "display_name": "確率設定", "hidden": True})},
+            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt"})},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, **kwargs):
+        return json.dumps([_random_weights_json(weights_json), _scene_prompt_change_key(scene_prompt)], ensure_ascii=False)
+
+    def route(self, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, unique_id=None, prompt=None, source_node_id="", source_node_name=""):
+        gate_id = str(source_node_id or unique_id or "").strip()
+        weights = _random_weights_json(weights_json)
+        if isinstance(prompt, dict) and unique_id is not None:
+            connected = {
+                raw[1] for node in prompt.values() if isinstance(node, dict)
+                for raw in (node.get("inputs") or {}).values()
+                if is_link(raw) and str(raw[0]) == str(unique_id)
+            }
+            missing = [str(index + 1) for index, weight in enumerate(weights) if weight and index not in connected]
+            if missing:
+                raise ScenePlanError(f"Scene Prompt Random Route #{gate_id}: 出力{', '.join(missing)}が未接続です。")
+        plan = with_source_node(scene_prompt, gate_id, source_node_name)
+        return random_route(plan, weights, gate_id)
+
+
 class ScenePromptQueue:
     DESCRIPTION = """最大10個の scene_prompt を scene_prompt1 から番号順に、1つの生成計画へ連結します。\nMerge と異なり入力同士の組み合わせは作らず、各入力の行・順序・生成回数を維持したまま後ろへ追加します。\nこれはScene生成計画の並び順を作るノードであり、ComfyUI標準の実行Queueそのものではありません。"""
     CATEGORY = "Scene/prompt"
@@ -2116,7 +2198,9 @@ class ScenePromptToText:
         if scope not in TEXT_SCOPE_CHOICES:
             raise ValueError("Scene Prompt To Text の対象が不正です。")
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
-        item = _text_item_for_index(plan, current_index)
+        base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
+        seed = (base_seed + current_index) % SEED_MODULO
+        item = _text_item_for_index(plan, current_index, seed)
         row = item["row"]
         positive, negative = row.get("positive_parts", []), row.get("negative_parts", [])
         trace = row.get("prompt_trace")
@@ -2128,8 +2212,6 @@ class ScenePromptToText:
                     positive, negative = [], []
                 else:
                     positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
-        base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
-        seed = (base_seed + current_index) % SEED_MODULO
         positive, negative = _resolve_prompt_parts(positive, negative, (), None, seed)
         return _join_unique(positive, ", "), _join_unique(negative, ", ")
 
@@ -2740,14 +2822,15 @@ class ScenePromptExpand:
         if run_handle and unique_id is not None and isinstance(prompt, dict):
             set_run_prompt_reference(run_handle, unique_id, prompt)
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
-        item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True)
+        base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
+        seed = (base_seed + current_index) % SEED_MODULO
+        item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True, seed=seed)
         row = item["row"]
         if row.get("model_links") is None and _connected_expand_resource_outputs(prompt, unique_id):
             raise ValueError(
                 "Scene Prompt ExpandのMODEL、CLIP、VAE出力を使うには、同じScene経路にScene Apply Modelを接続してください。"
             )
         global_index = int(item.get("global_index", 0) or 0)
-        base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + global_index) % SEED_MODULO
         positive_parts, negative_parts = _resolve_prompt_parts(
             row.get("positive_parts", []), row.get("negative_parts", []), row.get("loras", []), model_mode, seed,

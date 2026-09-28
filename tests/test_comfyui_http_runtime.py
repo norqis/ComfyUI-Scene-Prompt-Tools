@@ -1727,6 +1727,63 @@ NODE_CLASS_MAPPINGS = {
         finally:
             self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
+    def test_http_random_route_redraws_each_count_event_and_replays_selected_png(self):
+        from PIL import Image
+        import hashlib
+        marker = self.base / "random-route-result.json"
+        graph = {
+            "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "base"}},
+            "2": {"class_type": "ScenePromptRandomRoute", "inputs": {"scene_prompt": ["1", 0], "weights_json": json.dumps([5000, 5000] + [0] * 8)}},
+            "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 0], "positive_base": "route_A"}},
+            "4": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 1], "positive_base": "route_B"}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
+            "6": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["5", 0], "count": 10}},
+            "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["6", 0], "current_index": 0, "seed_base": 123, "run_id": "random-route", "timestamp_dir": False}},
+            "8": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "9": {"class_type": "TestSceneTextImage", "inputs": {"image": ["8", 0], "positive": ["7", 0], "negative": ["7", 1], "log_path": str(marker)}},
+            "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["9", 0], "scene_info": ["7", 2], "path": "random-route", "metadata_mode": "生成経路ノードのみ"}},
+        }
+        handle, workflow = self._prepare_callback_run(graph, "7")
+        labels = []
+        try:
+            for index in range(10):
+                graph["7"]["inputs"]["current_index"] = index
+                self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                prompt = json.loads(marker.read_text(encoding="utf-8"))[0]
+                payload = json.dumps([123 + index, "2"], ensure_ascii=False, separators=(",", ":"))
+                draw = int.from_bytes(hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest(), "big") % 10000
+                expected = "route_A" if draw < 5000 else "route_B"
+                self.assertIn(expected, prompt)
+                self.assertNotIn("route_B" if expected == "route_A" else "route_A", prompt)
+                labels.append(expected)
+            self.assertIn("route_A", labels)
+            self.assertIn("route_B", labels)
+            files = sorted((self.base / "output" / "random-route").glob("*.png"))
+            self.assertEqual(len(files), 10)
+            with Image.open(files[-1]) as image:
+                replay = json.loads(image.text["prompt"])
+                replay_workflow = json.loads(image.text["workflow"])
+            weights = json.loads(replay["2"]["inputs"]["weights_json"])
+            self.assertEqual(weights.count(10000), 1)
+            self.assertEqual(sum(weights), 10000)
+            replay["10"]["inputs"]["path"] = "random-route-replay"
+            replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
+            try:
+                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                self.assertIn(labels[-1], json.loads(marker.read_text(encoding="utf-8"))[0])
+            finally:
+                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
+        missing = copy.deepcopy(graph)
+        missing["5"]["inputs"].pop("scene_prompt2")
+        status, error = self._request_status("/scene_prompt/runs/prepare", {
+            "run_id": "random-route-missing", "api_graph": {"output": missing}, "expand_node_id": "7",
+        })
+        self.assertGreaterEqual(status, 400, error)
+        self.assertIn("出力2", json.dumps(error, ensure_ascii=False))
+
     def test_http_to_text_delete_cached_plan_and_execution_png_replay(self):
         from PIL import Image
         marker = self.base / "text-result.json"
