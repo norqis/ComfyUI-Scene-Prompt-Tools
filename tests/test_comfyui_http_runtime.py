@@ -1736,7 +1736,8 @@ NODE_CLASS_MAPPINGS = {
             "2": {"class_type": "ScenePromptRandomRoute", "inputs": {"scene_prompt": ["1", 0], "weights_json": json.dumps([5000, 5000] + [0] * 8)}},
             "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 0], "positive_base": "route_A"}},
             "4": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 1], "positive_base": "route_B"}},
-            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
+            "11": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 2], "positive_base": "never_route"}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0], "scene_prompt3": ["11", 0]}},
             "6": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["5", 0], "count": 10}},
             "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["6", 0], "current_index": 0, "seed_base": 123, "run_id": "random-route", "timestamp_dir": False}},
             "8": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
@@ -1755,6 +1756,7 @@ NODE_CLASS_MAPPINGS = {
                 expected = "route_A" if draw < 5000 else "route_B"
                 self.assertIn(expected, prompt)
                 self.assertNotIn("route_B" if expected == "route_A" else "route_A", prompt)
+                self.assertNotIn("never_route", prompt)
                 labels.append(expected)
             self.assertIn("route_A", labels)
             self.assertIn("route_B", labels)

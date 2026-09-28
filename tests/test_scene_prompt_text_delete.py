@@ -439,6 +439,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         api['6']['inputs'].pop('scene_prompt2')
         with self.assertRaisesRegex(self.presets.ScenePresetResolutionError, '出力2'):
             self.presets.snapshot_presets_for_run(self.runs.create_run_context('default'), {'output': api}, '7')
+        api['5']['inputs'].pop('scene_prompt')
         with self.assertRaisesRegex(self.plan.ScenePlanError, '出力2'):
             self.nodes.ScenePromptRandomRoute().route(
                 weights_json=json.dumps([5000, 5000] + [0] * 8), unique_id='2', prompt=api,
