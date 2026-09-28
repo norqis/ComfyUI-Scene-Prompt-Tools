@@ -804,6 +804,66 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(bypassPreset.reference.bypassed, false);
     assert.equal(bypassPreset.reference.unbypassed, true);
     console.log("real ComfyUI bypass Preset save/load preserves mode, physical links and execution routing");
+    const randomWorkflowRoundTrip = await page.evaluate(async () => {
+        const app = window.app;
+        app.graph.clear();
+        const add = (type) => {
+            const node = window.LiteGraph.createNode(type);
+            if (!node) throw new Error(`Missing native node ${type}`);
+            app.graph.add(node);
+            return node;
+        };
+        const scene = add("ScenePrompter");
+        const random = add("ScenePromptRandomRoute");
+        const queue = add("ScenePrompterQueue");
+        const expand = add("ScenePrompterExpand");
+        scene.connect(0, random, random.inputs.findIndex((input) => input.name === "scene_prompt"));
+        random.connect(0, queue, queue.inputs.findIndex((input) => input.name === "scene_prompt1"));
+        queue.connect(0, expand, expand.inputs.findIndex((input) => input.name === "scene_prompt"));
+        queue.widgets.find((widget) => widget.name === "order_mode").value = "alternate";
+        queue.widgets.find((widget) => widget.name === "alternate_block_size").value = 9;
+        queue.widgets.find((widget) => widget.name === "downstream_count_mode").value = "fixed";
+        const encoded = "[10000,0,0,0,0,0,0,0,0,0]";
+        const initial = app.graph.serialize();
+        const old = structuredClone(initial);
+        const oldRandom = old.nodes.find((entry) => String(entry.id) === String(random.id));
+        if (!oldRandom) throw new Error(`Random node missing from workflow: ${JSON.stringify({ id: random.id, nodes: old.nodes.map((entry) => [entry.id, entry.type]) })}`);
+        oldRandom.widgets_values = [encoded];
+        await app.loadGraphData(old, true, true);
+        await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+        const oldNode = app.graph.getNodeById(random.id);
+        const oldValue = oldNode.widgets.find((widget) => widget.name === "preserve_join")?.value;
+        const frozen = structuredClone(initial);
+        frozen.nodes.find((entry) => String(entry.id) === String(random.id)).widgets_values = [encoded, true];
+        await app.loadGraphData(frozen, true, true);
+        await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+        const restored = app.graph.getNodeById(random.id);
+        const serialized = app.graph.serialize().nodes.find((entry) => String(entry.id) === String(random.id));
+        const prompt = await app.graphToPrompt();
+        return {
+            widgetNames: restored.widgets.map((widget) => widget.name),
+            oldValue,
+            newValue: restored.widgets.find((widget) => widget.name === "preserve_join")?.value,
+            hidden: restored.widgets.find((widget) => widget.name === "preserve_join")?.hidden,
+            serialized: serialized.widgets_values,
+            apiInputs: prompt.output?.[String(random.id)]?.inputs,
+            queueControls: ["order_mode", "alternate_block_size", "downstream_count_mode"].map((name) => {
+                const widget = app.graph.getNodeById(queue.id).widgets.find((item) => item.name === name);
+                return { value: widget?.value, disabled: widget?.disabled };
+            }),
+        };
+    });
+    assert.equal(randomWorkflowRoundTrip.oldValue, false, "legacy one-widget Random workflows default preserve_join to false");
+    assert.equal(randomWorkflowRoundTrip.newValue, true, "frozen PNG workflow restores preserve_join");
+    assert.equal(randomWorkflowRoundTrip.hidden, true, "preserve_join remains hidden in the node UI");
+    assert.deepEqual(randomWorkflowRoundTrip.widgetNames.slice(0, 2), ["weights_json", "preserve_join"]);
+    assert.deepEqual(randomWorkflowRoundTrip.serialized.slice(0, 2), ["[10000,0,0,0,0,0,0,0,0,0]", true]);
+    assert.equal(randomWorkflowRoundTrip.apiInputs?.preserve_join, true,
+        "graphToPrompt retains the frozen Random Queue boundary after PNG-style restoration");
+    assert.deepEqual(randomWorkflowRoundTrip.queueControls.map((entry) => entry.value), ["input_order", 1, "multiply"],
+        "frozen one-arm Random preserves a closing Queue and normalizes obsolete controls");
+    assert.ok(randomWorkflowRoundTrip.queueControls.every((entry) => entry.disabled));
+    console.log("real ComfyUI Random legacy and frozen workflow widget round trips passed");
     const seedNodes = await page.evaluate(async () => {
         window.app.graph.clear();
         const add = (type) => {

@@ -393,19 +393,128 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             '18': {'class_type': 'ScenePromptCallback', 'inputs': {
                 'scene_prompt': ['16', 0], 'callback': ['17', 0],
             }},
-            '19': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['18', 0]}},
+            '20': {'class_type': 'ScenePromptRandomRoute', 'inputs': {
+                'scene_prompt': ['18', 0], 'weights_json': self.nodes.DEFAULT_RANDOM_WEIGHTS_JSON,
+            }},
+            '19': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['20', 0]}},
         }
         reached = {node['class_type'] for node in api.values()}
         self.assertEqual(reached - {'ScenePrompterExpand', 'ScenePromptToText', 'SceneApplyModel'},
                          set(self.presets.SAFE_NODE_CLASSES) - {'ScenePresetReference'})
         scene_nodes, source = self.presets._scene_nodes_for_expand(api, '19')
         self.assertEqual(set(scene_nodes), set(api) - {'19'})
-        self.assertEqual(source, ['18', 0])
+        self.assertEqual(source, ['20', 0])
         handle = self.runs.create_run_context('default')
         with self.subTest('prepare'):
             result = self.presets.snapshot_presets_for_run(handle, {'output': api}, '19')
         self.assertEqual(result['total_images'], 2)
         self.assertEqual(result['total_batches'], 2)
+
+    def test_random_route_snapshot_selects_output_slots_and_checks_missing_positive(self):
+        import json
+        api = {
+            '1': scene_prompt('base'),
+            '2': {'class_type': 'ScenePromptRandomRoute', 'inputs': {
+                'scene_prompt': ['1', 0], 'weights_json': json.dumps([5000, 5000] + [0] * 8),
+            }},
+            '3': scene_prompt('A'),
+            '4': {'class_type': 'ScenePromptDelete', 'inputs': {
+                'scene_prompt': ['2', 0], 'negative': '', 'positive': '',
+            }},
+            '5': {'class_type': 'ScenePromptReverse', 'inputs': {
+                'scene_prompt': ['2', 1], 'reverse_scope': self.nodes.REVERSE_SCOPE_ALL,
+            }},
+            '6': {'class_type': 'ScenePrompterQueue', 'inputs': {
+                'scene_prompt1': ['4', 0], 'scene_prompt2': ['5', 0],
+            }},
+            '7': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['6', 0]}},
+        }
+        handle = self.runs.create_run_context('default')
+        result = self.presets.snapshot_presets_for_run(handle, {'output': api}, '7')
+        self.assertEqual(result['total_batches'], 1)
+        joined = self.presets._scene_node_value(api, '6', {}, set(), run_handle=handle)
+        selected = [self.plan.item_for_normalized_plan(joined, 0, seed)['row']['positive_parts'] for seed in range(20)]
+        self.assertIn(['base'], selected)
+        self.assertIn([], selected)
+        api['6']['inputs'].pop('scene_prompt2')
+        with self.assertRaisesRegex(self.presets.ScenePresetResolutionError, '出力2'):
+            self.presets.snapshot_presets_for_run(self.runs.create_run_context('default'), {'output': api}, '7')
+        api['5']['inputs'].pop('scene_prompt')
+        with self.assertRaisesRegex(self.plan.ScenePlanError, '出力2'):
+            self.nodes.ScenePromptRandomRoute().route(
+                weights_json=json.dumps([5000, 5000] + [0] * 8), unique_id='2', prompt=api,
+            )
+
+    def test_random_route_inside_preset_uses_reference_instance_gate_ids(self):
+        import json
+        preset_nodes = {
+            '1': {'class_type': 'ScenePresetInput', 'inputs': {}},
+            '2': {'class_type': 'ScenePromptRandomRoute', 'inputs': {
+                'scene_prompt': ['1', 0], 'weights_json': json.dumps([2500, 7500] + [0] * 8),
+            }},
+            '3': {'class_type': 'ScenePath', 'inputs': {'scene_prompt': ['2', 0], 'path_name': 'A'}},
+            '4': {'class_type': 'ScenePath', 'inputs': {'scene_prompt': ['2', 1], 'path_name': 'B'}},
+            '5': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['3', 0], 'scene_prompt2': ['4', 0]}},
+            '6': {'class_type': 'ScenePresetOutput', 'inputs': {'scene_prompt': ['5', 0]}},
+        }
+        saved = self.presets.save_preset({
+            'preset_id': 'route_preset', 'name': 'route_preset', 'output_node_id': '6',
+            'api_graph': {'output': preset_nodes}, 'workflow': self.workflow(preset_nodes),
+        })
+        listed = self.presets.list_presets()
+        compact = next(entry['api_graph']['output'] for entry in listed['presets'] if entry['metadata']['preset_id'] == 'route_preset')
+        self.assertEqual(json.loads(compact['2']['inputs']['weights_json']), [2500, 7500] + [0] * 8)
+        api = {
+            '100': scene_prompt('base'),
+            '101': {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': 'route_preset', 'scene_prompt': ['100', 0]}},
+            '102': {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': 'route_preset', 'scene_prompt': ['100', 0]}},
+            '103': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['101', 0], 'scene_prompt2': ['102', 0]}},
+        }
+        first = self.presets._scene_node_value(api, '101', {'route_preset': saved}, set())
+        second = self.presets._scene_node_value(api, '102', {'route_preset': saved}, set())
+        def gate(plan):
+            unit = plan['units'][0]
+            while unit['kind'] == 'map':
+                unit = unit['unit']
+            return unit['gate_id']
+        self.assertEqual(gate(first), '101/2')
+        self.assertEqual(gate(second), '102/2')
+
+    def test_random_route_validates_dynamic_preset_edges(self):
+        import json
+        class Dynamic:
+            def __init__(self, ephemeral):
+                self.ephemeral = ephemeral
+            def all_node_ids(self):
+                return self.ephemeral.keys()
+            def get_node(self, node_id):
+                return self.ephemeral[node_id]
+        route = self.nodes.ScenePromptRandomRoute()
+        kwargs = {'weights_json': json.dumps([5000, 5000] + [0] * 8), 'unique_id': 'ephemeral_random',
+                  'prompt': {'unrelated': {'class_type': 'ScenePrompter', 'inputs': {}}}}
+        dynamic = Dynamic({
+            'arm_a': {'inputs': {'scene_prompt': ['ephemeral_random', 0]}},
+            'arm_b': {'inputs': {'scene_prompt': ['ephemeral_random', 1]}},
+        })
+        self.assertEqual(len(route.route(**kwargs, dynprompt=dynamic)), 10)
+        dynamic.ephemeral.pop('arm_b')
+        with self.assertRaisesRegex(self.plan.ScenePlanError, '出力2'):
+            route.route(**kwargs, dynprompt=dynamic)
+
+    def test_random_replay_does_not_freeze_conflicting_expand_and_to_text_arms(self):
+        import json
+        original = json.dumps([5000, 5000] + [0] * 8)
+        graph = {'route': {'class_type': 'ScenePromptRandomRoute', 'inputs': {'weights_json': original}}}
+        first = {'_event_ref': (('top', 0), ('random_choice', 'route', 0), ('top', 0), ('run', 0))}
+        second = {'_event_ref': (('top', 0), ('random_choice', 'route', 1), ('top', 0), ('run', 0))}
+        self.nodes._freeze_random_routes(graph, None, [first, second])
+        self.assertEqual(graph['route']['inputs']['weights_json'], original)
+        self.nodes._freeze_random_routes(graph, None, [first, first])
+        self.assertEqual(json.loads(graph['route']['inputs']['weights_json']), [10000] + [0] * 9)
+        self.assertTrue(graph['route']['inputs']['preserve_join'])
+        visual = {'nodes': [{'id': 'route', 'type': 'ScenePromptRandomRoute', 'widgets_values': [original]}]}
+        self.nodes._freeze_random_routes(graph, visual, [first])
+        self.assertEqual(visual['nodes'][0]['widgets_values'], [graph['route']['inputs']['weights_json'], True])
 
 
 if __name__ == '__main__':

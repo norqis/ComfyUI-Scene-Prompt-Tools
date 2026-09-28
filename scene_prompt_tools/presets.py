@@ -27,6 +27,7 @@ from .nodes import (
     ScenePromptReverse,
     ScenePromptDelete,
     ScenePromptToText,
+    ScenePromptRandomRoute,
     ScenePromptCallback,
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
@@ -64,6 +65,7 @@ SAFE_NODE_CLASSES = {
     "ScenePromptReverse": ScenePromptReverse,
     "ScenePromptDelete": ScenePromptDelete,
     "ScenePrompterQueue": ScenePromptQueue,
+    "ScenePromptRandomRoute": ScenePromptRandomRoute,
     "SceneEmptyLatent": SceneEmptyLatent,
     "SceneApplyLora": SceneApplyLora,
     "ScenePromptCallback": ScenePromptCallback,
@@ -102,6 +104,7 @@ DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePromptReverse": "Scene Prompt Reverse",
     "ScenePromptDelete": "Scene Prompt Delete",
     "ScenePrompterQueue": "Scene Prompt Queue",
+    "ScenePromptRandomRoute": "Scene Prompt Random Route",
     "SceneEmptyLatent": "Scene Empty Latent",
     "SceneApplyModel": "Scene Apply Model",
     "SceneApplyLora": "Scene Apply LoRA",
@@ -245,6 +248,7 @@ def _compact_preset_list_graph(api_graph):
     scalar_inputs = {
         "matrix_json", "batch_size", "count", "preset_id", "reverse_scope",
         "order_mode", "alternate_block_size", "downstream_count_mode",
+        "weights_json", "preserve_join",
     }
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
@@ -492,9 +496,11 @@ def _validate_preset_graph(nodes):
             if not is_link(input_value):
                 continue
             source_id = str(input_value[0])
-            if type(input_value[1]) is not int or input_value[1] != 0:
+            allowed_slots = range(10) if nodes.get(source_id, {}).get("class_type") == "ScenePromptRandomRoute" else (0,)
+            if type(input_value[1]) is not int or input_value[1] not in allowed_slots:
+                message = "出力番号が不正です。" if nodes.get(source_id, {}).get("class_type") == "ScenePromptRandomRoute" else "出力0だけを接続してください。"
                 raise ScenePresetError(
-                    f"{_node_label(node_id, node)} の {input_name} は出力0だけを接続してください。"
+                    f"{_node_label(node_id, node)} の {input_name} は{message}"
                 )
             if source_id not in nodes:
                 raise ScenePresetError(f"{_node_label(node_id, node)} の接続先 #{source_id} がありません。")
@@ -588,6 +594,7 @@ def _validate_preset_input_values(nodes):
 
 def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
     validation = _validate_preset_graph(nodes)
+    _validate_random_route_connections(nodes, nodes)
     _validate_preset_input_values(nodes)
     resolved = {}
     if preset_id is not None:
@@ -610,7 +617,12 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
             _resolve_preset_tree(preset_id, resolved, [], user_id)
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
-    _scene_node_value(nodes, validation["output_link"][0], resolved, set(), user_id=user_id)
+    output_link = validation["output_link"]
+    result = _scene_node_value(nodes, output_link[0], resolved, set(), user_id=user_id)
+    if nodes[str(output_link[0])].get("class_type") == "ScenePromptRandomRoute":
+        result = result[output_link[1]]
+    if isinstance(result, dict) and result.get("random_guards"):
+        raise ScenePresetError("Scene Prompt Random Route の分岐をPreset内のQueueで合流してください。")
 
 
 def _preset_nodes(preset):
@@ -837,6 +849,27 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     return _scene_prompt_closure(nodes, source[0]), source
 
 
+def _validate_random_route_connections(nodes, scene_nodes):
+    for node_id, node in scene_nodes.items():
+        if node.get("class_type") != "ScenePromptRandomRoute":
+            continue
+        weights = ScenePromptRandomRoute.INPUT_TYPES()["required"]["weights_json"][1]["default"]
+        raw = _node_inputs(node).get("weights_json", weights)
+        from .nodes import _random_weights_json
+        values = _random_weights_json(raw)
+        connected = {
+            value[1] for other in nodes.values() if isinstance(other, dict)
+            for value in _node_inputs(other).values()
+            if is_link(value) and str(value[0]) == str(node_id)
+        }
+        missing = [str(index + 1) for index, weight in enumerate(values) if weight and index not in connected]
+        if missing:
+            raise ScenePresetResolutionError(
+                f"Scene Prompt Random Route #{node_id}: 出力{', '.join(missing)}が未接続です。",
+                str(node_id),
+            )
+
+
 def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
     """Resolve an arbitrarily large Preset DAG without Python recursion limits."""
     root_id = _clean_preset_id(preset_id)
@@ -926,6 +959,15 @@ def _scene_node_value_impl(
     def value(raw):
         if isinstance(raw, (list, tuple)) and len(raw) == 2:
             source = nodes.get(str(raw[0]), {})
+            if source.get("class_type") == "ScenePromptRandomRoute":
+                slot = raw[1]
+                if type(slot) is not int or not 0 <= slot < 10:
+                    raise ScenePresetError(f"{_node_label(raw[0], source)} の出力番号が不正です。")
+                result = _scene_node_value(
+                    nodes, raw[0], resolved, next_stack, input_values,
+                    user_id, run_handle, memo, preset_stack, preset_value_memo,
+                )
+                return result[slot]
             if source.get("class_type") == "ScenePromptToText":
                 slot = raw[1]
                 if type(slot) is not int or slot not in (0, 1):
@@ -983,6 +1025,7 @@ def _scene_node_value_impl(
             run_handle,
             preset_stack,
             preset_value_memo,
+            node_id,
         ))
         memo[node_id] = result
         return result
@@ -1007,9 +1050,12 @@ def _scene_node_value_impl(
         kwargs["run_handle"] = run_handle
     if class_type == "ScenePromptCallback":
         kwargs["source_node_id"] = node_id
+    if class_type == "ScenePromptRandomRoute":
+        path = "/".join(part.split("@", 1)[1] for part in preset_stack)
+        kwargs["source_node_id"] = f"{path}/{node_id}" if path else node_id
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
-    memo[node_id] = result[0]
-    return result[0]
+    memo[node_id] = result if class_type == "ScenePromptRandomRoute" else result[0]
+    return memo[node_id]
 
 
 def _scene_node_value(
@@ -1089,14 +1135,38 @@ def _evaluate_preset_scene(
     run_handle="",
     preset_stack=(),
     preset_value_memo=None,
+    reference_node_id="",
 ):
     preset_id = str(preset["metadata"]["preset_id"])
-    if preset_id in preset_stack:
-        cycle = " -> ".join([*preset_stack, preset_id])
+    if preset_id in [part.split("@", 1)[0] for part in preset_stack]:
+        cycle = " -> ".join([*(part.split("@", 1)[0] for part in preset_stack), preset_id])
         raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
     preset_value_memo = {} if preset_value_memo is None else preset_value_memo
     upstream_key = upstream.get("change_key") if isinstance(upstream, dict) else None
-    memo_key = (preset_id, upstream_key)
+    random_presets = preset_value_memo.setdefault("__random_presets__", {})
+    if preset_id not in random_presets:
+        pending = [(preset_id, preset, False)]
+        visiting = set()
+        while pending:
+            current_id, current_preset, leaving = pending.pop()
+            if current_id in random_presets:
+                continue
+            if leaving:
+                visiting.discard(current_id)
+                current_nodes = _preset_nodes(current_preset)
+                random_presets[current_id] = (
+                    any(node.get("class_type") == "ScenePromptRandomRoute" for node in current_nodes.values() if isinstance(node, dict))
+                    or any(random_presets.get(child_id, False) for _, child_id, _ in _find_references(current_nodes))
+                )
+                continue
+            if current_id in visiting:
+                continue
+            visiting.add(current_id)
+            pending.append((current_id, current_preset, True))
+            for _, child_id, _ in _find_references(_preset_nodes(current_preset)):
+                if child_id in resolved and child_id not in random_presets and child_id not in visiting:
+                    pending.append((child_id, resolved[child_id], False))
+    memo_key = (preset_id, upstream_key, str(reference_node_id), preset_stack) if random_presets[preset_id] else (preset_id, upstream_key)
     if memo_key in preset_value_memo:
         return preset_value_memo[memo_key]
     validation = _validate_preset_payload(preset)
@@ -1113,9 +1183,11 @@ def _evaluate_preset_scene(
         user_id,
         run_handle,
         {},
-        (*preset_stack, preset_id),
+        (*preset_stack, f"{preset_id}@{reference_node_id}"),
         preset_value_memo,
     )
+    if nodes[str(output_link[0])].get("class_type") == "ScenePromptRandomRoute":
+        result = result[output_link[1]]
     preset_value_memo[memo_key] = result
     return result
 
@@ -1128,6 +1200,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
     if not isinstance(nodes, dict):
         raise ScenePresetError("生成開始時のグラフを取得できませんでした。")
     scene_nodes, source = _scene_nodes_for_expand(nodes, expand_node_id)
+    _validate_random_route_connections(nodes, scene_nodes)
     cache_key = _run_cache_key(run_id, user_id)
     with _PRESET_LOCK:
         _assert_run_not_cancelled(run_id, user_id)
@@ -1155,6 +1228,11 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id, preset_value_memo={})
             if source is not None else seed_plan()
         )
+        if source is not None and scene_nodes[str(source[0])].get("class_type") == "ScenePromptRandomRoute":
+            plan = plan[source[1]]
+        if plan["random_guards"]:
+            guard = plan["random_guards"][-1]
+            raise ScenePresetError(f"Scene Prompt Random Route {guard['gate_id']} の分岐をQueueで合流してください。")
         response = {
             "presets": [
                 {

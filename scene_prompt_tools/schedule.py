@@ -21,7 +21,7 @@ MAX_SAFE_INTEGER = _old.MAX_SAFE_INTEGER
 SCENE_PROMPT_TYPE = _old.SCENE_PROMPT_TYPE
 MAX_SCHEDULE_DEPTH = 256
 PLAN_VERSION = 7
-PLAN_KEYS = {"type", "version", "units", "sources", "contains_queue_boundary", "stats", "change_key"}
+PLAN_KEYS = {"type", "version", "units", "sources", "contains_queue_boundary", "random_guards", "stats", "change_key"}
 STATS_KEYS = {"total_batches", "total_images", "unset_batches", "row_count"}
 UNIT_KEYS = {
     "run": {"row", "count"},
@@ -33,6 +33,7 @@ UNIT_KEYS = {
     "matrix_map": {"unit", "matrix_rows"},
     "product": {"left", "right"},
     "map": {"unit", "operations"},
+    "random_choice": {"gate_id", "weights", "inputs", "selected_arm"},
 }
 OPERATION_KINDS = {
     "prompt_add", "path_add", "reverse", "delete", "model_set", "lora_add",
@@ -50,7 +51,7 @@ class ScheduleUnit(dict):
             self.depth = 0
         elif kind in {"sequence"}:
             self.depth = 1 + data["plan"].depth
-        elif kind == "alternate":
+        elif kind in {"alternate", "random_choice"}:
             self.depth = 1 + max((plan.depth for plan in data["inputs"]), default=0)
         elif kind == "product":
             self.depth = 1 + max(data["left"].depth, data["right"].depth)
@@ -118,6 +119,15 @@ def _unit_stats(unit):
         return dict(unit["plan"]["stats"])
     if kind == "alternate":
         return _sum_stats(plan["stats"] for plan in unit["inputs"])
+    if kind == "random_choice":
+        arms = unit["inputs"]
+        selected = unit["selected_arm"]
+        if selected is not None:
+            return dict(arms[selected]["stats"])
+        active = [arm["stats"] for arm, weight in zip(arms, unit["weights"]) if weight]
+        if not active or any(stats != active[0] for stats in active[1:]):
+            raise ScenePlanError("Scene Prompt Random Route の各経路の生成件数が一致しません。")
+        return dict(active[0])
     if kind in {"repeat", "repeat_each"}:
         stats = unit["unit"]["stats"]
         factor = _old._require_int(unit["factor"], "Scene Prompt repeat factor",
@@ -144,7 +154,7 @@ def _unit_stats(unit):
     raise ScenePlanError("Unsupported Scene Prompt schedule unit.")
 
 
-def _plan(units, sources=None, boundary=False):
+def _plan(units, sources=None, boundary=False, guards=()):
     units = list(units)
     depth = max((1 + unit.depth for unit in units), default=0)
     if depth > MAX_SCHEDULE_DEPTH:
@@ -155,6 +165,7 @@ def _plan(units, sources=None, boundary=False):
         "units": units,
         "sources": _old._clone_sources([] if sources is None else sources),
         "contains_queue_boundary": bool(boundary),
+        "random_guards": [copy.deepcopy(guard) for guard in guards],
         "stats": _sum_stats(unit["stats"] for unit in units),
     })
     data.depth = depth
@@ -205,7 +216,8 @@ def _validate_plan(value, depth=0, ancestors=None):
     ancestors.add(id(value))
     units = [_validate_unit(unit, depth + 1, ancestors) for unit in value["units"]]
     ancestors.remove(id(value))
-    expected = _plan(units, value["sources"], value["contains_queue_boundary"])
+    guards = _validate_guards(value["random_guards"])
+    expected = _plan(units, value["sources"], value["contains_queue_boundary"], guards)
     if value["stats"] != expected["stats"] or value["change_key"] != expected["change_key"]:
         raise ScenePlanError("Scene Prompt schedule statistics or fingerprint are invalid.")
     return expected
@@ -232,6 +244,15 @@ def _validate_unit(value, depth, ancestors):
             raise ScenePlanError("Scene Prompt alternate inputs are invalid.")
         data["block_size"] = _old._require_int(data["block_size"], "Scene Prompt alternate block size", 1, MAX_SAFE_INTEGER)
         data["inputs"] = [_validate_plan(plan, depth + 1, ancestors) for plan in data["inputs"]]
+    elif kind == "random_choice":
+        _old._require_string(data["gate_id"], "Scene Prompt Random Route ID", allow_empty=False)
+        data["weights"] = validate_random_weights(data["weights"])
+        if not isinstance(data["inputs"], list) or len(data["inputs"]) != 10:
+            raise ScenePlanError("Scene Prompt Random Route の出力が不正です。")
+        data["inputs"] = [_validate_plan(plan, depth + 1, ancestors) for plan in data["inputs"]]
+        selected = data["selected_arm"]
+        if selected is not None and (type(selected) is not int or not 0 <= selected < 10):
+            raise ScenePlanError("Scene Prompt Random Route の選択先が不正です。")
     elif kind == "product":
         data["left"] = _validate_plan(data["left"], depth + 1, ancestors)
         data["right"] = _validate_plan(data["right"], depth + 1, ancestors)
@@ -287,6 +308,28 @@ def normalize_plan(value):
     if isinstance(value, ScenePlan):
         return value
     return _validate_plan(value)
+
+
+def validate_random_weights(value):
+    if not isinstance(value, list) or len(value) != 10 or any(type(item) is not int or not 0 <= item <= 10000 for item in value):
+        raise ScenePlanError("Scene Prompt Random Route の確率は0.01%単位の10個の整数で指定してください。")
+    if sum(value) != 10000:
+        raise ScenePlanError("Scene Prompt Random Route の確率合計は100%にしてください。")
+    return list(value)
+
+
+def _validate_guards(guards):
+    if not isinstance(guards, list) or len(guards) > MAX_SCHEDULE_DEPTH:
+        raise ScenePlanError("Scene Prompt Random Route の分岐状態が不正です。")
+    result = []
+    for guard in guards:
+        if not isinstance(guard, dict) or set(guard) != {"gate_id", "arm_index", "weights"}:
+            raise ScenePlanError("Scene Prompt Random Route の分岐状態が不正です。")
+        gate_id = _old._require_string(guard["gate_id"], "Scene Prompt Random Route ID", allow_empty=False)
+        arm = _old._require_int(guard["arm_index"], "Scene Prompt Random Route output", 0, 9)
+        weights = validate_random_weights(guard["weights"])
+        result.append({"gate_id": gate_id, "arm_index": arm, "weights": weights})
+    return result
 
 
 def _validate_operation(operation):
@@ -445,7 +488,9 @@ def _apply_operation(row, operation):
 def _map_plan(plan, operation):
     _validate_operation(operation)
     source = normalize_plan(plan)
-    return _plan([_map_unit(unit, operation) for unit in source["units"]], source["sources"], source["contains_queue_boundary"])
+    if source["random_guards"] and operation["kind"] == "latent_set" and not _inert_random_arm(source):
+        raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Empty Latent は使えません。")
+    return _plan([_map_unit(unit, operation) for unit in source["units"]], source["sources"], source["contains_queue_boundary"], source["random_guards"])
 
 
 def transform(plan, transform_row=None, *, latent=None, operation=None):
@@ -467,7 +512,7 @@ def transform(plan, transform_row=None, *, latent=None, operation=None):
         row = _old._clone_row(transform_row(copy.deepcopy(simple["row"]), {"row": copy.deepcopy(simple["row"]), "count": simple["count"]}))
         result = _unit("run", row=row, count=simple["count"])
         units.append(_unit("count_fixed", unit=result) if fixed else result)
-    return _plan(units, source["sources"], source["contains_queue_boundary"])
+    return _plan(units, source["sources"], source["contains_queue_boundary"], source["random_guards"])
 
 
 def mark_prompt_passthrough(plan):
@@ -506,9 +551,18 @@ def _repeat(unit, factor):
     return _unit("repeat", unit=unit, factor=factor)
 
 
+def _inert_random_arm(plan):
+    if not plan["random_guards"] or plan["stats"]["total_batches"] != 0:
+        return False
+    gate = plan["random_guards"][-1]
+    return gate["weights"][gate["arm_index"]] == 0
+
+
 def multiply_count(plan, factor):
     amount = _old._require_int(factor, "Scene Prompt count factor", 0, MAX_SAFE_INTEGER)
     source = normalize_plan(plan)
+    if source["random_guards"] and not _inert_random_arm(source):
+        raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Prompt Count は使えません。")
     units = []
     for unit in source["units"]:
         if amount > 0 and unit["kind"] == "count_fixed":
@@ -517,12 +571,12 @@ def multiply_count(plan, factor):
             units.append(_unit("count_fixed", unit=_repeat(unit["unit"], 0)))
         else:
             units.append(_repeat(unit, amount))
-    return mark_prompt_passthrough(_plan(units, source["sources"], source["contains_queue_boundary"]))
+    return mark_prompt_passthrough(_plan(units, source["sources"], source["contains_queue_boundary"], source["random_guards"]))
 
 
 def _contains_composite(unit):
     kind = unit["kind"]
-    if kind in {"alternate", "sequence", "repeat_each"}:
+    if kind in {"alternate", "sequence", "repeat_each", "random_choice"}:
         return True
     if kind == "product":
         return any(_contains_composite(subunit) for plan in (unit["left"], unit["right"]) for subunit in plan["units"])
@@ -533,6 +587,8 @@ def _contains_composite(unit):
 
 def merge(left, right):
     first, second = normalize_plan(left), normalize_plan(right)
+    if first["random_guards"] or second["random_guards"]:
+        raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Prompt Merge は使えません。")
     composite = any(_contains_composite(unit) for plan in (first, second) for unit in plan["units"])
     boundary = first["contains_queue_boundary"] or second["contains_queue_boundary"]
     if composite:
@@ -575,6 +631,37 @@ def _validate_queue_controls(order_mode, alternate_block_size, input_repeats_jso
 def queue(values, *, order_mode="input_order", alternate_block_size=1, input_repeats_json="{}", downstream_count_mode="multiply"):
     mode, block, count_mode = _validate_queue_controls(order_mode, alternate_block_size, input_repeats_json, downstream_count_mode)
     slots = [(index, normalize_plan(value)) for index, value in enumerate(values, start=1) if value is not None]
+    zero_guards = [plan["random_guards"][-1] for _, plan in slots if _inert_random_arm(plan)]
+    slots = [(index, plan) for index, plan in slots if not (
+        _inert_random_arm(plan)
+    )]
+    if zero_guards and not slots:
+        gate = zero_guards[0]
+        missing = [str(index + 1) for index, weight in enumerate(gate["weights"]) if weight]
+        raise ScenePlanError(f"Scene Prompt Random Route {gate['gate_id']} の出力{', '.join(missing)}が合流Queueに接続されていません。")
+    guarded = [(index, plan) for index, plan in slots if plan["random_guards"]]
+    if guarded:
+        if len(guarded) != len(slots):
+            raise ScenePlanError("Scene Prompt Random Route の合流Queueに無関係な入力を混ぜられません。")
+        stack = guarded[0][1]["random_guards"]
+        gate = stack[-1]
+        if any(plan["random_guards"][:-1] != stack[:-1] or
+               plan["random_guards"][-1]["gate_id"] != gate["gate_id"] or
+               plan["random_guards"][-1]["weights"] != gate["weights"] for _, plan in guarded):
+            raise ScenePlanError("Scene Prompt Random Route の分岐を交差させず、同じQueueへ合流してください。")
+        inputs = [None] * 10
+        for _, plan in guarded:
+            arm = plan["random_guards"][-1]["arm_index"]
+            if inputs[arm] is not None:
+                raise ScenePlanError(f"Scene Prompt Random Route の出力{arm + 1}が同じQueueに複数接続されています。")
+            inputs[arm] = _plan(plan["units"], plan["sources"], plan["contains_queue_boundary"], stack[:-1])
+        missing = [str(index + 1) for index, weight in enumerate(gate["weights"]) if weight and inputs[index] is None]
+        if missing:
+            raise ScenePlanError(f"Scene Prompt Random Route {gate['gate_id']} の出力{', '.join(missing)}が合流Queueに接続されていません。")
+        empty = _plan([])
+        inputs = [plan if plan is not None else empty for plan in inputs]
+        unit = _unit("random_choice", gate_id=gate["gate_id"], weights=gate["weights"], inputs=inputs, selected_arm=None)
+        return mark_prompt_whole(_plan([unit], boundary=True, guards=stack[:-1]))
     locked = any(plan["contains_queue_boundary"] for _, plan in slots)
     sources = [{
         "index": index, "row_count": plan["stats"]["row_count"],
@@ -618,6 +705,8 @@ def _matrix_row(base, matrix_row):
 
 def matrix_product(plan, matrix_rows, configured):
     source = normalize_plan(plan)
+    if source["random_guards"] and not _inert_random_arm(source):
+        raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Matrix は使えません。")
     if not isinstance(matrix_rows, list) or type(configured) is not bool:
         raise ScenePlanError("Scene Matrix rows are invalid.")
     active = []
@@ -639,46 +728,72 @@ def matrix_product(plan, matrix_rows, configured):
         else:
             derived = []
         units.extend(_unit("count_fixed", unit=item) if fixed else item for item in derived)
-    return _plan(units, boundary=source["contains_queue_boundary"])
+    return _plan(units, boundary=source["contains_queue_boundary"], guards=source["random_guards"])
 
 
-def _select_plan(plan, index):
+def random_route(plan, weights, gate_id, *, preserve_join=False):
+    source = normalize_plan(plan)
+    weights = validate_random_weights(weights)
+    gate_id = _old._require_string(str(gate_id or "").strip(), "Scene Prompt Random Route ID", allow_empty=False)
+    if any(guard["gate_id"] == gate_id for guard in source["random_guards"]):
+        raise ScenePlanError("Scene Prompt Random Route の分岐が閉じる前に同じノードを再利用できません。")
+    outputs = []
+    for arm, weight in enumerate(weights):
+        guard = {"gate_id": gate_id, "arm_index": arm, "weights": weights}
+        outputs.append(_plan(source["units"] if weight else [], source["sources"] if weight else [], source["contains_queue_boundary"] if weight else False, [*source["random_guards"], guard]))
+    if sum(bool(weight) for weight in weights) == 1 and not preserve_join:
+        arm = next(index for index, weight in enumerate(weights) if weight)
+        outputs[arm] = source
+    return tuple(outputs)
+
+
+def _random_arm(weights, gate_id, seed):
+    payload = json.dumps([int(seed), str(gate_id)], ensure_ascii=False, separators=(",", ":"))
+    draw = int.from_bytes(hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest(), "big") % 10000
+    for arm, weight in enumerate(weights):
+        if draw < weight:
+            return arm
+        draw -= weight
+    raise ScenePlanError("Scene Prompt Random Route の確率が不正です。")
+
+
+def _select_plan(plan, index, seed=0):
     unit_index = bisect.bisect_right(plan.batch_prefix, index)
     if unit_index >= len(plan["units"]):
         raise IndexError("Generation index is outside the plan.")
     offset = plan.batch_prefix[unit_index - 1] if unit_index else 0
     row_offset = plan.row_prefix[unit_index - 1] if unit_index else 0
-    item = _select_unit(plan["units"][unit_index], index - offset)
+    item = _select_unit(plan["units"][unit_index], index - offset, seed)
     item["row_index"] += row_offset
     item["event_ref"] = (("top", unit_index), *item["event_ref"])
     return item
 
 
-def _select_unit(unit, index):
+def _select_unit(unit, index, seed=0):
     kind = unit["kind"]
     if kind == "run":
         row = copy.deepcopy(unit["row"])
         return {"row": row, "count": unit["count"], "row_index": 0, "repeat_index": index + 1,
                 "event_ref": (("run", index),)}
     if kind == "sequence":
-        item = _select_plan(unit["plan"], index)
+        item = _select_plan(unit["plan"], index, seed)
         item["event_ref"] = (("sequence",), *item["event_ref"])
         return item
     if kind == "count_fixed":
-        item = _select_unit(unit["unit"], index)
+        item = _select_unit(unit["unit"], index, seed)
         item["event_ref"] = (("fixed",), *item["event_ref"])
         return item
     if kind == "repeat":
         child_count = unit["unit"]["stats"]["total_batches"]
         cycle, local = divmod(index, child_count)
-        item = _select_unit(unit["unit"], local)
+        item = _select_unit(unit["unit"], local, seed)
         item["repeat_index"] += cycle * item["count"]
         item["count"] *= unit["factor"]
         item["event_ref"] = (("repeat", cycle), *item["event_ref"])
         return item
     if kind == "repeat_each":
         child_index, within = divmod(index, unit["factor"])
-        item = _select_unit(unit["unit"], child_index)
+        item = _select_unit(unit["unit"], child_index, seed)
         item["repeat_index"] = (item["repeat_index"] - 1) * unit["factor"] + within + 1
         item["count"] *= unit["factor"]
         item["event_ref"] = (("repeat_each", within), *item["event_ref"])
@@ -701,7 +816,7 @@ def _select_unit(unit, index):
             amount = min(block, max(0, length - block * round_index))
             if within < amount:
                 local = block * round_index + within
-                item = _select_plan(plan, local)
+                item = _select_plan(plan, local, seed)
                 item["row_index"] += sum(previous["stats"]["row_count"] for previous in unit["inputs"][:socket])
                 item["event_ref"] = (("alternate", socket, round_index, within), *item["event_ref"])
                 return item
@@ -710,7 +825,7 @@ def _select_unit(unit, index):
     if kind == "matrix_map":
         size = len(unit["matrix_rows"])
         child_index, matrix_index = divmod(index, size)
-        item = _select_unit(unit["unit"], child_index)
+        item = _select_unit(unit["unit"], child_index, seed)
         item["row"] = _matrix_row(item["row"], unit["matrix_rows"][matrix_index])
         item["row_index"] = item["row_index"] * size + matrix_index
         item["event_ref"] = (("matrix", matrix_index), *item["event_ref"])
@@ -718,26 +833,33 @@ def _select_unit(unit, index):
     if kind == "product":
         right_batches = unit["right"]["stats"]["total_batches"]
         left_index, right_index = divmod(index, right_batches)
-        left = _select_plan(unit["left"], left_index)
-        right = _select_plan(unit["right"], right_index)
+        left = _select_plan(unit["left"], left_index, seed)
+        right = _select_plan(unit["right"], right_index, seed)
         row = _old.merge_rows(left["row"], right["row"])
         return {"row": row, "count": left["count"] * right["count"],
                 "row_index": left["row_index"] * unit["right"]["stats"]["row_count"] + right["row_index"],
                 "repeat_index": (left["repeat_index"] - 1) * right["count"] + right["repeat_index"],
                 "event_ref": (("product",), left["event_ref"], right["event_ref"])}
     if kind == "map":
-        item = _select_unit(unit["unit"], index)
+        item = _select_unit(unit["unit"], index, seed)
         for operation in unit["operations"]:
             item["row"] = _apply_operation(item["row"], operation)
         item["event_ref"] = (("map",), *item["event_ref"])
         return item
+    if kind == "random_choice":
+        arm = _random_arm(unit["weights"], unit["gate_id"], seed)
+        item = _select_plan(unit["inputs"][arm], index, seed)
+        item["event_ref"] = (("random_choice", unit["gate_id"], arm), *item["event_ref"])
+        return item
     raise ScenePlanError("Unsupported Scene Prompt schedule unit.")
 
 
-def item_for_normalized_plan(plan, index):
+def item_for_normalized_plan(plan, index, seed=0):
+    if plan["random_guards"]:
+        raise ScenePlanError(f"Scene Prompt Random Route {plan['random_guards'][-1]['gate_id']} の分岐がQueueで合流していません。")
     if type(index) is not int or not 0 <= index < plan["stats"]["total_batches"]:
         raise IndexError("Generation index is outside the plan.")
-    item = _select_plan(plan, index)
+    item = _select_plan(plan, index, seed)
     item["label"] = _old.row_label(item["row"])
     item["start_index"] = index - item["repeat_index"] + 1
     item["queue_index"] = 0
@@ -759,6 +881,8 @@ def legacy_rows(plan):
     Executing a composite schedule never uses this view; materializing an
     alternating plan would change its grouping and make large Counts costly.
     """
+    if plan["random_guards"]:
+        raise ScenePlanError(f"Scene Prompt Random Route {plan['random_guards'][-1]['gate_id']} の分岐がQueueで合流していません。")
     if plan["stats"]["row_count"] > 100_000:
         raise ScenePlanError("This schedule has too many logical rows to list.")
     rows = []
@@ -800,14 +924,14 @@ def legacy_rows(plan):
     return result
 
 
-def _prune_plan(plan, selected_sources, visible_sources, pending_operations=()):
+def _prune_plan(plan, selected_sources, visible_sources, pending_operations=(), selected_arms=None):
     return _plan(
-        [_prune_unit(unit, selected_sources, visible_sources, pending_operations) for unit in plan["units"]],
-        plan["sources"], plan["contains_queue_boundary"],
+        [_prune_unit(unit, selected_sources, visible_sources, pending_operations, selected_arms) for unit in plan["units"]],
+        plan["sources"], plan["contains_queue_boundary"], plan["random_guards"],
     )
 
 
-def _prune_unit(unit, selected_sources, visible_sources, pending_operations=()):
+def _prune_unit(unit, selected_sources, visible_sources, pending_operations=(), selected_arms=None):
     kind = unit["kind"]
     if kind == "run":
         row = unit["row"]
@@ -817,15 +941,22 @@ def _prune_unit(unit, selected_sources, visible_sources, pending_operations=()):
         kept = (row_sources & visible_sources) <= selected_sources
         return unit if kept else _unit("run", row=unit["row"], count=0)
     if kind == "sequence":
-        return _unit("sequence", plan=_prune_plan(unit["plan"], selected_sources, visible_sources, pending_operations))
+        return _unit("sequence", plan=_prune_plan(unit["plan"], selected_sources, visible_sources, pending_operations, selected_arms))
     if kind == "alternate":
-        return _unit("alternate", inputs=[_prune_plan(plan, selected_sources, visible_sources, pending_operations) for plan in unit["inputs"]], block_size=unit["block_size"])
+        return _unit("alternate", inputs=[_prune_plan(plan, selected_sources, visible_sources, pending_operations, selected_arms) for plan in unit["inputs"]], block_size=unit["block_size"])
+    if kind == "random_choice":
+        arm = selected_arms.get(unit["gate_id"]) if selected_arms else None
+        if arm is None:
+            return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=[_plan([]) for _ in range(10)], selected_arm=0)
+        inputs = [_plan([]) for _ in range(10)]
+        inputs[arm] = _prune_plan(unit["inputs"][arm], selected_sources, visible_sources, pending_operations, selected_arms)
+        return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=inputs, selected_arm=arm)
     if kind == "product":
-        return _unit("product", left=_prune_plan(unit["left"], selected_sources, visible_sources), right=_prune_plan(unit["right"], selected_sources, visible_sources))
+        return _unit("product", left=_prune_plan(unit["left"], selected_sources, visible_sources, selected_arms=selected_arms), right=_prune_plan(unit["right"], selected_sources, visible_sources, selected_arms=selected_arms))
     if kind == "map":
-        child = _prune_unit(unit["unit"], selected_sources, visible_sources, (*unit["operations"], *pending_operations))
+        child = _prune_unit(unit["unit"], selected_sources, visible_sources, (*unit["operations"], *pending_operations), selected_arms)
         return _unit("map", unit=child, operations=unit["operations"])
-    child = _prune_unit(unit["unit"], selected_sources, visible_sources, pending_operations)
+    child = _prune_unit(unit["unit"], selected_sources, visible_sources, pending_operations, selected_arms)
     if kind in {"repeat", "repeat_each"}:
         return _unit(kind, unit=child, factor=unit["factor"])
     if kind == "count_fixed":
@@ -880,6 +1011,11 @@ def _rank_unit(unit, path):
         before = sum(min(length, round_index * block) for length in lengths)
         prior = sum(min(block, max(0, length - round_index * block)) for length in lengths[:socket])
         return before + prior + offset
+    if kind == "random_choice" and marker[0] == "random_choice":
+        arm = marker[2] if len(marker) == 3 and marker[1] == unit["gate_id"] else -1
+        if type(arm) is not int or arm != unit["selected_arm"]:
+            raise ScenePlanError("Scene Prompt Random Route の保存経路が一致しません。")
+        return _rank_plan(unit["inputs"][arm], path[1:])
     if kind == "matrix_map" and marker[0] == "matrix":
         matrix_index = marker[1]
         if type(matrix_index) is not int or not 0 <= matrix_index < len(unit["matrix_rows"]):
@@ -903,7 +1039,15 @@ def replay_index_for_event(plan, event_ref, selected_sources, visible_source_ids
         raise ScenePlanError("Selected Scene Prompt event path is missing.")
     selected = {str(value) for value in selected_sources}
     visible = {str(value) for value in visible_source_ids}
-    pruned = _prune_plan(source, selected, visible)
+    selected_arms = {}
+    def choices(path):
+        for part in path:
+            if isinstance(part, (list, tuple)) and part and part[0] == "random_choice" and len(part) == 3:
+                selected_arms[part[1]] = part[2]
+            elif isinstance(part, (list, tuple)):
+                choices(part)
+    choices(event_ref)
+    pruned = _prune_plan(source, selected, visible, selected_arms=selected_arms)
     index = _rank_plan(pruned, event_ref)
     if not 0 <= index < pruned["stats"]["total_batches"]:
         raise ScenePlanError("Selected Scene Prompt event was pruned.")

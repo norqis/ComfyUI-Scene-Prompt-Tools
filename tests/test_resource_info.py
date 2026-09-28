@@ -46,6 +46,22 @@ class ResourceInfoTests(unittest.TestCase):
              "roles": ["model", "clip"], "applies": True},
         ]}])
 
+    def test_random_route_shows_distinct_resources_from_both_candidate_branches(self):
+        graph = {"output": {
+            "1": node("ScenePrompter"),
+            "2": node("ScenePromptRandomRoute", scene_prompt=["1", 0], weights_json="[5000,5000,0,0,0,0,0,0,0,0]"),
+            "3": node("SceneApplyModel", scene_prompt=["2", 0], model=["8", 0], clip=["8", 1], vae=["8", 2]),
+            "4": node("SceneApplyModel", scene_prompt=["2", 1], model=["8", 0], clip=["8", 1], vae=["8", 2]),
+            "5": node("SceneApplyLora", scene_prompt=["3", 0], lora_name="A.safetensors", strength_model=1.0, strength_clip=1.0),
+            "6": node("SceneApplyLora", scene_prompt=["4", 0], lora_name="B.safetensors", strength_model=1.0, strength_clip=1.0),
+            "7": node("ScenePrompterQueue", scene_prompt1=["5", 0], scene_prompt2=["6", 0]),
+            "9": node("ScenePrompterExpand", scene_prompt=["7", 0]),
+            "8": node("CheckpointLoaderSimple", ckpt_name="base.safetensors"),
+        }}
+        result = self.info.connected_resources(graph, "9")
+        self.assertEqual([model["name"] for model in result["models"]], ["base.safetensors"])
+        self.assertEqual({lora["name"] for lora in result["loras"]}, {"A.safetensors", "B.safetensors"})
+
     def test_separate_anima_files_and_standard_lora_chain(self):
         graph = {"output": {
             "1": node("ScenePrompter"),
