@@ -7415,6 +7415,7 @@ function sceneScheduleCount(plan, factor) {
 }
 
 function sceneScheduleMap(plan, transform) {
+    if (plan.stats.error) return plan;
     const mapUnit = (unit) => unit.kind === "fixed"
         ? sceneScheduleWrapper("fixed", mapUnit(unit.unit))
         : { kind: "map", unit, transform, total: unit.total, totalImages: unit.totalImages,
@@ -7653,6 +7654,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
     }
     if (upstream && (sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
+        if (base.stats.error) return finish(base);
         if (isScenePromptNode(node) || isScenePathNode(node) || isSceneEmptyLatentNode(node)) {
             const transform = (entry) => {
                 if (!entry) return null;

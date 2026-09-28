@@ -55,6 +55,8 @@ assert.equal(ctx.sceneScheduleCount(randomJoined, 10).stats.total, 10, "Count re
 assert.match(ctx.sceneScheduleCount(guarded(leaf("A"), 0), 2).stats.error, /Queueで合流/u);
 assert.match(ctx.sceneScheduleMatrix(guarded(leaf("A"), 0), [{ label: "single" }]).stats.error, /Queueで合流/u);
 assert.match(ctx.sceneScheduleMerge(guarded(leaf("A"), 0), leaf("B")).stats.error, /Queueで合流/u);
+assert.match(ctx.sceneScheduleMap(ctx.sceneScheduleError("不正な確率"), (entry) => entry).stats.error,
+    /不正な確率/u, "a downstream Prompt does not erase the random validation error");
 assert.match(queue([guarded(leaf("A"), 0)], controls()).stats.error, /ランダム分岐/u,
     "a missing positive arm is an error");
 assert.equal(queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1), ctx.sceneSchedulePlan()], controls()).stats.total, 1,
