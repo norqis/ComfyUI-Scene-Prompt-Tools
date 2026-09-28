@@ -7319,7 +7319,12 @@ function sceneRandomChoicePlan(plans) {
     const unit = { kind: "random_choice", plans,
         total: first.stats.total, totalImages: first.stats.totalImages,
         unsetBatches: first.stats.unsetBatches, rows: first.stats.rows };
-    return sceneSchedulePlan([unit], first.boundary, first.randomGuards.slice(0, -1));
+    return sceneSchedulePlan([unit], true, first.randomGuards.slice(0, -1));
+}
+
+function sceneRandomZeroArm(plan) {
+    const guard = sceneRandomGuard(plan);
+    return guard && guard.weights[guard.armIndex] === 0;
 }
 
 function sceneRandomJoinReady(plans) {
@@ -7408,7 +7413,8 @@ function sceneSchedulePrefix(plan, limit) {
 
 function sceneScheduleCount(plan, factor) {
     if (plan.stats.error) return plan;
-    if (plan.randomGuards.length) return sceneScheduleError("ランダム分岐はQueueで合流してからCountを接続してください。");
+    if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
+        return sceneScheduleError("ランダム分岐はQueueで合流してからCountを接続してください。");
     const units = plan.units.map((unit) => factor === 0 ? sceneScheduleWrapper("repeat", unit, 0)
         : unit.kind === "fixed" ? unit : sceneScheduleWrapper("repeat", unit, factor));
     return sceneSchedulePlan(units, plan.boundary, plan.randomGuards);
@@ -7425,7 +7431,7 @@ function sceneScheduleMap(plan, transform) {
 
 function sceneScheduleMatrix(plan, matrixRows) {
     if (plan.stats.error) return plan;
-    if (plan.randomGuards.length)
+    if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
         return sceneScheduleError("ランダム分岐はQueueで合流してからMatrixを接続してください。");
     if (!matrixRows.length) return sceneSchedulePlan([], plan.boundary, plan.randomGuards);
     const matrixEntry = (entry, matrixRow) => {
@@ -7499,9 +7505,10 @@ function sceneScheduleQueue(plans, socketNames, controls) {
     const invalid = plans.find((plan) => plan?.stats?.error);
     if (invalid) return invalid;
     const active = plans.some((plan) => sceneRandomGuard(plan))
-        ? plans.filter((plan) => plan.stats.total > 0) : plans;
+        ? plans.filter((plan) => !sceneRandomZeroArm(plan)) : plans;
+    if (!active.length && plans.length) return sceneSchedulePlan([], true);
     if (sceneRandomJoinReady(active)) return sceneRandomChoicePlan(active);
-    if (plans.some((plan) => sceneRandomGuard(plan)))
+    if (active.some((plan) => sceneRandomGuard(plan)))
         return sceneScheduleError("ランダム分岐の0%を超える出力を同じQueueへ接続してください。");
     const factor = Math.max(1, Number(controls.alternate_block_size) || 1);
     if (!plans.length) {
@@ -7555,6 +7562,10 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
         } else if (entry.class_type === "ScenePromptCounter") {
             const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
             plan = sceneScheduleCount(base, clampSceneCount(apiInput(entry, "count"), 1));
+        } else if (entry.class_type === "SceneEmptyLatent") {
+            const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
+            plan = base.randomGuards.length && !sceneRandomZeroArm(base)
+                ? sceneScheduleError("ランダム分岐はQueueで合流してからEmpty Latentを接続してください。") : base;
         } else if (entry.class_type === "ScenePresetReference") {
             plan = sceneScheduleForPreset(apiInput(entry, "preset_id"), source("scene_prompt"), nextStack,
                 null, `${instancePath}/${nodeId}`);
@@ -7567,7 +7578,8 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                 plan = sceneScheduleError("ランダム分岐の確率の合計を100%にしてください。");
             } else {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-                plan = !weights[outputSlot] ? sceneSchedulePlan()
+                plan = !weights[outputSlot] ? sceneSchedulePlan([], base.boundary,
+                    [...base.randomGuards, { gateId: `${instancePath}/${nodeId}`, armIndex: outputSlot, weights }])
                     : weights.filter((weight) => weight > 0).length === 1 ? base
                         : sceneSchedulePlan(base.units, base.boundary,
                             [...base.randomGuards, { gateId: `${instancePath}/${nodeId}`, armIndex: outputSlot, weights }]);
@@ -7614,9 +7626,10 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
     if (isScenePromptRandomRouteNode(node)) {
         if (!sceneRandomWeightsValid(node)) return finish(sceneScheduleError("ランダム分岐の確率の合計を100%にしてください。"));
         const weights = sceneRandomWeights(node);
-        if (!weights[outputSlot]) return finish(sceneSchedulePlan());
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
             || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
+        if (!weights[outputSlot]) return finish(sceneSchedulePlan([], base.boundary,
+            [...base.randomGuards, { gateId: String(node.id), armIndex: outputSlot, weights }]));
         if (weights.filter((weight) => weight > 0).length === 1) return finish(base);
         return finish(sceneSchedulePlan(base.units, base.boundary,
             [...base.randomGuards, { gateId: String(node.id), armIndex: outputSlot, weights }]));
@@ -7655,6 +7668,8 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
     if (upstream && (sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
         if (base.stats.error) return finish(base);
+        if (isSceneEmptyLatentNode(node) && base.randomGuards.length && !sceneRandomZeroArm(base))
+            return finish(sceneScheduleError("ランダム分岐はQueueで合流してからEmpty Latentを接続してください。"));
         if (isScenePromptNode(node) || isScenePathNode(node) || isSceneEmptyLatentNode(node)) {
             const transform = (entry) => {
                 if (!entry) return null;
@@ -7792,7 +7807,7 @@ function sceneQueuePendingInNode(node, seen = new Set()) {
 function sceneQueueLockState(node) {
     const sources = connectedScenePromptSourcesForQueue(node);
     const plans = sources.map(({ input }) => sceneScheduleForLinkedInput(node, input.name));
-    if (plans.length && sceneRandomJoinReady(plans.filter((plan) => plan?.stats?.total > 0))) return "random";
+    if (plans.length && sceneRandomJoinReady(plans.filter((plan) => !sceneRandomZeroArm(plan)))) return "random";
     if (sources.some(({ source }) => sceneQueueBoundaryInNode(source))) return "upstream";
     if (sources.some(({ source }) => sceneQueuePendingInNode(source))) return "loading";
     return "";

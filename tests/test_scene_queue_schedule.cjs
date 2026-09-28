@@ -31,7 +31,7 @@ for (const name of [
     "sceneSchedulePlan", "sceneScheduleRun", "sceneScheduleWrapper", "sceneScheduleRepeatEach",
     "sceneScheduleSequence", "sceneScheduleAlternate", "sceneScheduleAtUnit", "sceneScheduleAt",
     "sceneSchedulePrefix", "sceneScheduleCount", "sceneScheduleMap", "sceneScheduleMatrix", "sceneScheduleQueue",
-    "sceneScheduleError", "sceneRandomGuard", "sceneRandomChoicePlan", "sceneRandomJoinReady",
+    "sceneScheduleError", "sceneRandomGuard", "sceneRandomChoicePlan", "sceneRandomZeroArm", "sceneRandomJoinReady",
     "sceneScheduleHasComposite", "sceneScheduleMerge", "mergeScenePromptEntryPair",
 ]) vm.runInContext(functionSource(name), ctx);
 
@@ -59,8 +59,15 @@ assert.match(ctx.sceneScheduleMap(ctx.sceneScheduleError("不正な確率"), (en
     /不正な確率/u, "a downstream Prompt does not erase the random validation error");
 assert.match(queue([guarded(leaf("A"), 0)], controls()).stats.error, /ランダム分岐/u,
     "a missing positive arm is an error");
-assert.equal(queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1), ctx.sceneSchedulePlan()], controls()).stats.total, 1,
+const zeroArm = ctx.sceneSchedulePlan([], false, [{ gateId: "random-1", armIndex: 2, weights: randomWeights }]);
+assert.equal(queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1), zeroArm], controls()).stats.total, 1,
     "connected zero-percent arms do not increase the generation count");
+const zeroUpstream = ctx.sceneSchedulePlan();
+const zeroJoined = queue([guarded(zeroUpstream, 0), guarded(zeroUpstream, 1), zeroArm], controls());
+assert.equal(zeroJoined.stats.total, 0, "positive-probability arms remain joined when the upstream plan has zero rows");
+assert.equal(zeroJoined.boundary, true, "a Random join remains a Queue boundary even with zero rows");
+assert.equal(ctx.sceneScheduleCount(randomJoined, 2).boundary, true,
+    "a downstream Count repeats the Random Queue unit, not individual alternatives");
 const crossed = queue([
     ctx.sceneSchedulePlan(leaf("A").units, false, [{ gateId: "outer", armIndex: 0, weights: randomWeights },
         { gateId: "inner", armIndex: 0, weights: randomWeights }]),
