@@ -523,6 +523,12 @@ export function injectStyle() {
         }
         .pc-lora-word span { overflow-wrap: anywhere; }
         .pc-lora-dialog a { color: #9db8ec; }
+        .pc-random-dialog { width: min(430px, calc(100vw - 24px)); }
+        .pc-random-fields { display: grid; gap: 6px; margin-top: 14px; }
+        .pc-random-row { display: grid; grid-template-columns: 1fr 90px auto; align-items: center; gap: 8px; }
+        .pc-random-row input { box-sizing: border-box; width: 100%; padding: 5px 7px; color: #e7e7e7; background: #171a20; border: 1px solid #59616e; border-radius: 4px; }
+        .pc-random-total { margin-top: 12px; padding: 7px 9px; border-radius: 4px; background: #263b30; color: #adf0be; }
+        .pc-random-invalid { color: #ff8f8f !important; border-color: #e24c4c !important; background: #3c2529 !important; }
         .pc-resource-dialog { width: min(720px, calc(100vw - 24px)); }
         .pc-resource-section { display: grid; gap: 7px; }
         .pc-resource-section > strong { padding-bottom: 3px; border-bottom: 1px solid #4a505b; }

@@ -2418,6 +2418,52 @@ try {
     assert.equal(await resources.count(), 0, "a late hash response cannot reopen a removed node's modal");
     await page.evaluate(() => { window.app.graphToPrompt = window.__originalResourceGraphToPrompt; });
     await checkFavorites(browser, `http://127.0.0.1:${address.port}/`);
+    await page.evaluate(async () => {
+        class RandomNode {
+            constructor() {
+                this.id = 9701;
+                this.type = this.comfyClass = "ScenePromptRandomRoute";
+                this.graph = window.app.graph;
+                this.size = [260, 160];
+                this.inputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }];
+                this.outputs = Array.from({ length: 10 }, (_, index) => ({ name: `scene_prompt${index + 1}`, links: index < 2 ? [index + 1] : [] }));
+                this.widgets = [{ name: "weights_json", type: "text", value: "[10000,0,0,0,0,0,0,0,0,0]", options: {} }];
+                this.widgets_values = this.widgets.map((widget) => widget.value);
+            }
+            addWidget(type, name, value, callback, options = {}) {
+                const widget = { type, name, value, callback, options, computeSize: () => [100, 20] };
+                this.widgets.push(widget); return widget;
+            }
+            setDirtyCanvas() {}
+            setSize(size) { this.size = size; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(RandomNode, { name: "ScenePromptRandomRoute" });
+        window.__sceneRandomTestNode = new RandomNode();
+        window.app.graph._nodes.push(window.__sceneRandomTestNode);
+        window.__sceneRandomTestNode.onNodeCreated();
+        window.__sceneRandomTestNode.widgets.find((widget) => widget.sceneRole === "random_settings").callback();
+    });
+    const randomDialog = page.getByRole("dialog", { name: "Scene Prompt Random Route 設定" });
+    await randomDialog.getByRole("spinbutton", { name: "scene_prompt1 の確率（%）" }).fill("60");
+    await randomDialog.getByRole("spinbutton", { name: "scene_prompt2 の確率（%）" }).fill("40");
+    assert.equal(await page.evaluate(() => window.__sceneRandomTestNode.widgets[0].value), "[10000,0,0,0,0,0,0,0,0,0]",
+        "editing random percentages does not mutate the saved workflow before closing");
+    await randomDialog.getByRole("button", { name: "閉じる" }).click();
+    assert.equal(await page.evaluate(() => window.__sceneRandomTestNode.widgets[0].value), "[6000,4000,0,0,0,0,0,0,0,0]");
+    await page.evaluate(() => window.__sceneRandomTestNode.widgets.find((widget) => widget.sceneRole === "random_settings").callback());
+    await randomDialog.getByRole("spinbutton", { name: "scene_prompt2 の確率（%）" }).fill("30");
+    assert.match(await randomDialog.locator(".pc-random-total").textContent(), /90\.00%/u);
+    assert.ok(await randomDialog.locator(".pc-random-total").evaluate((element) => element.classList.contains("pc-random-invalid")));
+    await randomDialog.getByRole("button", { name: "閉じる" }).click();
+    assert.equal(await page.evaluate(() => window.__sceneRandomTestNode.widgets[0].value), "[6000,3000,0,0,0,0,0,0,0,0]",
+        "an invalid sum remains saved and visibly invalid until corrected");
+    assert.equal(await page.evaluate(() => window.__sceneRandomTestNode.boxcolor), "#e24c4c");
+    await page.evaluate(() => window.__sceneRandomTestNode.widgets.find((widget) => widget.sceneRole === "random_settings").callback());
+    await randomDialog.getByRole("spinbutton", { name: "scene_prompt2 の確率（%）" }).fill("12.345");
+    await randomDialog.getByRole("button", { name: "閉じる" }).click();
+    assert.equal(await page.evaluate(() => window.__sceneRandomTestNode.widgets[0].value), "[6000,3000,0,0,0,0,0,0,0,0]",
+        "malformed percentages can be discarded without trapping the modal");
+
     console.log("Scene Prompt browser integration tests passed.");
 } finally {
     await browser.close();

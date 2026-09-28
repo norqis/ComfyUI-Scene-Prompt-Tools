@@ -23,6 +23,7 @@ const previewContext = {
     scenePromptSourceCacheKey(node) { return node.id; },
     isSceneNodeMuted() { return false; }, isSceneNodeBypassed() { return false; },
     isScenePresetReferenceNode() { return false; },
+    isScenePromptRandomRouteNode() { return false; }, sceneRandomRouteInNode() { return false; },
     sceneQueueBoundaryInNode() { return false; },
     sceneScheduleForNode(node) { return node; },
     sceneSchedulePrefix(node, limit) {

@@ -19,6 +19,7 @@ function functionSource(name) {
 const ctx = {
     Array, Map, Set, Object, Number, String, JSON, Math,
     SCENE_PROMPT_QUEUE_INPUT_NAMES: new Set(Array.from({ length: 10 }, (_, i) => `scene_prompt${i + 1}`)),
+    SCENE_RANDOM_DEFAULT_WEIGHTS: [10000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     emptyMatrixRow: () => ({}),
     matrixLineLabel: (row) => row.label,
     sceneQueueDisplayPartsForEntry: (entry) => entry.parts,
@@ -30,6 +31,7 @@ for (const name of [
     "sceneSchedulePlan", "sceneScheduleRun", "sceneScheduleWrapper", "sceneScheduleRepeatEach",
     "sceneScheduleSequence", "sceneScheduleAlternate", "sceneScheduleAtUnit", "sceneScheduleAt",
     "sceneSchedulePrefix", "sceneScheduleCount", "sceneScheduleMap", "sceneScheduleMatrix", "sceneScheduleQueue",
+    "sceneScheduleError", "sceneRandomGuard", "sceneRandomChoicePlan", "sceneRandomJoinReady",
     "sceneScheduleHasComposite", "sceneScheduleMerge", "mergeScenePromptEntryPair",
 ]) vm.runInContext(functionSource(name), ctx);
 
@@ -40,6 +42,30 @@ const controls = (order_mode = "input_order", block = 1, repeats = "{}", downstr
     ({ order_mode, alternate_block_size: block, input_repeats_json: repeats, downstream_count_mode });
 const queue = (plans, settings) => ctx.sceneScheduleQueue(plans, plans.map((_, index) => `scene_prompt${index + 1}`), settings);
 const prefix = (plan, limit = plan.stats.total) => ctx.sceneSchedulePrefix(plan, limit).map((entry) => entry.parts.join(""));
+
+const randomWeights = [6000, 4000, 0, 0, 0, 0, 0, 0, 0, 0];
+const guarded = (plan, index, gateId = "random-1") => ctx.sceneSchedulePlan(plan.units, plan.boundary,
+    [{ gateId, armIndex: index, weights: randomWeights }]);
+const randomJoined = queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1)], controls("alternate", 3));
+assert.equal(randomJoined.stats.total, 1, "random alternatives occupy one generation slot");
+assert.equal(randomJoined.stats.rows, 1);
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(randomJoined))), ["ランダム候補"],
+    "preview does not falsely claim a winner before execution");
+assert.equal(ctx.sceneScheduleCount(randomJoined, 10).stats.total, 10, "Count repeats draws, not winning paths");
+assert.match(ctx.sceneScheduleCount(guarded(leaf("A"), 0), 2).stats.error, /Queueで合流/u);
+assert.match(ctx.sceneScheduleMatrix(guarded(leaf("A"), 0), [{ label: "single" }]).stats.error, /Queueで合流/u);
+assert.match(ctx.sceneScheduleMerge(guarded(leaf("A"), 0), leaf("B")).stats.error, /Queueで合流/u);
+assert.match(queue([guarded(leaf("A"), 0)], controls()).stats.error, /ランダム分岐/u,
+    "a missing positive arm is an error");
+assert.equal(queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1), ctx.sceneSchedulePlan()], controls()).stats.total, 1,
+    "connected zero-percent arms do not increase the generation count");
+const crossed = queue([
+    ctx.sceneSchedulePlan(leaf("A").units, false, [{ gateId: "outer", armIndex: 0, weights: randomWeights },
+        { gateId: "inner", armIndex: 0, weights: randomWeights }]),
+    ctx.sceneSchedulePlan(leaf("B").units, false, [{ gateId: "outer", armIndex: 1, weights: randomWeights },
+        { gateId: "inner", armIndex: 1, weights: randomWeights }]),
+], controls());
+assert.match(crossed.stats.error, /ランダム分岐/u, "crossed nested random guards cannot be joined");
 
 const a = leaf("A");
 const b = leaf("B");
@@ -143,6 +169,17 @@ const preset = { api_graph: { output: {
         order_mode: "alternate", alternate_block_size: 1, input_repeats_json: "{}", downstream_count_mode: "multiply" } },
     5: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
 } } };
+const randomPreset = { api_graph: { output: {
+    1: { class_type: "ScenePresetInput", inputs: {} },
+    2: { class_type: "ScenePromptRandomRoute", inputs: { scene_prompt: ["1", 0], weights_json: JSON.stringify(randomWeights) } },
+    3: { class_type: "ScenePrompter", inputs: { scene_prompt: ["2", 0], prompt_name: "A" } },
+    4: { class_type: "ScenePrompter", inputs: { scene_prompt: ["2", 1], prompt_name: "B" } },
+    5: { class_type: "ScenePrompterQueue", inputs: { scene_prompt1: ["3", 0], scene_prompt2: ["4", 0] } },
+    6: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["5", 0] } },
+} } };
+const randomPresetPlan = ctx.sceneScheduleForPreset("random-preset", leaf("X"), new Set(), randomPreset, "reference-42");
+assert.equal(randomPresetPlan.stats.total, 1, "Preset Random keeps one draw after Queue join");
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(randomPresetPlan))), ["ランダム候補"]);
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleForPreset("inner", leaf("A"), new Set(), preset)))),
     ["Ab1", "Ab2"], "Preset rehydration retains the internal Queue order and Prompt labels");
 const compactInner = { api_graph: { output: {
@@ -182,6 +219,7 @@ Object.assign(ctx, {
     scenePromptInputSource: (node) => node.upstream || null,
     connectedScenePromptSourcesForQueue: (node) => (node.sources || []).map((source, index) =>
         ({ input: { name: `scene_prompt${index + 1}` }, source })),
+    sceneScheduleForLinkedInput: () => null,
     findWidget: (node, name) => node.widgets.find((widget) => widget.name === name),
     setWidgetValue: (node, name, value) => { node.widgets.find((widget) => widget.name === name).value = value; },
     hideWidget: (widget) => { widget.hidden = true; },
@@ -202,6 +240,13 @@ assert.deepEqual(widgets.map((widget) => widget.value), ["input_order", 1, "{}",
 assert.ok(widgets.filter((widget) => widget.name !== "input_repeats_json")
     .every((widget) => widget.disabled && widget.options.disabled));
 assert.equal(widgets[2].hidden, true, "legacy repeat widget stays hidden in its serialized slot");
+ctx.sceneScheduleForLinkedInput = (_node, name) => name === "scene_prompt1"
+    ? guarded(leaf("A"), 0) : guarded(leaf("B"), 1);
+receiving.sources = [previous, { id: "random-branch", kind: "prompt" }];
+assert.equal(ctx.syncSceneQueueControls(receiving), "random",
+    "a complete Random join locks Queue controls even with an upstream Queue");
+assert.match(widgets[0].label, /ランダム分岐の合流/u);
+ctx.sceneScheduleForLinkedInput = () => null;
 receiving.sources = [{ id: "ordinary", kind: "prompt" }];
 assert.equal(ctx.syncSceneQueueControls(receiving), "", "disconnecting upstream Queue unlocks controls");
 assert.equal(widgets[1].disabled, false, "row repeat is active in input order mode");
@@ -209,5 +254,32 @@ assert.deepEqual(widgets.map((widget) => widget.value), ["input_order", 1, "{}",
     "old nondefault settings do not reappear after unlocking");
 receiving.sources = [{ id: "bypass", kind: "queue", mode: 4, upstream: { id: "ordinary-2", kind: "prompt" } }];
 assert.equal(ctx.syncSceneQueueControls(receiving), "", "bypassed Queue without effective Queue path does not lock");
+ctx.isScenePromptRandomRouteNode = (node) => node.kind === "random";
+vm.runInContext(functionSource("sceneRandomRouteInNode"), ctx);
+const activeRoute = { id: "route-active", kind: "random" };
+assert.equal(ctx.sceneRandomRouteInNode(activeRoute), true);
+assert.equal(ctx.sceneRandomRouteInNode({ ...activeRoute, id: "route-muted", mode: 2 }), false);
+assert.equal(ctx.sceneRandomRouteInNode({ ...activeRoute, id: "route-bypassed", mode: 4,
+    upstream: { id: "ordinary-route-source", kind: "prompt" } }), false,
+"bypassed Random does not impose route semantics");
+
+Object.assign(ctx, {
+    isRerouteNode: (node) => node.kind === "reroute",
+    firstLinkedInput: (node) => node.inputs.find((input) => input.link != null),
+    graphLink: (graph, id) => graph.links[id] || null,
+    nodeClassName: (node) => node?.kind || "",
+    linkKey: (link) => [link.id, link.origin_id, link.origin_slot, link.target_id, link.target_slot].join(":"),
+});
+for (const name of ["resolveLinkedSourceFromLink", "resolveLinkedSourceFromInput"])
+    vm.runInContext(functionSource(name), ctx);
+const rerouteGraph = { links: {
+    1: { id: 1, origin_id: "random", origin_slot: 1, target_id: "reroute", target_slot: 0 },
+    2: { id: 2, origin_id: "reroute", origin_slot: 0, target_id: "target", target_slot: 0 },
+} };
+rerouteGraph.getNodeById = (id) => ({ random: { id: "random", kind: "random" },
+    reroute: { id: "reroute", kind: "reroute", inputs: [{ link: 1 }] } })[id];
+const resolvedReroute = ctx.resolveLinkedSourceFromInput(rerouteGraph, { link: 2 });
+assert.equal(resolvedReroute.source.id, "random");
+assert.equal(resolvedReroute.slot, 1, "Reroute preserves the Random output slot");
 
 console.log("Scene Queue schedule, Count policy, chunking, and bounded preview tests passed.");
