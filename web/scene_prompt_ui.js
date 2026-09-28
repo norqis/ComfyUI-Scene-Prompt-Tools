@@ -7506,7 +7506,8 @@ function sceneScheduleQueue(plans, socketNames, controls) {
     if (invalid) return invalid;
     const active = plans.some((plan) => sceneRandomGuard(plan))
         ? plans.filter((plan) => !sceneRandomZeroArm(plan)) : plans;
-    if (!active.length && plans.length) return sceneSchedulePlan([], true);
+    if (!active.length && plans.length)
+        return sceneScheduleError("ランダム分岐の0%を超える出力を同じQueueへ接続してください。");
     if (sceneRandomJoinReady(active)) return sceneRandomChoicePlan(active);
     if (active.some((plan) => sceneRandomGuard(plan)))
         return sceneScheduleError("ランダム分岐の0%を超える出力を同じQueueへ接続してください。");

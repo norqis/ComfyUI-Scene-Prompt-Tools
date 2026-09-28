@@ -60,6 +60,8 @@ assert.match(ctx.sceneScheduleMap(ctx.sceneScheduleError("不正な確率"), (en
 assert.match(queue([guarded(leaf("A"), 0)], controls()).stats.error, /ランダム分岐/u,
     "a missing positive arm is an error");
 const zeroArm = ctx.sceneSchedulePlan([], false, [{ gateId: "random-1", armIndex: 2, weights: randomWeights }]);
+assert.match(queue([zeroArm], controls()).stats.error, /0%を超える出力/u,
+    "a Queue containing only zero-percent arms cannot close a missing positive-probability route");
 assert.equal(queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1), zeroArm], controls()).stats.total, 1,
     "connected zero-percent arms do not increase the generation count");
 const zeroUpstream = ctx.sceneSchedulePlan();
