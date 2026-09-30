@@ -21,6 +21,21 @@ function functionSource(name) {
     throw new Error(`Unclosed function: ${name}`);
 }
 
+function methodSource(name) {
+    const start = source.indexOf(`    ${name}() {`);
+    assert.notEqual(start, -1, `Missing method: ${name}`);
+    const bodyStart = source.indexOf("{", start);
+    let depth = 0;
+    for (let index = bodyStart; index < source.length; index += 1) {
+        if (source[index] === "{") depth += 1;
+        if (source[index] === "}") {
+            depth -= 1;
+            if (depth === 0) return source.slice(start, index + 1);
+        }
+    }
+    throw new Error(`Unclosed method: ${name}`);
+}
+
 function deferred() {
     let resolve;
     let reject;
@@ -495,9 +510,18 @@ async function testWorkflowLoadGuardMarksOnlyLoadWindow() {
     const context = {
         Math,
         sceneWorkflowLoadDepth: 0,
+        sceneWorkflowLoadSources: new Set(),
         app: {
-            loadGraphData() {
+            loadGraphData(workflow) {
                 assert.equal(context.sceneWorkflowLoadDepth, 1);
+                if (workflow?.fail) {
+                    context.sceneWorkflowLoadSources.add({ id: 1 });
+                    throw new Error("load failed");
+                }
+                if (workflow?.cancel) {
+                    context.sceneWorkflowLoadSources.add({ id: 2 });
+                    return false;
+                }
                 return loading;
             },
         },
@@ -510,6 +534,124 @@ async function testWorkflowLoadGuardMarksOnlyLoadWindow() {
     resolveLoad("loaded");
     assert.equal(await result, "loaded");
     assert.equal(context.sceneWorkflowLoadDepth, 0);
+    await assert.rejects(context.app.loadGraphData({ fail: true }), /load failed/);
+    assert.equal(context.sceneWorkflowLoadSources.size, 0, "failed loads discard pending old nodes");
+    assert.equal(await context.app.loadGraphData({ cancel: true }), false);
+    assert.equal(context.sceneWorkflowLoadSources.size, 0, "cancelled loads discard pending old nodes");
+}
+
+function testWorkflowConnectionStormDefersSceneWork() {
+    const work = { original: 0, queue: 0, random: 0, label: 0, cache: 0, schedule: 0, downstream: 0 };
+    const context = {
+        Set,
+        sceneWorkflowLoadDepth: 1,
+        sceneWorkflowLoadSources: new Set(),
+        installSceneModeWatcher() {},
+        isSceneApplyLoraNode: () => true,
+        isScenePromptQueueNode: () => true,
+        isScenePromptRandomRouteNode: () => true,
+        syncSceneLoraSelectLabel: () => { work.label += 1; },
+        syncSceneQueueControls: () => { work.queue += 1; },
+        syncSceneRandomRoute: () => { work.random += 1; },
+        clearSceneComputedCaches: () => { work.cache += 1; },
+        scheduleSceneNodeRefresh: () => { work.schedule += 1; },
+        refreshDownstreamSceneNodes: () => { work.downstream += 1; },
+        handleSceneNodeModeChange() {},
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("installSceneConnectionWatcher"), context);
+    const node = { id: 100, onConnectionsChange() { work.original += 1; } };
+    context.installSceneConnectionWatcher(node);
+    for (let index = 0; index < 1200; index += 1) node.onConnectionsChange();
+    assert.equal(work.original, 1200, "the original connection handler still receives every load event");
+    assert.equal(work.cache, 1200, "the current node cache is invalidated for every changed edge");
+    assert.equal(context.sceneWorkflowLoadSources.size, 1, "repeated edge changes share one source");
+    assert.deepEqual([work.queue, work.random, work.label, work.schedule, work.downstream], [0, 0, 0, 0, 0],
+        "load edges defer graph work until configuration completes");
+    context.sceneWorkflowLoadDepth = 0;
+    node.onConnectionsChange();
+    assert.deepEqual([work.original, work.queue, work.random, work.label, work.schedule, work.downstream],
+        [1201, 1, 1, 1, 1, 1], "interactive edge changes still refresh immediately");
+}
+
+function testWorkflowLoadDefersWidgetTriggeredRefreshes() {
+    const node = { id: 77, sceneQueueControlLock: "upstream" };
+    const context = {
+        sceneWorkflowLoadDepth: 1,
+        sceneWorkflowLoadSources: new Set(),
+        collectDownstreamSceneNodes() { throw new Error("must not traverse during load"); },
+        sceneQueueLockState() { throw new Error("must not compute Queue lock during load"); },
+        setTimeout() { throw new Error("must not schedule a per-widget timer during load"); },
+    };
+    vm.createContext(context);
+    for (const name of ["refreshDownstreamSceneNodes", "scheduleSceneNodeRefresh", "syncSceneQueueControls"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    context.refreshDownstreamSceneNodes(node);
+    context.scheduleSceneNodeRefresh(node);
+    assert.equal(context.syncSceneQueueControls(node), "upstream");
+    assert.deepEqual([...context.sceneWorkflowLoadSources], [node],
+        "connection, widget, and Queue callbacks converge on one deferred source");
+}
+
+function testWorkflowLoadFlushTraversesOldGraphOnce() {
+    const count = 302;
+    const queueIds = new Set(Array.from({ length: 17 }, (_, index) => index * 17 + 16));
+    const nodes = Array.from({ length: count }, (_, index) => ({
+        id: index,
+        type: queueIds.has(index) ? "ScenePrompterQueue" : "ScenePrompter",
+        widgets: queueIds.has(index) ? [
+            { name: "order_mode", value: index === 16 ? "alternate" : "input_order" },
+            { name: "alternate_block_size", value: index === 16 ? 3 : 1 },
+            { name: "downstream_count_mode", value: index === 16 ? "fixed" : "multiply" },
+        ] : [],
+        outputs: [{ links: index < count - 1 ? [index + 1] : [] }],
+    }));
+    let lookups = 0;
+    const graph = {
+        _nodes: nodes,
+        links: Object.fromEntries(nodes.slice(1).map((node) => [node.id, { target_id: node.id }])),
+        getNodeById(id) { lookups += 1; return nodes[id]; },
+    };
+    for (const node of nodes) node.graph = graph;
+    const stale = { id: 42, graph, outputs: [{ links: [43] }] };
+    const work = { queue: 0, cleared: new Set(), refreshed: new Set() };
+    const context = {
+        Set,
+        app: { graph },
+        sceneWorkflowLoadSources: new Set([...nodes, stale]),
+        SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "downstream_count_mode"],
+        sceneGraphNodes: () => nodes,
+        isRerouteNode: () => false,
+        isPromptMatrixNode: () => false,
+        isScenePromptSourceNode: (node) => node.type === "ScenePrompter" || node.type === "ScenePrompterQueue",
+        isSceneExpandNode: () => false,
+        isScenePromptQueueNode: (node) => node.type === "ScenePrompterQueue",
+        findWidget: (node, name) => node.widgets.find((widget) => widget.name === name),
+        syncSceneQueueControls(node) {
+            work.queue += 1;
+            if (node.id === 16) {
+                node.widgets[0].value = "input_order";
+                node.widgets[1].value = 1;
+                node.widgets[2].value = "multiply";
+            }
+        },
+        clearSceneComputedCaches: (node) => work.cleared.add(node),
+        scheduleSceneNodeRefresh: (node) => work.refreshed.add(node),
+    };
+    vm.createContext(context);
+    vm.runInContext(functionSource("downstreamNodes"), context);
+    vm.runInContext(functionSource("collectDownstreamSceneNodes"), context);
+    vm.runInContext(`globalThis.extension = { ${methodSource("afterConfigureGraph")} };`, context);
+    context.extension.afterConfigureGraph();
+    assert.equal(work.queue, 17, "each Queue locks or unlocks once after the graph is restored");
+    assert.deepEqual(nodes[16].widgets.map((widget) => widget.value), ["input_order", 1, "multiply"],
+        "the final Queue lock can replace stale saved controls");
+    assert.equal(lookups, count + 1 + count - 1, "shared traversal visits each edge at most once");
+    assert.equal(work.refreshed.size, count, "changed sources and downstream nodes refresh once despite 302 load sources");
+    assert.equal(context.sceneWorkflowLoadSources.size, 0, "pending load sources are drained");
+    assert.equal(work.cleared.has(nodes[42]), true, "a live node sharing a stale id is still refreshed");
+    assert.equal(work.refreshed.has(stale), false, "a removed node is not scheduled after graph replacement");
 }
 
 function testPendingFifoRunPreparesPresetSnapshotImmediately() {
@@ -798,6 +940,9 @@ Promise.resolve()
     .then(testSavedPromptNormalLoadsShareOneInFlightRequest)
     .then(testLiveWidgetStateWinsOverStaleSerializedValue)
     .then(testWorkflowLoadGuardMarksOnlyLoadWindow)
+    .then(testWorkflowConnectionStormDefersSceneWork)
+    .then(testWorkflowLoadDefersWidgetTriggeredRefreshes)
+    .then(testWorkflowLoadFlushTraversesOldGraphOnce)
     .then(testPendingFifoRunPreparesPresetSnapshotImmediately)
     .then(testOverflowCountsDoNotStartABatchRun)
     .then(testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure)

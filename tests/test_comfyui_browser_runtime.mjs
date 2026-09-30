@@ -195,7 +195,7 @@ window.__sceneSeedRuntimeTest = {
         }, { content: pngBase64, name: basename(process.env.COMFYUI_WORKFLOW_PNG), expectedNodes: workflow.nodes.length });
         assert.equal(dropResult.error, undefined, `${dropResult.error}\n${JSON.stringify(dropResult, null, 2)}`);
         assert.equal(dropResult.nodes, workflow.nodes.length, "drag-style PNG loading must restore every node");
-        if (expectedConversionOptions.every((value) => typeof value === "boolean")) {
+        if (expectedConversionOptions.length === 2 && expectedConversionOptions.every((value) => typeof value === "boolean")) {
             assert.deepEqual(dropResult.conversionOptions, expectedConversionOptions, "drag-style PNG loading must preserve Expand conversion options");
         }
         assert.ok(["Illustrious", "Anima"].includes(dropResult.modelMode), "Expand restores a model selector");

@@ -287,6 +287,7 @@ let chipMeasureContext = null;
 let sceneDownstreamRefreshTimer = null;
 let sceneQueuePromptSyncPaused = 0;
 let sceneWorkflowLoadDepth = 0;
+const sceneWorkflowLoadSources = new Set();
 let hideInternalDomWidgetsScheduled = false;
 let hideInternalDomWidgetsTimerShort = null;
 let hideInternalDomWidgetsTimerLong = null;
@@ -6388,6 +6389,10 @@ function flushDownstreamSceneRefreshes() {
     const sources = [...sceneDownstreamRefreshSources];
     sceneDownstreamRefreshSources.clear();
     sceneDownstreamRefreshTimer = null;
+    if (sceneWorkflowLoadDepth > 0) {
+        for (const source of sources) sceneWorkflowLoadSources.add(source);
+        return;
+    }
     const targets = new Set();
     for (const source of sources) {
         collectDownstreamSceneNodes(source, targets);
@@ -6401,6 +6406,10 @@ function flushDownstreamSceneRefreshes() {
 
 function refreshDownstreamSceneNodes(node) {
     if (!node) {
+        return;
+    }
+    if (sceneWorkflowLoadDepth > 0) {
+        sceneWorkflowLoadSources.add(node);
         return;
     }
     for (const target of collectDownstreamSceneNodes(node)) {
@@ -6489,6 +6498,11 @@ function installSceneConnectionWatcher(node) {
     const originalOnConnectionsChange = node.onConnectionsChange;
     node.onConnectionsChange = function () {
         const result = originalOnConnectionsChange?.apply(this, arguments);
+        if (sceneWorkflowLoadDepth > 0) {
+            clearSceneComputedCaches(this);
+            sceneWorkflowLoadSources.add(this);
+            return result;
+        }
         if (isSceneApplyLoraNode(this)) syncSceneLoraSelectLabel(this);
         if (isScenePromptQueueNode(this)) syncSceneQueueControls(this);
         if (isScenePromptRandomRouteNode(this)) syncSceneRandomRoute(this);
@@ -6508,8 +6522,12 @@ function installSceneConnectionWatcher(node) {
     node.scenePromptConnectionWrapped = true;
 }
 
-function scheduleSceneNodeRefresh(node, options = {}, delay = 80) {
+function scheduleSceneNodeRefresh(node, options = {}, delay = 80, allowDuringLoad = false) {
     if (!node) {
+        return;
+    }
+    if (sceneWorkflowLoadDepth > 0 && !allowDuringLoad) {
+        sceneWorkflowLoadSources.add(node);
         return;
     }
     const pending = node.scenePendingRefreshOptions || {};
@@ -7816,7 +7834,11 @@ function sceneQueueLockState(node) {
     return "";
 }
 
-function syncSceneQueueControls(node) {
+function syncSceneQueueControls(node, allowDuringLoad = false) {
+    if (sceneWorkflowLoadDepth > 0 && !allowDuringLoad) {
+        sceneWorkflowLoadSources.add(node);
+        return node.sceneQueueControlLock || "";
+    }
     const lock = sceneQueueLockState(node);
     node.sceneQueueControlLock = lock;
     for (const name of SCENE_QUEUE_CONTROL_NAMES) {
@@ -10146,10 +10168,14 @@ function installSceneWorkflowLoadGuard() {
     const originalLoadGraphData = app.loadGraphData.bind(app);
     app.loadGraphData = async function (...args) {
         sceneWorkflowLoadDepth += 1;
+        let loaded = false;
         try {
-            return await originalLoadGraphData(...args);
+            const result = await originalLoadGraphData(...args);
+            loaded = result !== false;
+            return result;
         } finally {
             sceneWorkflowLoadDepth = Math.max(0, sceneWorkflowLoadDepth - 1);
+            if (sceneWorkflowLoadDepth === 0 && !loaded) sceneWorkflowLoadSources.clear();
             if (sceneWorkflowLoadDepth === 0 && typeof clearForeignSceneProgressState === "function") {
                 clearForeignSceneProgressState();
             }
@@ -11785,7 +11811,7 @@ function attachScenePath(node) {
 
 function attachScenePromptQueue(node) {
     injectStyle();
-    applySceneWidgetLabels(node);
+    if (!node.sceneQueueControlsInitialized) applySceneWidgetLabels(node);
 
     node.properties = node.properties || {};
     node.resizable = true;
@@ -11813,7 +11839,10 @@ function attachScenePromptQueue(node) {
             widget.sceneQueueControlWrapped = true;
         }
     }
-    syncSceneQueueControls(node);
+    if (sceneWorkflowLoadDepth === 0 && !node.sceneQueueControlsInitialized) {
+        syncSceneQueueControls(node);
+        node.sceneQueueControlsInitialized = true;
+    }
     addScenePromptQueueListWidget(node);
     hideNonSceneRoleWidgets(node);
     scheduleHideInternalDomWidgets();
@@ -12482,14 +12511,25 @@ app.registerExtension({
     name: "ScenePrompt.UI",
 
     afterConfigureGraph() {
+        const sources = new Set([...sceneWorkflowLoadSources]
+            .filter((node) => app.graph?.getNodeById?.(node.id) === node));
+        sceneWorkflowLoadSources.clear();
         for (const node of sceneGraphNodes()) {
             if (!isScenePromptQueueNode(node)) continue;
             const before = SCENE_QUEUE_CONTROL_NAMES.map((name) => findWidget(node, name)?.value);
-            syncSceneQueueControls(node);
+            syncSceneQueueControls(node, true);
+            node.sceneQueueControlsInitialized = true;
             if (SCENE_QUEUE_CONTROL_NAMES.some((name, index) => findWidget(node, name)?.value !== before[index])) {
                 clearSceneComputedCaches(node);
-                refreshDownstreamSceneNodes(node);
+                sources.add(node);
             }
+        }
+        const targets = new Set(sources);
+        const seen = new Set();
+        for (const source of sources) collectDownstreamSceneNodes(source, targets, seen);
+        for (const target of targets) {
+            clearSceneComputedCaches(target);
+            scheduleSceneNodeRefresh(target, { fitHeight: false }, 40, true);
         }
     },
 

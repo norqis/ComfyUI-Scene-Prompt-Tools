@@ -2238,6 +2238,9 @@ try {
         window.__scenePromptExtension.afterConfigureGraph();
         const presetLocked = queue.widgets.slice(0, 4).map((widget) =>
             ({ value: widget.value, disabled: widget.disabled }));
+        queue.onConfigure?.();
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
+        const reattachedLabels = queue.widgets.slice(0, 4).map((widget) => widget.label);
         reference.scenePresetGraph.api_graph.output[2] = {
             class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0], prompt_name: "plain" },
         };
@@ -2245,7 +2248,7 @@ try {
         window.__scenePromptExtension.afterConfigureGraph();
         const plainPreset = queue.widgets.slice(0, 4).map((widget) =>
             ({ value: widget.value, disabled: widget.disabled }));
-        return { locked, unlocked, reloaded, presetLocked, plainPreset };
+        return { locked, unlocked, reloaded, presetLocked, reattachedLabels, plainPreset };
     });
     assert.deepEqual(queueControls.locked.map(({ value }) => value), ["input_order", 1, "{}", "multiply"]);
     assert.ok(queueControls.locked.filter((_, index) => index !== 2).every(({ disabled, label }) => disabled && label.includes("上流Queueあり")),
@@ -2260,6 +2263,8 @@ try {
     assert.deepEqual(queueControls.presetLocked.map(({ value }) => value), ["input_order", 1, "{}", "multiply"]);
     assert.ok(queueControls.presetLocked.filter((_, index) => index !== 2).every(({ disabled }) => disabled),
         "saved Preset-internal Queue locks the active controls after rehydration");
+    assert.ok(queueControls.reattachedLabels.filter((_, index) => index !== 2).every((label) => label.includes("上流Queueあり")),
+        "post-load Queue reattachment preserves locked control labels");
     assert.equal(queueControls.plainPreset[2].value, "{}",
         "a Preset without an internal Queue clears obsolete per-input repeats");
 
