@@ -163,6 +163,8 @@ assert.equal(huge.units.length, 1, "large Counts keep a bounded schedule");
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(huge, 6))), ["A", "B", "A", "B", "A", "B"]);
 
 Object.assign(ctx, {
+    sceneWorkflowLoadDepth: 0,
+    sceneWorkflowLoadSources: new Set(),
     SCENE_QUEUE_CONTROL_DEFAULTS: controls(),
     SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "downstream_count_mode"],
     scenePresetDisplayGraphs: new Map(),
