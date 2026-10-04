@@ -33,7 +33,10 @@ def api_origin(settings):
 
 
 def _headers(settings, url):
-    return {"Authorization": "Bearer " + settings["civitai_api_key"]} if settings["civitai_api_key"] and urlsplit(url).netloc == urlsplit(api_origin(settings)).netloc else {}
+    def origin(value):
+        parsed = urlsplit(value)
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+    return {"Authorization": "Bearer " + settings["civitai_api_key"]} if settings["civitai_api_key"] and origin(url) == origin(api_origin(settings)) else {}
 
 
 async def api_get(settings, path, params=None):
@@ -150,7 +153,7 @@ async def search(settings, query, model_mode, sort="Most Downloaded"):
     if model_mode not in MODES:
         raise ValueError("Unsupported model_mode.")
     data = await api_get(settings, "/api/v1/models", {"query": query, "types": "LORA", "limit": 30, "period": "AllTime", "sort": sort,
-        "baseModels": "Illustrious" if model_mode == "Illustrious" else "Anima", "nsfw": "false"})
+        "baseModels": ["Illustrious", "NoobAI"] if model_mode == "Illustrious" else ["Anima"], "nsfw": "false"})
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ServiceError("Civitai returned an invalid search response.")
     items = []

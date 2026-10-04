@@ -36,6 +36,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.model = {"id": 1, "name": "cat", "type": "LORA", "modelVersions": [self.version]}
         self.redirect = False
         self.model_requests = []
+        self.base_model_parameters = []
         self.download_calls = 0
         self.storage_headers = []
         self.api_status = 200
@@ -48,6 +49,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
     async def handle(self, request):
         if request.path.startswith("/api/v1/models"):
             self.model_requests.append((dict(request.query), request.headers.get("Authorization")))
+            self.base_model_parameters.append(request.query.getall("baseModels", []))
             return web.json_response({"items": [self.model]} if request.path == "/api/v1/models" else self.model, status=self.api_status)
         if request.path.startswith("/api/download"):
             self.download_calls += 1
@@ -69,7 +71,23 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertEqual(params["period"], "AllTime")
             self.assertEqual(params["sort"], sort)
             self.assertEqual(authorization, "Bearer civitai-secret")
+            self.assertEqual(self.base_model_parameters[-1], ["Illustrious", "NoobAI"])
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])
+
+    async def test_noobai_family_search_and_anima_parameters(self):
+        self.version["baseModel"] = "NoobAI"
+        result = await civitai.search(self.settings, "cat", "Illustrious")
+        self.assertEqual(result["items"][0]["base_model"], "NoobAI")
+        self.version["baseModel"] = "Anima"
+        result = await civitai.search(self.settings, "cat", "Anima")
+        self.assertEqual(result["items"][0]["base_model"], "Anima")
+        self.assertEqual(self.base_model_parameters[-1], ["Anima"])
+
+    async def test_authorization_origin_includes_scheme_host_and_port(self):
+        with mock.patch.object(civitai, "api_origin", return_value="https://civitai.com"):
+            self.assertEqual(civitai._headers(self.settings, "https://civitai.com:443/api/download/models/2"), {"Authorization": "Bearer civitai-secret"})
+            for url in ("http://civitai.com/api/download/models/2", "http://civitai.com:443/api/download/models/2", "https://civitai.com:444/api/download/models/2", "https://other.example/api/download/models/2"):
+                self.assertEqual(civitai._headers(self.settings, url), {}, url)
 
     async def test_download_safe_path_atomic_hash_dedup_and_incompatible(self):
         identity = {"model_id": 1, "version_id": 2, "file_id": 3}
