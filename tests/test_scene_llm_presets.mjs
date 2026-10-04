@@ -139,8 +139,27 @@ assert.equal(first.graph.links[first.node.outputs[0].links[0]].target_id, additi
 assert.equal(first.graph.links[additions[0].outputs[0].links[0]].target_id, additions[1].id);
 assert.deepEqual(additions[1].outputs[0].links.map((id) => first.graph.links[id]).map((link) => [link.target_id, link.target_slot]), formerTargets);
 assert.equal(insertLoras(first.graph, first.node, candidates, loraNode).length, 0, "repeat generation reuses adjacent identities");
+// Mimic native attach/rAF controls: UI-only widgets and displayed widget order
+// differ from the canonical serialized transport emitted by SceneApplyLora.
+const nativeLora = additions[0], nativeSerialize = nativeLora.serialize;
+nativeLora.widgets.push({ name: "LoRA select", value: "gallery", options: { serialize: false } },
+    { name: "state list", value: { transient: true }, serialize: false });
+nativeLora.widgets.reverse();
+nativeLora.serialize = function () {
+    const named = Object.fromEntries(["lora_name", "model_mode", "positive"].map((name) => [name, widget(this, name).value]));
+    return { ...nativeSerialize.call(this), widgets_values: Object.values(named), widgets_values_named: named };
+};
 first.commit();
 const inserted = parsePresetOverrides(a.widgets[1].value)["5"];
+const nativeWorkflowNode = inserted.workflow.nodes.find((node) => node.id === nativeLora.id);
+assert.deepEqual(nativeWorkflowNode.widgets_values, ["llm/1.safetensors", "", "trigger1"], "new native node canonical widget ordering survives UI control attachment");
+assert.deepEqual(Object.keys(nativeWorkflowNode.widgets_values_named), ["lora_name", "model_mode", "positive"]);
+assert(!Object.hasOwn(inserted.api_graph.output[String(nativeLora.id)].inputs, "LoRA select"));
+assert(!Object.hasOwn(inserted.api_graph.output[String(nativeLora.id)].inputs, "state list"));
+// A later occurrence commit traverses the already-attached parent graph again.
+insertionTargets[1].commit();
+const afterSecondCommit = parsePresetOverrides(a.widgets[1].value)["5"];
+assert.deepEqual(afterSecondCommit.workflow.nodes.find((node) => node.id === nativeLora.id).widgets_values, nativeWorkflowNode.widgets_values);
 assert.deepEqual(inserted.api_graph.output[2].inputs.scene_prompt, [String(additions[1].id), 0]);
 assert.deepEqual(inserted.api_graph.output[String(queue.id)].inputs.scene_prompt5, [String(additions[1].id), 0]);
 for (const link of inserted.workflow.links) {

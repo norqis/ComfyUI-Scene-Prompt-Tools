@@ -178,30 +178,33 @@ export function createPresetGraph(definition, ownerGraph) {
         const api = {}, serialized = [];
         for (const node of nodes.values()) {
             const old = output[String(node.id)], saved = workflowNodes.get(String(node.id));
+            const storedWidgets = (node.widgets || []).filter((widget) => widget.serialize !== false && widget.options?.serialize !== false);
+            const workflowNode = saved ? { ...saved, properties: node.properties, inputs: copy(node.inputs), outputs: copy(node.outputs) }
+                : node.serialize();
             const inputs = { ...(old?.inputs || {}) };
-            for (const widget of node.widgets || []) inputs[widget.name] = widget.value;
+            const namedValues = !saved && workflowNode.widgets_values_named;
+            if (namedValues && typeof namedValues === "object") Object.assign(inputs, namedValues);
+            else for (const widget of storedWidgets) inputs[widget.name] = widget.value;
             for (const input of node.inputs || []) {
                 const link = graph.links[input.link];
                 if (link) inputs[input.name] = [String(link.origin_id), link.origin_slot];
                 else if (Array.isArray(inputs[input.name])) delete inputs[input.name];
             }
             api[String(node.id)] = { ...(old || {}), class_type: node.comfyClass || node.type || node.class_type, inputs };
-            const workflowNode = saved ? { ...saved, properties: node.properties, inputs: copy(node.inputs), outputs: copy(node.outputs) }
-                : node.serialize();
             if (saved) {
                 workflowNode.widgets_values = [...(saved.widgets_values || [])];
                 workflowNode.widgets_values_named = { ...saved.widgets_values_named };
                 const scalarNames = old?.class_type === "ScenePresetReference"
                     ? ["preset_id", "run_handle", "llm_presets_json"]
                     : Object.keys(old?.inputs || {}).filter((name) => !Array.isArray(old.inputs[name]));
-                for (const widget of node.widgets || []) {
+                for (const widget of storedWidgets) {
                     if (widget.value === old?.inputs?.[widget.name]) continue;
                     if (!scalarNames.includes(widget.name)) scalarNames.push(widget.name);
                     writeWorkflowWidget(workflowNode, widget.name, widget.value, scalarNames);
                 }
             } else {
-                workflowNode.widgets_values = (node.widgets || []).map((widget) => widget.value);
-                workflowNode.widgets_values_named = Object.fromEntries((node.widgets || []).map((widget) => [widget.name, widget.value]));
+                if (!Array.isArray(workflowNode.widgets_values)) workflowNode.widgets_values = storedWidgets.map((widget) => widget.value);
+                if (!workflowNode.widgets_values_named) workflowNode.widgets_values_named = Object.fromEntries(storedWidgets.map((widget) => [widget.name, widget.value]));
             }
             serialized.push(workflowNode);
         }
