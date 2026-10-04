@@ -104,7 +104,10 @@ function reachablePresetOccurrences(prepared) {
             if (!entry) return;
             for (const [name, value] of Object.entries(entry.inputs || {}))
                 if (/^scene_prompt\d*$/u.test(name) && Array.isArray(value)) visit(String(value[0]));
-            if (entry.class_type === "ScenePresetReference" && modes.get(id) !== 4) visitPreset(presetOccurrenceChild(preset, id));
+            if (entry.class_type === "ScenePresetReference" && modes.get(id) !== 4) {
+                const child = presetOccurrenceChild(preset, id);
+                if (child?.scenePresetHasLLM) visitPreset(child);
+            }
         }
         const output = Object.entries(preset.api_graph.output).find(([, entry]) => entry.class_type === "ScenePresetOutput");
         if (output) visit(output[0]);
@@ -281,7 +284,7 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
     const targets = [], visited = new Set();
     const graphs = new Map();
     function visitPreset(preset) {
-        if (!preset) return;
+        if (!preset?.scenePresetHasLLM) return;
         const context = contexts.get(preset), path = context.path;
         let graph = graphs.get(path);
         if (!graph) { graph = createPresetGraph(preset, ownerGraph); graphs.set(path, graph); }
