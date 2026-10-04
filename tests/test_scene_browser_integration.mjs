@@ -10,6 +10,9 @@ const assets = new Map([
     ["/extensions/scene-prompt/web/scene_prompt_ui.js", "web/scene_prompt_ui.js"],
     ["/extensions/scene-prompt/web/scene_prompt_state.js", "web/scene_prompt_state.js"],
     ["/extensions/scene-prompt/web/scene_prompt_style.js", "web/scene_prompt_style.js"],
+    ["/extensions/scene-prompt/web/scene_prompt_llm.js", "web/scene_prompt_llm.js"],
+    ["/extensions/scene-prompt/web/scene_prompt_civitai.js", "web/scene_prompt_civitai.js"],
+    ["/extensions/scene-prompt/web/scene_llm_presets.js", "web/scene_llm_presets.js"],
 ]);
 
 const appModule = `
@@ -2580,6 +2583,39 @@ try {
     assert.equal(await randomDialog.getByRole("spinbutton", { name: "scene_prompt2 の確率（%）" }).inputValue(), "16.67");
     await randomDialog.getByRole("button", { name: "閉じる" }).click();
 
+    const llmControls = await page.evaluate(async () => {
+        class Node {
+            constructor(type, id) {
+                this.type = this.comfyClass = this.title = type; this.id = id; this.graph = window.app.graph; this.mode = 0; this.size = [340, 300];
+                this.inputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }];
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                this.widgets = Object.entries(type === "ScenePromptLLM" ? { model_mode: "Illustrious", description: "", positive: "", negative: "", generation_state_json: "{}" }
+                    : { model_mode: "Illustrious", current_index: 0, run_id: "", seed_base: 0 }).map(([name, value]) => ({ name, value, type: "text", options: {} }));
+            }
+            addWidget(type,name,value,callback,options={}) { const widget={type,name,value,callback,options};this.widgets.push(widget);return widget; }
+            addCustomWidget(widget) {this.widgets.push(widget);return widget;}
+            setDirtyCanvas(){} setSize(size){this.size=size;} computeSize(){return this.size;}
+        }
+        class LLM extends Node { constructor(){super("ScenePromptLLM",9901);} }
+        class Expand extends Node { constructor(){super("ScenePrompterExpand",9902);} }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(LLM,{name:"ScenePromptLLM"});
+        await window.__scenePromptExtension.beforeRegisterNodeDef(Expand,{name:"ScenePrompterExpand"});
+        const llm=new LLM(),expand=new Expand();window.app.graph._nodes.push(llm,expand);
+        window.app.graph.getNodeById=(id)=>window.app.graph._nodes.find((node)=>String(node.id)===String(id));
+        const calls=window.__scenePromptCalls.length;
+        llm.onNodeCreated();expand.onNodeCreated();
+        const generate=expand.widgets.find((widget)=>widget.sceneRole==="expand_llm_generate"),run=expand.widgets.find((widget)=>widget.sceneRole==="expand_run_all");
+        const emptyDisabled=generate.disabled;
+        llm.widgets.find((widget)=>widget.name==="description").value="a girl with a hat";
+        window.app.graph.links ||= {};window.app.graph.links[9903]={id:9903,origin_id:llm.id,origin_slot:0,target_id:expand.id,target_slot:0};
+        llm.outputs[0].links=[9903];expand.inputs[0].link=9903;
+        expand.onNodeCreated();const reachableDisabled=generate.disabled;
+        llm.mode=4;expand.onNodeCreated();const bypassDisabled=generate.disabled;
+        return {emptyDisabled,reachableDisabled,bypassDisabled,order:expand.widgets.indexOf(generate)+1===expand.widgets.indexOf(run),
+            noCalls:calls===window.__scenePromptCalls.length,hidden:llm.widgets.find((widget)=>widget.name==="generation_state_json").hidden,
+            own:llm.widgets.filter((widget)=>widget.sceneRole?.startsWith("llm_")).map((widget)=>widget.sceneRole)};
+    });
+    assert.deepEqual(llmControls,{emptyDisabled:true,reachableDisabled:false,bypassDisabled:true,order:true,noCalls:true,hidden:true,own:["llm_generate","llm_settings","llm_status"]});
     console.log("Scene Prompt browser integration tests passed.");
 } finally {
     await browser.close();
