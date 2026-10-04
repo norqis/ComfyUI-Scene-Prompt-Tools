@@ -245,6 +245,27 @@ def _compact_matrix_json(value):
     return json.dumps({"version": 1, "sets": compact}, ensure_ascii=False, separators=(",", ":"))
 
 
+def _compact_local_preset_json(serialized):
+    """Keep local occurrence schedules without transferring saved prompt text."""
+    definitions = parse_llm_preset_overrides(serialized)
+    if not definitions:
+        return "{}"
+    compact = {}
+    for path, definition in definitions.items():
+        workflow = definition.get("workflow") or {}
+        compact[path] = {
+            "schema_version": definition.get("schema_version"),
+            "scene_compact": True,
+            "metadata": copy.deepcopy(definition["metadata"]),
+            "api_graph": _compact_preset_list_graph(definition["api_graph"]),
+            "workflow": {"nodes": [
+                {key: node[key] for key in ("id", "mode") if key in node}
+                for node in workflow.get("nodes", []) if isinstance(node, dict)
+            ]},
+        }
+    return _canonical_json({"version": 1, "presets": compact})
+
+
 def _compact_preset_list_graph(api_graph):
     nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
     if not isinstance(nodes, dict):
@@ -263,7 +284,12 @@ def _compact_preset_list_graph(api_graph):
             if is_link(value):
                 inputs[name] = copy.deepcopy(value)
             elif name in scalar_inputs:
-                inputs[name] = _compact_matrix_json(value) if name == "matrix_json" else copy.deepcopy(value)
+                if name == "matrix_json":
+                    inputs[name] = _compact_matrix_json(value)
+                elif name == "llm_presets_json":
+                    inputs[name] = _compact_local_preset_json(value)
+                else:
+                    inputs[name] = copy.deepcopy(value)
         compact_nodes[str(node_id)] = {"class_type": node.get("class_type"), "inputs": inputs}
         if node.get("class_type") == "ScenePromptLLM":
             compact_nodes[str(node_id)]["has_llm_input"] = bool(str(_node_inputs(node).get("description") or "").strip())
@@ -793,6 +819,8 @@ def parse_llm_preset_overrides(serialized="{}"):
             raise ScenePresetError("LLM Preset customization path is invalid.")
         if not isinstance(preset, dict) or not isinstance(preset.get("metadata"), dict):
             raise ScenePresetError("LLM Preset customization definition is invalid.")
+        if preset.get("scene_compact"):
+            raise ScenePresetError("Compact Preset definitions must be loaded in full before saving or execution.")
         # Local editor changes are not a shared-file revision. Recompute the
         # content hash before applying the ordinary safe graph validation.
         preset["metadata"]["sha256"] = _content_hash(preset.get("api_graph"), preset.get("workflow"))

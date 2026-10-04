@@ -211,7 +211,13 @@ class LLMNodePresetTests(unittest.TestCase):
         self.assertIs(self.presets._compact_preset_list_graph(local['api_graph'])['output']['2']['has_llm_input'], False)
         reference = self.reference('child', {'.': local})
         reference_compact = self.presets._compact_preset_list_graph(graph({'10': reference}))['output']['10']
-        self.assertEqual(reference_compact['inputs']['llm_presets_json'], reference['inputs']['llm_presets_json'])
+        compact_definition = json.loads(reference_compact['inputs']['llm_presets_json'])['presets']['.']
+        self.assertIs(compact_definition['scene_compact'], True)
+        self.assertEqual(compact_definition['metadata']['preset_id'], 'child')
+        self.assertIs(compact_definition['api_graph']['output']['2']['has_llm_input'], False)
+        self.assertEqual(compact_definition['api_graph']['output']['4']['inputs']['count'], 1)
+        self.assertNotIn('private saved output', json.dumps(compact_definition))
+        self.assertTrue(all(set(node) <= {'id', 'mode'} for node in compact_definition['workflow']['nodes']))
         ordinary = self.presets._compact_preset_list_graph(graph({'10': self.reference('child')}))['output']['10']
         self.assertNotIn('llm_presets_json', ordinary['inputs'])
         inputs['description'] = 'list availability'
@@ -224,7 +230,41 @@ class LLMNodePresetTests(unittest.TestCase):
         listed_llm = listed['llm-list']['api_graph']['output']['2']
         self.assertIs(listed_llm['has_llm_input'], True)
         self.assertNotIn('private saved output', json.dumps(listed['llm-list']))
-        self.assertEqual(listed['nested-list']['api_graph']['output']['2']['inputs']['llm_presets_json'], parent['2']['inputs']['llm_presets_json'])
+        nested_list = json.loads(listed['nested-list']['api_graph']['output']['2']['inputs']['llm_presets_json'])['presets']['.']
+        self.assertIs(nested_list['api_graph']['output']['2']['has_llm_input'], True)
+        self.assertNotIn('private saved output', json.dumps(listed['nested-list']))
+
+    def test_recursive_compact_local_state_omits_megabyte_text_and_preserves_source(self):
+        child = self.save('child', basic_nodes('shared'))
+        heavy = self.definition(child, 'positive-secret:' + 'p' * 1024 * 1024, count=7)
+        heavy['api_graph']['output']['2']['inputs']['description'] = 'description-secret:' + 'd' * 1024 * 1024
+        parent_nodes = basic_nodes('parent')
+        parent_nodes['4'] = self.reference('child', {'.': heavy})
+        parent_nodes['4']['inputs']['scene_prompt'] = ['2', 0]
+        parent_nodes['3']['inputs']['scene_prompt'] = ['4', 0]
+        parent = self.presets.save_preset({'preset_id': 'parent', 'name': 'parent', 'output_node_id': '3',
+            'api_graph': graph(parent_nodes), 'workflow': outer_workflow(parent_nodes)})
+        parent_local = copy.deepcopy(parent)
+        outer = graph({'10': self.reference('parent', {'.': parent_local, '4': heavy})})
+        source_before = json.dumps(outer)
+        serialized = json.dumps(self.presets._compact_preset_list_graph(outer))
+        self.assertLess(len(serialized), 20_000)
+        self.assertNotIn('positive-secret:', serialized)
+        self.assertNotIn('description-secret:', serialized)
+        local = json.loads(json.loads(serialized)['output']['10']['inputs']['llm_presets_json'])
+        self.assertEqual(set(local['presets']), {'.', '4'})
+        child_compact = local['presets']['4']
+        self.assertIs(child_compact['scene_compact'], True)
+        self.assertEqual(child_compact['api_graph']['output']['4']['inputs']['count'], 7)
+        self.assertIs(child_compact['api_graph']['output']['2']['has_llm_input'], True)
+        nested_serialized = local['presets']['.']['api_graph']['output']['4']['inputs']['llm_presets_json']
+        self.assertEqual(json.loads(nested_serialized)['presets']['.']['metadata']['preset_id'], 'child')
+        self.assertEqual(json.dumps(outer), source_before)
+        reloaded = self.presets.load_preset('parent')
+        self.assertEqual(reloaded['api_graph']['output']['4']['inputs']['llm_presets_json'], parent_nodes['4']['inputs']['llm_presets_json'])
+        self.assertEqual(self.presets._compact_local_preset_json('{}'), '{}')
+        with self.assertRaisesRegex(self.presets.ScenePresetError, 'loaded in full'):
+            self.presets.parse_llm_preset_overrides(json.dumps(local))
 
 
 if __name__ == '__main__':
