@@ -42,6 +42,26 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("route-secret", str(result))
                     result = await registered[("GET", "/scene_prompt/llm/settings")](request)
                     self.assertTrue(result["payload"]["api_key_set"])
+                    saved = settings_module.load_settings("alice")
+                    request.payload = {"base_url": "http://127.0.0.1:19001/v1", "model": "unsaved-model", "api_key": "unsaved-secret"}
+                    with mock.patch.object(service, "test_connection", return_value={"ok": True, "models": [], "model": "unsaved-model"}) as connection:
+                        result = await registered[("POST", "/scene_prompt/llm/test")](request)
+                        supplied = connection.call_args.args[0]
+                        self.assertEqual(supplied["base_url"], request.payload["base_url"])
+                        self.assertEqual(supplied["model"], "unsaved-model")
+                        self.assertEqual(supplied["api_key"], "unsaved-secret")
+                        self.assertNotIn("unsaved-secret", str(result))
+                    self.assertEqual(settings_module.load_settings("alice"), saved)
+                    request.payload["api_key"] = ""
+                    with mock.patch.object(service, "test_connection", return_value={"ok": True}) as connection:
+                        await registered[("POST", "/scene_prompt/llm/test")](request)
+                        self.assertEqual(connection.call_args.args[0]["api_key"], "route-secret")
+                    request.payload["base_url"] = "invalid"
+                    with mock.patch.object(service, "test_connection") as connection:
+                        result = await registered[("POST", "/scene_prompt/llm/test")](request)
+                        self.assertEqual(result["status"], 400)
+                        connection.assert_not_called()
+                    self.assertEqual(settings_module.load_settings("alice"), saved)
                     request.user_id = "bob"
                     result = await registered[("GET", "/scene_prompt/llm/settings")](request)
                     self.assertFalse(result["payload"]["api_key_set"])

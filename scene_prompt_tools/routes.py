@@ -620,7 +620,7 @@ def define_routes():
 
     async def llm_operation(request, operation):
         # Lazy imports retain compatibility with lightweight Comfy/aiohttp route loaders.
-        from .llm_settings import load_settings, public_settings, save_settings
+        from .llm_settings import load_settings, merge_settings, public_settings, save_settings
         from .llm_service import ServiceError, generate, select_loras, test_connection
         from .civitai import search, download
         try:
@@ -637,7 +637,7 @@ def define_routes():
                 if operation == "settings_post":
                     result = await asyncio.to_thread(save_settings, user_id, payload)
                 elif operation == "test":
-                    result = await test_connection(settings)
+                    result = await test_connection(merge_settings(settings, payload))
                 elif operation == "generate":
                     result = await generate(settings, payload.get("description"), payload.get("model_mode"))
                 elif operation == "select":
