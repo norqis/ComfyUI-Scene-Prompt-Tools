@@ -274,7 +274,7 @@ export function createPresetGraph(definition, ownerGraph) {
 
 export function collectPresetLLMTargets(reference, definitions, { refresh } = {}) {
     const prepared = preparePresetReference(reference, definitions);
-    if (!prepared.root || prepared.error) return [];
+    if (!prepared.root || prepared.error || !prepared.root.scenePresetHasLLM) return [];
     if (prepared.targets) return prepared.targets;
     let expected = prepared.serialized;
     const ownerGraph = reference.graph;
