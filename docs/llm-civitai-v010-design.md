@@ -1,6 +1,6 @@
 # v0.10.0 LLM prompts and Civitai LoRA selection
 
-Status: design awaiting review; implementation not shipped.
+Status: implemented after design review approval. Frontend regression tests and an isolated CPU ComfyUI browser run passed, including LLM widgets, saved prompt/API round trips, native LoRA insertion and Undo/Redo. The legacy 175-node PNG loaded in 2.21 seconds with no LLM/Civitai calls. Real LLM prompt quality remains unverified because no suitable endpoint was already running. Release checks and publication are tracked separately.
 
 ## User contract
 
@@ -19,7 +19,7 @@ Status: design awaiting review; implementation not shipped.
 
 Separate Python llm and civitai service modules and frontend controller/modal modules; existing large UI contains integration hooks only. Nonblocking aiohttp requests, sequential LLM work and streamed downloads, hash/fs work off event loop. No new dependency other than existing aiohttp.
 
-Per-public-Comfy-user connection settings in scene_prompt_tools storage: base_url (default http://127.0.0.1:8080/v1), model, api_key, response_format (json_object/json_schema/instructions), timeout_seconds, civitai_api_key, civitai_host (com/civitai.red). Tokens masked/read-preserved; never returned in GET settings or embedded in graph. Settings modal supplies connection test/models. No server restart/GPU auto-start.
+Per-public-Comfy-user connection settings in scene_prompt_tools storage: base_url (default http://127.0.0.1:8080/v1), model, api_key, response_format (json_object/json_schema/instructions), timeout_seconds, reasoning_effort (empty/default, none, low, medium, high), max_tokens (default 8192, range 64–32768), civitai_api_key, civitai_host (civitai.com/civitai.red). Tokens masked/read-preserved; never returned in GET settings or embedded in graph. Settings modal supplies connection test/models. No server restart/GPU auto-start.
 
 REST endpoints:
 - GET/POST /scene_prompt/llm/settings, POST /scene_prompt/llm/test.

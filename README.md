@@ -19,6 +19,8 @@ Add **Scene Prompt (LLM)** as the first prompt node, or connect an existing Scen
 
 Open the node's connection settings and enter an OpenAI-compatible endpoint, model, and optional API key. The default endpoint is `http://127.0.0.1:8080/v1`. Choose the structured response format supported by your server and use the connection test before generating. Civitai settings include an optional API key and the supported host selection. Settings are stored separately for each ComfyUI user; credentials are excluded from workflows and PNG metadata.
 
+An OpenAI-compatible server such as Strata can be configured directly; no MCP server is required. Optional reasoning effort and maximum output tokens let you use the settings supported by your endpoint. The tool never starts a model server or GPU process automatically.
+
 **Prompt Generate** on Scene Prompt Expand converts the reachable LLM descriptions before **Continuous Generate**. It reuses matching saved results, including your manual edits; use the LLM node's own Generate button to regenerate deliberately. Changing the model mode replaces the saved output pair when you generate again. Loading a workflow and generating images use the saved prompts and never start LLM inference.
 
 When the generated description suggests useful LoRAs, the tool searches real compatible Civitai candidates and lets the LLM choose from those results. A successful download is verified and saved in the configured LoRA folder's `llm` subfolder. Selected Apply LoRA nodes are inserted immediately after their LLM node, preserving downstream connections and Queue order. Trigger prompts are stored on Apply LoRA and follow its model filter.

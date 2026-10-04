@@ -47,11 +47,17 @@ export async function requestJSON(api, path, body) {
     return data;
 }
 export function identity(candidate) { return `${candidate.model_id}/${candidate.version_id}/${candidate.file_id}`; }
+function triggerIdentity(token) {
+    let word = String(token).trim();
+    while (word.startsWith("(") && word.endsWith(")")) word = word.slice(1, -1).replace(/:\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/u, "").trim();
+    return word.toLocaleLowerCase();
+}
 export function applyCandidate(node, candidate, { query = "", sort = "Most Downloaded", model_mode = value(node, "model_mode"), origin } = {}) {
     const previous = node.properties?.scene_civitai || {};
     const managed = new Set(previous.managed_triggers || []);
     const manual = String(value(node, "positive")).split(",").map((token) => token.trim()).filter((token) => token && !managed.has(token));
-    const triggers = [...new Set((candidate.triggers || []).flatMap((text) => String(text).split(",")).map((token) => token.trim()).filter((token) => token && !manual.includes(token)))];
+    const manualIdentities = new Set(manual.map(triggerIdentity));
+    const triggers = [...new Set((candidate.triggers || []).flatMap((text) => String(text).split(",")).map((token) => token.trim()).filter((token) => token && !manualIdentities.has(triggerIdentity(token))))];
     for (const [name, next] of Object.entries({ lora_name: candidate.lora_name, model_mode, positive: [...manual, ...triggers].join(", ") })) {
         if (widget(node, name)) widget(node, name).value = next;
     }
@@ -97,20 +103,26 @@ export function insertLoras(graph, origin, candidates, createNode) {
     }
     return nodes;
 }
-export function createLLMController({ app, api, createNode, refresh, presetTargets, onError, onBusy }) {
+export function createLLMController({ app, api, createNode, refresh, presetTargets, onError, onBusy,
+    beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const busy = new WeakSet();
+    let operationBusy = false;
     function targets(root) { return collectLLMTargets(root.graph || app.graph, root, { presetTargets }); }
     async function generate(root, explicit = false) {
-        if (busy.has(root)) return;
+        if (operationBusy) return;
+        operationBusy = true;
         busy.add(root);
         onBusy?.(root, true);
         const ownerGraph = app.graph;
         const list = explicit ? [{ node: root, graph: root.graph || ownerGraph }] : targets(root);
+        for (const { node } of list) { busy.add(node); onBusy?.(node, true); }
         if (!list.length) root.sceneLLMStatus = "生成対象がありません";
         let errorQuery = "";
+        let currentNode = root;
         try {
             for (const target of list) {
                 const { node, graph } = target;
+                currentNode = node;
                 target.ownerGraph = ownerGraph;
                 const captured = captureTarget(target, () => app.graph);
                 const rootMode = value(root, "model_mode"), rootLinks = linksKey(root);
@@ -123,7 +135,7 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                 const reusable = !explicit && saved.description === description && saved.model_mode === model_mode && saved.template_version === "scene-llm-v1";
                 if (reusable) { node.sceneLLMStatus = "生成済み"; continue; }
                 const output = await requestJSON(api, "/scene_prompt/llm/generate", { description, model_mode });
-                if (!current()) continue;
+                if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; continue; }
                 const downloaded = [];
                 for (const query of output.lora_queries || []) {
                     errorQuery = query;
@@ -140,7 +152,7 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                     }
                 }
                 if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; continue; }
-                graph.beforeChange?.();
+                beginChange(graph);
                 try {
                     if (widget(node, "positive")) widget(node, "positive").value = output.positive;
                     if (widget(node, "negative")) widget(node, "negative").value = output.negative;
@@ -148,14 +160,19 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                     if (widget(node, "generation_state_json")) widget(node, "generation_state_json").value = JSON.stringify({ description, model_mode, template_version: output.template_version, lora_queries: output.lora_queries });
                     insertLoras(graph, node, downloaded, createNode);
                     target.commit?.();
-                } finally { graph.afterChange?.(); }
+                } finally { endChange(graph); }
                 node.sceneLLMStatus = "完了";
                 refresh?.(target.reference || node);
             }
         } catch (error) {
             root.sceneLLMStatus = error.message;
+            currentNode.sceneLLMStatus = error.message;
             onError?.(error, errorQuery, () => generate(root, explicit));
-        } finally { busy.delete(root); onBusy?.(root, false); app.graph?.setDirtyCanvas?.(true, true); }
+        } finally {
+            operationBusy = false;
+            for (const node of new Set([root, ...list.map((target) => target.node)])) { busy.delete(node); onBusy?.(node, false); }
+            app.graph?.setDirtyCanvas?.(true, true);
+        }
     }
     return { generate, targets, busy };
 }

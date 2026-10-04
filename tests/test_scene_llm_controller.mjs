@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import vm from "node:vm";
 import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity } from "../web/scene_prompt_llm.js";
 
 function fixture() {
@@ -39,6 +41,9 @@ const candidate = (id) => ({ model_id: id, version_id: id + 10, file_id: id + 20
     field(inserted[0], "positive").value = "manual, trigger1 edited, trigger1";
     applyCandidate(inserted[0], candidate(4));
     assert.equal(field(inserted[0], "positive").value, "manual, trigger1 edited, trigger4");
+    field(inserted[0], "positive").value = "manual, (TRIGGER4:1.3)";
+    applyCandidate(inserted[0], candidate(4));
+    assert.equal(field(inserted[0], "positive").value, "manual, (TRIGGER4:1.3)", "weighted existing manual triggers are not duplicated");
 }
 {
     const { graph, node, create } = fixture(), app = { graph }, calls = [];
@@ -80,4 +85,30 @@ for (const change of ["output", "description", "tab", "delete", "connection"]) {
     assert.equal(graph.before, 0, "stale graph never enters transaction");
 }
 assert.equal(identity(candidate(1)), "1/11/21");
+{
+    const source = await readFile(new URL("../web/scene_prompt_ui.js", import.meta.url), "utf8");
+    const start = source.indexOf("function endSceneLLMChange(");
+    const snippet = source.slice(start, source.indexOf("\nconst sceneLLMController", start));
+    let completed = 0;
+    assert.throws(() => vm.runInNewContext(`${snippet}; endSceneLLMChange(graph);`, {
+        graph: { afterChange() { throw new Error("Graph callback failed"); } }, app: { canvas: { emitAfterChange() { completed++; } } },
+    }), /Graph callback failed/);
+    assert.equal(completed, 1, "native ChangeTracker transaction closes even when graph callbacks fail");
+}
+for (const startWithExpand of [true, false]) {
+    const { graph, node, create } = fixture(), app = { graph }, target = node("ScenePromptLLM", "test"), expand = node("ScenePrompterExpand");
+    target.connect(0, expand, 0);
+    let resolve, requests = 0;
+    const api = { fetchApi: () => { requests++; return new Promise((done) => { resolve = done; }); } };
+    const controller = createLLMController({ app, api, createNode: create });
+    const operation = controller.generate(startWithExpand ? expand : target, !startWithExpand);
+    await controller.generate(startWithExpand ? target : expand, startWithExpand);
+    assert.equal(requests, 1, "own and Expand operations cannot overlap");
+    assert.equal(controller.busy.has(target), true, "upstream own button is busy during Expand");
+    resolve({ ok: false, status: 503, json: async () => ({ error: "Service unavailable" }) });
+    await operation;
+    assert.equal(target.sceneLLMStatus, "Service unavailable", "failing target displays settled error");
+    assert.equal(controller.busy.has(target), false);
+    assert.equal(controller.busy.has(expand), false);
+}
 console.log("LLM controller traversal, insertion, reuse and ownership tests passed.");

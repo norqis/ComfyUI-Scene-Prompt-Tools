@@ -4874,8 +4874,19 @@ function isSceneLLMNode(node) {
     return nodeClassNames(node).includes(LLM_TYPE);
 }
 
+function beginSceneLLMChange(graph) {
+    graph.beforeChange?.();
+    app.canvas?.emitBeforeChange?.();
+}
+
+function endSceneLLMChange(graph) {
+    try { graph.afterChange?.(); }
+    finally { app.canvas?.emitAfterChange?.(); }
+}
+
 const sceneLLMController = createLLMController({
     app, api,
+    beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
     createNode: (type) => globalThis.LiteGraph.createNode(type),
     refresh: (node) => refreshDownstreamSceneNodes(node),
     presetTargets: (node) => collectPresetLLMTargets(node, scenePresetDisplayGraphs),
@@ -4913,7 +4924,8 @@ function attachSceneLLM(node) {
 
 function openSceneCivitaiSearch(node) {
     injectStyle();
-    return openCivitaiSearch({ node, api, activeGraph: () => app.graph, refresh: (target) => { syncSceneLoraSelectLabel(target); clearSceneComputedCaches(target); refreshDownstreamSceneNodes(target); } });
+    return openCivitaiSearch({ node, api, activeGraph: () => app.graph, beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
+        refresh: (target) => { syncSceneLoraSelectLabel(target); clearSceneComputedCaches(target); refreshDownstreamSceneNodes(target); } });
 }
 
 function isPromptMatrixNode(node) {
@@ -12760,6 +12772,25 @@ app.registerExtension({
             nodeType.prototype.serialize = function (...args) {
                 const serialized = serialize?.apply(this, args);
                 return serialized ? { ...serialized, widgets_values: scenePromptSerializedWidgetValues(this) } : serialized;
+            };
+        }
+
+        if (nodeData.name === "ScenePromptLLM") {
+            const names = ["model_mode", "description", "positive", "negative", "generation_state_json"];
+            const configure = nodeType.prototype.configure;
+            const serialize = nodeType.prototype.serialize;
+            nodeType.prototype.configure = function (...args) {
+                const config = args[0];
+                const named = { ...Object.fromEntries(names.slice(0, config?.widgets_values?.length || 0).map((name, index) => [name, config.widgets_values[index]])), ...config?.widgets_values_named };
+                const result = configure?.apply(this, args);
+                for (const name of names) if (Object.hasOwn(named, name)) setWidgetValue(this, name, named[name], { silent: true });
+                return result;
+            };
+            nodeType.prototype.serialize = function (...args) {
+                const result = serialize?.apply(this, args);
+                if (!result) return result;
+                const named = Object.fromEntries(names.map((name) => [name, findWidget(this, name)?.value ?? (name === "generation_state_json" ? "{}" : "")]));
+                return { ...result, widgets_values: names.map((name) => named[name]), widgets_values_named: named };
             };
         }
 

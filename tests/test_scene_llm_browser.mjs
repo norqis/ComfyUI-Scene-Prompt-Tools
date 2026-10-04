@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { chromium } from "playwright";
 
 const server = http.createServer(async (request, response) => {
@@ -57,10 +58,11 @@ try {
     assert.match(await failure.textContent(), /different.*Network unavailable/s);
     await page.evaluate(() => window.fail=false); await failure.getByRole("button", { name: "再試行" }).click();
     await modal.locator(".pc-civitai-card").first().waitFor();
-    await mkdir(resolve("test-results"), { recursive: true }); await page.screenshot({ path: resolve("test-results/llm-civitai-search.png") });
+    const reviewDirectory = resolve(tmpdir(), "scene-prompt-llm-review");
+    await mkdir(reviewDirectory, { recursive: true }); await page.screenshot({ path: resolve(reviewDirectory, "llm-civitai-search.png") });
     await page.setViewportSize({ width: 360, height: 740 });
     assert.equal(await modal.evaluate((node) => node.scrollWidth <= node.clientWidth), true, "mobile dialog has no horizontal overflow");
-    await page.screenshot({ path: resolve("test-results/llm-civitai-mobile.png") });
+    await page.screenshot({ path: resolve(reviewDirectory, "llm-civitai-mobile.png") });
     await page.setViewportSize({ width: 1100, height: 850 });
     await page.keyboard.press("Escape"); await modal.waitFor({ state: "detached" }); assert.equal(await page.locator("#launch").evaluate((node)=>node===document.activeElement), true);
     await page.evaluate(() => window.settings());
@@ -69,7 +71,7 @@ try {
     await settings.getByRole("button", { name: "接続テスト・モデル取得" }).click(); await settings.getByText("接続成功:", { exact: false }).waitFor();
     await settings.getByRole("button", { name: "保存", exact: true }).click(); await settings.getByText("保存しました", { exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.calls.at(-1).body.api_key), "");
-    await page.screenshot({ path: resolve("test-results/llm-settings.png") });
+    await page.screenshot({ path: resolve(reviewDirectory, "llm-settings.png") });
     await page.keyboard.press("Escape");
     console.log("Actual Chromium Civitai search, download, error/retry, focus and masked settings tests passed.");
 } finally { await browser.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); }

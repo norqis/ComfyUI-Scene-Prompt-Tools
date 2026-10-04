@@ -46,7 +46,8 @@ export function showAPIError(error, query, retry) {
     button.onclick = () => { modal.dismiss(); void retry(); }; modal.dialog.append(button);
     return modal;
 }
-export function openCivitaiSearch({ node, api, refresh, details, activeGraph = () => node.graph }) {
+export function openCivitaiSearch({ node, api, refresh, details, activeGraph = () => node.graph,
+    beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const state = node.properties?.scene_civitai || {};
     const modal = openModal("Civitai Search");
     const controls = element("div", undefined, "pc-civitai-controls"), query = element("input"), sort = element("select");
@@ -90,9 +91,9 @@ export function openCivitaiSearch({ node, api, refresh, details, activeGraph = (
                 try {
                     const downloaded = await requestJSON(api, "/scene_prompt/civitai/download", { model_id: item.model_id, version_id: item.version_id, file_id: item.file_id, model_mode: value(node, "model_mode") });
                     if (!modal.overlay.isConnected || revision !== serial || !current() || value(node, "lora_name") !== lora) return;
-                    graph.beforeChange?.();
+                    beginChange(graph);
                     try { applyCandidate(node, { ...downloaded.candidate, lora_name: downloaded.lora_name }, { query: query.value.trim(), sort: sort.value }); }
-                    finally { graph.afterChange?.(); }
+                    finally { endChange(graph); }
                     item.acquired = true; item.lora_name = downloaded.lora_name;
                     refresh?.(node); render(items);
                 } catch (error) { if (modal.overlay.isConnected) showAPIError(error, query.value, () => choose.click()); }

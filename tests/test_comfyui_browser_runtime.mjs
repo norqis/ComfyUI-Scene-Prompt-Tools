@@ -56,7 +56,7 @@ try {
     await mkdir(dirname(nodeDirectory), { recursive: true });
     await cp(root, nodeDirectory, {
         recursive: true,
-        filter: (entry) => ![".git", ".venv", "node_modules", "__pycache__", ".pytest_cache"].includes(entry.split(/[\\/]/u).at(-1)),
+        filter: (entry) => ![".git", ".venv", ".venv-http", ".venv-test", "node_modules", "__pycache__", ".pytest_cache", "test-results"].includes(entry.split(/[\\/]/u).at(-1)),
     });
     child = spawn(python, [
         "main.py",
@@ -76,6 +76,24 @@ try {
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.stack || error.message));
     const seedRequests = [];
+    const llmRequests = [];
+    const runtimeCandidate = { model_id: 100, version_id: 200, file_id: 300, name: "Runtime Hat", version_name: "v1", base_model: "Illustrious",
+        file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["runtime_hat"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "llm/runtime-hat.safetensors" };
+    await page.route("**/scene_prompt/llm/**", async (route) => {
+        const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
+        const body = route.request().postDataJSON();
+        llmRequests.push({ path, body });
+        if (path.endsWith("/generate")) return route.fulfill({ json: { positive: "1girl, hat", negative: "blurry", lora_queries: ["hat"], template_version: "scene-llm-v1" } });
+        if (path.endsWith("/select_loras")) return route.fulfill({ json: { selected: [{ model_id: 100, version_id: 200, file_id: 300 }] } });
+        throw new Error(`Unexpected LLM runtime request ${path}`);
+    });
+    await page.route("**/scene_prompt/civitai/**", async (route) => {
+        const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
+        llmRequests.push({ path, body: route.request().method() === "POST" ? route.request().postDataJSON() : null });
+        if (path.endsWith("/search")) return route.fulfill({ json: { items: [runtimeCandidate], query: "hat", sort: "Most Downloaded" } });
+        if (path.endsWith("/download")) return route.fulfill({ json: { candidate: runtimeCandidate, lora_name: runtimeCandidate.lora_name } });
+        throw new Error(`Unexpected Civitai runtime request ${path}`);
+    });
     await page.route("**/prompt", async (route) => {
         if (route.request().method() !== "POST") return route.continue();
         seedRequests.push(route.request().postDataJSON());
@@ -88,6 +106,8 @@ try {
         const response = await route.fetch();
         await route.fulfill({ response, body: `${await response.text()}
 window.__sceneSeedRuntimeTest = {
+    updateLLMExpand(node) { updateSceneExpandButton(node); },
+    tracker() { return sceneActiveWorkflow()?.changeTracker; },
     async openFavoritePicker(favorites = false) {
         const node = window.LiteGraph.createNode("ScenePrompter");
         window.app.graph.add(node);
@@ -206,15 +226,18 @@ window.__sceneSeedRuntimeTest = {
 
         const loadResult = await page.evaluate(async (savedWorkflow) => {
             try {
+                const started = performance.now();
                 await Promise.race([
                     window.app.loadGraphData(savedWorkflow),
                     new Promise((_resolve, reject) => setTimeout(() => reject(new Error("loadGraphData timed out")), 15_000)),
                 ]);
+                const loadMilliseconds = performance.now() - started;
                 const expandNode = window.app.graph?._nodes?.find(
                     (node) => node.type === "ScenePrompterExpand" || node.type === "Scene Prompt Expand",
                 );
                 const prompt = await window.app.graphToPrompt();
                 return {
+                    loadMilliseconds,
                     nodes: window.app.graph?._nodes?.length || 0,
                     currentIndex: expandNode?.widgets?.find((widget) => widget.name === "current_index")?.value,
                     promptCurrentIndex: prompt.output?.[String(expandNode?.id)]?.inputs?.current_index,
@@ -228,7 +251,8 @@ window.__sceneSeedRuntimeTest = {
         assert.equal(loadResult.currentIndex, 0, "JSON workflow loading resets a transient Expand cursor to its first Scene row");
         assert.equal(loadResult.promptCurrentIndex, 0, "normal Queue after JSON workflow loading serializes the first Scene row");
         assert.deepEqual(pageErrors, [], `workflow load raised browser errors:\n${pageErrors.join("\n")}`);
-        console.log(`real ComfyUI PNG workflow load passed (${loadResult.nodes} nodes)`);
+        assert.equal(llmRequests.length, 0, "legacy PNG loading never calls LLM or Civitai services");
+        console.log(`real ComfyUI PNG workflow load passed (${loadResult.nodes} nodes, ${loadResult.loadMilliseconds.toFixed(1)} ms, no LLM/Civitai calls)`);
     }
     const result = await page.evaluate(() => {
         const names = ["filename_enabled", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "randomize", "run_handle"];
@@ -864,6 +888,93 @@ window.__sceneSeedRuntimeTest = {
         "frozen one-arm Random preserves a closing Queue and normalizes obsolete controls");
     assert.ok(randomWorkflowRoundTrip.queueControls.every((entry) => entry.disabled));
     console.log("real ComfyUI Random legacy and frozen workflow widget round trips passed");
+    const llmRuntime = await page.evaluate(async () => {
+        const app = window.app;
+        app.graph.clear();
+        const llm = window.LiteGraph.createNode("ScenePromptLLM");
+        const expand = window.LiteGraph.createNode("ScenePrompterExpand");
+        const branch = window.LiteGraph.createNode("ScenePrompterQueue");
+        if (!llm || !expand || !branch) throw new Error("Actual LLM/Expand/Queue registration missing");
+        for (const node of [llm, expand, branch]) app.graph.add(node);
+        const field = (node, name) => node.widgets.find((widget) => widget.name === name);
+        const role = (node, name) => node.widgets.find((widget) => widget.sceneRole === name);
+        const own = role(llm, "llm_generate"), description = field(llm, "description"), generate = role(expand, "expand_llm_generate");
+        if (!own || !generate || !description?.inputEl) throw new Error("Native LLM widgets / description textarea unavailable");
+        const empty = { own: own.disabled, expand: generate.disabled };
+        const order = llm.widgets.indexOf(own) === llm.widgets.indexOf(description) + 1 && expand.widgets.indexOf(generate) + 1 === expand.widgets.indexOf(role(expand, "expand_run_all"));
+        description.inputEl.value = "a girl wearing a hat";
+        description.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        description.callback?.(description.value);
+        llm.connect(0, branch, branch.inputs.findIndex((input) => input.name === "scene_prompt2"));
+        branch.connect(0, expand, expand.inputs.findIndex((input) => input.name === "scene_prompt"));
+        window.__sceneSeedRuntimeTest.updateLLMExpand(expand);
+        const enabled = { own: !own.disabled, expand: !generate.disabled };
+        llm.mode = 4;
+        window.__sceneSeedRuntimeTest.updateLLMExpand(expand);
+        const bypassDisabled = generate.disabled;
+        llm.mode = 0;
+        window.__sceneSeedRuntimeTest.updateLLMExpand(expand);
+        const tracker = window.__sceneSeedRuntimeTest.tracker();
+        if (!tracker?.undo || !tracker?.redo) throw new Error("Native ChangeTracker unavailable");
+        tracker.captureCanvasState();
+        const trackerBefore = { changeCount: tracker.changeCount, nodes: tracker.activeState?.nodes?.map((node) => [node.id, node.type]), history: tracker.undoQueue.length };
+        await generate.callback();
+        const managed = app.graph._nodes.find((node) => node.comfyClass === "SceneApplyLora" && node.properties?.scene_civitai?.origin === String(llm.id));
+        if (!managed) throw new Error(`Generated native ApplyLoRA missing; status=${llm.sceneLLMStatus}`);
+        const prompt = await app.graphToPrompt();
+        const beforeReload = { llm: prompt.output[String(llm.id)]?.inputs, lora: prompt.output[String(managed.id)]?.inputs,
+            queueInput: prompt.output[String(branch.id)]?.inputs.scene_prompt2, managed: managed.properties.scene_civitai,
+            serial: app.graph.serialize(), ids: { llm: llm.id, lora: managed.id, expand: expand.id, branch: branch.id } };
+        const ids = beforeReload.ids;
+        await tracker.undo();
+        if (!field(app.graph.getNodeById(ids.llm), "positive")) throw new Error(JSON.stringify({ trackerBefore, ids, afterUndo: app.graph._nodes.map((node) => ({id:node.id,type:node.type,widgets:node.widgets?.map((widget)=>widget.name)})), history: tracker.undoQueue.length, changeCount: tracker.changeCount }));
+        const undone = { positive: field(app.graph.getNodeById(ids.llm), "positive").value,
+            loras: app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora").length,
+            queueOrigin: app.graph.links[app.graph.getNodeById(ids.branch).inputs.find((input) => input.name === "scene_prompt2").link]?.origin_id };
+        await tracker.redo();
+        const redone = { positive: field(app.graph.getNodeById(ids.llm), "positive").value,
+            loras: app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora").length,
+            queueOrigin: app.graph.links[app.graph.getNodeById(ids.branch).inputs.find((input) => input.name === "scene_prompt2").link]?.origin_id };
+        await app.loadGraphData(beforeReload.serial, true, true);
+        const restored = app.graph.getNodeById(ids.llm), restoredLora = app.graph.getNodeById(ids.lora), restoredExpand = app.graph.getNodeById(ids.expand);
+        const after = await app.graphToPrompt();
+        field(restored, "positive").value = "user edited prompt";
+        await role(restoredExpand, "expand_llm_generate").callback();
+        return { empty, order, enabled, bypassDisabled, description: description.value, undone, redone,
+            beforeReload, restored: { llm: after.output[String(ids.llm)]?.inputs, lora: after.output[String(ids.lora)]?.inputs,
+                queueInput: after.output[String(ids.branch)]?.inputs.scene_prompt2, provenance: restoredLora.properties.scene_civitai },
+            reusedPositive: field(restored, "positive").value,
+            nodeCount: app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora").length,
+            stateHidden: field(restored, "generation_state_json").hidden };
+    });
+    assert.deepEqual(llmRuntime.empty, { own: true, expand: true });
+    assert.equal(llmRuntime.order, true);
+    assert.deepEqual(llmRuntime.enabled, { own: true, expand: true });
+    assert.equal(llmRuntime.bypassDisabled, true);
+    assert.equal(llmRuntime.description, "a girl wearing a hat");
+    assert.equal(llmRuntime.beforeReload.llm.positive, "1girl, hat");
+    assert.equal(llmRuntime.beforeReload.llm.negative, "blurry");
+    assert.equal(llmRuntime.beforeReload.lora.lora_name, runtimeCandidate.lora_name);
+    assert.equal(llmRuntime.beforeReload.lora.positive, "runtime_hat");
+    assert.deepEqual(llmRuntime.undone, { positive: "", loras: 0, queueOrigin: llmRuntime.beforeReload.ids.llm });
+    assert.deepEqual(llmRuntime.redone, { positive: "1girl, hat", loras: 1, queueOrigin: llmRuntime.beforeReload.ids.lora });
+    assert.deepEqual(llmRuntime.beforeReload.queueInput, [String(llmRuntime.beforeReload.ids.lora), 0]);
+    assert.equal(llmRuntime.restored.llm.positive, "1girl, hat");
+    assert.equal(llmRuntime.restored.llm.negative, "blurry");
+    assert.equal(llmRuntime.restored.llm.description, "a girl wearing a hat");
+    assert.equal(llmRuntime.restored.llm.model_mode, "Illustrious");
+    assert.deepEqual(JSON.parse(llmRuntime.restored.llm.generation_state_json), { description: "a girl wearing a hat", model_mode: "Illustrious", template_version: "scene-llm-v1", lora_queries: ["hat"] });
+    assert.equal(llmRuntime.restored.lora.lora_name, runtimeCandidate.lora_name);
+    assert.deepEqual(llmRuntime.restored.queueInput, llmRuntime.beforeReload.queueInput);
+    assert.deepEqual(llmRuntime.restored.provenance, llmRuntime.beforeReload.managed);
+    assert.equal(llmRuntime.reusedPositive, "user edited prompt");
+    assert.equal(llmRuntime.nodeCount, 1);
+    assert.equal(llmRuntime.stateHidden, true);
+    assert.deepEqual(llmRequests.map((request) => request.path), ["/scene_prompt/llm/generate", "/scene_prompt/civitai/search", "/scene_prompt/llm/select_loras", "/scene_prompt/civitai/download"], "workflow load and converted Expand never invoke any service");
+    assert.deepEqual(llmRequests[0].body, { description: "a girl wearing a hat", model_mode: "Illustrious" });
+    assert.doesNotMatch(JSON.stringify(llmRuntime.beforeReload.serial), /image_url|api_key|conversation_history/);
+    console.log("real ComfyUI LLM widget controls, explicit generation, native LoRA insertion and workflow/API reload passed");
+
     const seedNodes = await page.evaluate(async () => {
         window.app.graph.clear();
         const add = (type) => {
