@@ -187,6 +187,7 @@ export function createPresetGraph(definition, ownerGraph) {
     let nextNode = Math.max(0, ...[...workflowNodes.keys()].map(Number).filter(Number.isFinite));
     let nextLink = Math.max(0, ...((local.workflow.links || []).map((link) => Number(link[0]))));
     function connect(slot, target, targetSlot) {
+        target = graph.getNodeById(target.id) || target;
         if (targetSlot < 0) throw new Error("Preset Scene input is missing.");
         const input = target.inputs[targetSlot];
         if (input.link != null) graph.removeLink(input.link);
@@ -204,7 +205,30 @@ export function createPresetGraph(definition, ownerGraph) {
         if (target?.inputs?.[link.target_slot]?.link === id) target.inputs[link.target_slot].link = null;
         delete graph.links[id];
     };
-    graph.add = (node) => { node.id = ++nextNode; node.graph = graph; node.connect = connect; nodes.set(String(node.id), node); };
+    graph.add = (node) => {
+        // Snapshot while detached: native DOM widgets expect a real Comfy graph.
+        // The local occurrence holds plain data and never binds the native node.
+        const template = copy(node.serialize());
+        const named = template.widgets_values_named || Object.fromEntries((node.widgets || [])
+            .filter((widget) => widget.serialize !== false && widget.options?.serialize !== false)
+            .map((widget) => [widget.name, copy(widget.value)]));
+        const facade = { ...template, id: ++nextNode, type: node.type, comfyClass: node.comfyClass || node.type,
+            graph, connect, widgets: Object.entries(named).map(([name, value]) => ({ name, value })),
+            pos: Array.from(template.pos || node.pos || [0, 0]), size: Array.from(template.size || node.size || [300, 150]),
+            properties: copy(node.properties || template.properties || {}),
+            inputs: copy(template.inputs || node.inputs || []), outputs: copy(template.outputs || node.outputs || []),
+            serialize() {
+                const values = Object.fromEntries(this.widgets.map((widget) => [widget.name, widget.value]));
+                return { ...copy(template), id: this.id, pos: [...this.pos], size: [...this.size], mode: this.mode || 0,
+                    properties: copy(this.properties), inputs: copy(this.inputs), outputs: copy(this.outputs),
+                    widgets_values: Object.values(values), widgets_values_named: values };
+            } };
+        node.id = facade.id;
+        node.scenePresetDetachedSnapshot = true;
+        node.onRemoved?.();
+        nodes.set(String(facade.id), facade);
+        return facade;
+    };
     for (const [id, entry] of Object.entries(output)) {
         const saved = workflowNodes.get(id) || { id: Number(id), type: entry.class_type };
         const scalarNames = Object.keys(entry.inputs || {}).filter((name) => !Array.isArray(entry.inputs[name]));

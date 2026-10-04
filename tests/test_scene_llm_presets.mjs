@@ -133,8 +133,35 @@ first.graph.add(queue);
 first.node.connect(0, queue, 4);
 const formerTargets = first.node.outputs[0].links.map((id) => first.graph.links[id]).map((link) => [link.target_id, link.target_slot]);
 const candidates = [1, 2].map((id) => ({ model_id: id, version_id: id, file_id: id, lora_name: `llm/${id}.safetensors`, triggers: [`trigger${id}`] }));
-const additions = insertLoras(first.graph, first.node, candidates, loraNode);
+const detachedSources = [];
+function nativeFactory() {
+    const node = loraNode(), baseSerialize = node.serialize;
+    node.widgets.push({ name: "LoRA select", value: "gallery", options: { serialize: false } },
+        { name: "state list", value: { transient: true }, serialize: false });
+    node.widgets.reverse();
+    node.serialize = function () {
+        assert(this.graph == null, "native DOM serializer must run before any fake graph binding");
+        this.snapshotCalls = (this.snapshotCalls || 0) + 1;
+        const named = Object.fromEntries(["lora_name", "model_mode", "positive"].map((name) => [name, widget(this, name).value]));
+        return { ...baseSerialize.call(this), widgets_values: Object.values(named), widgets_values_named: named };
+    };
+    node.onRemoved = function () {
+        assert(this.graph == null);
+        assert(this.scenePresetDetachedSnapshot);
+        this.cleaned = true;
+    };
+    detachedSources.push(node);
+    return node;
+}
+const additions = insertLoras(first.graph, first.node, candidates, nativeFactory);
 assert.equal(additions.length, 2);
+for (let index = 0; index < additions.length; index++) {
+    assert.notStrictEqual(additions[index], detachedSources[index], "local graph stores a separate plain facade");
+    assert.strictEqual(first.graph.getNodeById(additions[index].id), additions[index]);
+    assert.equal(detachedSources[index].snapshotCalls, 1);
+    assert(detachedSources[index].cleaned);
+    assert(detachedSources[index].graph == null, "native original remains detached after insertion");
+}
 assert.equal(first.graph.links[first.node.outputs[0].links[0]].target_id, additions[0].id);
 assert.equal(first.graph.links[additions[0].outputs[0].links[0]].target_id, additions[1].id);
 assert.deepEqual(additions[1].outputs[0].links.map((id) => first.graph.links[id]).map((link) => [link.target_id, link.target_slot]), formerTargets);
@@ -152,14 +179,23 @@ nativeLora.serialize = function () {
 first.commit();
 const inserted = parsePresetOverrides(a.widgets[1].value)["5"];
 const nativeWorkflowNode = inserted.workflow.nodes.find((node) => node.id === nativeLora.id);
+assert(detachedSources.every((node) => node.snapshotCalls === 1), "later commits never invoke native DOM serialization again");
 assert.deepEqual(nativeWorkflowNode.widgets_values, ["llm/1.safetensors", "", "trigger1"], "new native node canonical widget ordering survives UI control attachment");
 assert.deepEqual(Object.keys(nativeWorkflowNode.widgets_values_named), ["lora_name", "model_mode", "positive"]);
 assert(!Object.hasOwn(inserted.api_graph.output[String(nativeLora.id)].inputs, "LoRA select"));
 assert(!Object.hasOwn(inserted.api_graph.output[String(nativeLora.id)].inputs, "state list"));
+assert(!a.widgets[1].value.includes("scenePresetDetachedSnapshot"), "detached lifecycle flag is not serialized into workflow state");
 // A later occurrence commit traverses the already-attached parent graph again.
 insertionTargets[1].commit();
 const afterSecondCommit = parsePresetOverrides(a.widgets[1].value)["5"];
 assert.deepEqual(afterSecondCommit.workflow.nodes.find((node) => node.id === nativeLora.id).widgets_values, nativeWorkflowNode.widgets_values);
+widget(nativeLora, "positive").value = "edited trigger";
+first.commit();
+const editedFacade = parsePresetOverrides(a.widgets[1].value)["5"];
+assert.equal(editedFacade.api_graph.output[String(nativeLora.id)].inputs.positive, "edited trigger");
+assert.equal(editedFacade.workflow.nodes.find((node) => node.id === nativeLora.id).widgets_values_named.positive, "edited trigger",
+    "plain facade canonical serialization follows later scalar edits");
+assert(detachedSources.every((node) => node.snapshotCalls === 1));
 assert.deepEqual(inserted.api_graph.output[2].inputs.scene_prompt, [String(additions[1].id), 0]);
 assert.deepEqual(inserted.api_graph.output[String(queue.id)].inputs.scene_prompt5, [String(additions[1].id), 0]);
 for (const link of inserted.workflow.links) {
