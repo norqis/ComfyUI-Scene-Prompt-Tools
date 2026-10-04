@@ -5,6 +5,8 @@ const EMPTY = '{"version":1,"presets":{}}';
 const field = (node, name) => node?.widgets?.find((widget) => widget.name === name);
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const pathJoin = (path, id) => path === "." ? String(id) : `${path}/${id}`;
+const sharedEntriesCurrent = (prepared, definitions) => [...prepared.sharedEntries]
+    .every(([id, definition]) => definitions.get(id) === definition);
 
 export function parsePresetOverrides(serialized) {
     if (!serialized) return {};
@@ -24,15 +26,17 @@ export function preparePresetReference(reference, definitions) {
     const serialized = String(field(reference, "llm_presets_json")?.value || "");
     const presetId = String(field(reference, "preset_id")?.value || "");
     const previous = cache.get(reference);
-    if (previous?.serialized === serialized && previous.presetId === presetId && previous.definitions === definitions)
+    if (previous?.serialized === serialized && previous.presetId === presetId && previous.definitions === definitions
+        && sharedEntriesCurrent(previous, definitions))
         return previous;
     let overrides, error = null;
     try { overrides = parsePresetOverrides(serialized); } catch (failure) { overrides = {}; error = failure; }
-    const prepared = { serialized, presetId, definitions, overrides, occurrences: new Map(), localPaths: new Set(), error,
+    const prepared = { serialized, presetId, definitions, overrides, occurrences: new Map(), localPaths: new Set(), sharedEntries: new Map(), error,
         revision: (previous?.revision || 0) + 1 };
     function prepare(id, path, inherited, stack) {
         if (stack.has(id)) return null;
         const definition = inherited["."] || definitions.get(id);
+        if (!inherited["."]) prepared.sharedEntries.set(id, definition);
         if (!definition || String(definition.metadata?.preset_id) !== id) return null;
         const preset = { ...definition };
         if (inherited["."]) prepared.localPaths.add(path);
@@ -187,7 +191,9 @@ export function createPresetGraph(definition, ownerGraph) {
             if (saved) {
                 workflowNode.widgets_values = [...(saved.widgets_values || [])];
                 workflowNode.widgets_values_named = { ...saved.widgets_values_named };
-                const scalarNames = Object.keys(old?.inputs || {}).filter((name) => !Array.isArray(old.inputs[name]));
+                const scalarNames = old?.class_type === "ScenePresetReference"
+                    ? ["preset_id", "run_handle", "llm_presets_json"]
+                    : Object.keys(old?.inputs || {}).filter((name) => !Array.isArray(old.inputs[name]));
                 for (const widget of node.widgets || []) {
                     if (widget.value === old?.inputs?.[widget.name]) continue;
                     if (!scalarNames.includes(widget.name)) scalarNames.push(widget.name);
@@ -237,7 +243,8 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
                 identity: { ownerGraph, outerReference: reference, path, presetId: preset.metadata.preset_id, nodeId: String(id) },
                 current: () => reference.graph === ownerGraph && ownerGraph?.getNodeById?.(reference.id) === reference
                     && String(field(reference, "preset_id")?.value || "") === prepared.presetId
-                    && String(field(reference, "llm_presets_json")?.value || "") === expected,
+                    && String(field(reference, "llm_presets_json")?.value || "") === expected
+                    && sharedEntriesCurrent(prepared, definitions),
                 commit() {
                     const widget = field(reference, "llm_presets_json");
                     if (!widget) throw new Error("Preset local state widget is missing.");

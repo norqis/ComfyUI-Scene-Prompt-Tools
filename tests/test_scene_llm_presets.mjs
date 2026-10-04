@@ -83,6 +83,26 @@ assert.equal(statsContext.scenePresetStats("outer", null, new Set(), preparePres
 assert.equal(presetOccurrenceChild(preparePresetReference(b, definitions).root, 5).api_graph.output[1].inputs.positive, "shared");
 assert.equal(JSON.stringify([...definitions]), original, "generation never mutates shared definitions");
 
+const liveDefinitions = new Map(definitions), live = reference(44, "{}");
+const beforeReplace = preparePresetReference(live, liveDefinitions);
+const pendingLive = collectPresetLLMTargets(live, liveDefinitions);
+const revisedInner = structuredClone(inner);
+revisedInner.api_graph.output[1].inputs.positive = "shared update";
+liveDefinitions.set("inner", revisedInner);
+assert(!pendingLive[0].current(), "shared definition replacement invalidates pending generation");
+const afterReplace = preparePresetReference(live, liveDefinitions);
+assert.notStrictEqual(afterReplace, beforeReplace, "same Map nested entry replacement rebuilds occurrence preparation");
+assert.equal(presetOccurrenceChild(afterReplace.root, 5).api_graph.output[1].inputs.positive, "shared update");
+const unrelated = definition("unused", {});
+liveDefinitions.set("unused", unrelated);
+assert.strictEqual(preparePresetReference(live, liveDefinitions), afterReplace, "unrelated shared entry changes retain preparation");
+const revisedOuter = structuredClone(outer);
+revisedOuter.api_graph.output[7].inputs.scene_prompt5 = ["5", 0];
+liveDefinitions.set("outer", revisedOuter);
+const rootReplaced = preparePresetReference(live, liveDefinitions);
+assert.notStrictEqual(rootReplaced, afterReplace, "same Map root entry replacement rebuilds preparation");
+assert.deepEqual(rootReplaced.root.api_graph.output[7].inputs.scene_prompt5, ["5", 0]);
+
 const ownInner = structuredClone(inner);
 ownInner.api_graph.output[1].inputs.positive = "owned child";
 const ownOuter = structuredClone(outer);
@@ -135,6 +155,20 @@ assert.equal(editorReferenceNode.widgets_values[2], editor.api_graph.output[5].i
 assert.equal(editorChild.api_graph.output[1].inputs.positive, "local A first");
 assert.equal(editorChild.api_graph.output[String(additions[0].id)].inputs.lora_name, "llm/1.safetensors");
 assert.equal(JSON.stringify([...definitions]), original);
+// Real widget order includes the preexisting optional hidden run handle.
+const threeWidgetRoot = structuredClone(editor);
+const threeWidgetReference = threeWidgetRoot.workflow.nodes.find((node) => node.id === 6);
+threeWidgetReference.widgets_values = ["inner", "existing-run-handle", threeWidgetRoot.api_graph.output[6].inputs.llm_presets_json];
+const threeWidgetSource = reference(45, JSON.stringify({ version: 1, presets: { ".": threeWidgetRoot } }));
+const opened = presetEditorDefinition(threeWidgetSource, definitions);
+const openedReference = opened.workflow.nodes.find((node) => node.id === 6);
+assert.equal(openedReference.widgets_values[0], "inner");
+assert.equal(openedReference.widgets_values[1], "existing-run-handle");
+assert.equal(openedReference.widgets_values[2], opened.api_graph.output[6].inputs.llm_presets_json);
+const savedRootDefinitions = new Map(definitions).set("outer", structuredClone(opened));
+const savedRootReference = reference(46, "{}");
+assert.equal(presetOccurrenceChild(preparePresetReference(savedRootReference, savedRootDefinitions).root, 6).api_graph.output[2].inputs.count, 9,
+    "opening local root, explicit root save, and shared root reload retains its three-widget child customization");
 const savedEditorReference = reference(43, JSON.stringify({ version: 1, presets: { ".": editor } }));
 assert.equal(presetOccurrenceChild(preparePresetReference(savedEditorReference, definitions).root, 6).api_graph.output[2].inputs.count, 9,
     "root editor save/reload retains child-local customization");
