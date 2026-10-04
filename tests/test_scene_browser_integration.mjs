@@ -945,18 +945,66 @@ try {
     }); });
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
     const loraPicker = page.getByRole("dialog", { name: "LoRAを選択" });
-    await loraPicker.getByRole("button", { name: /style\.safetensors/u }).waitFor();
+    await loraPicker.locator(".pc-lora-select").filter({ hasText: "style.safetensors" }).waitFor();
     await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-title").getByText("Civitai Style").waitFor();
-    assert.equal(await loraPicker.locator(".pc-lora-row").first().locator(":scope > :first-child").getAttribute("class"), "pc-lora-title",
+    assert.equal(await loraPicker.locator(".pc-lora-select").first().locator(":scope > :first-child").getAttribute("class"), "pc-lora-title",
         "the Civitai title leads each picker row and the path is subordinate");
     assert.equal(await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-source").textContent(), "Civitai",
         "the picker title is the resolved Civitai model name");
+    const pickerRows = loraPicker.locator(".pc-lora-row");
+    assert.deepEqual(await pickerRows.locator(".pc-lora-path").allTextContents(), ["style.safetensors", "folder/other.safetensors"]);
+    assert.equal(await pickerRows.first().locator(".pc-lora-select").getAttribute("aria-pressed"), "true");
+    await pickerRows.first().getByText("選択中", { exact: true }).waitFor();
+    assert.equal(await pickerRows.locator("button button").count(), 0, "selection and detail buttons are siblings");
+    assert.equal(await pickerRows.first().locator(":scope > button").count(), 2);
+    const selectedColor = await pickerRows.first().evaluate((row) => getComputedStyle(row).backgroundColor);
+    await pickerRows.first().hover();
+    assert.equal(await pickerRows.first().evaluate((row) => getComputedStyle(row).backgroundColor), selectedColor);
+    await pickerRows.first().locator(".pc-lora-select").focus();
+    assert.equal(await pickerRows.first().evaluate((row) => getComputedStyle(row).backgroundColor), selectedColor);
+    const beforePreview = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
+    const otherDetails = pickerRows.last().locator(".pc-lora-source");
+    await otherDetails.click();
+    const previewDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
+    await previewDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values), beforePreview,
+        "preview does not change the selected file or prompts");
+    assert.equal(await previewDialog.locator(".pc-lora-word button:enabled").count(), 0);
+    assert.match(await previewDialog.locator(".pc-lora-word button").first().getAttribute("title"), /選択/u);
+    assert.equal(await loraPicker.evaluate((dialog) => dialog.parentElement.inert), true);
+    const previewClose = previewDialog.getByRole("button", { name: "閉じる" });
+    await previewClose.focus();
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await previewDialog.getByRole("link", { name: "Civitaiで見る" }).evaluate((link) => document.activeElement === link), true);
+    await page.keyboard.press("Tab");
+    assert.equal(await previewClose.evaluate((button) => document.activeElement === button), true);
+    await page.keyboard.press("Escape");
+    assert.equal(await previewDialog.count(), 0);
+    assert.equal(await loraPicker.count(), 1, "Escape closes only the upper modal");
+    assert.equal(await loraPicker.evaluate((dialog) => dialog.parentElement.inert), false);
+    assert.equal(await otherDetails.evaluate((button) => document.activeElement === button), true);
+    for (let i = 0; i < 2; i += 1) {
+        await otherDetails.click();
+        await previewDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+        await previewDialog.locator("..").click({ position: { x: 2, y: 2 } });
+        assert.equal(await previewDialog.count(), 0);
+        assert.equal(await otherDetails.evaluate((button) => document.activeElement === button), true);
+    }
+    await pickerRows.first().locator(".pc-lora-source").click();
+    await previewDialog.locator(".pc-lora-word button:enabled").first().waitFor();
+    assert.equal(await previewDialog.locator(".pc-lora-word button:disabled").count(), 0);
+    if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR) {
+        await mkdir(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, { recursive: true });
+        await page.screenshot({ path: resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, "lora-preview.png") });
+    }
+    await page.keyboard.press("Escape");
+    if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR) await page.screenshot({ path: resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, "lora-picker.png") });
     await loraPicker.getByRole("searchbox", { name: "パス・取得済みCivitai名で検索" }).fill("folder/");
     assert.equal(await loraPicker.locator(".pc-lora-row").count(), 1, "path search narrows the list");
     await loraPicker.getByRole("searchbox", { name: "パス・取得済みCivitai名で検索" }).fill("Civitai Style");
     assert.ok(await loraPicker.locator(".pc-lora-row").count() >= 1, "resolved Civitai-name search finds rows");
     await loraPicker.getByRole("searchbox", { name: "パス・取得済みCivitai名で検索" }).fill("style.safetensors");
-    await loraPicker.locator(".pc-lora-row").click();
+    await loraPicker.locator(".pc-lora-select").click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]").some((entry) => entry.title === "Civitai Style"));
     const loraInfoCalls = await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length);
     assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values[0]), "style.safetensors",
@@ -983,26 +1031,27 @@ try {
     await page.keyboard.press("Escape");
     assert.equal(await page.getByRole("dialog", { name: "LoRA 詳細確認" }).count(), 0);
     await page.evaluate(() => { window.__sceneLoraCatalog[0].mtime_ns = 3; window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback(); });
-    await loraPicker.getByRole("button", { name: /style\.safetensors/u }).waitFor();
+    await loraPicker.locator(".pc-lora-select").filter({ hasText: "style.safetensors" }).waitFor();
     await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-title").getByText("Civitai Style").waitFor();
     assert.ok(await page.evaluate(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]")
         .some((entry) => entry.key === "style.safetensors\u0000100\u00003")),
     "changed file metadata resolves and caches the new identity");
-    await loraPicker.locator(".pc-lora-row").first().click();
+    await loraPicker.locator(".pc-lora-select").first().click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]").some((entry) => entry.key.startsWith("style.safetensors") && entry.title === "Civitai Style"));
     await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => route.fulfill({ status: 503, body: "offline" }), { times: 1 });
     await page.evaluate(() => { window.__sceneLoraCatalog[1].mtime_ns = 4; });
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
     const offlineLookup = page.waitForResponse((response) => response.url().includes("/model-versions/by-hash/") && response.status() === 503);
     await offlineLookup;
-    await loraPicker.locator(".pc-lora-row").last().locator(".pc-lora-title").getByText("Civitai名を取得できませんでした").waitFor();
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-title").getByText("Civitai名を取得できませんでした").waitFor();
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]")
         .some((entry) => entry.key === "folder/other.safetensors\u0000200\u00004")), false,
     "transient Civitai failures are not cached as missing models");
+    assert.equal(await loraPicker.locator(".pc-lora-source").count(), 2, "failed lookup retains both detail buttons");
     await page.keyboard.press("Escape");
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
-    await loraPicker.locator(".pc-lora-row").last().locator(".pc-lora-title").getByText("Civitai Style").waitFor();
-    await loraPicker.getByRole("button", { name: /other\.safetensors/u }).click();
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-title").getByText("Civitai Style").waitFor();
+    await loraPicker.locator(".pc-lora-select").filter({ hasText: "other.safetensors" }).click();
     assert.deepEqual(await page.evaluate(() => {
         const widget = window.__sceneLoraTestNode.widgets.find((entry) => entry.sceneRole === "lora_select");
         return { label: widget.label, tooltip: widget.tooltip };
@@ -1012,7 +1061,8 @@ try {
     assert.ok(civitaiLookupCount >= 3, "offline name lookup retries on a later picker open");
     await page.route("https://civitai.com/api/v1/model-versions/by-hash/*", (route) => route.fulfill({ status: 404, body: "missing" }), { times: 1 });
     await page.evaluate(() => { window.__sceneLoraCatalog[1].mtime_ns = 5; window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback(); });
-    await loraPicker.locator(".pc-lora-row").last().locator(".pc-lora-title").getByText("Civitaiに登録なし").waitFor();
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-title").getByText("Civitaiに登録なし").waitFor();
+    assert.equal(await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-path").textContent(), "folder/other.safetensors", "reopening moves the current selection first");
     assert.ok(await page.evaluate(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]")
         .some((entry) => entry.key === "folder/other.safetensors\u0000200\u00005" && entry.status === "not_found")),
     "confirmed 404 is cached as not registered");
@@ -1022,7 +1072,7 @@ try {
         window.__sceneLoraInfoVersionOverride = 7;
         window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback();
     });
-    await loraPicker.locator(".pc-lora-row").last().locator(".pc-lora-title")
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-title")
         .getByText("ファイルが更新されました。再表示してください").waitFor();
     await page.keyboard.press("Escape");
     await page.evaluate(() => { window.__sceneLoraInfoVersionOverride = null; });
@@ -1032,14 +1082,16 @@ try {
         window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback();
     });
     const lookupsBeforeConcurrentDetails = civitaiLookupCount;
-    await loraPicker.getByRole("button", { name: /other\.safetensors/u }).click();
+    const delayedPreviewBefore = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source").click();
     await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
-    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback(); });
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?") && call.url.includes("other.safetensors")).length), 6,
         "selection and details share the in-flight metadata and hash lookup");
     await page.evaluate(() => window.__releaseSceneLoraInfo());
     await page.getByRole("dialog", { name: "LoRA 詳細確認" }).getByRole("link", { name: "Civitaiで見る" }).waitFor();
     assert.equal(civitaiLookupCount, lookupsBeforeConcurrentDetails + 1, "selection and details share one Civitai request");
+    assert.deepEqual(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values), delayedPreviewBefore, "delayed preview leaves node widgets intact");
+    await page.keyboard.press("Escape");
     await page.keyboard.press("Escape");
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
     await page.locator(".pc-popup").getByText("Outfit", { exact: false }).click();
@@ -1068,6 +1120,29 @@ try {
     assert.match(loraCandidateRoundTrip.negativeList, /1候補/u);
     assert.deepEqual(loraCandidateRoundTrip.restored, loraCandidateRoundTrip.stored, "both LoRA candidate lists survive save and reload");
     await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+        window.__sceneLoraCatalog.push({ path: "third.safetensors", size: 300, mtime_ns: 1 });
+        const node = window.__sceneLoraTestNode;
+        const widget = node.widgets.find((entry) => entry.name === "lora_name");
+        widget.value = "folder\\other.safetensors";
+        widget.callback?.();
+        node.widgets.find((entry) => entry.sceneRole === "lora_select").callback();
+    });
+    await loraPicker.locator(".pc-lora-row").first().getByText("選択中", { exact: true }).waitFor();
+    assert.deepEqual(await loraPicker.locator(".pc-lora-path").allTextContents(),
+        ["folder/other.safetensors", "style.safetensors", "third.safetensors"], "slash identity promotes selected while preserving other catalog order");
+    await loraPicker.getByRole("searchbox").fill("safetensors");
+    assert.equal(await loraPicker.locator(".pc-lora-path").first().textContent(), "folder/other.safetensors");
+    const normalizedBefore = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
+    const normalizedCalls = await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length);
+    await loraPicker.locator(".pc-lora-source").first().focus();
+    await page.keyboard.press("Enter");
+    await loraDialog.locator(".pc-lora-word button:enabled").first().waitFor();
+    assert.deepEqual(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values), normalizedBefore, "slash normalization never rewrites serialized paths");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), normalizedCalls, "row preview retains size and mtime cache identity");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__sceneLoraCatalog.pop());
     const positiveBeforeStaleDetails = await page.evaluate(() => {
         const node = window.__sceneLoraTestNode;
         const widget = node.widgets.find((entry) => entry.name === "lora_name");
@@ -2158,7 +2233,7 @@ try {
     await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
     await page.evaluate(() => window.__releaseSceneLoraList());
     const bootstrapPicker = page.getByRole("dialog", { name: "LoRAを選択" });
-    await bootstrapPicker.getByRole("button", { name: /style\.safetensors/u }).evaluate((button) => button.click());
+    await bootstrapPicker.locator(".pc-lora-select").filter({ hasText: "style.safetensors" }).evaluate((button) => button.click());
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?") && call.url.includes("style.safetensors")).length), 2,
         "catalog metadata creates a distinct in-flight key from the earlier path-only detail request");
     await page.evaluate(() => window.__releaseSceneLoraInfo());

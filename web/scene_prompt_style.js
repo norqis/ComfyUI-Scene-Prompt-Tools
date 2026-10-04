@@ -545,15 +545,19 @@ export function injectStyle() {
         }
         .pc-lora-list { min-height: 80px; overflow-y: auto; display: grid; align-content: start; gap: 5px; }
         .pc-lora-row {
-            display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px;
-            width: 100%; padding: 9px 11px; text-align: left; cursor: pointer;
+            display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; align-items: center;
+            width: 100%; box-sizing: border-box; padding: 9px 11px; text-align: left;
             border: 1px solid #3c4553; border-radius: 5px; background: #292f38; color: #edf1f8;
             font: inherit;
         }
-        .pc-lora-row:hover, .pc-lora-row:focus-visible { border-color: #8db5ef; background: #334052; }
+        .pc-lora-row:hover, .pc-lora-row:focus-within { border-color: #8db5ef; background: #334052; }
+        .pc-lora-row.pc-lora-selected, .pc-lora-row.pc-lora-selected:hover, .pc-lora-row.pc-lora-selected:focus-within { border-color: #63bd83; background: #254333; }
+        .pc-lora-select { display: grid; gap: 3px; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+        .pc-lora-select:focus-visible, .pc-lora-source:focus-visible { outline: 2px solid #a6d8b6; outline-offset: 3px; }
+        .pc-lora-selected-marker { color: #a6e0b8; font-size: 12px; }
         .pc-lora-path { grid-column: 1 / -1; color: #b8c7d9; overflow-wrap: anywhere; }
         .pc-lora-title { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
-        .pc-lora-source { align-self: center; padding: 2px 6px; border-radius: 3px; background: #455366; color: #dceaff; white-space: nowrap; }
+        .pc-lora-source { border: 1px solid #667e9b; font: inherit; cursor: pointer; align-self: center; padding: 2px 6px; border-radius: 3px; background: #455366; color: #dceaff; white-space: nowrap; }
     `;
     if (!style.parentNode) {
         document.head.appendChild(style);
