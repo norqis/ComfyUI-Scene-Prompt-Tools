@@ -5086,14 +5086,17 @@ function saveSceneLoraCache(item, local, version, status) {
     return entry;
 }
 
+function sceneLoraPathIdentity(path) {
+    return String(path || "").trim().replaceAll("\\", "/");
+}
+
 function sceneLoraCatalogItem(path) {
-    return sceneLoraCatalog.find((item) => item.path === path) || { path, title: path.split(/[\\/]/u).at(-1) || path, source: "ファイル名" };
+    return sceneLoraCatalog.find((item) => sceneLoraPathIdentity(item.path) === sceneLoraPathIdentity(path)) || { path, title: path.split(/[\\/]/u).at(-1) || path, source: "ファイル名" };
 }
 
 function sceneLoraDisplay(item) {
     const cached = cachedSceneLora(item);
-    return { title: cached?.title || (cached?.status === "not_found" ? "Civitaiに登録なし" : "Civitai名を確認中…"),
-        source: cached?.title ? "Civitai" : "", versionName: cached?.versionName || "" };
+    return { title: cached?.title || (cached?.status === "not_found" ? "Civitaiに登録なし" : "Civitai名を確認中…") };
 }
 
 async function resolveSceneLora(item) {
@@ -5134,6 +5137,7 @@ function closeSceneLoraPicker(node) {
 }
 
 async function openSceneLoraPicker(node) {
+    closeSceneLoraDetails(node);
     closeSceneLoraPicker(node);
     injectStyle();
     const overlay = document.createElement("div");
@@ -5163,7 +5167,7 @@ async function openSceneLoraPicker(node) {
     dialog.append(head, search, list);
     overlay.append(dialog);
     document.body.append(overlay);
-    const onKey = (event) => { if (event.key === "Escape") closeSceneLoraPicker(node); };
+    const onKey = (event) => { if (!overlay.inert && event.key === "Escape") closeSceneLoraPicker(node); };
     let generation = 0;
     let pending = [];
     let busy = false;
@@ -5174,7 +5178,9 @@ async function openSceneLoraPicker(node) {
         observer?.disconnect();
         document.removeEventListener("keydown", onKey);
         overlay.remove();
+        node.sceneLoraPickerOverlay = null;
     };
+    node.sceneLoraPickerOverlay = overlay;
     node.sceneLoraPickerCleanup = cleanup;
     close.onclick = () => closeSceneLoraPicker(node);
     overlay.onclick = (event) => { if (event.target === overlay) closeSceneLoraPicker(node); };
@@ -5184,7 +5190,7 @@ async function openSceneLoraPicker(node) {
         if (busy) return;
         busy = true;
         while (pending.length && node.sceneLoraPickerCleanup === cleanup) {
-            const { item, row, title, source, revision } = pending.shift();
+            const { item, row, title, revision } = pending.shift();
             if (revision !== generation || !row.isConnected) continue;
             try {
                 const result = await resolveSceneLora(item);
@@ -5192,7 +5198,6 @@ async function openSceneLoraPicker(node) {
                     if (result.key !== sceneLoraCacheKey(item)) title.textContent = "ファイルが更新されました。再表示してください";
                     else {
                         title.textContent = result.title || "Civitaiに登録なし";
-                        source.textContent = result.title ? "Civitai" : "";
                     }
                 }
             } catch (_error) {
@@ -5207,10 +5212,11 @@ async function openSceneLoraPicker(node) {
         observer?.disconnect();
         const revision = generation;
         const query = search.value.trim().toLocaleLowerCase();
+        const selectedPath = sceneLoraPathIdentity(findWidget(node, "lora_name")?.value);
         const shown = sceneLoraCatalog.filter((item) => {
             const cached = cachedSceneLora(item);
             return `${item.path} ${cached?.title || ""} ${cached?.versionName || ""}`.toLocaleLowerCase().includes(query);
-        });
+        }).sort((a, b) => Number(sceneLoraPathIdentity(b.path) === selectedPath) - Number(sceneLoraPathIdentity(a.path) === selectedPath));
         list.replaceChildren();
         if (!shown.length) { list.textContent = "該当するLoRAはありません。"; return; }
         observer = new IntersectionObserver((entries) => {
@@ -5225,24 +5231,38 @@ async function openSceneLoraPicker(node) {
         for (const catalogItem of shown) {
             const item = { ...catalogItem };
             const display = sceneLoraDisplay(item);
-            const row = document.createElement("button");
-            row.type = "button";
-            row.className = "pc-lora-row";
+            const row = document.createElement("div");
+            const selected = sceneLoraPathIdentity(item.path) === selectedPath;
+            row.className = `pc-lora-row${selected ? " pc-lora-selected" : ""}`;
+            const select = document.createElement("button");
+            select.type = "button";
+            select.className = "pc-lora-select";
+            select.setAttribute("aria-pressed", String(selected));
             const path = document.createElement("span");
             path.className = "pc-lora-path";
             path.textContent = item.path;
             const title = document.createElement("strong");
             title.className = "pc-lora-title";
             title.textContent = display.title;
-            const source = document.createElement("small");
+            select.append(title, path);
+            if (selected) {
+                const marker = document.createElement("span");
+                marker.className = "pc-lora-selected-marker";
+                marker.textContent = "選択中";
+                select.append(marker);
+            }
+            const source = document.createElement("button");
+            source.type = "button";
             source.className = "pc-lora-source";
-            source.textContent = display.source;
-            row.append(title, source, path);
+            source.textContent = "Civitai";
+            source.setAttribute("aria-label", `${item.path} の詳細確認`);
+            source.onclick = () => openSceneLoraDetails(node, item, source);
+            row.append(select, source);
             if (!cachedSceneLora(item)) {
-                row.sceneLoraJob = { item, row, title, source, revision };
+                row.sceneLoraJob = { item, row, title, revision };
                 observer.observe(row);
             }
-            row.onclick = async () => {
+            select.onclick = async () => {
                 closeSceneLoraDetails(node);
                 setWidgetValue(node, "lora_name", item.path);
                 closeSceneLoraPicker(node);
@@ -5265,7 +5285,7 @@ function closeSceneLoraDetails(node) {
     node.sceneLoraDetailsCleanup = null;
 }
 
-async function openSceneLoraDetails(node) {
+async function openSceneLoraDetails(node, previewItem = null, returnFocus = document.activeElement) {
     closeSceneLoraDetails(node);
     injectStyle();
     const overlay = document.createElement("div");
@@ -5290,26 +5310,50 @@ async function openSceneLoraDetails(node) {
     dialog.append(head, content);
     overlay.append(dialog);
     document.body.append(overlay);
-    const onKey = (event) => { if (event.key === "Escape") closeSceneLoraDetails(node); };
-    const cleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+    const pickerOverlay = node.sceneLoraPickerOverlay;
+    if (pickerOverlay) pickerOverlay.inert = true;
+    const onKey = (event) => {
+        if (event.key === "Escape") {
+            event.preventDefault();
+            closeSceneLoraDetails(node);
+        } else if (event.key === "Tab") {
+            const focusable = [...dialog.querySelectorAll("button:not(:disabled), a[href]")];
+            const first = focusable[0];
+            const last = focusable.at(-1);
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault(); last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault(); first.focus();
+            }
+        }
+    };
+    const cleanup = () => {
+        document.removeEventListener("keydown", onKey);
+        overlay.remove();
+        if (pickerOverlay) pickerOverlay.inert = false;
+        if (returnFocus?.isConnected) returnFocus.focus();
+    };
     node.sceneLoraDetailsCleanup = cleanup;
     close.onclick = () => closeSceneLoraDetails(node);
     overlay.onclick = (event) => { if (event.target === overlay) closeSceneLoraDetails(node); };
     document.addEventListener("keydown", onKey);
     close.focus();
     const selectedName = String(findWidget(node, "lora_name")?.value || "").trim();
+    const selectedAtOpen = sceneLoraPathIdentity(selectedName);
+    const item = previewItem || sceneLoraCatalogItem(selectedName);
+    const canInject = () => sceneLoraPathIdentity(item.path) === selectedAtOpen
+        && sceneLoraPathIdentity(findWidget(node, "lora_name")?.value) === selectedAtOpen;
     try {
-        if (!selectedName) throw new Error("LoRAを選択してください。");
-        const item = sceneLoraCatalogItem(selectedName);
+        if (!item.path) throw new Error("LoRAを選択してください。");
         const result = await resolveSceneLora(item);
         if (node.sceneLoraDetailsCleanup !== cleanup) return;
-        if (String(findWidget(node, "lora_name")?.value || "").trim() !== selectedName) {
+        if (!previewItem && !canInject()) {
             closeSceneLoraDetails(node);
             return;
         }
         content.replaceChildren();
         const filename = document.createElement("div");
-        filename.textContent = selectedName;
+        filename.textContent = item.path;
         content.append(filename);
         if (result.title) {
             const modelName = document.createElement("strong");
@@ -5349,8 +5393,10 @@ async function openSceneLoraDetails(node) {
             inject.className = "pc-button";
             inject.type = "button";
             inject.textContent = "注入";
+            inject.disabled = !canInject();
+            inject.title = inject.disabled ? "このLoRAを選択してから注入してください。" : "選択中のLoRAのTrigger Wordを注入";
             inject.onclick = () => {
-                if (String(findWidget(node, "lora_name")?.value || "").trim() !== selectedName) {
+                if (!canInject()) {
                     closeSceneLoraDetails(node);
                     return;
                 }
