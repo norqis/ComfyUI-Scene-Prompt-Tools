@@ -33,6 +33,7 @@ const reference = (id, state = "") => {
     references.set(id, node); return node;
 };
 const a = reference(40), b = reference(41);
+assert.deepEqual(parsePresetOverrides("{}"), {}, "backend default empty widget value is accepted");
 const preparedA = preparePresetReference(a, definitions);
 assert.strictEqual(preparePresetReference(a, definitions), preparedA);
 assert.notStrictEqual(preparePresetReference(b, definitions).root, preparedA.root);
@@ -128,6 +129,9 @@ for (const link of inserted.workflow.links) {
 }
 const editor = presetEditorDefinition(a, definitions);
 const editorChild = parsePresetOverrides(editor.api_graph.output[5].inputs.llm_presets_json)["."];
+const editorReferenceNode = editor.workflow.nodes.find((node) => node.id === 5);
+assert.equal(editorReferenceNode.widgets_values[2], editor.api_graph.output[5].inputs.llm_presets_json,
+    "local state appends after the existing hidden run_handle widget");
 assert.equal(editorChild.api_graph.output[1].inputs.positive, "local A first");
 assert.equal(editorChild.api_graph.output[String(additions[0].id)].inputs.lora_name, "llm/1.safetensors");
 assert.equal(JSON.stringify([...definitions]), original);

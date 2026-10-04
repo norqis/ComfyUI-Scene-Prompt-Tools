@@ -9,10 +9,11 @@ const pathJoin = (path, id) => path === "." ? String(id) : `${path}/${id}`;
 export function parsePresetOverrides(serialized) {
     if (!serialized) return {};
     const state = JSON.parse(String(serialized));
+    if (state && !Array.isArray(state) && Object.keys(state).length === 0) return {};
     if (state?.version !== 1 || !state.presets || typeof state.presets !== "object" || Array.isArray(state.presets))
         throw new Error("Preset instance state is invalid.");
     for (const [path, definition] of Object.entries(state.presets)) {
-        if (!(path === "." || /^\d+(?:\/\d+)*$/u.test(path)) || !definition?.metadata?.preset_id
+        if (!(path === "." || path.split("/").every((part) => part && part !== "." && part !== "..")) || !definition?.metadata?.preset_id
             || !definition?.api_graph?.output || !Array.isArray(definition?.workflow?.nodes))
             throw new Error("Preset instance definition is invalid.");
     }
@@ -106,7 +107,7 @@ export function presetEditorDefinition(reference, definitions) {
         const value = JSON.stringify({ version: 1, presets });
         entry.inputs.llm_presets_json = value;
         const workflowNode = root.workflow.nodes.find((node) => String(node.id) === nodeId);
-        if (workflowNode) writeWorkflowWidget(workflowNode, "llm_presets_json", value, ["preset_id", "llm_presets_json"]);
+        if (workflowNode) writeWorkflowWidget(workflowNode, "llm_presets_json", value, ["preset_id", "run_handle", "llm_presets_json"]);
     }
     return root;
 }
@@ -259,7 +260,7 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
                         const childValue = JSON.stringify({ version: 1, presets: localOverrides });
                         childEntry.inputs.llm_presets_json = childValue;
                         const savedChild = parent.workflow.nodes.find((entry) => String(entry.id) === childId);
-                        if (savedChild) writeWorkflowWidget(savedChild, "llm_presets_json", childValue, ["preset_id", "llm_presets_json"]);
+                        if (savedChild) writeWorkflowWidget(savedChild, "llm_presets_json", childValue, ["preset_id", "run_handle", "llm_presets_json"]);
                         if (parentGraph) {
                             const childNode = parentGraph.getNodeById(childId);
                             const childWidget = field(childNode, "llm_presets_json");
