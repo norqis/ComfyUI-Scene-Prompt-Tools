@@ -18,6 +18,7 @@ from .scene_prompt_tools.nodes import (
     ScenePromptCallbackDesktop,
     SceneSaveImage,
 )
+from .scene_prompt_tools.llm_node import ScenePromptLLM
 from .scene_prompt_tools.prompt import ScenePrompt
 from .scene_prompt_tools.presets import ScenePresetInput, ScenePresetOutput, ScenePresetReference
 from .scene_prompt_tools.routes import define_routes
@@ -25,6 +26,7 @@ from .scene_prompt_tools.routes import define_routes
 
 NODE_CLASS_MAPPINGS = {
     "ScenePrompter": ScenePrompt,
+    "ScenePromptLLM": ScenePromptLLM,
     "SceneMatrix": SceneMatrix,
     "ScenePath": ScenePath,
     "ScenePrompterMerge": ScenePromptMerge,
@@ -50,6 +52,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ScenePrompter": "Scene Prompt",
+    "ScenePromptLLM": "Scene Prompt (LLM)",
     "SceneMatrix": "Scene Matrix",
     "ScenePath": "Scene Path",
     "ScenePrompterMerge": "Scene Prompt Merge",

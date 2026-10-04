@@ -114,15 +114,15 @@ class ResourceInfoTests(unittest.TestCase):
             "3": node("ScenePresetReference", scene_prompt=["2", 0], preset_id="nested"),
             "4": node("ScenePrompterExpand", scene_prompt=["3", 0]),
         }}
-        preset = {"schema_version": 1, "api_graph": preset_graph}
-        with mock.patch.object(self.info, "load_preset", return_value=preset) as loaded:
+        preset = {"schema_version": 1, "metadata": {"preset_id": "nested"}, "api_graph": preset_graph}
+        with mock.patch.object(importlib.import_module(f"{self.routes.__package__}.presets"), "load_preset", return_value=preset) as loaded:
             result = self.info.connected_resources(graph, "4")
         loaded.assert_called_once_with("nested", "default")
         self.assertEqual([item["name"] for item in result["loras"]], ["nested.safetensors"])
 
     def test_nested_preset_cycle_is_rejected(self):
         def preset(reference_id):
-            return {"schema_version": 1, "api_graph": {"output": {
+            return {"schema_version": 1, "metadata": {"preset_id": "a" if reference_id == "b" else "b"}, "api_graph": {"output": {
                 "1": node("ScenePresetInput"),
                 "2": node("ScenePresetReference", scene_prompt=["1", 0], preset_id=reference_id),
                 "3": node("ScenePresetOutput", scene_prompt=["2", 0]),
@@ -132,7 +132,7 @@ class ResourceInfoTests(unittest.TestCase):
             "1": node("ScenePresetReference", preset_id="a"),
             "2": node("ScenePrompterExpand", scene_prompt=["1", 0]),
         }}
-        with mock.patch.object(self.info, "load_preset", side_effect=lambda name, _user: preset("b" if name == "a" else "a")):
+        with mock.patch.object(importlib.import_module(f"{self.routes.__package__}.presets"), "load_preset", side_effect=lambda name, _user: preset("b" if name == "a" else "a")):
             with self.assertRaisesRegex(self.info.ScenePresetError, "循環"):
                 self.info.connected_resources(graph, "2")
 

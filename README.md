@@ -13,6 +13,24 @@ git clone https://github.com/norqis/ComfyUI-Scene-Prompt-Tools.git
 
 This package has no separate Python dependency installation step.
 
+## LLM prompts and Civitai LoRAs (v0.10.0)
+
+Add **Scene Prompt (LLM)** as the first prompt node, or connect an existing Scene plan to its `scene_prompt` input. Select **Illustrious** or **Anima**, describe the content you want, then press **Generate**. The saved positive and negative fields are editable. Illustrious conversion favors English tags; Anima conversion favors concise English descriptions. Generation preserves your exclusions without adding a generic style or quality prompt.
+
+Open the node's connection settings and enter an OpenAI-compatible endpoint, model, and optional API key. The default endpoint is `http://127.0.0.1:8080/v1`. Choose the structured response format supported by your server and use the connection test before generating. Civitai settings include an optional API key and the supported host selection. Settings are stored separately for each ComfyUI user; credentials are excluded from workflows and PNG metadata.
+
+**Prompt Generate** on Scene Prompt Expand converts the reachable LLM descriptions before **Continuous Generate**. It reuses matching saved results, including your manual edits; use the LLM node's own Generate button to regenerate deliberately. Changing the model mode replaces the saved output pair when you generate again. Loading a workflow and generating images use the saved prompts and never start LLM inference.
+
+When the generated description suggests useful LoRAs, the tool searches real compatible Civitai candidates and lets the LLM choose from those results. A successful download is verified and saved in the configured LoRA folder's `llm` subfolder. Selected Apply LoRA nodes are inserted immediately after their LLM node, preserving downstream connections and Queue order. Trigger prompts are stored on Apply LoRA and follow its model filter.
+
+The local LoRA picker also provides **Civitai Search**. Edit the search query, choose Most Downloaded, Most Liked, Most Collected, or Highest Rated, and inspect the compatible results. The selected item is highlighted; reopening preserves the query, sort, and selection. Empty results are normal. Errors retain your current graph and selection and provide Retry. Workflow state keeps selection identities and local filenames, while images and API keys stay outside the workflow.
+
+### Customizing one Preset Reference
+
+Prompt Generate can reach LLM nodes inside a Preset Reference. Its generated prompts and inserted LoRAs are saved on that particular Reference, so two references to the same shared Preset can produce different results. Nested references are identified by their position in the reference tree; repeated uses of the same nested Preset remain independent. A nested Reference's own customization takes precedence over customization inherited from its parent.
+
+Opening the customized Reference in the Preset editor shows its saved local graph. Explicit Preset Save writes the currently open root Preset and retains nested customizations inside it. A shared nested Preset changes only when you explicitly open and save that child. The originating Reference retains its customization, and an image generation already in progress keeps the snapshot captured when it started.
+
 ## Update
 
 From the custom-node directory, pull the latest files and restart ComfyUI.

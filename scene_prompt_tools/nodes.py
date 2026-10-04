@@ -554,7 +554,7 @@ def _slice_workflow_for_output(
 
 
 SCENE_NODE_TYPES = {
-    "ScenePrompter", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePromptRandomRoute", "ScenePrompterExpand",
+    "ScenePrompter", "ScenePromptLLM", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePromptRandomRoute", "ScenePrompterExpand",
     "ScenePromptCounter", "ScenePromptReverse", "ScenePromptDelete", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
     "SceneApplyModel", "SceneApplyLora",
     "ScenePromptCallback",
