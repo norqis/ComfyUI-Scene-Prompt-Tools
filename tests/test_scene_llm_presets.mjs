@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import vm from "node:vm";
 import { preparePresetReference, presetOccurrenceChild, collectPresetLLMTargets,
-    presetEditorDefinition, parsePresetOverrides } from "../web/scene_llm_presets.js";
+    presetEditorDefinition, parsePresetOverrides, hydratePresetReference, presetReferenceHasLLM } from "../web/scene_llm_presets.js";
 import { insertLoras } from "../web/scene_prompt_llm.js";
 
 function definition(id, output) {
@@ -196,6 +196,62 @@ a.widgets[1].value = "";
 assert(!first.current(), "undo/external widget edits invalidate pending targets");
 a.widgets[1].value = oldSerialized;
 assert.throws(() => parsePresetOverrides('{"version":2,"presets":{}}'));
+
+const fullChild = structuredClone(inner);
+fullChild.metadata.preset_id = "lazy-child";
+fullChild.api_graph.output[1].inputs.positive = "full customized child";
+fullChild.api_graph.output[1].inputs.generation_state_json = '{"description":"room","model_mode":"Illustrious","template_version":"1"}';
+const fullParent = structuredClone(outer);
+fullParent.metadata.preset_id = "lazy-parent";
+for (const id of [5, 6]) fullParent.api_graph.output[id].inputs.preset_id = "lazy-child";
+fullParent.api_graph.output[5].inputs.llm_presets_json = JSON.stringify({ version: 1, presets: { ".": fullChild } });
+delete fullParent.api_graph.output[7].inputs.scene_prompt5;
+function compactPreset(full, local = false) {
+    const output = {};
+    for (const [id, node] of Object.entries(full.api_graph.output)) {
+        const inputs = Object.fromEntries(Object.entries(node.inputs || {}).filter(([name, value]) => Array.isArray(value) || ["preset_id", "count"].includes(name)));
+        if (node.inputs?.llm_presets_json) {
+            const overrides = parsePresetOverrides(node.inputs.llm_presets_json);
+            inputs.llm_presets_json = JSON.stringify({ version: 1, presets: Object.fromEntries(Object.entries(overrides).map(([path, preset]) => [path, compactPreset(preset, true)])) });
+        }
+        output[id] = { class_type: node.class_type, inputs,
+            ...(node.class_type === "ScenePromptLLM" ? { has_llm_input: !!node.inputs.description.trim() } : {}) };
+    }
+    return { metadata: structuredClone(full.metadata), api_graph: { output }, ...(local ? { scene_compact: true,
+        workflow: { nodes: full.workflow.nodes.map(({ id, mode }) => ({ id, mode })) } } : {}) };
+}
+const compactDefinitions = new Map([["lazy-parent", compactPreset(fullParent)], ["lazy-child", compactPreset(fullChild)]]);
+const lazyReference = reference(60, "{}"); lazyReference.widgets[0].value = "lazy-parent";
+preparePresetReference(lazyReference, compactDefinitions);
+assert(presetReferenceHasLLM(lazyReference), "compact availability uses has_llm_input without workflow hydration");
+assert.equal(presetEditorDefinition(lazyReference, compactDefinitions), null, "compact editor root cannot replace the real full response");
+const requests = [];
+await hydratePresetReference(lazyReference, compactDefinitions, async (id) => {
+    requests.push(id); return structuredClone(id === "lazy-parent" ? fullParent : fullChild);
+});
+assert.deepEqual(requests, ["lazy-parent"], "full ancestor restores customized child without fetching or replacing it by its shared ID");
+const hydrated = collectPresetLLMTargets(lazyReference, compactDefinitions);
+assert.equal(hydrated.length, 1, "unreachable second Reference is not hydrated or generated");
+assert.equal(widget(hydrated[0].node, "positive").value, "full customized child", "full ancestor restores its actual own child definition");
+assert.equal(widget(hydrated[0].node, "generation_state_json").value, fullChild.api_graph.output[1].inputs.generation_state_json);
+hydrated[0].commit();
+assert(!lazyReference.widgets[1].value.includes('"scene_compact":true'), "compact transport markers never persist into Reference state");
+const requestsBeforeCached = requests.length;
+await hydratePresetReference(lazyReference, compactDefinitions, async () => { throw new Error("Unexpected extra source request"); });
+assert.equal(requests.length, requestsBeforeCached);
+const cachedReference = reference(61, "{}"); cachedReference.widgets[0].value = "lazy-parent";
+const freshCompact = new Map([["lazy-parent", compactPreset(fullParent)], ["lazy-child", compactPreset(fullChild)]]);
+await hydratePresetReference(cachedReference, freshCompact, async () => { throw new Error("Identity/hash full source cache should reuse"); });
+assert(presetReferenceHasLLM(cachedReference));
+const sharedParent = structuredClone(fullParent); sharedParent.metadata.preset_id = "lazy-shared-parent";
+delete sharedParent.api_graph.output[5].inputs.llm_presets_json;
+const sharedReference = reference(62, "{}"); sharedReference.widgets[0].value = "lazy-shared-parent";
+const sharedDefinitions = new Map([["lazy-shared-parent", compactPreset(sharedParent)], ["lazy-child", compactPreset(fullChild)]]);
+const sharedRequests = [];
+await hydratePresetReference(sharedReference, sharedDefinitions, async (id) => {
+    sharedRequests.push(id); return structuredClone(id === "lazy-shared-parent" ? sharedParent : fullChild);
+});
+assert.deepEqual(sharedRequests, ["lazy-shared-parent", "lazy-child"], "uncustomized shared child loads only after its full ancestor");
 
 const largeOutput = {};
 for (let index = 1; index <= 1500; index++) largeOutput[index] = { class_type: "ScenePromptCounter", inputs: { count: index } };

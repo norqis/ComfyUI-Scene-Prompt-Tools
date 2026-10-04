@@ -1,6 +1,7 @@
 // Instance-local Preset definitions. Preparation happens on load/change, never in draw.
 const cache = new WeakMap();
 const contexts = new WeakMap();
+const fullSources = new Map();
 const EMPTY = '{"version":1,"presets":{}}';
 const field = (node, name) => node?.widgets?.find((widget) => widget.name === name);
 const copy = (value) => JSON.parse(JSON.stringify(value));
@@ -64,7 +65,7 @@ export function preparePresetReference(reference, definitions) {
             visited.add(nodeId);
             const entry = definition.api_graph.output[nodeId];
             if (!entry) return false;
-            if (modes.get(nodeId) !== 4 && ((entry.class_type === "ScenePromptLLM" && String(entry.inputs.description || "").trim())
+            if (modes.get(nodeId) !== 4 && ((entry.class_type === "ScenePromptLLM" && (entry.has_llm_input === true || String(entry.inputs.description || "").trim()))
                 || (entry.class_type === "ScenePresetReference" && children.get(nodeId)?.scenePresetHasLLM))) return true;
             return Object.entries(entry.inputs || {}).some(([name, value]) => /^scene_prompt\d*$/u.test(name)
                 && Array.isArray(value) && hasLLM(String(value[0])));
@@ -86,6 +87,62 @@ export function presetOccurrenceChild(preset, referenceId) {
 export function presetReferenceRevision(reference) { return cache.get(reference)?.revision || 0; }
 export function presetReferenceHasLLM(reference) { return !!cache.get(reference)?.root?.scenePresetHasLLM; }
 
+const fullDefinition = (preset) => !!preset && !preset.scene_compact && Array.isArray(preset.workflow?.nodes)
+    && !!preset.api_graph?.output;
+
+function reachablePresetOccurrences(prepared) {
+    const occurrences = [], seenPresets = new Set();
+    function visitPreset(preset) {
+        if (!preset || seenPresets.has(preset)) return;
+        seenPresets.add(preset);
+        occurrences.push(preset);
+        const seen = new Set(), modes = new Map((preset.workflow?.nodes || []).map((node) => [String(node.id), Number(node.mode) || 0]));
+        function visit(id) {
+            if (seen.has(id) || modes.get(id) === 2) return;
+            seen.add(id);
+            const entry = preset.api_graph.output[id];
+            if (!entry) return;
+            for (const [name, value] of Object.entries(entry.inputs || {}))
+                if (/^scene_prompt\d*$/u.test(name) && Array.isArray(value)) visit(String(value[0]));
+            if (entry.class_type === "ScenePresetReference" && modes.get(id) !== 4) visitPreset(presetOccurrenceChild(preset, id));
+        }
+        const output = Object.entries(preset.api_graph.output).find(([, entry]) => entry.class_type === "ScenePresetOutput");
+        if (output) visit(output[0]);
+    }
+    visitPreset(prepared.root);
+    return occurrences;
+}
+
+// Called only by explicit generation/editor actions. Fetch a full ancestor before
+// inspecting its children: its full local child definitions own their customization.
+export async function hydratePresetReference(reference, definitions, loadFull) {
+    const initialValue = String(field(reference, "llm_presets_json")?.value || "");
+    const initialId = String(field(reference, "preset_id")?.value || "");
+    for (;;) {
+        const prepared = preparePresetReference(reference, definitions);
+        if (prepared.error) throw prepared.error;
+        if (!prepared.root) throw new Error("Preset definition is unavailable.");
+        const missing = reachablePresetOccurrences(prepared).find((preset) => !fullDefinition(preset));
+        if (!missing) return prepared;
+        const context = contexts.get(missing);
+        if (prepared.localPaths.has(context.path)) throw new Error("Preset customization is incomplete. Reload its full source before generating.");
+        const id = String(missing.metadata.preset_id), hash = String(missing.metadata.sha256 || "");
+        const key = `${id}:${hash}`;
+        let full = fullSources.get(key);
+        if (!full) {
+            full = await loadFull(id);
+            if (!fullDefinition(full) || String(full.metadata?.preset_id) !== id) throw new Error("Full Preset response is invalid.");
+            const actualKey = `${id}:${String(full.metadata.sha256 || "")}`;
+            fullSources.set(actualKey, full);
+            while (fullSources.size > 32) fullSources.delete(fullSources.keys().next().value);
+        }
+        if (String(field(reference, "llm_presets_json")?.value || "") !== initialValue
+            || String(field(reference, "preset_id")?.value || "") !== initialId)
+            throw new Error("Preset changed while loading its source.");
+        definitions.set(id, full);
+    }
+}
+
 function writeWorkflowWidget(node, name, value, inputNames) {
     node.widgets_values_named = { ...node.widgets_values_named, [name]: value };
     node.widgets_values ||= [];
@@ -95,7 +152,7 @@ function writeWorkflowWidget(node, name, value, inputNames) {
 
 export function presetEditorDefinition(reference, definitions) {
     const prepared = preparePresetReference(reference, definitions);
-    if (!prepared.root) return null;
+    if (!fullDefinition(prepared.root) || !prepared.localPaths.size) return null;
     const root = copy(prepared.root);
     // Put each descendant occurrence onto its direct Reference, so explicit root Save
     // retains children locally without writing any child shared file.
