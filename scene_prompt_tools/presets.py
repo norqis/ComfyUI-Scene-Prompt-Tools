@@ -12,6 +12,7 @@ from types import MappingProxyType
 
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
+from .llm_node import ScenePromptLLM
 from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
 from .plan import mark_prompt_whole, seed_plan
 from .storage import public_user_directory
@@ -54,10 +55,13 @@ _PRESET_FILE_CACHE_TTL_SECONDS = 2.0
 _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
 _RESOLVING_RUNS = {}
+_LOCAL_PRESET_CACHE = OrderedDict()
+_LOCAL_PRESET_CACHE_MAX_ITEMS = 64
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
 
 SAFE_NODE_CLASSES = {
     "ScenePrompter": ScenePrompt,
+    "ScenePromptLLM": ScenePromptLLM,
     "SceneMatrix": SceneMatrix,
     "ScenePath": ScenePath,
     "ScenePrompterMerge": ScenePromptMerge,
@@ -97,6 +101,7 @@ LEGACY_PRESET_CLASS_TYPES = {
 
 DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePrompter": "Scene Prompt",
+    "ScenePromptLLM": "Scene Prompt (LLM)",
     "SceneMatrix": "Scene Matrix",
     "ScenePath": "Scene Path",
     "ScenePrompterMerge": "Scene Prompt Merge",
@@ -240,6 +245,27 @@ def _compact_matrix_json(value):
     return json.dumps({"version": 1, "sets": compact}, ensure_ascii=False, separators=(",", ":"))
 
 
+def _compact_local_preset_json(serialized):
+    """Keep local occurrence schedules without transferring saved prompt text."""
+    definitions = parse_llm_preset_overrides(serialized)
+    if not definitions:
+        return "{}"
+    compact = {}
+    for path, definition in definitions.items():
+        workflow = definition.get("workflow") or {}
+        compact[path] = {
+            "schema_version": definition.get("schema_version"),
+            "scene_compact": True,
+            "metadata": copy.deepcopy(definition["metadata"]),
+            "api_graph": _compact_preset_list_graph(definition["api_graph"]),
+            "workflow": {"nodes": [
+                {key: node[key] for key in ("id", "mode") if key in node}
+                for node in workflow.get("nodes", []) if isinstance(node, dict)
+            ]},
+        }
+    return _canonical_json({"version": 1, "presets": compact})
+
+
 def _compact_preset_list_graph(api_graph):
     nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
     if not isinstance(nodes, dict):
@@ -248,7 +274,7 @@ def _compact_preset_list_graph(api_graph):
     scalar_inputs = {
         "matrix_json", "batch_size", "count", "preset_id", "reverse_scope",
         "order_mode", "alternate_block_size", "downstream_count_mode",
-        "weights_json", "preserve_join",
+        "weights_json", "preserve_join", "llm_presets_json",
     }
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
@@ -258,8 +284,15 @@ def _compact_preset_list_graph(api_graph):
             if is_link(value):
                 inputs[name] = copy.deepcopy(value)
             elif name in scalar_inputs:
-                inputs[name] = _compact_matrix_json(value) if name == "matrix_json" else copy.deepcopy(value)
+                if name == "matrix_json":
+                    inputs[name] = _compact_matrix_json(value)
+                elif name == "llm_presets_json":
+                    inputs[name] = _compact_local_preset_json(value)
+                else:
+                    inputs[name] = copy.deepcopy(value)
         compact_nodes[str(node_id)] = {"class_type": node.get("class_type"), "inputs": inputs}
+        if node.get("class_type") == "ScenePromptLLM":
+            compact_nodes[str(node_id)]["has_llm_input"] = bool(str(_node_inputs(node).get("description") or "").strip())
     return {"output": compact_nodes}
 
 
@@ -604,6 +637,7 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
             "metadata": {"preset_id": clean_preset_id, "name": clean_preset_id},
             "api_graph": {"output": nodes},
         }
+    occurrences = {}
     for reference_node_id, preset_id, _node in _find_references(nodes):
         if not preset_id:
             label = _node_label(reference_node_id, _node)
@@ -614,9 +648,10 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
                 reference_node_id,
             )
         try:
-            _resolve_preset_tree(preset_id, resolved, [], user_id)
+            occurrences.update(prepare_preset_occurrences({reference_node_id: _node}, resolved, user_id))
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
+    resolved = {**resolved, "__occurrences__": occurrences}
     output_link = validation["output_link"]
     result = _scene_node_value(nodes, output_link[0], resolved, set(), user_id=user_id)
     if nodes[str(output_link[0])].get("class_type") == "ScenePromptRandomRoute":
@@ -759,6 +794,76 @@ def save_preset(payload, user_id="default"):
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
     return saved
+
+
+def parse_llm_preset_overrides(serialized="{}"):
+    """Prepare local definitions once per exact serialized widget value."""
+    serialized = str(serialized or "{}")
+    with _PRESET_LOCK:
+        cached = _LOCAL_PRESET_CACHE.get(serialized)
+        if cached is not None:
+            _LOCAL_PRESET_CACHE.move_to_end(serialized)
+            return cached
+    try:
+        payload = json.loads(serialized)
+    except (ValueError, TypeError) as exc:
+        raise ScenePresetError("LLM Preset customization JSON is invalid.") from exc
+    if payload == {}:
+        definitions = {}
+    else:
+        if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("presets"), dict):
+            raise ScenePresetError("LLM Preset customization format is invalid.")
+        definitions = payload["presets"]
+    for path, preset in definitions.items():
+        if not isinstance(path, str) or (path != "." and any(not part or part in {".", ".."} for part in path.split("/"))):
+            raise ScenePresetError("LLM Preset customization path is invalid.")
+        if not isinstance(preset, dict) or not isinstance(preset.get("metadata"), dict):
+            raise ScenePresetError("LLM Preset customization definition is invalid.")
+        if preset.get("scene_compact"):
+            raise ScenePresetError("Compact Preset definitions must be loaded in full before saving or execution.")
+        # Local editor changes are not a shared-file revision. Recompute the
+        # content hash before applying the ordinary safe graph validation.
+        preset["metadata"]["sha256"] = _content_hash(preset.get("api_graph"), preset.get("workflow"))
+        validation = _validate_preset_payload(preset)
+        _validate_preset_input_values(_preset_nodes(preset))
+        preset["_validation"] = validation
+    with _PRESET_LOCK:
+        _LOCAL_PRESET_CACHE[serialized] = definitions
+        while len(_LOCAL_PRESET_CACHE) > _LOCAL_PRESET_CACHE_MAX_ITEMS:
+            _LOCAL_PRESET_CACHE.popitem(last=False)
+    return definitions
+
+
+def prepare_preset_occurrences(nodes, resolved=None, user_id="default"):
+    """Resolve by reference path; inherited entries apply only to that subtree."""
+    resolved = {} if resolved is None else resolved
+    occurrences = {}
+    pending = list(reversed([(node_id, preset_id, node, {}, ()) for node_id, preset_id, node in _find_references(nodes)]))
+    while pending:
+        path, preset_id, reference, inherited, ancestors = pending.pop()
+        preset_id = _clean_preset_id(preset_id)
+        if preset_id in ancestors:
+            raise ScenePresetError(f"Preset参照が循環しています: {' -> '.join((*ancestors, preset_id))}")
+        overrides = {**inherited, **parse_llm_preset_overrides(_node_inputs(reference).get("llm_presets_json", "{}"))}
+        preset = overrides.get(".")
+        if preset is None:
+            if preset_id not in resolved:
+                if not overrides:
+                    _resolve_preset_tree(preset_id, resolved, [], user_id)
+                else:
+                    resolved[preset_id] = load_preset(preset_id, user_id)
+            preset = resolved[preset_id]
+        if str(preset["metadata"]["preset_id"]) != preset_id:
+            raise ScenePresetError(f"LLM Preset customization identity mismatch: {path}")
+        if "_validation" not in preset:
+            preset["_validation"] = _validate_preset_graph(_preset_nodes(preset))
+        occurrences[path] = preset
+        for child_id, child_preset_id, child in _find_references(_preset_nodes(preset)):
+            prefix = child_id + "/"
+            subtree = {("." if key == child_id else key[len(prefix):]): value
+                       for key, value in overrides.items() if key == child_id or key.startswith(prefix)}
+            pending.append((f"{path}/{child_id}", child_preset_id, child, subtree, (*ancestors, preset_id)))
+    return occurrences
 
 
 def _find_references(nodes):
@@ -1013,7 +1118,8 @@ def _scene_node_value_impl(
         return result
     if class_type == "ScenePresetReference":
         preset_id = _clean_preset_id(_node_inputs(node).get("preset_id"))
-        preset = resolved.get(preset_id)
+        reference_path = "/".join([*(part.split("@", 1)[1] for part in preset_stack), node_id])
+        preset = resolved.get("__occurrences__", {}).get(reference_path, resolved.get(preset_id))
         if not preset:
             raise ScenePresetError(f"Preset「{preset_id}」のスナップショットがありません。")
         upstream = value(_node_inputs(node).get("scene_prompt")) if is_link(_node_inputs(node).get("scene_prompt")) else None
@@ -1048,11 +1154,14 @@ def _scene_node_value_impl(
         kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
     if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
-    if class_type == "ScenePromptCallback":
-        kwargs["source_node_id"] = node_id
+    if class_type in SAFE_NODE_CLASSES and class_type not in {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop"}:
+        path = "/".join(part.split("@", 1)[1] for part in preset_stack)
+        kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
+        if class_type != "ScenePromptCallback":
+            kwargs.setdefault("source_node_name", _source_node_name(node))
     if class_type == "ScenePromptRandomRoute":
         path = "/".join(part.split("@", 1)[1] for part in preset_stack)
-        kwargs["source_node_id"] = f"{path}/{node_id}" if path else node_id
+        kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     memo[node_id] = result if class_type == "ScenePromptRandomRoute" else result[0]
     return memo[node_id]
@@ -1143,33 +1252,10 @@ def _evaluate_preset_scene(
         raise ScenePresetError(f"Preset参照が循環しています: {cycle}")
     preset_value_memo = {} if preset_value_memo is None else preset_value_memo
     upstream_key = upstream.get("change_key") if isinstance(upstream, dict) else None
-    random_presets = preset_value_memo.setdefault("__random_presets__", {})
-    if preset_id not in random_presets:
-        pending = [(preset_id, preset, False)]
-        visiting = set()
-        while pending:
-            current_id, current_preset, leaving = pending.pop()
-            if current_id in random_presets:
-                continue
-            if leaving:
-                visiting.discard(current_id)
-                current_nodes = _preset_nodes(current_preset)
-                random_presets[current_id] = (
-                    any(node.get("class_type") == "ScenePromptRandomRoute" for node in current_nodes.values() if isinstance(node, dict))
-                    or any(random_presets.get(child_id, False) for _, child_id, _ in _find_references(current_nodes))
-                )
-                continue
-            if current_id in visiting:
-                continue
-            visiting.add(current_id)
-            pending.append((current_id, current_preset, True))
-            for _, child_id, _ in _find_references(_preset_nodes(current_preset)):
-                if child_id in resolved and child_id not in random_presets and child_id not in visiting:
-                    pending.append((child_id, resolved[child_id], False))
-    memo_key = (preset_id, upstream_key, str(reference_node_id), preset_stack) if random_presets[preset_id] else (preset_id, upstream_key)
+    memo_key = (preset_id, upstream_key, str(reference_node_id), preset_stack)
     if memo_key in preset_value_memo:
         return preset_value_memo[memo_key]
-    validation = _validate_preset_payload(preset)
+    validation = preset.get("_validation") or _validate_preset_graph(_preset_nodes(preset))
     nodes = _preset_nodes(preset)
     input_id = validation["input_id"]
     output_link = validation["output_link"]
@@ -1218,14 +1304,22 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             if _needs_workflow_preset_snapshots(nodes, expand_node_id)
             else []
         )
-        references = [*_find_references(nodes), *workflow_references]
-        for reference_node_id, preset_id, _node in references:
+        references = _find_references(nodes)
+        api_reference_ids = {node_id for node_id, _preset_id, _node in references}
+        references.extend(reference for reference in workflow_references if reference[0] not in api_reference_ids)
+        occurrences = {}
+        for reference_node_id, preset_id, node in references:
+            if node.get("class_type") != "ScenePresetReference":
+                values = node.get("widgets_values", [])
+                node = {"class_type": "ScenePresetReference", "inputs": {"preset_id": preset_id,
+                    "llm_presets_json": values[2] if len(values) > 2 else "{}"}}
             try:
-                _resolve_preset_tree(preset_id, resolved, [], user_id)
+                occurrences.update(prepare_preset_occurrences({reference_node_id: node}, resolved, user_id))
             except ScenePresetError as exc:
                 raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
+        evaluation_resolved = {**resolved, "__occurrences__": occurrences}
         plan = (
-            _scene_node_value(scene_nodes, source[0], resolved, set(), user_id=user_id, run_handle=run_id, preset_value_memo={})
+            _scene_node_value(scene_nodes, source[0], evaluation_resolved, set(), user_id=user_id, run_handle=run_id, preset_value_memo={})
             if source is not None else seed_plan()
         )
         if source is not None and scene_nodes[str(source[0])].get("class_type") == "ScenePromptRandomRoute":
@@ -1246,6 +1340,11 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             "total_batches": int(plan["stats"]["total_batches"]),
         }
 
+        response["presets"].extend(
+            {"preset_id": preset["metadata"]["preset_id"], "name": preset["metadata"]["name"],
+             "sha256": preset["metadata"]["sha256"], "reference_path": path}
+            for path, preset in occurrences.items() if preset is not resolved.get(preset["metadata"]["preset_id"])
+        )
         with _PRESET_LOCK:
             _assert_run_not_cancelled(run_id, user_id)
             existing = _RUN_SNAPSHOTS.get(cache_key)
@@ -1255,6 +1354,8 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
                 return copy.deepcopy(existing["response"])
             _RUN_SNAPSHOTS[cache_key] = {
                 "presets": resolved,
+                "occurrences": copy.deepcopy(occurrences),
+                "has_local_overrides": any(preset is not resolved.get(preset["metadata"]["preset_id"]) for preset in occurrences.values()),
                 "response": copy.deepcopy(response),
                 "last_access": time.monotonic(),
             }
@@ -1283,7 +1384,7 @@ def release_scene_preset_snapshot(run_id, user_id="default"):
         return released
 
 
-def _snapshot_preset(run_id, preset_id, user_id="default"):
+def _snapshot_preset(run_id, preset_id, user_id="default", reference_path=""):
     run_id = str(run_id or "").strip()
     with _PRESET_LOCK:
         cache_key = _run_cache_key(run_id, user_id)
@@ -1293,14 +1394,14 @@ def _snapshot_preset(run_id, preset_id, user_id="default"):
                 raise ScenePresetError(f"実行「{run_id}」のPresetスナップショットがありません。")
             entry["last_access"] = time.monotonic()
             _RUN_SNAPSHOTS.move_to_end(cache_key)
-            preset = entry["presets"].get(preset_id)
+            preset = entry.get("occurrences", {}).get(str(reference_path)) or entry["presets"].get(preset_id)
             if preset:
                 return preset
             raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
     return load_preset(preset_id, user_id)
 
 
-def _peek_snapshot_preset(run_id, preset_id, user_id="default"):
+def _peek_snapshot_preset(run_id, preset_id, user_id="default", reference_path=""):
     """Read a prepared snapshot without extending TTL or changing LRU order."""
     run_id = str(run_id or "").strip()
     if not run_id:
@@ -1309,7 +1410,7 @@ def _peek_snapshot_preset(run_id, preset_id, user_id="default"):
         entry = _RUN_SNAPSHOTS.get(_run_cache_key(run_id, user_id))
         if not entry:
             raise ScenePresetError(f"実行「{run_id}」のPresetスナップショットがありません。")
-        preset = entry["presets"].get(preset_id)
+        preset = entry.get("occurrences", {}).get(str(reference_path)) or entry["presets"].get(preset_id)
         if not preset:
             raise ScenePresetError(f"実行「{run_id}」にPreset「{preset_id}」は含まれていません。")
         return preset
@@ -1324,6 +1425,9 @@ def snapshot_presets_for_metadata(run_id, user_id="default"):
         entry = _RUN_SNAPSHOTS.get(_run_cache_key(run_id, user_id))
         if not entry:
             raise ScenePresetError(f"実行「{run_id}」のPresetスナップショットがありません。")
+        occurrences = entry.get("occurrences", {})
+        if entry.get("has_local_overrides"):
+            return MappingProxyType({**entry["presets"], "__occurrences__": occurrences})
         return MappingProxyType(entry["presets"])
 
 
@@ -1405,19 +1509,22 @@ def expand_preset_reference(
     source_node_id="",
     source_node_name="",
     unique_id=None,
+    llm_presets_json="{}",
 ):
     preset_id = _clean_preset_id(preset_id)
+    reference_path = str(source_node_id or unique_id or "")
     if _require_context:
         user_id = require_run_context(run_handle)["user_id"]
-        preset = _snapshot_preset(run_handle, preset_id, user_id)
+        preset = _snapshot_preset(run_handle, preset_id, user_id, reference_path)
     elif run_handle:
-        preset = _snapshot_preset(run_handle, preset_id)
+        preset = _snapshot_preset(run_handle, preset_id, reference_path=reference_path)
     else:
         user_id = "default"
         resolved = {}
-        _resolve_preset_tree(preset_id, resolved, [], user_id)
-        preset = resolved[preset_id]
-    validation = _validate_preset_payload(preset)
+        reference = {"class_type": "ScenePresetReference", "inputs": {"preset_id": preset_id, "llm_presets_json": llm_presets_json}}
+        occurrences = prepare_preset_occurrences({reference_path: reference}, resolved, user_id)
+        preset = occurrences[reference_path]
+    validation = preset.get("_validation") or _validate_preset_graph(_preset_nodes(preset))
     nodes = _preset_nodes(preset)
     input_id = validation["input_id"]
     output_id = validation["output_id"]
@@ -1451,6 +1558,13 @@ def expand_preset_reference(
             target.set_input("run_handle", str(run_handle))
         if class_type == "ScenePresetReference":
             target.set_input("run_handle", str(run_handle))
+            if not run_handle:
+                child_path = f"{reference_path}/{node_id}"
+                prefix = child_path + "/"
+                subtree = {("." if path == child_path else path[len(prefix):]):
+                           {key: value for key, value in definition.items() if key != "_validation"}
+                           for path, definition in occurrences.items() if path == child_path or path.startswith(prefix)}
+                target.set_input("llm_presets_json", _canonical_json({"version": 1, "presets": subtree}))
 
     output_link = validation["output_link"]
     result = _replace_link(output_link, input_id, scene_prompt, graph)
@@ -1520,6 +1634,7 @@ class ScenePresetReference:
             "optional": {
                 "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "rawLink": True}),
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
+                "llm_presets_json": ("STRING", {"default": "{}", "hidden": True}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1530,13 +1645,14 @@ class ScenePresetReference:
 
     @classmethod
     def IS_CHANGED(cls, preset_id="", scene_prompt=None, run_handle="", **kwargs):
-        del scene_prompt, kwargs
+        del scene_prompt
         user_id = get_run_user_id(run_handle)
-        preset = _peek_snapshot_preset(run_handle, _clean_preset_id(preset_id), user_id)
+        reference_path = str(kwargs.get("source_node_id") or kwargs.get("unique_id") or "")
+        preset = _peek_snapshot_preset(run_handle, _clean_preset_id(preset_id), user_id, reference_path)
         metadata = preset["metadata"]
         return f"{metadata['preset_id']}:{metadata['sha256']}:{run_handle}"
 
-    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id="", source_node_name=""):
+    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id="", source_node_name="", llm_presets_json="{}"):
         return expand_preset_reference(
             preset_id,
             scene_prompt,
@@ -1545,4 +1661,5 @@ class ScenePresetReference:
             source_node_id=source_node_id,
             source_node_name=source_node_name,
             unique_id=unique_id,
+            llm_presets_json=llm_presets_json,
         )

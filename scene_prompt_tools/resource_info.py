@@ -16,7 +16,7 @@ from .presets import (
     _scene_nodes_for_expand,
     _scene_prompt_closure,
     _validate_preset_graph,
-    load_preset,
+    prepare_preset_occurrences,
 )
 
 
@@ -64,7 +64,7 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
     loras = OrderedDict()
     visited_sources = set()
     loaded_presets = {}
-    visited_presets = set()
+    occurrences = prepare_preset_occurrences(scene_nodes, loaded_presets, user_id)
     visiting_presets = set()
 
     def add_model(kind, name, role, source_class, unresolved=False):
@@ -133,7 +133,7 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
         else:
             add_model("unresolved", kind or f"#{node_id}", role, kind or "Unknown", True)
 
-    def visit_scene(scope, resource_nodes):
+    def visit_scene(scope, resource_nodes, path=""):
         for node_id, node in scope.items():
             if not isinstance(node, dict):
                 continue
@@ -158,16 +158,13 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                 preset_id = _literal(resource_nodes, inputs.get("preset_id"), "")
                 if preset_id in visiting_presets:
                     raise ScenePresetError(f"Preset参照が循環しています: {preset_id}")
-                if preset_id not in loaded_presets:
-                    loaded_presets[preset_id] = load_preset(preset_id, user_id)
-                if preset_id in visited_presets:
-                    continue
+                reference_path = f"{path}/{node_id}" if path else str(node_id)
+                preset = occurrences[reference_path]
                 visiting_presets.add(preset_id)
-                preset_nodes = _preset_nodes(loaded_presets[preset_id])
+                preset_nodes = _preset_nodes(preset)
                 output_link = _validate_preset_graph(preset_nodes)["output_link"]
-                visit_scene(_scene_prompt_closure(preset_nodes, output_link[0]), preset_nodes)
+                visit_scene(_scene_prompt_closure(preset_nodes, output_link[0]), preset_nodes, reference_path)
                 visiting_presets.remove(preset_id)
-                visited_presets.add(preset_id)
 
     visit_scene(scene_nodes, nodes)
     return {"model_mode": mode, "models": list(models.values()), "loras": list(loras.values())}

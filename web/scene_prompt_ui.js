@@ -1,6 +1,9 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ChangeTracker } from "../../scripts/changeTracker.js";
+import { createLLMController, LLM_TYPE } from "./scene_prompt_llm.js";
+import { openCivitaiSearch, openLLMSettings, showAPIError } from "./scene_prompt_civitai.js";
+import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference } from "./scene_llm_presets.js";
 import {
     DEFAULT_SELECTED_JSON,
     MATRIX_DEFAULT_JSON,
@@ -66,6 +69,7 @@ function setSceneUndoHistoryLimit(value) {
     return limit;
 }
 const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
+    "ScenePromptLLM",
     "ScenePrompter",
     "SceneMatrix",
     "ScenePath",
@@ -85,6 +89,7 @@ const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePromptCallbackDesktop",
 ]);
 const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
+    "ScenePromptLLM",
     "ScenePrompter",
     "SceneMatrix",
     "ScenePath",
@@ -100,6 +105,7 @@ const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
     "ScenePresetReference",
 ]);
 const NODE_NAMES = new Set([
+    "ScenePromptLLM",
     ...PROMPT_NODE_NAMES,
     ...PROMPT_MATRIX_NODE_NAMES,
     ...SCENE_PATH_NODE_NAMES,
@@ -4864,6 +4870,66 @@ function isScenePromptNode(node) {
     return nodeClassNames(node).some((name) => PROMPT_NODE_NAMES.has(name));
 }
 
+function isSceneLLMNode(node) {
+    return nodeClassNames(node).includes(LLM_TYPE);
+}
+
+function beginSceneLLMChange(graph) {
+    graph.beforeChange?.();
+    app.canvas?.emitBeforeChange?.();
+}
+
+function endSceneLLMChange(graph) {
+    try { graph.afterChange?.(); }
+    finally { app.canvas?.emitAfterChange?.(); }
+}
+
+const sceneLLMController = createLLMController({
+    app, api,
+    beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
+    createNode: (type) => globalThis.LiteGraph.createNode(type),
+    refresh: (node) => refreshDownstreamSceneNodes(node),
+    presetTargets: (node) => collectPresetLLMTargets(node, scenePresetDisplayGraphs),
+    presetHasTargets: (node) => presetReferenceHasLLM(node),
+    prepareTargets: prepareSceneLLMPresetSources,
+    onError: showAPIError,
+    onBusy: (node, busy) => {
+        const button = findSceneWidget(node, isSceneLLMNode(node) ? "llm_generate" : "expand_llm_generate");
+        if (button) { button.disabled = busy || (isSceneLLMNode(node) ? !String(findWidget(node, "description")?.value || "").trim() : !sceneLLMController.canGenerate(node)); button.name = busy ? "プロンプト生成中…" : "プロンプト生成"; }
+        node.setDirtyCanvas?.(true, true);
+    },
+});
+
+function attachSceneLLM(node) {
+    injectStyle();
+    installSceneConnectionWatcher(node);
+    hideWidget(findWidget(node, "generation_state_json"));
+    const generate = addSceneButton(node, "llm_generate", "プロンプト生成", () => sceneLLMController.generate(node, true));
+    generate.disabled = sceneLLMController.busy.has(node) || !String(findWidget(node, "description")?.value || "").trim();
+    node.widgets.splice(node.widgets.indexOf(generate), 1);
+    node.widgets.splice(node.widgets.indexOf(findWidget(node, "description")) + 1, 0, generate);
+    addSceneButton(node, "llm_settings", "LLM接続設定", () => openLLMSettings(api));
+    if (!findSceneWidget(node, "llm_status")) {
+        const status = node.addCustomWidget({ name: "LLM status", sceneRole: "llm_status", serialize: false,
+            computeSize: () => [node.size?.[0] || 300, 24],
+            draw: (ctx, _node, width, y) => { ctx.fillStyle = "#bbb"; ctx.font = "12px sans-serif"; ctx.fillText(node.sceneLLMStatus || "待機", 10, y + 16, width - 20); } });
+        status.serialize = false;
+    }
+    for (const name of ["description", "model_mode", "positive", "negative"]) {
+        const widget = findWidget(node, name);
+        if (!widget || widget.sceneLLMWrapped) continue;
+        const callback = widget.callback;
+        widget.callback = function (...args) { callback?.apply(this, args); generate.disabled = sceneLLMController.busy.has(node) || !String(findWidget(node, "description")?.value || "").trim(); clearSceneComputedCaches(node); refreshDownstreamSceneNodes(node); };
+        widget.sceneLLMWrapped = true;
+    }
+}
+
+function openSceneCivitaiSearch(node) {
+    injectStyle();
+    return openCivitaiSearch({ node, api, activeGraph: () => app.graph, beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
+        refresh: (target) => { syncSceneLoraSelectLabel(target); clearSceneComputedCaches(target); refreshDownstreamSceneNodes(target); } });
+}
+
 function isPromptMatrixNode(node) {
     return nodeClassNames(node).some((name) => PROMPT_MATRIX_NODE_NAMES.has(name));
 }
@@ -5137,6 +5203,7 @@ function closeSceneLoraPicker(node) {
 }
 
 async function openSceneLoraPicker(node) {
+    if (node.properties?.scene_civitai) return openSceneCivitaiSearch(node);
     closeSceneLoraDetails(node);
     closeSceneLoraPicker(node);
     injectStyle();
@@ -5155,7 +5222,11 @@ async function openSceneLoraPicker(node) {
     close.type = "button";
     close.className = "pc-button";
     close.textContent = "閉じる";
-    head.append(heading, close);
+    const civitaiSearch = document.createElement("button");
+    civitaiSearch.className = "pc-button";
+    civitaiSearch.textContent = "Civitai Search";
+    civitaiSearch.onclick = () => { closeSceneLoraPicker(node); openSceneCivitaiSearch(node); };
+    head.append(heading, civitaiSearch, close);
     const search = document.createElement("input");
     search.type = "search";
     search.className = "pc-lora-search";
@@ -5490,7 +5561,7 @@ function isScenePromptCallbackProducerNode(node) {
 }
 
 function isScenePromptSourceNode(node) {
-    return isScenePromptNode(node)
+    return isSceneLLMNode(node) || isScenePromptNode(node)
         || isPromptMatrixNode(node)
         || isScenePathNode(node)
         || isScenePromptMergeNode(node)
@@ -6818,6 +6889,11 @@ function scenePromptSourceLocalCacheKey(node) {
         }
         : null;
 
+    if (nodeClassName(node) === "ScenePromptLLM") {
+        return JSON.stringify({ type: "llm", id: node.id, mode: sceneNodeMode(node), upstream: upstreamKey,
+            values: ["model_mode", "description", "positive", "negative", "generation_state_json"]
+                .map((name) => findWidget(node, name)?.value || "") });
+    }
     if (isScenePromptNode(node)) {
         return JSON.stringify({
             local: scenePromptLocalCacheKey(node),
@@ -6934,6 +7010,7 @@ function scenePromptSourceLocalCacheKey(node) {
             preset_id: String(findWidget(node, "preset_id")?.value || ""),
             input: linkedInputKey(node, "scene_prompt"),
             snapshot: node?.scenePresetGraph?.metadata?.sha256 || "",
+            local_revision: node.scenePresetRevision || 0,
         });
     }
     if (isScenePromptCallbackNode(node)) {
@@ -6945,7 +7022,7 @@ function scenePromptSourceLocalCacheKey(node) {
             callback: linkedInputKey(node, "callback"),
         });
     }
-    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node)) {
+    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node) || nodeClassName(node) === "ScenePromptLLM") {
         return JSON.stringify({
             type: isSceneApplyModelNode(node) ? "apply_model" : "apply_lora",
             id: node?.id ?? null,
@@ -7032,7 +7109,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
         let result = emptyScenePromptStats();
         if (node.class_type === "ScenePresetInput") {
             result = upstream || sceneStatsSeed();
-        } else if (node.class_type === "ScenePrompter") {
+        } else if (node.class_type === "ScenePrompter" || node.class_type === "ScenePromptLLM") {
             result = source("scene_prompt") || sceneStatsSeed();
         } else if (node.class_type === "SceneMatrix") {
             const base = source("scene_prompt") || sceneStatsSeed();
@@ -7067,7 +7144,8 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             }
             result = sceneStatsQueue([result], hasSource);
         } else if (node.class_type === "ScenePresetReference") {
-            result = scenePresetStats(String(apiInput(node, "preset_id") || ""), source("scene_prompt"), nextStack);
+            result = scenePresetStats(String(apiInput(node, "preset_id") || ""), source("scene_prompt"), nextStack,
+                preset?.scenePresetChildren?.get(String(nodeId)) || null);
         } else if (node.class_type === "SceneApplyModel" || node.class_type === "SceneApplyLora") {
             result = source("scene_prompt") || sceneStatsSeed();
         } else if (node.class_type === "ScenePromptCallback") {
@@ -7270,7 +7348,7 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
     if (isScenePromptCallbackNode(node)) {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
-    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node)) {
+    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node) || nodeClassName(node) === "ScenePromptLLM") {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     return finish(emptyScenePromptStats());
@@ -7634,7 +7712,7 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                 ? sceneScheduleError("ランダム分岐はQueueで合流してからEmpty Latentを接続してください。") : base;
         } else if (entry.class_type === "ScenePresetReference") {
             plan = sceneScheduleForPreset(apiInput(entry, "preset_id"), source("scene_prompt"), nextStack,
-                null, `${instancePath}/${nodeId}`);
+                preset?.scenePresetChildren?.get(String(nodeId)) || null, `${instancePath}/${nodeId}`);
         } else if (entry.class_type === "ScenePromptRandomRoute") {
             let weights;
             try { weights = JSON.parse(String(apiInput(entry, "weights_json") || "")); } catch { weights = null; }
@@ -7812,7 +7890,8 @@ function sceneQueueBoundaryInPreset(presetId, upstream, stack = new Set(), prefe
         if (entry.class_type === "ScenePresetInput") return upstream;
         if (entry.class_type === "ScenePresetReference") {
             const nested = sceneQueueBoundaryInPreset(apiInput(entry, "preset_id"),
-                visit(apiLink(apiInput(entry, "scene_prompt"))), nextStack);
+                visit(apiLink(apiInput(entry, "scene_prompt"))), nextStack,
+                preset?.scenePresetChildren?.get(String(nodeId)) || null);
             if (nested !== null) return nested;
         }
         return Object.entries(entry.inputs || {}).some(([name, value]) =>
@@ -8166,7 +8245,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
             : [{ parts: [], count: 1, row: emptyMatrixRow() }]);
     }
 
-    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node)) {
+    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node) || nodeClassName(node) === "ScenePromptLLM") {
         const upstream = scenePromptInputSource(node);
         return finish(upstream
             ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
@@ -8654,6 +8733,8 @@ function markSceneNodeChanged(node, options = {}) {
 }
 
 function updateSceneExpandButton(node, options = {}) {
+    const generate = findSceneWidget(node, "expand_llm_generate");
+    if (generate) generate.disabled = sceneLLMController.busy.has(node) || !sceneLLMController.canGenerate(node);
     const button = findSceneWidget(node, "expand_run_all");
     if (!button) {
         return;
@@ -11270,6 +11351,10 @@ function ensurePromptMatrixControls(node) {
 function ensureSceneExpandControls(node) {
     const info = addSceneButton(node, "expand_resources", "生成情報", () => openSceneExpandResources(node));
     const run = addSceneButton(node, "expand_run_all", "連続生成", () => startSceneBatchRun(node));
+    const generate = addSceneButton(node, "expand_llm_generate", "プロンプト生成", () => sceneLLMController.generate(node));
+    node.widgets.splice(node.widgets.indexOf(generate), 1);
+    node.widgets.splice(node.widgets.indexOf(run), 0, generate);
+    generate.disabled = sceneLLMController.busy.has(node) || !sceneLLMController.canGenerate(node);
     const infoIndex = node.widgets.indexOf(info);
     const runIndex = node.widgets.indexOf(run);
     if (infoIndex > runIndex) {
@@ -11414,6 +11499,7 @@ async function openSceneExpandResources(node) {
         for (const lora of data.loras || []) {
             const card = document.createElement("div");
             card.className = "pc-resource-card";
+            if (lora.variants?.length && lora.variants.every((variant) => variant.applies === false)) card.classList.add("pc-resource-unapplied");
             addText(card, lora.name, "pc-resource-name");
             for (const variant of lora.variants || []) {
                 const roles = variant.roles || ["model", "clip"];
@@ -11423,7 +11509,7 @@ async function openSceneExpandResources(node) {
                 ].filter(Boolean);
                 const mode = variant.model_mode ?? (variant.applies === true ? "標準LoRA" : "モデル種別 取得不可");
                 const applicability = variant.applies == null ? "適用可否を取得不可" : variant.applies ? "適用対象" : "モデル種別が異なるため適用外";
-                addText(card, [mode, ...strengths, applicability].join(" / "), "pc-resource-detail");
+                addText(card, [mode, ...strengths, applicability].join(" / "), `pc-resource-detail${variant.applies === false ? " pc-resource-unapplied" : ""}`);
             }
             if (!lora.unresolved) addLookup(card, async () => resolveSceneLora(sceneLoraCatalogItem(lora.name)));
             loraSection.append(card);
@@ -11506,7 +11592,9 @@ function refreshScenePresetReference(node, presets = scenePresetList || []) {
         return;
     }
     const preset = selectedScenePreset(node, presets);
-    const nextGraph = preset ? scenePresetDisplayGraphs.get(String(preset.preset_id)) || null : null;
+    const prepared = preparePresetReference(node, scenePresetDisplayGraphs);
+    const nextGraph = prepared.root || (preset ? scenePresetDisplayGraphs.get(String(preset.preset_id)) || null : null);
+    node.scenePresetRevision = prepared.revision;
     if (node.scenePresetGraph !== nextGraph) {
         node.scenePresetGraph = nextGraph;
         clearSceneComputedCaches(node);
@@ -11606,6 +11694,34 @@ async function openScenePresetPicker(node) {
     popup.appendChild(list);
 }
 
+async function loadFullSceneLLMPreset(presetId) {
+    const response = await api.fetchApi(`/scene_presets/load?preset_id=${encodeURIComponent(presetId)}&include_api_graph=1`);
+    const preset = await readApiJson(response, "Presetを読み込めませんでした");
+    if (!response.ok) throw new Error(preset.error || "Presetを読み込めませんでした");
+    return preset;
+}
+
+async function prepareSceneLLMPresetSources(root) {
+    const graph = root.graph || app.graph, definitions = scenePresetDisplayGraphs;
+    const seen = new Set(), references = [];
+    function visit(node) {
+        if (!node || seen.has(node) || Number(node.mode) === 2) return;
+        seen.add(node);
+        for (const input of node.inputs || []) {
+            if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/u.test(input.name || "") || nodeClassName(node) === "Reroute")) continue;
+            const link = graph.links?.[input.link];
+            if (link) visit(graph.getNodeById(link.origin_id));
+        }
+        if (isScenePresetReferenceNode(node) && Number(node.mode) !== 4 && presetReferenceHasLLM(node)) references.push(node);
+    }
+    visit(root);
+    for (const reference of references) {
+        await hydratePresetReference(reference, definitions, loadFullSceneLLMPreset);
+        if (scenePresetDisplayGraphs !== definitions) throw new Error("Preset一覧が更新されたため、もう一度生成してください。");
+        refreshScenePresetReference(reference, scenePresetList || []);
+    }
+}
+
 async function openScenePresetEditor(node) {
     const presetId = String(findWidget(node, "preset_id")?.value || "").trim();
     if (!presetId) {
@@ -11622,15 +11738,14 @@ async function openScenePresetEditor(node) {
         if (typeof app.loadGraphData !== "function") {
             throw new Error("Preset編集に必要なComfyUI APIが見つかりません。");
         }
-        const response = await api.fetchApi(`/scene_presets/load?preset_id=${encodeURIComponent(presetId)}`);
-        const preset = await readApiJson(response, "Presetを読み込めませんでした");
-        if (!response.ok) {
-            throw new Error(preset.error || "Presetを読み込めませんでした");
-        }
+        const preset = await loadFullSceneLLMPreset(presetId);
         if (!preset?.metadata?.preset_id || !preset?.workflow) {
             throw new Error("Presetの応答形式が不正です。");
         }
-        const workflow = presetEditorWorkflow(preset);
+        scenePresetDisplayGraphs.set(presetId, preset);
+        await hydratePresetReference(node, scenePresetDisplayGraphs, loadFullSceneLLMPreset);
+        const localPreset = presetEditorDefinition(node, scenePresetDisplayGraphs);
+        const workflow = presetEditorWorkflow(localPreset || preset);
         await app.loadGraphData(workflow, true, true, `Preset - ${preset.metadata.name || preset.metadata.preset_id}`);
     } catch (error) {
         showSceneBatchError("Presetを編集用ワークフローとして開けませんでした。", error);
@@ -11720,6 +11835,17 @@ function attachScenePresetReference(node) {
     node.resizable = true;
     removeInternalInputSockets(node, { visibleNames: new Set(["scene_prompt"]), removeAllExceptVisible: true });
     hideWidget(findWidget(node, "preset_id"));
+    const localState = findWidget(node, "llm_presets_json");
+    hideWidget(localState);
+    if (localState && !localState.scenePresetLocalSync) {
+        const previous = localState.callback;
+        localState.callback = function (...args) {
+            const result = previous?.apply(this, args);
+            refreshScenePresetReference(node, scenePresetList || []);
+            return result;
+        };
+        localState.scenePresetLocalSync = true;
+    }
     addSceneButton(node, "scene_preset_select", "Presetを選択", () => openScenePresetPicker(node));
     addSceneButton(node, "scene_preset_edit", "Preset編集", () => openScenePresetEditor(node));
     if (!node.scenePresetSelectionRefreshInstalled) {
@@ -12206,11 +12332,14 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
 }
 
 function attachSceneNode(node, nodeName) {
+    if (node.scenePresetDetachedSnapshot) return;
     installSceneNodeRemovalCleanup(node, nodeName);
     if (isScenePromptSourceNode(node) && !isScenePromptCallbackNode(node)) {
         sceneTitleSyncNodes.add(node);
     }
-    if (isScenePresetOutputNode(node) || SCENE_PRESET_OUTPUT_NODE_NAMES.has(nodeName)) {
+    if (isSceneLLMNode(node) || nodeName === LLM_TYPE) {
+        attachSceneLLM(node);
+    } else if (isScenePresetOutputNode(node) || SCENE_PRESET_OUTPUT_NODE_NAMES.has(nodeName)) {
         attachScenePresetOutput(node);
     } else if (isScenePresetReferenceNode(node) || SCENE_PRESET_REFERENCE_NODE_NAMES.has(nodeName)) {
         attachScenePresetReference(node);
@@ -12256,6 +12385,7 @@ function scheduleAttachSceneNode(node, nodeName) {
     node.scenePromptAttachScheduled = true;
     requestAnimationFrame(() => {
         node.scenePromptAttachScheduled = false;
+        if (node.scenePresetDetachedSnapshot) return;
         try {
             attachSceneNode(node, nodeName);
         } catch (error) {
@@ -12673,6 +12803,25 @@ app.registerExtension({
             nodeType.prototype.serialize = function (...args) {
                 const serialized = serialize?.apply(this, args);
                 return serialized ? { ...serialized, widgets_values: scenePromptSerializedWidgetValues(this) } : serialized;
+            };
+        }
+
+        if (nodeData.name === "ScenePromptLLM") {
+            const names = ["model_mode", "description", "positive", "negative", "generation_state_json"];
+            const configure = nodeType.prototype.configure;
+            const serialize = nodeType.prototype.serialize;
+            nodeType.prototype.configure = function (...args) {
+                const config = args[0];
+                const named = { ...Object.fromEntries(names.slice(0, config?.widgets_values?.length || 0).map((name, index) => [name, config.widgets_values[index]])), ...config?.widgets_values_named };
+                const result = configure?.apply(this, args);
+                for (const name of names) if (Object.hasOwn(named, name)) setWidgetValue(this, name, named[name], { silent: true });
+                return result;
+            };
+            nodeType.prototype.serialize = function (...args) {
+                const result = serialize?.apply(this, args);
+                if (!result) return result;
+                const named = Object.fromEntries(names.map((name) => [name, findWidget(this, name)?.value ?? (name === "generation_state_json" ? "{}" : "")]));
+                return { ...result, widgets_values: names.map((name) => named[name]), widgets_values_named: named };
             };
         }
 

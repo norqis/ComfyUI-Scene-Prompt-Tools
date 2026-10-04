@@ -1162,7 +1162,7 @@ class ScenePresetTests(unittest.TestCase):
         snapshot = self.module.snapshot_presets_for_run("large-siblings", api_graph, "40")
         self.assertEqual([preset["preset_id"] for preset in snapshot["presets"]], ["left", "right"])
 
-    def test_shared_nested_preset_is_evaluated_once_per_upstream_plan(self):
+    def test_shared_nested_preset_keeps_independent_occurrence_sources(self):
         self.save("shared-child", basic_nodes("child"))
         parent = basic_nodes()
         parent["4"] = {
@@ -1193,7 +1193,7 @@ class ScenePresetTests(unittest.TestCase):
 
         with mock.patch.object(self.module.ScenePrompt, "build", counted_build):
             self.module.snapshot_presets_for_run("shared-evaluation", api_graph, "11")
-        self.assertEqual(len(build_calls), 1)
+        self.assertEqual(len(build_calls), 2)
 
     def test_preset_output_link_rejects_boolean_and_float_indexes(self):
         for name, invalid_index in (("boolean", False), ("float", 0.0)):

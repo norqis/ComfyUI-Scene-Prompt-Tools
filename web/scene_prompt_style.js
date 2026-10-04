@@ -2,6 +2,20 @@ export function injectStyle() {
     const style = document.getElementById("scene-prompt-style") || document.createElement("style");
     style.id = "scene-prompt-style";
     style.textContent = `
+        .pc-civitai-dialog { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+        .pc-civitai-controls { display: flex; gap: 8px; padding: 8px 0; }
+        .pc-civitai-controls input { flex: 1; min-width: 0; }
+        .pc-civitai-dialog input, .pc-civitai-dialog select { color: #eee; background: #292d35; border: 1px solid #59616d; border-radius: 4px; padding: 6px; box-sizing: border-box; min-width: 0; }
+        .pc-civitai-dialog a { color: #a5c8ff; }
+        .pc-civitai-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; overflow: auto; }
+        .pc-civitai-card { display: flex; flex-direction: column; gap: 7px; padding: 12px; border: 1px solid #555; border-radius: 6px; }
+        .pc-civitai-card.pc-lora-selected { border: 2px solid #60d082; background: #193c28; }
+        .pc-civitai-card img { width: 100%; height: 180px; object-fit: contain; }
+        .pc-civitai-error { color: #ffb0a7; }
+        .pc-civitai-dialog form { display: flex; flex-direction: column; gap: 10px; }
+        .pc-civitai-dialog label { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+        .pc-civitai-dialog label input:not([type=checkbox]), .pc-civitai-dialog label select { width: 65%; }
+        @media (max-width: 520px) { .pc-civitai-controls { flex-wrap: wrap; } .pc-civitai-controls input { flex-basis: 100%; } .pc-civitai-controls select { flex: 1; } .pc-civitai-results { grid-template-columns: minmax(0, 1fr); } }
         .pc-popup {
             position: fixed;
             z-index: 99999;
@@ -536,6 +550,10 @@ export function injectStyle() {
         .pc-resource-card { display: grid; gap: 6px; min-width: 0; padding: 9px 11px; border: 1px solid #3c4553; border-radius: 5px; background: #292f38; }
         .pc-resource-name { overflow-wrap: anywhere; font-weight: 600; }
         .pc-resource-detail { color: #bbc7d7; overflow-wrap: anywhere; }
+        .pc-resource-unapplied { color: #90969f; background: #24282e; }
+        .pc-resource-card.pc-resource-unapplied { border-color: #343940; }
+        .pc-resource-card.pc-resource-unapplied .pc-resource-name { color: #90969f; }
+        .pc-resource-card.pc-resource-unapplied .pc-button, .pc-resource-card.pc-resource-unapplied a { color: #aab1bb; }
         .pc-resource-card .pc-button { justify-self: start; }
         .pc-lora-picker { width: min(660px, calc(100vw - 24px)); display: flex; flex-direction: column; }
         .pc-lora-search {

@@ -651,7 +651,8 @@ def _expand_workflow_only_reference(workflow, reference_id, preset):
     return mapping
 
 
-def _expand_workflow_only_references(workflow, preset_snapshots, display_only_references=()):
+def _expand_workflow_only_references(workflow, preset_snapshots, display_only_references=(), source_ids=None):
+    source_ids = {} if source_ids is None else source_ids
     display_only_references = set(display_only_references)
     while True:
         reference = next(
@@ -669,7 +670,10 @@ def _expand_workflow_only_references(workflow, preset_snapshots, display_only_re
         if reference is None:
             return
         preset_id = _workflow_reference_preset_id(reference)
-        preset = preset_snapshots.get(preset_id) if isinstance(preset_snapshots, Mapping) else None
+        reference_id = str(reference.get("id"))
+        reference_path = source_ids.get(reference_id, reference_id)
+        preset = (preset_snapshots.get("__occurrences__", {}).get(reference_path)
+                  or preset_snapshots.get(preset_id)) if isinstance(preset_snapshots, Mapping) else None
         if not isinstance(preset, dict):
             raise ValueError(f"Preset「{preset_id}」の実行開始時スナップショットがありません。")
         reference_id = str(reference.get("id"))
@@ -677,6 +681,7 @@ def _expand_workflow_only_references(workflow, preset_snapshots, display_only_re
         templates = _workflow_template_index(_workflow_nodes(preset))
         api_nodes = _nodes(preset)
         for original_id, copied_id in mapping.items():
+            source_ids[copied_id] = f"{reference_path}/{original_id}"
             if (
                 original_id not in api_nodes
                 and templates[original_id].get("type") == PRESET_REFERENCE
@@ -707,11 +712,12 @@ def expand_preset_references(prompt, workflow, preset_snapshots, expand_workflow
             break
         inputs = expanded_prompt[reference_id].get("inputs")
         preset_id = str(inputs.get("preset_id") or "").strip() if isinstance(inputs, dict) else ""
-        preset = preset_snapshots.get(preset_id) if isinstance(preset_snapshots, Mapping) else None
+        preset = (preset_snapshots.get("__occurrences__", {}).get(source_ids.get(reference_id, reference_id))
+                  or preset_snapshots.get(preset_id)) if isinstance(preset_snapshots, Mapping) else None
         if not isinstance(preset, dict):
             raise ValueError(f"Preset「{preset_id or reference_id}」の実行開始時スナップショットがありません。")
         _inline_reference(expanded_prompt, expanded_workflow, reference_id, preset, source_ids, state)
     _rebuild_expanded_workflow_links(expanded_prompt, expanded_workflow, state)
     if expand_workflow_references:
-        _expand_workflow_only_references(expanded_workflow, preset_snapshots, state["display_only_references"])
+        _expand_workflow_only_references(expanded_workflow, preset_snapshots, state["display_only_references"], source_ids)
     return expanded_prompt, expanded_workflow, source_ids

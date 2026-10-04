@@ -618,6 +618,68 @@ def define_routes():
     _ROUTES_DEFINED = True
     setattr(PromptServer.instance, "_scene_prompt_routes_defined", True)
 
+    async def llm_operation(request, operation):
+        # Lazy imports retain compatibility with lightweight Comfy/aiohttp route loaders.
+        from .llm_settings import load_settings, merge_settings, public_settings, save_settings
+        from .llm_service import ServiceError, generate, select_loras, test_connection
+        from .civitai import search, download
+        try:
+            user_id = _request_user_id(request)
+            settings = await asyncio.to_thread(load_settings, user_id)
+            if operation == "settings_get":
+                result = public_settings(settings)
+            elif operation == "search":
+                result = await search(settings, request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"))
+            else:
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Request body must be a JSON object.")
+                if operation == "settings_post":
+                    result = await asyncio.to_thread(save_settings, user_id, payload)
+                elif operation == "test":
+                    result = await test_connection(merge_settings(settings, payload))
+                elif operation == "generate":
+                    result = await generate(settings, payload.get("description"), payload.get("model_mode"))
+                elif operation == "select":
+                    result = await select_loras(settings, payload.get("description"), payload.get("model_mode"), payload.get("query", ""), payload.get("candidates"))
+                else:
+                    result = await download(settings, payload, payload.get("model_mode"))
+            return web.json_response(result)
+        except ServiceError as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status)
+        except (ValueError, TypeError, KeyError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except OSError:
+            return web.json_response({"error": "Unable to access Scene Prompt settings or the configured LoRA folder."}, status=500)
+
+    @PromptServer.instance.routes.get("/scene_prompt/llm/settings")
+    async def scene_llm_settings_get(request):
+        return await llm_operation(request, "settings_get")
+
+    @PromptServer.instance.routes.post("/scene_prompt/llm/settings")
+    async def scene_llm_settings_post(request):
+        return await llm_operation(request, "settings_post")
+
+    @PromptServer.instance.routes.post("/scene_prompt/llm/test")
+    async def scene_llm_test(request):
+        return await llm_operation(request, "test")
+
+    @PromptServer.instance.routes.post("/scene_prompt/llm/generate")
+    async def scene_llm_generate(request):
+        return await llm_operation(request, "generate")
+
+    @PromptServer.instance.routes.post("/scene_prompt/llm/select_loras")
+    async def scene_llm_select(request):
+        return await llm_operation(request, "select")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/search")
+    async def scene_civitai_search(request):
+        return await llm_operation(request, "search")
+
+    @PromptServer.instance.routes.post("/scene_prompt/civitai/download")
+    async def scene_civitai_download(request):
+        return await llm_operation(request, "download")
+
     @PromptServer.instance.routes.get("/scene_prompt/loras/list")
     async def scene_prompt_lora_list(request):
         del request
@@ -868,10 +930,14 @@ def define_routes():
         try:
             preset_id = request.query.get("preset_id")
             preset = await asyncio.to_thread(load_preset, preset_id, _request_user_id(request))
-            return web.json_response({
+            response = {
                 "metadata": preset["metadata"],
                 "workflow": preset["workflow"],
-            })
+            }
+            if request.query.get("include_api_graph") == "1":
+                response["schema_version"] = preset["schema_version"]
+                response["api_graph"] = preset["api_graph"]
+            return web.json_response(response)
         except ScenePresetNotFoundError as exc:
             return web.json_response({"error": str(exc)}, status=404)
         except ScenePresetError as exc:

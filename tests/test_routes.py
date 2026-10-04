@@ -1,4 +1,5 @@
 import importlib
+import copy
 import asyncio
 import json
 import os
@@ -298,6 +299,18 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertSetEqual(set(loaded["payload"]), {"metadata", "workflow"})
         self.assertEqual(loaded["payload"]["metadata"]["preset_id"], "route")
         self.assertNotIn("api_graph", loaded["payload"])
+        full_loaded = asyncio.run(load_preset(Request(query={"preset_id": "route", "include_api_graph": "1"})))
+        self.assertEqual(full_loaded["status"], 200)
+        self.assertSetEqual(set(full_loaded["payload"]), {"schema_version", "metadata", "workflow", "api_graph"})
+        self.assertEqual(full_loaded["payload"]["schema_version"], 1)
+        self.assertEqual(full_loaded["payload"]["api_graph"], graph)
+        hydrated = copy.deepcopy(full_loaded['payload'])
+        hydrated['api_graph']['output']['2']['inputs']['positive_base'] = 'edited hydrated result'
+        presets_module = importlib.import_module(self.routes.__package__ + '.presets')
+        overrides = presets_module.parse_llm_preset_overrides(json.dumps({'version': 1, 'presets': {'.': hydrated}}))
+        self.assertEqual(overrides['.']['api_graph']['output']['2']['inputs']['positive_base'], 'edited hydrated result')
+        default_loaded = asyncio.run(load_preset(Request(query={"preset_id": "route", "include_api_graph": "0"})))
+        self.assertNotIn("api_graph", default_loaded["payload"])
 
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         claim = self.routes._test_routes[("POST", "/scene_prompt/runs/claim")]
