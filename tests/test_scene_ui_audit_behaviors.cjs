@@ -56,6 +56,7 @@ const previewContext = {
     },
 };
 vm.createContext(previewContext);
+vm.runInContext(functionSource("nodeClassName"), previewContext);
 vm.runInContext(functionSource("scenePromptPreviewEntries"), previewContext);
 const base = { id: "base", kind: "queue", sources: [
     { id: "a", kind: "prompt", title: "A" }, { id: "b", kind: "prompt", title: "B" },
