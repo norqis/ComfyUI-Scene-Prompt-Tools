@@ -26,6 +26,23 @@ export function collectLLMTargets(graph, root, { presetTargets } = {}) {
     visit(root);
     return targets;
 }
+export function hasLLMTargets(graph, root, presetHasTargets) {
+    const seen = new Set();
+    function visit(node) {
+        if (!node || seen.has(node) || Number(node.mode) === 2) return false;
+        seen.add(node);
+        if (Number(node.mode) !== 4) {
+            if (className(node) === LLM_TYPE && String(value(node, "description")).trim()) return true;
+            if (className(node) === "ScenePresetReference" && presetHasTargets?.(node)) return true;
+        }
+        return (node.inputs || []).some((input) => {
+            if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/.test(input.name || "") || className(node) === "Reroute")) return false;
+            const link = graph.links?.[input.link];
+            return link ? visit(graph.getNodeById(link.origin_id)) : false;
+        });
+    }
+    return visit(root);
+}
 function linksKey(node) {
     const graph = node.graph;
     return JSON.stringify({ inputs: (node.inputs || []).map((input) => [input.name, input.link]),
@@ -90,36 +107,44 @@ export function insertLoras(graph, origin, candidates, createNode) {
         applyCandidate(node, candidate, { ...candidate.search_state, origin: originKey });
         return node;
     });
+    const placedNodes = [];
     for (const node of nodes) {
         graph.add(node);
-        node.pos = [Number(tail.pos?.[0] || 0) + Number(tail.size?.[0] || 300) + 40, Number(tail.pos?.[1] || 0)];
-        tail.connect(slot, node, (node.inputs || []).findIndex((input) => input.name === "scene_prompt"));
-        tail = node;
+        const placed = graph.getNodeById(node.id);
+        placed.pos = [Number(tail.pos?.[0] || 0) + Number(tail.size?.[0] || 300) + 40, Number(tail.pos?.[1] || 0)];
+        tail.connect(slot, placed, (placed.inputs || []).findIndex((input) => input.name === "scene_prompt"));
+        tail = placed;
+        placedNodes.push(placed);
     }
     for (const link of outgoing) {
         graph.removeLink(link.id);
         const target = graph.getNodeById(link.target_id);
         if (target) tail.connect(slot, target, link.target_slot);
     }
-    return nodes;
+    return placedNodes;
 }
-export function createLLMController({ app, api, createNode, refresh, presetTargets, onError, onBusy,
+export function createLLMController({ app, api, createNode, refresh, presetTargets, presetHasTargets, prepareTargets, onError, onBusy,
     beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const busy = new WeakSet();
     let operationBusy = false;
     function targets(root) { return collectLLMTargets(root.graph || app.graph, root, { presetTargets }); }
+    function canGenerate(root) { return hasLLMTargets(root.graph || app.graph, root, presetHasTargets); }
     async function generate(root, explicit = false) {
         if (operationBusy) return;
         operationBusy = true;
         busy.add(root);
         onBusy?.(root, true);
         const ownerGraph = app.graph;
-        const list = explicit ? [{ node: root, graph: root.graph || ownerGraph }] : targets(root);
-        for (const { node } of list) { busy.add(node); onBusy?.(node, true); }
-        if (!list.length) root.sceneLLMStatus = "生成対象がありません";
+        const initialRoot = captureTarget({ node: root, graph: ownerGraph, ownerGraph }, () => app.graph);
+        let list = [];
         let errorQuery = "";
         let currentNode = root;
         try {
+            if (!explicit) await prepareTargets?.(root);
+            if (!initialRoot()) return;
+            list = explicit ? [{ node: root, graph: root.graph || ownerGraph }] : targets(root);
+            for (const { node } of list) { busy.add(node); onBusy?.(node, true); }
+            if (!list.length) root.sceneLLMStatus = "生成対象がありません";
             for (const target of list) {
                 const { node, graph } = target;
                 currentNode = node;
@@ -174,5 +199,5 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
             app.graph?.setDirtyCanvas?.(true, true);
         }
     }
-    return { generate, targets, busy };
+    return { generate, targets, canGenerate, busy };
 }

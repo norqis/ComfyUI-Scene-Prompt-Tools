@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { chromium } from "playwright";
+import { parseSelectionState } from "../web/scene_prompt_state.js";
 
 if (process.env.RUN_REAL_COMFYUI_BROWSER_SMOKE !== "1") {
     console.log("real ComfyUI browser smoke skipped");
@@ -17,6 +18,8 @@ const python = process.env.COMFYUI_PYTHON;
 assert.ok(python, "COMFYUI_PYTHON is required for the real ComfyUI browser smoke.");
 assert.ok(source, "COMFYUI_SOURCE is required for the real ComfyUI browser smoke.");
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const harnessSource = await readFile(fileURLToPath(import.meta.url), "utf8");
+for (const match of harnessSource.matchAll(/'(\{"version":1,"categories":.+?\})'/gu)) parseSelectionState(match[1]);
 
 async function freePort() {
     const server = http.createServer();
@@ -58,6 +61,11 @@ try {
         recursive: true,
         filter: (entry) => ![".git", ".venv", ".venv-http", ".venv-test", "node_modules", "__pycache__", ".pytest_cache", "test-results"].includes(entry.split(/[\\/]/u).at(-1)),
     });
+    const fixtureLoras = resolve(directory, "models", "loras");
+    await mkdir(fixtureLoras, { recursive: true });
+    const header = Buffer.from('{"__metadata__":{}}'.padEnd(24, " "));
+    const headerLength = Buffer.alloc(8); headerLength.writeBigUInt64LE(BigInt(header.length));
+    await writeFile(resolve(fixtureLoras, "runtime-hat.safetensors"), Buffer.concat([headerLength, header]));
     child = spawn(python, [
         "main.py",
         "--cpu",
@@ -78,7 +86,7 @@ try {
     const seedRequests = [];
     const llmRequests = [];
     const runtimeCandidate = { model_id: 100, version_id: 200, file_id: 300, name: "Runtime Hat", version_name: "v1", base_model: "Illustrious",
-        file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["runtime_hat"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "llm/runtime-hat.safetensors" };
+        file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["runtime_hat"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "runtime-hat.safetensors" };
     await page.route("**/scene_prompt/llm/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         const body = route.request().postDataJSON();
@@ -104,10 +112,12 @@ try {
     }));
     await page.route("**/scene_prompt_ui.js", async (route) => {
         const response = await route.fetch();
-        await route.fulfill({ response, body: `${await response.text()}
+        const sourceUI = (await response.text()).replace("onError: showAPIError,", "onError: (error, query, retry) => { window.__sceneLLMRuntimeError = error.stack; showAPIError(error, query, retry); },");
+        await route.fulfill({ response, body: `${sourceUI}
 window.__sceneSeedRuntimeTest = {
     updateLLMExpand(node) { updateSceneExpandButton(node); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
+    async refreshPresetReference(node) { await loadScenePresetList(true); refreshScenePresetReference(node); },
     async openFavoritePicker(favorites = false) {
         const node = window.LiteGraph.createNode("ScenePrompter");
         window.app.graph.add(node);
@@ -256,9 +266,9 @@ window.__sceneSeedRuntimeTest = {
     }
     const result = await page.evaluate(() => {
         const names = ["filename_enabled", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "randomize", "run_handle"];
-        const values = [true, "positive, {A|B}", '{"version":1,"categories":{"Outfit":[{"id":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"id":"calm","label":"Calm"}]}}', "Outfit", 99, false, "new run"];
+        const values = [true, "positive, {A|B}", '{"version":1,"categories":{"Outfit":[{"prompt":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"prompt":"calm","label":"Calm"}]}}', "Outfit", 99, false, "new run"];
         const legacyNames = ["prompt_name", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "control_after_generate", "randomize", "run_handle"];
-        const legacyValues = ["v0.3 name", "v0.3 positive, {A|B}", "v0.3-positive-json", "v0.3 negative", "v0.3-negative-json", "Outfit", 77, "randomize", false, "v0.3 run"];
+        const legacyValues = ["v0.3 name", "v0.3 positive, {A|B}", '{"version":1,"categories":{"Legacy":[{"label":"Legacy positive","prompt":"old positive"}]}}', "v0.3 negative", '{"version":1,"categories":{"Legacy":[{"label":"Legacy negative","prompt":"old negative"}]}}', "Outfit", 77, "randomize", false, "v0.3 run"];
         const node = window.LiteGraph.createNode("ScenePrompter");
         window.app.graph.add(node);
         const setValue = (name, value) => {
@@ -301,21 +311,21 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(result.values, {
         filename_enabled: true,
         positive_base: "positive, {A|B}",
-        positive_json: '{"version":1,"categories":{"Outfit":[{"id":"summer","label":"Summer"}]}}',
+        positive_json: '{"version":1,"categories":{"Outfit":[{"prompt":"summer","label":"Summer"}]}}',
         negative_base: "negative",
-        negative_json: '{"version":1,"categories":{"Mood":[{"id":"calm","label":"Calm"}]}}',
+        negative_json: '{"version":1,"categories":{"Mood":[{"prompt":"calm","label":"Calm"}]}}',
         category_order: "Outfit",
         seed: 99,
         randomize: false,
         run_handle: "new run",
     });
-    assert.deepEqual(result.legacyInput, ["v0.3 name", "v0.3 positive, {A|B}", "v0.3-positive-json", "v0.3 negative", "v0.3-negative-json", "Outfit", 77, "randomize", false, "v0.3 run"]);
+    assert.deepEqual(result.legacyInput, ["v0.3 name", "v0.3 positive, {A|B}", '{"version":1,"categories":{"Legacy":[{"label":"Legacy positive","prompt":"old positive"}]}}', "v0.3 negative", '{"version":1,"categories":{"Legacy":[{"label":"Legacy negative","prompt":"old negative"}]}}', "Outfit", 77, "randomize", false, "v0.3 run"]);
     assert.deepEqual(result.legacy, {
         prompt_name: "v0.3 name",
         positive_base: "v0.3 positive, {A|B}",
-        positive_json: "v0.3-positive-json",
+        positive_json: '{"version":1,"categories":{"Legacy":[{"label":"Legacy positive","prompt":"old positive"}]}}',
         negative_base: "v0.3 negative",
-        negative_json: "v0.3-negative-json",
+        negative_json: '{"version":1,"categories":{"Legacy":[{"label":"Legacy negative","prompt":"old negative"}]}}',
         category_order: "Outfit",
         seed: 77,
         control_after_generate: "randomize",
@@ -975,6 +985,77 @@ window.__sceneSeedRuntimeTest = {
     assert.doesNotMatch(JSON.stringify(llmRuntime.beforeReload.serial), /image_url|api_key|conversation_history/);
     console.log("real ComfyUI LLM widget controls, explicit generation, native LoRA insertion and workflow/API reload passed");
 
+    const presetLLMRuntime = await page.evaluate(async () => {
+        const app = window.app, field = (node, name) => node.widgets.find((widget) => widget.name === name), role = (node, name) => node.widgets.find((widget) => widget.sceneRole === name);
+        app.graph.clear();
+        const add = (type) => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+        const connect = (from, to) => from.connect(0, to, to.inputs.findIndex((input) => input.name === "scene_prompt"));
+        const input = add("ScenePresetInput"), first = add("ScenePromptLLM"), second = add("ScenePromptLLM"), output = add("ScenePresetOutput");
+        field(first, "description").value = "a girl with a hat"; field(second, "description").value = "a second girl with a hat";
+        connect(input, first); connect(first, second); connect(second, output);
+        const presetId = "runtime-llm-reference"; field(output, "preset_id").value = presetId;
+        const savedResponse = await fetch("/scene_presets/save", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset_id: presetId, name: "Native LLM Reference", output_node_id: String(output.id), api_graph: await app.graphToPrompt(), workflow: app.graph.serialize() }) });
+        if (!savedResponse.ok) throw new Error((await savedResponse.json()).error);
+        app.graph.clear();
+        const reference = add("ScenePresetReference"), expand = add("ScenePrompterExpand");
+        field(reference, "preset_id").value = presetId; connect(reference, expand);
+        await window.__sceneSeedRuntimeTest.refreshPresetReference(reference);
+        window.__sceneSeedRuntimeTest.updateLLMExpand(expand);
+        if (role(expand, "expand_llm_generate").disabled) throw new Error("Native Reference LLM discovery disabled");
+        await role(expand, "expand_llm_generate").callback();
+        const local = JSON.parse(field(reference, "llm_presets_json").value);
+        if (!local.presets?.["."]) throw new Error(`Reference commit missing: ${window.__sceneLLMRuntimeError || expand.sceneLLMStatus}`);
+        const originalResponse = await fetch(`/scene_presets/load?preset_id=${presetId}`), original = await originalResponse.json();
+        const untouched = original.workflow.nodes.filter((node) => node.type === "SceneApplyLora").length === 0;
+        const ownerWorkflow = app.graph.serialize(), referenceId = reference.id;
+        await app.loadGraphData(ownerWorkflow, true, true);
+        const restoredReference = app.graph.getNodeById(referenceId);
+        const retained = field(restoredReference, "llm_presets_json").value;
+        await role(restoredReference, "scene_preset_edit").callback();
+        const api = await app.graphToPrompt();
+        const nativeLoras = app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora");
+        const prompts = app.graph._nodes.filter((node) => node.comfyClass === "ScenePromptLLM");
+        const editor = { loras: nativeLoras.map((node) => api.output[String(node.id)]?.inputs), prompts: prompts.map((node) => api.output[String(node.id)]?.inputs) };
+        const editorOutput = app.graph._nodes.find((node) => node.comfyClass === "ScenePresetOutput");
+        const saveReply = new Promise((resolve) => {
+            const originalFetch = window.fetch;
+            window.fetch = async (...args) => {
+                const response = await originalFetch(...args);
+                if (String(args[0]).includes("/scene_presets/save")) {
+                    window.fetch = originalFetch;
+                    resolve({ ok: response.ok, data: await response.clone().json() });
+                }
+                return response;
+            };
+        });
+        await role(editorOutput, "scene_preset_save").callback();
+        const savedEditor = await saveReply;
+        if (!savedEditor.ok) throw new Error(`Native Preset Save rejected: ${JSON.stringify(savedEditor.data)}`);
+        const loadedResponse = await fetch(`/scene_presets/load?preset_id=${presetId}`), loaded = await loadedResponse.json();
+        if (!loadedResponse.ok) throw new Error(loaded.error);
+        await app.loadGraphData(loaded.workflow, true, true);
+        const loadedAPI = await app.graphToPrompt();
+        return { untouched, retained: retained === JSON.stringify(local), editor,
+            loadedLoras: app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora").map((node) => loadedAPI.output[String(node.id)]?.inputs),
+            loadedPrompts: app.graph._nodes.filter((node) => node.comfyClass === "ScenePromptLLM").map((node) => loadedAPI.output[String(node.id)]?.inputs) };
+    });
+    assert.equal(presetLLMRuntime.untouched, true, "Reference generation never writes the shared Preset file");
+    assert.equal(presetLLMRuntime.retained, true, "Reference customization survives native owning-workflow reload");
+    assert.equal(presetLLMRuntime.editor.loras.length, 2);
+    assert.equal(presetLLMRuntime.loadedLoras.length, 2);
+    for (const lora of [...presetLLMRuntime.editor.loras, ...presetLLMRuntime.loadedLoras]) {
+        assert.equal(lora.lora_name, runtimeCandidate.lora_name); assert.equal(lora.positive, "runtime_hat"); assert.equal(lora.model_mode, "Illustrious");
+    }
+    for (const prompt of [...presetLLMRuntime.editor.prompts, ...presetLLMRuntime.loadedPrompts]) {
+        assert.equal(prompt.positive, "1girl, hat"); assert.equal(prompt.negative, "blurry"); assert.equal(prompt.model_mode, "Illustrious");
+        assert.ok(prompt.description.includes("girl")); assert.equal(JSON.parse(prompt.generation_state_json).template_version, "scene-llm-v1");
+    }
+    assert.equal(llmRequests.filter((request) => request.path.endsWith("/generate")).length, 3, "only the explicit standalone and two Preset LLMs generate");
+    await page.waitForTimeout(300);
+    assert.deepEqual(pageErrors, [], `native LLM/Preset lifecycle raised browser errors:\n${pageErrors.join("\n")}`);
+    console.log("real ComfyUI instance-local Preset LLM generation, native LoRA editor widgets and explicit Save/reload passed");
+
     const seedNodes = await page.evaluate(async () => {
         window.app.graph.clear();
         const add = (type) => {
@@ -1041,6 +1122,8 @@ window.__sceneSeedRuntimeTest = {
         return seed;
     });
     assert.equal(new Set(sentSeeds).size, 5, "normal Queue, first snapshot, and cached repeats receive fresh seeds");
+    await page.waitForTimeout(300);
+    assert.deepEqual(pageErrors, [], `complete native harness raised browser errors:\n${pageErrors.join("\n")}`);
     console.log("real ComfyUI normal Queue and cached batch sampler seed submissions passed");
 } finally {
     await browser?.close();

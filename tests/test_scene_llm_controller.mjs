@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
-import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity } from "../web/scene_prompt_llm.js";
+import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity, hasLLMTargets } from "../web/scene_prompt_llm.js";
 
 function fixture() {
     let next = 1, linkID = 1;
@@ -109,6 +109,27 @@ for (const startWithExpand of [true, false]) {
     await operation;
     assert.equal(target.sceneLLMStatus, "Service unavailable", "failing target displays settled error");
     assert.equal(controller.busy.has(target), false);
+    assert.equal(controller.busy.has(expand), false);
+}
+for (const change of ["mode", "tab", "connection"]) {
+    const { graph, node, create } = fixture(), app = { graph }, reference = node("ScenePresetReference"), expand = node("ScenePrompterExpand");
+    reference.connect(0, expand, 0);
+    let finishPreparation, hydration = 0, requests = 0, constructed = 0;
+    const controller = createLLMController({ app, api: { fetchApi() { requests++; } }, createNode: create,
+        presetHasTargets: () => true,
+        presetTargets: () => { constructed++; return []; },
+        prepareTargets: () => { hydration++; return new Promise((done) => { finishPreparation = done; }); } });
+    assert.equal(controller.canGenerate(expand), true);
+    assert.equal(hasLLMTargets(graph, expand, () => false), false);
+    assert.equal(constructed, 0, "availability never constructs a Preset graph");
+    assert.equal(hydration, 0, "availability never fetches missing workflows");
+    const pending = controller.generate(expand);
+    if (change === "mode") field(expand, "model_mode").value = "Anima";
+    if (change === "tab") app.graph = {};
+    if (change === "connection") graph.removeLink(expand.inputs[0].link);
+    finishPreparation(); await pending;
+    assert.equal(constructed, 0, "root changed during workflow hydration never constructs stale targets");
+    assert.equal(requests, 0);
     assert.equal(controller.busy.has(expand), false);
 }
 console.log("LLM controller traversal, insertion, reuse and ownership tests passed.");

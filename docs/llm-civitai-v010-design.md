@@ -1,6 +1,6 @@
 # v0.10.0 LLM prompts and Civitai LoRA selection
 
-Status: implemented after design review approval. Frontend regression tests and an isolated CPU ComfyUI browser run passed, including LLM widgets, saved prompt/API round trips, native LoRA insertion and Undo/Redo. The legacy 175-node PNG loaded in 2.21 seconds with no LLM/Civitai calls. Real LLM prompt quality remains unverified because no suitable endpoint was already running. Release checks and publication are tracked separately.
+Status: implemented after design review approval. Frontend regression tests and an isolated CPU ComfyUI browser run passed, including LLM widgets, saved prompt/API round trips, native LoRA insertion and Undo/Redo, and two-LLM instance-local Preset generation with editor Save/reload. The legacy 175-node PNG loaded in 1.74 seconds with no LLM/Civitai calls. Real LLM prompt quality remains unverified because no suitable endpoint was already running. Release checks and publication are tracked separately.
 
 ## User contract
 
@@ -37,6 +37,8 @@ LLM nodes in an open Preset editing graph work normally and persist through exis
 Backend snapshot/evaluation/GraphBuilder expansion/metadata replay and frontend counts/schedules/resources use these same occurrence identities and instance definitions; no globally keyed override contamination. Validate the same allowed Scene classes/links as ordinary Presets. Existing generation snapshot remains immutable. Editor entry opens local customized root workflow and places child-local state onto the respective nested Reference nodes. Save writes only the root Preset currently open, retaining nested local state in that file; shared nested Preset files are never implicitly written. The source Reference retains its customization after Save. Only opening/editing/saving a child Preset explicitly can update its shared file.
 
 Performance: parse/validate local JSON on load, widget change or generation commit only; memoize per Reference by exact serialized value, and share prepared map/memo during one stats/schedule/resources traversal. Never parse/hash/deepcopy/validate/traverse on canvas drawing. Backend cache bounded by serialized identity; generation snapshot owns its prepared copy. During workflow load defer downstream updates to existing afterConfigureGraph synchronization. Batch prompt/LoRA commits schedule one affected-path refresh rather than per-widget whole-graph refresh. Measure isolated legacy ~175-node loading and a large nested-local Reference graph, with no background requests.
+
+The Preset list remains lightweight (metadata and API graph). Button availability checks these prepared API graphs without constructing editor graphs. Explicit Expand Generate hydrates only reachable shared definitions whose workflow is missing via the existing Preset load endpoint, caches each workflow by preset ID and content hash, and then constructs generation targets. Full local definitions need no hydration. Root graph identity, mode and connections are checked again after hydration, so changes while loading cannot start inference on a stale graph.
 
 ## Required tests
 

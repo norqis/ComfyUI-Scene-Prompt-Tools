@@ -221,6 +221,8 @@ export const api = {
     if (url.includes("/scene_presets/list")) payload = { presets: [{ metadata: { preset_id: "browser-preset", name: "Browser Preset" } }], errors: [] };
     if (url.includes("/scene_presets/load")) payload = {
       metadata: { preset_id: "browser-preset", name: "Browser Preset" },
+      schema_version: 1,
+      api_graph: { output: { "1": { class_type: "ScenePresetInput", inputs: {} } } },
       workflow: { id: "stored-workflow", version: 1, nodes: [{ id: 1, type: "ScenePresetInput" }], extra: { stored: true, scene_preset_editor: { preset_id: "browser-preset", revision: 3 } } },
     };
     if (url.includes("/scene_presets/save")) payload = { metadata: { preset_id: "browser-preset", name: "Browser Preset" } };
@@ -2435,6 +2437,8 @@ try {
             loras: [{ name: "style.safetensors", variants: [
                 { model_mode: "Anima", strength_model: 0.8, strength_clip: 0.6, roles: ["model", "clip"], applies: true },
                 { model_mode: "Illustrious", strength_model: 1, strength_clip: 1, roles: ["model", "clip"], applies: false },
+            ] }, { name: "inactive.safetensors", variants: [
+                { model_mode: "Illustrious", strength_model: 0.5, strength_clip: 0.5, roles: ["model", "clip"], applies: false },
             ] }],
         };
         window.__originalResourceGraphToPrompt = window.app.graphToPrompt;
@@ -2457,8 +2461,15 @@ try {
     assert.equal(await resources.getByText("CLIP: text-encoder.safetensors").count(), 1);
     assert.equal(await resources.getByText("VAE: vae.safetensors").count(), 1);
     assert.equal(await resources.getByText("style.safetensors", { exact: true }).count(), 1, "one LoRA card groups strength and mode variants");
-    assert.equal(await resources.getByText(/モデル種別が異なるため適用外/u).count(), 1);
+    assert.equal(await resources.getByText(/モデル種別が異なるため適用外/u).count(), 2);
     const loraCard = resources.locator(".pc-resource-card").filter({ hasText: "style.safetensors" });
+    const inactiveCard = resources.locator(".pc-resource-card").filter({ hasText: "inactive.safetensors" });
+    assert.equal(await inactiveCard.evaluate((node) => node.classList.contains("pc-resource-unapplied")), true, "entire inapplicable LoRA row is muted");
+    assert.equal(await inactiveCard.getByRole("button", { name: "Civitaiを確認" }).isEnabled(), true, "gray resource rows retain usable lookup buttons");
+    assert.equal(await loraCard.evaluate((node) => node.classList.contains("pc-resource-unapplied")), false, "mixed LoRA variants preserve active row appearance");
+    const inactiveVariant = loraCard.locator(".pc-resource-detail.pc-resource-unapplied");
+    assert.equal(await inactiveVariant.evaluate((node) => getComputedStyle(node).color), "rgb(144, 150, 159)");
+    assert.notEqual(await loraCard.locator(".pc-resource-detail:not(.pc-resource-unapplied)").evaluate((node) => getComputedStyle(node).color), "rgb(144, 150, 159)");
     await loraCard.getByRole("button", { name: "Civitaiを確認" }).click();
     await loraCard.getByRole("link", { name: "Civitaiで見る" }).waitFor();
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/models/hash?")).length), 0,
