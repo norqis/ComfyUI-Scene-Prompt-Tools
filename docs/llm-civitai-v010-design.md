@@ -1,0 +1,50 @@
+# v0.10.0 LLM prompts and Civitai LoRA selection
+
+Status: design awaiting review; implementation not shipped.
+
+## User contract
+
+- New Scene Prompt (LLM), class `ScenePromptLLM`: optional scene_prompt input first; model_mode, description, editable positive/negative; own Generate button and connection settings. Output scene_prompt. No new Start/Expand/type.
+- Existing Expand gets Prompt Generate immediately above Continuous Generate. Empty/unreachable LLM descriptions disable it. Traverse only effective scene inputs, including Reroute/Queue/Count/Preset, skip bypassed LLM, deduplicate shared nodes. No LLM calls on load, drawing, or image generation.
+- Own button explicitly regenerates. Expand reuses description+mode+template-matching results including manual output edits; mode changes explicitly overwrite the one saved output pair. Convert each block independently, sequential requests, preserve exclusions only, no invented style/quality. English template prefers known Danbooru tags/short phrases for Illustrious and concise natural English for Anima.
+- LLM returns positive, negative, lora_queries. Queries are concrete optional concepts useful for a LoRA, not mandatory LoRAs for every generic object. Backend searches real compatible candidates (Most Downloaded, AllTime, 30), then asks LLM to choose candidate model/version/file IDs, or none. Reject IDs absent from the actual candidate list. LoRA selection never uses LLM-invented URLs.
+- Download selected safetensors into configured LoRA root/llm, stream to a temporary file, verify published SHA256, reuse identity/hash matches. API key sent only to trusted Civitai API origin, never redirect storage origins. Failed download does not insert a broken node.
+- Insert selected LoRAs in selection order immediately after originating LLM, before all former outgoing scene links; preserve target slots and Queue order. Use one graph change/undo transaction. Existing generated chains append, actual adjacency and origin identity must match; never consume manual LoRAs. Repeat operations reuse selected identities.
+- Triggers live on Apply LoRA positive and follow its model filter. Saved provenance tracks auto-managed trigger tokens; on changing LoRA remove only previously injected unedited tokens, preserve manual/edited text.
+- Apply LoRA stores query, sort, mode, selected model/version/file IDs, local filename, source origin and managed triggers in compact workflow state. No credentials, result galleries, images or conversation history in PNG/workflow.
+- LoRA Select for a search-managed node opens Civitai results with saved query/sort/selection. Regular local picker has Civitai Search at upper right. Shared result modal: editable query; Most Downloaded (default), Most Liked, Most Collected, Highest Rated; lazy image cards, title/model/trigger/size/count/link/acquired state; selected candidate green without violating requested sort order. Selected item can be shown separately if not in current top 30. Reopen restores state, refreshes results explicitly; process cache bounded.
+- API errors use modal with query, clear reason and Retry, preserving selection/graph. Zero results is a normal empty state.
+
+## Services and settings
+
+Separate Python llm and civitai service modules and frontend controller/modal modules; existing large UI contains integration hooks only. Nonblocking aiohttp requests, sequential LLM work and streamed downloads, hash/fs work off event loop. No new dependency other than existing aiohttp.
+
+Per-public-Comfy-user connection settings in scene_prompt_tools storage: base_url (default http://127.0.0.1:8080/v1), model, api_key, response_format (json_object/json_schema/instructions), timeout_seconds, civitai_api_key, civitai_host (com/civitai.red). Tokens masked/read-preserved; never returned in GET settings or embedded in graph. Settings modal supplies connection test/models. No server restart/GPU auto-start.
+
+REST endpoints:
+- GET/POST /scene_prompt/llm/settings, POST /scene_prompt/llm/test.
+- POST /scene_prompt/llm/generate {description,model_mode} -> {positive,negative,lora_queries,template_version}.
+- POST /scene_prompt/llm/select_loras {description,model_mode,query,candidates} -> {selected:[{model_id,version_id,file_id}]}.
+- GET /scene_prompt/civitai/search?query=&model_mode=&sort= -> {items:[normalized compatible downloadable candidates], query,sort}; preserve server ranking, version/file alignment.
+- POST /scene_prompt/civitai/download {model_id,version_id,file_id,model_mode} -> {lora_name,candidate}; refetch authoritative API record, validate compatibility and selected safetensors, derive safe filename using IDs, atomic rename, cache invalidation.
+
+Completion applies only to captured graph/node identity with unchanged description/output/mode/connections; if edited, deleted, tab replaced or undone meanwhile, do not overwrite. No automatic retries or fallbacks on arbitrary errors. New optional hidden widgets append to old nodes; compatibility migrations by widget name preserve old serialized arrays. New LLM integrates Python plan evaluation, metadata source paths, frontend stats/schedules/resources/To Text/Delete/Reverse and Preset safe registry.
+
+## Preset contract
+
+LLM nodes in an open Preset editing graph work normally and persist through existing explicit Preset Save. Expand operating through Reference must not mutate the shared Preset file. Store instance-local definitions of modified root/nested Presets in an appended optional hidden `llm_presets_json` widget on that Reference: {version:1,presets:{preset_id:preset_definition}}. Each reference has independent state; unchanged references keep live definitions. Generated outputs and inserted LoRA nodes update both local API graph and serialized workflow in those definitions. Affected definitions only, not full unrelated graph; no galleries/credentials. Same preset definition inside one reference is one conversion target; different outer Reference instances remain independent. Nested references inherit that local definition map unless carrying their own local override.
+
+Backend snapshot/evaluation/GraphBuilder expansion/metadata replay and frontend counts/resources use these same instance definitions; no globally keyed override contamination. Validate the same allowed Scene classes/links as ordinary Presets. Existing generation snapshot remains immutable. Editor entry opens local customized definition if present and Save explicitly commits it as ordinary Preset; it never writes shared files just from Prompt Generate.
+
+## Required tests
+
+- LLM JSON request/content/schema/exclusions/formats, invalid/truncated responses/errors/timeout; no leakage of keys; persisted editable outputs; zero background inference.
+- New node head/mixed chains/LoRA model filtering/Random/Queue/Count/To Text/Delete/Reverse; single request per reachable node, no unrelated/model input traversal, bypass and empty handling.
+- Search parameters, four sorts, compatible version filtering (Illustrious-family vs Anima), selected file/version/image consistency, none/invalid LLM IDs, error and retry; bounded/lazy cache and no workflow images.
+- Streamed download atomicity/hash mismatch/redirect token handling/identity reuse/path safety, no corrupt leftovers, configured root discovery.
+- Branch+Queue slots preserved, multiple LoRAs order, existing manual chain preserved, duplicate attempts, changed graph while awaiting, undo/redo and tab switch ownership.
+- Preset editor/Reference/nested/independent instances, saved PNG/JSON outputs and local graph insertion, snapshot/metadata/count consistency, old workflows unaffected.
+- Actual Chromium UI: disable/buttons order, settings, manual and LLM galleries, query/sort/selected green/details/trigger, modal failure/retry/focus/Escape, save/reload/undo/redo, no calls on workflow load. Real isolated Comfy runtime registration/API execution; real local LLM quality only if an already-running endpoint is available without interfering with production GPU.
+- Full existing frontend/Python suites, public package/privacy checks, CI before merge/tag v0.10.0; installed file sync only with empty production queue.
+
+Official sources: https://github.com/civitai/civitai-developer-docs/blob/main/site/reference/models.md ; https://github.com/civitai/civitai/blob/main/src/server/common/enums.ts ; https://docs.ollama.com/api/openai-compatibility
