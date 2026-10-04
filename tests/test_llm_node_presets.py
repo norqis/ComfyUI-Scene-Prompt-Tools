@@ -197,6 +197,35 @@ class LLMNodePresetTests(unittest.TestCase):
         self.assertEqual(nested_reloaded['widgets_values'], ['child', '', child_serialized])
         self.assertEqual(self.presets.load_preset('child')['api_graph']['output']['2']['inputs']['positive_base'], 'shared child')
 
+    def test_compact_list_llm_availability_and_nested_local_state(self):
+        shared = self.save('child', basic_nodes('shared'))
+        local = self.definition(shared, 'private saved output')
+        inputs = local['api_graph']['output']['2']['inputs']
+        inputs['description'] = ' a useful description '
+        inputs['generation_state_json'] = '{"description":"private saved description"}'
+        compact = self.presets._compact_preset_list_graph(local['api_graph'])['output']
+        self.assertIs(compact['2']['has_llm_input'], True)
+        for name in ('description', 'positive', 'negative', 'generation_state_json'):
+            self.assertNotIn(name, compact['2']['inputs'])
+        inputs['description'] = ' \n\t '
+        self.assertIs(self.presets._compact_preset_list_graph(local['api_graph'])['output']['2']['has_llm_input'], False)
+        reference = self.reference('child', {'.': local})
+        reference_compact = self.presets._compact_preset_list_graph(graph({'10': reference}))['output']['10']
+        self.assertEqual(reference_compact['inputs']['llm_presets_json'], reference['inputs']['llm_presets_json'])
+        ordinary = self.presets._compact_preset_list_graph(graph({'10': self.reference('child')}))['output']['10']
+        self.assertNotIn('llm_presets_json', ordinary['inputs'])
+        inputs['description'] = 'list availability'
+        self.save('llm-list', local['api_graph']['output'])
+        parent = basic_nodes()
+        parent['2'] = self.reference('child', {'.': local})
+        parent['2']['inputs']['scene_prompt'] = ['1', 0]
+        self.save('nested-list', parent)
+        listed = {entry['metadata']['preset_id']: entry for entry in self.presets.list_presets()['presets']}
+        listed_llm = listed['llm-list']['api_graph']['output']['2']
+        self.assertIs(listed_llm['has_llm_input'], True)
+        self.assertNotIn('private saved output', json.dumps(listed['llm-list']))
+        self.assertEqual(listed['nested-list']['api_graph']['output']['2']['inputs']['llm_presets_json'], parent['2']['inputs']['llm_presets_json'])
+
 
 if __name__ == '__main__':
     unittest.main()

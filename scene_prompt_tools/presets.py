@@ -253,7 +253,7 @@ def _compact_preset_list_graph(api_graph):
     scalar_inputs = {
         "matrix_json", "batch_size", "count", "preset_id", "reverse_scope",
         "order_mode", "alternate_block_size", "downstream_count_mode",
-        "weights_json", "preserve_join",
+        "weights_json", "preserve_join", "llm_presets_json",
     }
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
@@ -265,6 +265,8 @@ def _compact_preset_list_graph(api_graph):
             elif name in scalar_inputs:
                 inputs[name] = _compact_matrix_json(value) if name == "matrix_json" else copy.deepcopy(value)
         compact_nodes[str(node_id)] = {"class_type": node.get("class_type"), "inputs": inputs}
+        if node.get("class_type") == "ScenePromptLLM":
+            compact_nodes[str(node_id)]["has_llm_input"] = bool(str(_node_inputs(node).get("description") or "").strip())
     return {"output": compact_nodes}
 
 

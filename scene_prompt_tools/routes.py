@@ -930,10 +930,13 @@ def define_routes():
         try:
             preset_id = request.query.get("preset_id")
             preset = await asyncio.to_thread(load_preset, preset_id, _request_user_id(request))
-            return web.json_response({
+            response = {
                 "metadata": preset["metadata"],
                 "workflow": preset["workflow"],
-            })
+            }
+            if request.query.get("include_api_graph") == "1":
+                response["api_graph"] = preset["api_graph"]
+            return web.json_response(response)
         except ScenePresetNotFoundError as exc:
             return web.json_response({"error": str(exc)}, status=404)
         except ScenePresetError as exc:

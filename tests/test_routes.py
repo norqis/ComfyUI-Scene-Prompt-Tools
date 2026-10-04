@@ -298,6 +298,12 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertSetEqual(set(loaded["payload"]), {"metadata", "workflow"})
         self.assertEqual(loaded["payload"]["metadata"]["preset_id"], "route")
         self.assertNotIn("api_graph", loaded["payload"])
+        full_loaded = asyncio.run(load_preset(Request(query={"preset_id": "route", "include_api_graph": "1"})))
+        self.assertEqual(full_loaded["status"], 200)
+        self.assertSetEqual(set(full_loaded["payload"]), {"metadata", "workflow", "api_graph"})
+        self.assertEqual(full_loaded["payload"]["api_graph"], graph)
+        default_loaded = asyncio.run(load_preset(Request(query={"preset_id": "route", "include_api_graph": "0"})))
+        self.assertNotIn("api_graph", default_loaded["payload"])
 
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         claim = self.routes._test_routes[("POST", "/scene_prompt/runs/claim")]
