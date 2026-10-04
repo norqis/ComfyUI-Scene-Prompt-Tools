@@ -1143,6 +1143,30 @@ try {
     await page.keyboard.press("Escape");
     await page.keyboard.press("Escape");
     await page.evaluate(() => window.__sceneLoraCatalog.pop());
+    const positiveBeforeChangedPreview = await page.evaluate(() => {
+        const node = window.__sceneLoraTestNode;
+        const widget = node.widgets.find((entry) => entry.name === "lora_name");
+        widget.value = "style.safetensors";
+        widget.callback?.();
+        window.__sceneLoraCatalog[1].mtime_ns = 10;
+        window.__delayNextSceneLoraInfo = true;
+        node.widgets.find((entry) => entry.sceneRole === "lora_select").callback();
+        return node.widgets.find((entry) => entry.name === "positive").value;
+    });
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source").click();
+    await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
+    await page.evaluate(() => {
+        const widget = window.__sceneLoraTestNode.widgets.find((entry) => entry.name === "lora_name");
+        widget.value = "folder/other.safetensors";
+        widget.callback?.();
+        window.__releaseSceneLoraInfo();
+    });
+    await loraDialog.locator(".pc-lora-word button:disabled").first().waitFor();
+    assert.equal(await loraDialog.locator(".pc-lora-word button:enabled").count(), 0,
+        "selecting the previewed row during its delayed lookup does not grant injection eligibility");
+    assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((entry) => entry.name === "positive").value), positiveBeforeChangedPreview);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
     const positiveBeforeStaleDetails = await page.evaluate(() => {
         const node = window.__sceneLoraTestNode;
         const widget = node.widgets.find((entry) => entry.name === "lora_name");

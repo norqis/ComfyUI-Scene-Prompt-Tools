@@ -5339,8 +5339,10 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
     document.addEventListener("keydown", onKey);
     close.focus();
     const selectedName = String(findWidget(node, "lora_name")?.value || "").trim();
+    const selectedAtOpen = sceneLoraPathIdentity(selectedName);
     const item = previewItem || sceneLoraCatalogItem(selectedName);
-    const canInject = () => sceneLoraPathIdentity(findWidget(node, "lora_name")?.value) === sceneLoraPathIdentity(item.path);
+    const canInject = () => sceneLoraPathIdentity(item.path) === selectedAtOpen
+        && sceneLoraPathIdentity(findWidget(node, "lora_name")?.value) === selectedAtOpen;
     try {
         if (!item.path) throw new Error("LoRAを選択してください。");
         const result = await resolveSceneLora(item);
