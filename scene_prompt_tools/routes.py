@@ -935,6 +935,7 @@ def define_routes():
                 "workflow": preset["workflow"],
             }
             if request.query.get("include_api_graph") == "1":
+                response["schema_version"] = preset["schema_version"]
                 response["api_graph"] = preset["api_graph"]
             return web.json_response(response)
         except ScenePresetNotFoundError as exc:
