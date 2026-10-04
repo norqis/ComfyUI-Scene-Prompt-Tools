@@ -2299,6 +2299,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
 
         current_node_names = {
             "ScenePrompter",
+            "ScenePromptLLM",
             "SceneMatrix",
             "ScenePath",
             "ScenePrompterMerge",
@@ -2326,6 +2327,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             package.NODE_DISPLAY_NAME_MAPPINGS,
             {
                 "ScenePrompter": "Scene Prompt",
+                "ScenePromptLLM": "Scene Prompt (LLM)",
                 "SceneMatrix": "Scene Matrix",
                 "ScenePath": "Scene Path",
                 "ScenePrompterMerge": "Scene Prompt Merge",

@@ -33,6 +33,8 @@ class LLMNodePresetTests(unittest.TestCase):
         nodes['4'] = {"class_type": "ScenePromptCounter", "inputs": {"count": count, "scene_prompt": ['2', 0]}}
         nodes['3']['inputs']['scene_prompt'] = ['4', 0]
         local["workflow"] = outer_workflow(nodes)
+        llm_workflow = next(node for node in local['workflow']['nodes'] if node['id'] == 2)
+        llm_workflow['widgets_values'] = ['Illustrious', 'saved description', positive, '', '{}']
         return local
 
     def reference(self, preset_id, overrides=None):
@@ -147,6 +149,53 @@ class LLMNodePresetTests(unittest.TestCase):
         self.assertEqual(len(resources['loras']), 1)
         variants = resources['loras'][0]['variants']
         self.assertEqual({(v['model_mode'], v['applies']) for v in variants}, {('Illustrious', True), ('Anima', False)})
+
+    def test_workflow_only_nested_reference_real_widgets_metadata_and_root_save_reload(self):
+        child = self.save('child', basic_nodes('shared child'))
+        child_local = self.definition(child, 'custom child', 2)
+        child_serialized = json.dumps({'version': 1, 'presets': {'.': child_local}})
+        root_nodes = basic_nodes('root')
+        root_nodes['4'] = self.reference('child', {'.': child_local})
+        root_nodes['4']['inputs']['scene_prompt'] = ['2', 0]
+        root_nodes['3']['inputs']['scene_prompt'] = ['4', 0]
+        root_workflow = outer_workflow(root_nodes)
+        nested = next(node for node in root_workflow['nodes'] if node['id'] == 4)
+        nested['widgets_values'] = ['child', '', child_serialized]
+        root = self.presets.save_preset({'preset_id': 'root', 'name': 'root', 'output_node_id': '3',
+            'api_graph': graph(root_nodes), 'workflow': root_workflow})
+        root_local = copy.deepcopy(root)
+        root_local['api_graph']['output']['2']['inputs']['positive_base'] = 'local root'
+        local_json = json.dumps({'version': 1, 'presets': {'.': root_local}})
+        api = {
+            '1': basic_nodes('main')['2'],
+            '2': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['1', 0]}},
+            '9': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['2', 0], 'scene_info': ['2', 6],
+                'metadata_mode': self.nodes.SAVE_METADATA_WORKFLOW, 'expand_preset_contents': True}},
+        }
+        api['1']['inputs'].pop('scene_prompt')
+        workflow = outer_workflow(api)
+        workflow['nodes'].append({'id': 50, 'type': 'ScenePresetReference', 'pos': [800, 0],
+            'inputs': [], 'outputs': [{'name': 'scene_prompt', 'type': 'SCENE_PROMPT', 'links': []}],
+            'widgets_values': ['root', '', local_json]})
+        self.presets.snapshot_presets_for_run('canvas-only', graph(api), '2', workflow=workflow)
+        snapshots = self.presets.snapshot_presets_for_metadata('canvas-only')
+        self.assertEqual(snapshots['__occurrences__']['50/4']['api_graph']['output']['2']['inputs']['positive'], 'custom child')
+        metadata = importlib.import_module(self.presets.__package__ + '.preset_metadata')
+        replay, expanded_workflow, _ = metadata.expand_preset_references(api, workflow, snapshots, expand_workflow_references=True)
+        self.assertEqual(set(replay), set(api))
+        self.assertNotIn('ScenePresetReference', {node['type'] for node in expanded_workflow['nodes']})
+        self.assertIn('ScenePromptLLM', {node['type'] for node in expanded_workflow['nodes']})
+        replayed_llm = next(node for node in expanded_workflow['nodes'] if node['type'] == 'ScenePromptLLM')
+        self.assertEqual(replayed_llm['widgets_values'][2], 'custom child')
+        # Explicitly saving the root edited graph keeps the child customization
+        # in both API and real widget transport; it does not write the child file.
+        self.presets.save_preset({'preset_id': 'root', 'name': 'root', 'output_node_id': '3',
+            'api_graph': root_local['api_graph'], 'workflow': root_local['workflow']})
+        reloaded = self.presets.load_preset('root')
+        self.assertEqual(reloaded['api_graph']['output']['4']['inputs']['llm_presets_json'], child_serialized)
+        nested_reloaded = next(node for node in reloaded['workflow']['nodes'] if node['id'] == 4)
+        self.assertEqual(nested_reloaded['widgets_values'], ['child', '', child_serialized])
+        self.assertEqual(self.presets.load_preset('child')['api_graph']['output']['2']['inputs']['positive_base'], 'shared child')
 
 
 if __name__ == '__main__':

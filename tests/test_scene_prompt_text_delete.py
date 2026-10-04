@@ -393,8 +393,12 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             '18': {'class_type': 'ScenePromptCallback', 'inputs': {
                 'scene_prompt': ['16', 0], 'callback': ['17', 0],
             }},
+            '21': {'class_type': 'ScenePromptLLM', 'inputs': {
+                'scene_prompt': ['18', 0], 'model_mode': 'Illustrious',
+                'description': 'Saved only; no inference during execution.', 'positive': 'saved_llm_tag', 'negative': '',
+            }},
             '20': {'class_type': 'ScenePromptRandomRoute', 'inputs': {
-                'scene_prompt': ['18', 0], 'weights_json': self.nodes.DEFAULT_RANDOM_WEIGHTS_JSON,
+                'scene_prompt': ['21', 0], 'weights_json': self.nodes.DEFAULT_RANDOM_WEIGHTS_JSON,
             }},
             '19': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['20', 0]}},
         }
@@ -409,6 +413,9 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             result = self.presets.snapshot_presets_for_run(handle, {'output': api}, '19')
         self.assertEqual(result['total_images'], 2)
         self.assertEqual(result['total_batches'], 2)
+
+        plan = self.presets._scene_node_value(api, '21', {}, set(), run_handle=handle)
+        self.assertIn('saved_llm_tag', self.text(plan)[0])
 
     def test_random_route_snapshot_selects_output_slots_and_checks_missing_positive(self):
         import json
