@@ -879,8 +879,10 @@ async function testPresetResolveClearsOnlyItsOwnReferences() {
 }
 
 async function testPresetDisplayCacheStaysPerReference() {
+    const { preparePresetReference } = await import("../web/scene_llm_presets.js");
     const displayContext = {
         String,
+        preparePresetReference,
         findSceneWidget(node) { return node.widgets.find((widget) => widget.sceneRole === "scene_preset_select"); },
         findWidget(node, name) { return node.widgets.find((widget) => widget.name === name); },
         clearSceneComputedCaches() {},
