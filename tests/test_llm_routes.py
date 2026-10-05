@@ -14,6 +14,81 @@ aiohttp = llm_fixture.aiohttp
 service, settings_module = llm_fixture.service, llm_fixture.settings_module
 
 class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
+    async def test_gpu_routes_snapshot_client_ownership_operation_failure_and_explicit_intent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_modules = dict(sys.modules)
+            try:
+                routes = load_routes(Path(temporary))
+                package = routes.__package__
+                gpu = sys.modules[package + ".gpu_handoff"]
+                coordinator = routes.PromptServer.instance._scene_gpu_handoff
+                class Socket:
+                    closed = False
+                coordinator.socket_owners.update({"a": ("alice", Socket()), "b": ("alice", Socket())})
+                sys.modules["aiohttp"] = aiohttp
+                class Request:
+                    user_id = "alice"
+                    payload = {}
+                    async def json(self):
+                        return self.payload
+                request = Request()
+                registered = routes._test_routes
+                prepare = registered[("POST", "/scene_prompt/gpu/prepare")]
+                begin = registered[("POST", "/scene_prompt/llm/begin")]
+                end = registered[("POST", "/scene_prompt/llm/end")]
+                generate = registered[("POST", "/scene_prompt/llm/generate")]
+                release = registered[("POST", "/scene_prompt/gpu/release")]
+                with mock.patch.dict(sys.modules, {package + ".llm_settings": settings_module,
+                        package + ".llm_service": service}), \
+                        mock.patch.object(settings_module, "storage_directory", side_effect=lambda user: Path(temporary) / user), \
+                        mock.patch.object(coordinator, "release_comfy", new=mock.AsyncMock()):
+                    settings_module.save_settings("alice", {"model": "first", "api_key": "secret"})
+                    # Explicit endpoint calls preserve an operation requested
+                    # while the browser's UI setting was on, even if it changed
+                    # during a FIFO wait. No current-setting gate is consulted.
+                    request.payload = {"client_id": "a"}
+                    policy_response = await prepare(request)
+                    self.assertEqual(policy_response["status"], 200)
+                    policy_id = policy_response["payload"]["policy_id"]
+                    self.assertNotIn("secret", str(policy_response))
+                    started = await begin(request)
+                    self.assertEqual(started["status"], 200)
+                    session_id = started["payload"]["session_id"]
+                    self.assertEqual((await begin(request))["status"], 409)
+                    settings_module.save_settings("alice", {"model": "changed"})
+                    request.payload = {"client_id": "b", "session_id": session_id, "description": "scene", "model_mode": "Illustrious"}
+                    with mock.patch.object(service, "generate", new=mock.AsyncMock(return_value={"positive": "fixture"})) as inference:
+                        self.assertEqual((await generate(request))["status"], 403)
+                        inference.assert_not_awaited()
+                        request.user_id = "bob"
+                        request.payload["client_id"] = "a"
+                        self.assertEqual((await generate(request))["status"], 403)
+                        request.user_id = "alice"
+                        result = await generate(request)
+                        self.assertEqual(result["status"], 200)
+                        self.assertEqual(inference.await_args.args[0]["model"], "first")
+                        self.assertEqual(inference.await_args.args[0]["api_key"], "secret")
+                    request.payload = {"client_id": "b", "session_id": session_id}
+                    self.assertEqual((await end(request))["status"], 403)
+                    request.payload["client_id"] = "a"
+                    self.assertTrue((await end(request))["payload"]["ended"])
+                    self.assertFalse(coordinator.gate.exclusive)
+                    request.payload = {"client_id": "b", "policy_id": policy_id}
+                    self.assertEqual((await release(request))["status"], 403)
+                    request.payload["client_id"] = "a"
+                    self.assertTrue((await release(request))["payload"]["released"])
+                    request.payload = {"client_id": "a", "session_id": "missing", "description": "scene", "model_mode": "Illustrious"}
+                    self.assertEqual((await generate(request))["status"], 404)
+                    request.payload = {"client_id": "missing"}
+                    self.assertEqual((await prepare(request))["status"], 403)
+                    self.assertFalse(coordinator.policies)
+                    self.assertFalse(coordinator.sessions)
+            finally:
+                for name in list(sys.modules):
+                    if name not in original_modules:
+                        del sys.modules[name]
+                sys.modules.update(original_modules)
+
     async def test_real_http_settings_save_reopen_and_user_isolation_without_secret_prefill(self):
         with tempfile.TemporaryDirectory() as temporary:
             original_modules = dict(sys.modules)

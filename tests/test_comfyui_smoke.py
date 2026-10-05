@@ -80,6 +80,41 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertEqual(self.package.WEB_DIRECTORY, "./web")
         self.assertTrue((ROOT / self.package.WEB_DIRECTORY).is_dir())
 
+    def test_gpu_handoff_uses_real_executor_caches_and_weak_lifetime_registration(self):
+        import execution
+        import comfy.model_management as management
+        from comfy_execution.graph import DynamicPrompt
+        module = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.gpu_handoff"]
+        server = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.routes"].PromptServer.instance
+        coordinator = module.get_coordinator(server)
+        self.assertTrue(execution.PromptQueue._scene_gpu_hooks)
+        class CachedObject:
+            pass
+        for mode in (execution.CacheType.CLASSIC, execution.CacheType.LRU, execution.CacheType.RAM_PRESSURE):
+            with self.subTest(mode=mode):
+                executor = execution.PromptExecutor(server, cache_type=mode, cache_args={"lru": 2, "ram": 0, "ram_inactive": 0})
+                executor_ref = weakref.ref(executor)
+                asyncio.run(executor.caches.objects.set_prompt(DynamicPrompt({"object": {
+                    "class_type": "SceneSaveImage", "inputs": {}}}), ["object"], None))
+                cached = CachedObject()
+                cached_ref = weakref.ref(cached)
+                executor.caches.objects.set_local("object", cached)
+                del cached
+                self.assertIsNotNone(cached_ref())
+                future = self.loop.create_future()
+                coordinator.controls.append(future)
+                with mock.patch.object(management, "unload_all_models") as unload, mock.patch.object(management, "soft_empty_cache") as empty:
+                    coordinator.service_controls()
+                self.loop.run_until_complete(asyncio.sleep(0))
+                self.assertIsNone(future.result())
+                unload.assert_called_once()
+                empty.assert_called_once()
+                self.assertIsNone(cached_ref())
+                del executor
+                gc.collect()
+                self.assertIsNone(executor_ref())
+        self.assertFalse(coordinator.executors)
+
     def test_real_object_caches_reuse_save_owner_and_release_unused_fallback(self):
         import execution
         from comfy_execution.graph import DynamicPrompt

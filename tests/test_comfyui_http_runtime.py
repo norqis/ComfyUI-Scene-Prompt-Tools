@@ -15,6 +15,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -175,6 +176,64 @@ class _DesktopCallbackClient:
             time.sleep(0.02)
         with self._lock:
             return list(self.notifications)
+
+
+class _GpuProvider:
+    """A deterministic loopback provider; never calls a real local LLM."""
+    def __enter__(self):
+        fixture = self
+        self.loaded = True
+        self.false_success = False
+        self.busy = False
+        self.calls = []
+        self.marker = None
+        class Handler(BaseHTTPRequestHandler):
+            def _json(self, data, status=200):
+                body = json.dumps(data).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def do_GET(self):
+                fixture.calls.append(self.path)
+                if self.path == "/v1/status":
+                    self._json({"service": "strata", "loaded": fixture.loaded,
+                        "model": "gpu-fixture", "activity": {"in_flight": int(fixture.busy)}})
+                elif self.path == "/v1/models":
+                    self._json({"data": [{"id": "gpu-fixture"}]})
+                else:
+                    self._json({}, 404)
+            def do_POST(self):
+                fixture.calls.append(self.path)
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if self.path == "/v1/unload":
+                    if not fixture.false_success:
+                        fixture.loaded = False
+                    if fixture.marker:
+                        with fixture.marker.open("a", encoding="utf-8") as handle:
+                            handle.write("llm-unload\n")
+                    self._json({"status": "unloaded"})
+                elif self.path == "/v1/chat/completions":
+                    fixture.loaded = True
+                    self._json({"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
+                        "positive": "fixture", "negative": "", "lora_queries": []})}}]})
+                else:
+                    self._json({}, 404)
+            def log_message(self, *_args):
+                pass
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return self
+    def __exit__(self, *_exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+    @property
+    def port(self):
+        return self.server.server_address[1]
 
 
 def _scene_prompt_inputs():
@@ -657,6 +716,61 @@ class TestSceneModelSink:
     def consume(self, model, clip, vae):
         return ()
 
+class TestSceneGPUImage:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"log_path": ("STRING",), "label": ("STRING",), "hold_path": ("STRING",)}}
+    RETURN_TYPES = ()
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    CATEGORY = "test"
+    def execute(self, log_path, label, hold_path):
+        import time
+        with Path(log_path).open("a", encoding="utf-8") as handle:
+            handle.write(label + "-start\\n")
+        while hold_path and Path(hold_path).exists():
+            comfy_nodes.before_node_execution()
+            time.sleep(0.01)
+        with Path(log_path).open("a", encoding="utf-8") as handle:
+            handle.write(label + "-done\\n")
+        return ()
+
+# These markers instrument only the isolated CPU process. They prove cache
+# release order at the real worker boundary without inspecting the live GPU.
+import execution as comfy_execution
+import comfy.model_management as management
+import gc
+gpu_marker = Path(__file__).parent.parent.parent / "gpu-worker.log"
+def gpu_record(label):
+    with gpu_marker.open("a", encoding="utf-8") as handle:
+        handle.write(label + "\\n")
+original_reset = comfy_execution.PromptExecutor.reset
+def gpu_reset(self):
+    gpu_record("comfy-reset")
+    return original_reset(self)
+comfy_execution.PromptExecutor.reset = gpu_reset
+original_unload = management.unload_all_models
+def gpu_unload():
+    gpu_record("comfy-unload")
+    return original_unload()
+management.unload_all_models = gpu_unload
+original_empty = management.soft_empty_cache
+def gpu_empty(*args, **kwargs):
+    gpu_record("comfy-empty")
+    return original_empty(*args, **kwargs)
+management.soft_empty_cache = gpu_empty
+original_collect = gc.collect
+def gpu_collect(*args, **kwargs):
+    gpu_record("comfy-gc")
+    return original_collect(*args, **kwargs)
+gc.collect = gpu_collect
+original_task_done = comfy_execution.PromptQueue.task_done
+def gpu_task_done(self, *args, **kwargs):
+    result = original_task_done(self, *args, **kwargs)
+    gpu_record("task-done")
+    return result
+comfy_execution.PromptQueue.task_done = gpu_task_done
+
 # Built-in names are excluded from custom-node registration. Replace this one
 # only inside the isolated CPU harness to record scheduling without model files.
 comfy_nodes.NODE_CLASS_MAPPINGS["LoraLoader"] = TestSceneLoraLoader
@@ -665,6 +779,7 @@ NODE_CLASS_MAPPINGS = {
     "TestSceneModelBundle": TestSceneModelBundle,
     "TestSceneModelSink": TestSceneModelSink,
     "TestSceneTextImage": TestSceneTextImage,
+    "TestSceneGPUImage": TestSceneGPUImage,
 }
 ''',
             encoding="utf-8",
@@ -754,7 +869,8 @@ NODE_CLASS_MAPPINGS = {
         )
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
-                return response.status, json.loads(response.read().decode("utf-8"))
+                body = response.read().decode("utf-8")
+                return response.status, json.loads(body) if body else None
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
 
@@ -787,6 +903,162 @@ NODE_CLASS_MAPPINGS = {
         if extra_data is not None:
             payload["extra_data"] = extra_data
         return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
+
+    def _gpu_graph(self, marker, label, hold_path=""):
+        return {"1": {"class_type": "TestSceneGPUImage", "inputs": {
+            "log_path": str(marker), "label": label, "hold_path": str(hold_path)}}}
+
+    def _gpu_settings(self, provider):
+        self._request("/scene_prompt/llm/settings", {"base_url": "http://127.0.0.1/v1",
+            "port": provider.port, "model": "gpu-fixture", "api_key": "gpu-private-secret"})
+
+
+    def test_gpu_handoff_real_worker_order_continuous_epoch_and_private_history(self):
+        with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-owner"):
+            self._gpu_settings(provider)
+            marker = provider.marker = self.base / "gpu-image.log"
+            worker_marker = self.base / "gpu-worker.log"
+            worker_marker.write_text("", encoding="utf-8")
+            begin = self._request("/scene_prompt/llm/begin", {"client_id": "gpu-owner"})
+            release = worker_marker.read_text(encoding="utf-8").splitlines()
+            reset = release.index("comfy-reset")
+            unload = release.index("comfy-unload", reset + 1)
+            collect = release.index("comfy-gc", unload + 1)
+            self.assertGreater(release.index("comfy-empty", collect + 1), collect)
+            session_id = begin["session_id"]
+            self._request("/scene_prompt/llm/generate", {"client_id": "gpu-owner", "session_id": session_id,
+                "description": "fixture", "model_mode": "Illustrious"})
+            self.assertTrue(provider.loaded)
+            queued = self._request("/prompt", {"prompt": self._gpu_graph(marker, "blocked")})
+            time.sleep(0.1)
+            self.assertFalse(marker.exists(), "An OFF image must wait until the controlled LLM operation ends")
+            self._request("/scene_prompt/llm/end", {"client_id": "gpu-owner", "session_id": session_id})
+            self._wait_for_prompt(queued["prompt_id"])
+            marker.write_text("", encoding="utf-8")
+            policy_id = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-owner", "continuous": True})["policy_id"]
+            # Change saved settings after preparation; queued policy retains its
+            # original connection, model and key rather than rereading globals.
+            self._request("/scene_prompt/llm/settings", {"model": "changed-model"})
+            for label in ("first", "second"):
+                queued = self._request("/prompt", {"client_id": "gpu-owner", "prompt": self._gpu_graph(marker, label),
+                    "extra_data": {"scene_gpu_policy": policy_id}})
+                history = self._wait_for_prompt(queued["prompt_id"])
+                self.assertNotIn(policy_id, json.dumps(history))
+                self.assertNotIn("gpu-private-secret", json.dumps(history))
+            self.assertEqual(provider.calls.count("/v1/unload"), 1)
+            self.assertEqual(marker.read_text(encoding="utf-8").splitlines(),
+                ["llm-unload", "first-start", "first-done", "second-start", "second-done"])
+            self._request("/scene_prompt/llm/settings", {"model": "gpu-fixture"})
+            self._request("/scene_prompt/llm/generate", {"description": "fixture", "model_mode": "Illustrious"})
+            queued = self._request("/prompt", {"client_id": "gpu-owner", "prompt": self._gpu_graph(marker, "third"),
+                "extra_data": {"scene_gpu_policy": policy_id}})
+            self._wait_for_prompt(queued["prompt_id"])
+            self.assertEqual(provider.calls.count("/v1/unload"), 2)
+            self.assertTrue(self._request("/scene_prompt/gpu/release", {"policy_id": policy_id, "client_id": "gpu-owner"})["released"])
+
+
+    def test_gpu_release_failure_stops_nodes_and_native_worker_accepts_next_job(self):
+        with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-failure"):
+            self._gpu_settings(provider)
+            marker = provider.marker = self.base / "gpu-failure.log"
+            for false_success in (True, False):
+                provider.false_success = false_success
+                provider.busy = not false_success
+                provider.loaded = True
+                policy_id = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-failure"})["policy_id"]
+                queued = self._request("/prompt", {"client_id": "gpu-failure", "prompt": self._gpu_graph(marker, "forbidden"),
+                    "extra_data": {"scene_gpu_policy": policy_id}})
+                history = self._wait_for_prompt_error(queued["prompt_id"])
+                self.assertTrue(any(message[0] == "execution_error" for message in history["status"]["messages"]))
+                self.assertNotIn("forbidden-start", marker.read_text(encoding="utf-8") if marker.exists() else "")
+                self.assertNotIn(policy_id, json.dumps(history))
+            history = self._queue_and_wait(self._gpu_graph(marker, "next"))
+            self.assertEqual(history["status"]["status_str"], "success")
+            self.assertIn("next-done", marker.read_text(encoding="utf-8"))
+
+
+    def test_gpu_begin_waits_active_image_and_disconnect_releases_blocked_images(self):
+        with _GpuProvider() as provider:
+            self._gpu_settings(provider)
+            marker = self.base / "gpu-active.log"
+            worker_marker = self.base / "gpu-worker.log"
+            worker_marker.write_text("", encoding="utf-8")
+            hold = self.base / "gpu-active.hold"
+            hold.touch()
+            queued = self._request("/prompt", {"prompt": self._gpu_graph(marker, "active", hold)})
+            deadline = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(marker.exists())
+            # Native /free is flag-only and may consume a handoff wake at the
+            # end of this image. Both controls must still finish on the worker.
+            self.assertEqual(self._request_status("/free", {"unload_models": True, "free_memory": True})[0], 200)
+            result = {}
+            def begin():
+                result.update(self._request("/scene_prompt/llm/begin", {"client_id": "gpu-active"}))
+            with _DesktopCallbackClient(self.port, "gpu-active"):
+                thread = Thread(target=begin)
+                thread.start()
+                time.sleep(0.1)
+                self.assertFalse(result)
+                hold.unlink()
+                self._wait_for_prompt(queued["prompt_id"])
+                thread.join(timeout=10)
+                self.assertIn("session_id", result)
+                events = worker_marker.read_text(encoding="utf-8").splitlines()
+                self.assertLess(events.index("task-done"), events.index("comfy-reset"))
+                after = self._request("/prompt", {"prompt": self._gpu_graph(marker, "after")})
+                time.sleep(0.1)
+                self.assertNotIn("after-start", marker.read_text(encoding="utf-8"))
+            self._wait_for_prompt(after["prompt_id"])
+            self.assertIn("after-done", marker.read_text(encoding="utf-8"))
+
+    def test_gpu_prompt_admission_queue_removal_interrupt_and_two_client_ownership(self):
+        with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-tab-a"), _DesktopCallbackClient(self.port, "gpu-tab-b"):
+            self._gpu_settings(provider)
+            marker = provider.marker = self.base / "gpu-ownership.log"
+            session_id = self._request("/scene_prompt/llm/begin", {"client_id": "gpu-tab-a"})["session_id"]
+            blocker = self._request("/prompt", {"prompt": self._gpu_graph(marker, "blocked")})
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if self._request("/queue")["queue_running"]:
+                    break
+                time.sleep(0.02)
+            policy_id = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b", "continuous": True})["policy_id"]
+            status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-a", "prompt": self._gpu_graph(marker, "foreign"),
+                "extra_data": {"scene_gpu_policy": policy_id}})
+            self.assertEqual(status, 403)
+            status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "missing"),
+                "extra_data": {"scene_gpu_policy": "missing"}})
+            self.assertEqual(status, 404)
+            prompt_id = str(uuid.uuid4())
+            self._request("/prompt", {"client_id": "gpu-tab-b", "prompt_id": prompt_id,
+                "prompt": self._gpu_graph(marker, "deleted"), "extra_data": {"scene_gpu_policy": policy_id}})
+            self.assertNotIn(policy_id, json.dumps(self._request("/queue")))
+            # An OFF client must not pick up another item's private policy by
+            # deliberately reusing the caller-supplied native UUID.
+            status, _ = self._request_status("/prompt", {"prompt_id": prompt_id, "prompt": self._gpu_graph(marker, "duplicate")})
+            self.assertEqual(status, 409)
+            self.assertEqual(self._request_status("/queue", {"delete": [prompt_id]})[0], 200)
+            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": policy_id})[0], 404)
+            wiped_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
+            self._request("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "wiped"),
+                "extra_data": {"scene_gpu_policy": wiped_policy}})
+            self.assertEqual(self._request_status("/queue", {"clear": True})[0], 200)
+            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": wiped_policy})[0], 404)
+            invalid_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
+            status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-b", "prompt": {},
+                "extra_data": {"scene_gpu_policy": invalid_policy}})
+            self.assertEqual(status, 400)
+            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": invalid_policy})[0], 404)
+            self.assertEqual(self._request_status("/interrupt", {})[0], 200)
+            interrupted = self._wait_for_prompt_error(blocker["prompt_id"])
+            self.assertTrue(any(message[0] == "execution_interrupted" for message in interrupted["status"]["messages"]))
+            self.assertFalse(marker.exists())
+            self._request("/scene_prompt/llm/end", {"client_id": "gpu-tab-a", "session_id": session_id})
+            self._queue_and_wait(self._gpu_graph(marker, "next"))
+            self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["next-start", "next-done"])
+
 
     def test_queue_v7_alternating_count_modes_execute_in_final_order(self):
         """Run real Queue -> Count -> Expand contracts in this isolated CPU server."""

@@ -616,6 +616,58 @@ def define_routes():
         return
     _ROUTES_DEFINED = True
     setattr(PromptServer.instance, "_scene_prompt_routes_defined", True)
+    from .gpu_handoff import HandoffError, install
+    gpu = install(PromptServer.instance)
+
+    async def gpu_operation(request, operation):
+        from .llm_settings import request_settings
+        from .llm_service import ServiceError
+        try:
+            user_id = _request_user_id(request)
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Request body must be a JSON object.")
+            client_id = str(payload.get("client_id") or "")
+            if operation in ("prepare", "begin"):
+                # Calling this endpoint explicitly requests the operation's
+                # snapshotted policy. The UI may have waited in its FIFO while
+                # the user's currently saved settings changed.
+                settings, state = await asyncio.to_thread(request_settings, user_id)
+                if operation == "prepare":
+                    result = {"policy_id": gpu.prepare(user_id, client_id, settings,
+                        continuous=payload.get("continuous") is True,
+                        run_handle=str(payload.get("run_handle") or ""))}
+                else:
+                    result = {"session_id": await gpu.begin_session(user_id, client_id, settings, state)}
+            elif operation == "release":
+                policy_id = str(payload.get("policy_id") or "")
+                gpu.policy(policy_id, user_id, client_id)
+                result = {"released": gpu.retire_policy(policy_id)}
+            else:
+                result = {"ended": gpu.end_session(str(payload.get("session_id") or ""), user_id, client_id=client_id)}
+            return web.json_response(result)
+        except (HandoffError, ServiceError) as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status)
+        except (ValueError, TypeError, KeyError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except OSError:
+            return web.json_response({"error": "Unable to access Scene Prompt LLM settings."}, status=500)
+
+    @PromptServer.instance.routes.post("/scene_prompt/gpu/prepare")
+    async def scene_gpu_prepare(request):
+        return await gpu_operation(request, "prepare")
+
+    @PromptServer.instance.routes.post("/scene_prompt/gpu/release")
+    async def scene_gpu_release(request):
+        return await gpu_operation(request, "release")
+
+    @PromptServer.instance.routes.post("/scene_prompt/llm/begin")
+    async def scene_llm_begin(request):
+        return await gpu_operation(request, "begin")
+
+    @PromptServer.instance.routes.post("/scene_prompt/llm/end")
+    async def scene_llm_end(request):
+        return await gpu_operation(request, "end")
 
     async def llm_operation(request, operation):
         # Lazy imports retain compatibility with lightweight Comfy/aiohttp route loaders.
@@ -623,9 +675,7 @@ def define_routes():
         from .llm_service import ServiceError, generate, select_loras, test_connection
         try:
             user_id = _request_user_id(request)
-            if operation in ("generate", "select"):
-                settings, state = await asyncio.to_thread(request_settings, user_id)
-            elif operation != "settings_post":
+            if operation not in ("settings_post", "generate", "select"):
                 settings = await asyncio.to_thread(load_settings, user_id)
             if operation == "settings_get":
                 result = public_settings(settings)
@@ -636,13 +686,21 @@ def define_routes():
                 if operation == "settings_post":
                     result = await asyncio.to_thread(save_settings, user_id, payload)
                 elif operation == "test":
-                    result = await test_connection(merge_settings(settings, payload))
-                elif operation == "generate":
-                    result = await generate(settings, payload.get("description"), payload.get("model_mode"), state)
+                    async with gpu.llm_request(user_id):
+                        result = await test_connection(merge_settings(settings, payload))
                 else:
-                    result = await select_loras(settings, payload.get("description"), payload.get("model_mode"), payload.get("query", ""), payload.get("candidates"), state)
+                    session_id = payload.get("session_id")
+                    async with gpu.llm_request(user_id, session_id, str(payload.get("client_id") or "") if session_id else None) as session:
+                        if session is None:
+                            settings, state = await asyncio.to_thread(request_settings, user_id)
+                        else:
+                            settings, state = session.settings, session.state
+                        if operation == "generate":
+                            result = await generate(settings, payload.get("description"), payload.get("model_mode"), state)
+                        else:
+                            result = await select_loras(settings, payload.get("description"), payload.get("model_mode"), payload.get("query", ""), payload.get("candidates"), state)
             return web.json_response(result)
-        except ServiceError as exc:
+        except (HandoffError, ServiceError) as exc:
             return web.json_response({"error": str(exc)}, status=exc.status)
         except (ValueError, TypeError, KeyError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
