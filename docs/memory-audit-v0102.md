@@ -1,6 +1,6 @@
 # v0.10.2 lifetime and prompt-generation audit
 
-Status: revised root design approved by gpt-5.6-sol medium at 92e0ee9. Backend lifetime implementation, 25 focused regressions and the full 506-test Python suite verified; combined native/final-review/release gates remain.
+Status: revised root design approved by gpt-5.6-sol medium at 92e0ee9. Backend and frontend ownership implementations, full unit suites and isolated native browser checks verified. Final combined review and public release gates remain.
 
 ## Required behavior
 
@@ -55,6 +55,12 @@ Keep Save's owned payload/hash/staging write/verification outside the global loc
 - Root final diff/evidence review and gpt-5.6-sol medium APPROVE, public CI, v0.10.2 release and installed-source hash sync. No production restart.
 
 This revision concerns cache ownership. Integer precision/overflow checks, valid probability totals, parser/file-format integrity checks, explicit service output settings and user-requested Undo settings are not cache capacity controls and remain unchanged.
+
+## Frontend and independent root verification
+
+- The full frontend suite and isolated native CPU ComfyUI browser passed. The native test connected registered standard Checkpoint, diffusion-model, CLIP, VAE and LoRA loaders before the LLM path: prompt generation executed none of them and made zero image queue, run-preparation or resource-inspection requests. Failed Preset retry, two-LLM LoRA insertion, Undo/Redo, workflow reload and editor HTTP Save/reload also passed without delayed browser errors. Generated responses were fixtures; live LLM quality and GPU sampling speed were not measured.
+- Forty distinct hydrated 1 MiB outputs remained available during their owning operations, with no capacity eviction. Disposing the operations left zero definition entries; compact global source bytes stayed 18,522 before/after. The isolated JavaScript heap settled from 43.62 MiB to 3.36 MiB after disposal/collection. Current/persisted titles beyond 300 files, revision replacement, acquisition before catalog refresh, failed temporary identities, modal dismissal, layout replacement and terminal-event consumption/expiry have focused regressions.
+- Root independently reran all 25 memory ownership tests and the Preset frontend regression. A separate 70-revision probe using a 256 KiB API prompt retained zero operation bytes after input deletion/collection, with a 1.1363 MiB temporary peak. These are synthetic ownership measurements rather than a total browser or server memory claim.
 
 ## Backend lifetime implementation and evidence
 
