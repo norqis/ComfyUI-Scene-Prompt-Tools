@@ -16,6 +16,7 @@ from .llm_service import ServiceError, candidate_identity, MODES
 from .lora_metadata import file_identity, file_signature, file_operation
 
 SORTS = ("Most Downloaded", "Most Liked", "Most Collected", "Highest Rated")
+STAT_FIELDS = ("downloadCount", "thumbsUpCount", "favoriteCount", "collectedCount", "rating", "ratingCount", "commentCount", "tippedAmountCount")
 _NOT_FOUND = object()
 _DOWNLOAD_LOCK = None
 _HASH_CACHE = {}
@@ -31,12 +32,21 @@ def compatible(base_model, mode):
     return base in ("illustrious", "illustrious xl", "noobai", "noobai xl") if mode == "Illustrious" else base == "anima"
 
 
-def api_origin():
-    return "https://civitai.red"
+HOSTS = ("civitai.red", "civitai.com")
 
 
-async def api_get(path, params=None, *, missing_ok=False):
-    url = api_origin() + path
+def validate_host(host):
+    if host not in HOSTS:
+        raise ValueError("Civitai host must be civitai.red or civitai.com.")
+    return host
+
+
+def api_origin(host="civitai.red"):
+    return "https://" + validate_host(host)
+
+
+async def api_get(path, params=None, *, missing_ok=False, host="civitai.red"):
+    url = api_origin(validate_host(host)) + path
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), cookie_jar=aiohttp.DummyCookieJar()) as session:
             async with session.get(url, params=params, allow_redirects=False) as response:
@@ -44,17 +54,15 @@ async def api_get(path, params=None, *, missing_ok=False):
                     return _NOT_FOUND
                 if response.status != 200:
                     raise ServiceError(f"Civitai API returned HTTP {response.status}.")
-                return await response.json()
+                try:
+                    return json.loads(await response.text())
+                except json.JSONDecodeError as exc:
+                    raise ServiceError(f"Civitai API {path} returned invalid JSON (HTTP {response.status}).") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
         raise ServiceError("Civitai connection failed, timed out, or returned invalid JSON.") from exc
 
 
-async def by_hash(sha256):
-    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
-        raise ValueError("SHA256 must contain exactly 64 hexadecimal digits.")
-    version = await api_get("/api/v1/model-versions/by-hash/" + sha256.lower(), missing_ok=True)
-    if version is _NOT_FOUND:
-        return {"found": False, "version": None}
+def _hash_version(version):
     if (not isinstance(version, dict)
             or type(version.get("id")) is not int or version["id"] <= 0
             or type(version.get("modelId")) is not int or version["modelId"] <= 0
@@ -67,32 +75,82 @@ async def by_hash(sha256):
         "name": version["name"], "model": {"name": version["model"]["name"]}, "trainedWords": version.get("trainedWords", [])}}
 
 
-def normalize(model, mode):
+async def by_hash(sha256):
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+        raise ValueError("SHA256 must contain exactly 64 hexadecimal digits.")
+    error = None
+    for host in HOSTS:
+        try:
+            version = await api_get("/api/v1/model-versions/by-hash/" + sha256.lower(), missing_ok=True, host=host)
+            if version is not _NOT_FOUND:
+                return _hash_version(version)
+        except ServiceError as exc:
+            error = exc
+    if error is not None:
+        raise error
+    return {"found": False, "version": None}
+
+
+def _field(data, key, expected, default):
+    value = data.get(key, default)
+    if value is None:
+        return default
+    if not isinstance(value, expected) or isinstance(value, bool) and expected != bool:
+        raise ServiceError(f"Civitai returned an invalid {key} field.")
+    return value
+
+
+def normalize(model, mode, host="civitai.red"):
+    host = validate_host(host)
     if not isinstance(model, dict) or not isinstance(model.get("modelVersions", []), list):
         raise ServiceError("Civitai returned an invalid model response.")
-    if model.get("type") != "LORA" or model.get("mode") or model.get("availability", "Public") != "Public":
+    if _field(model, "type", str, "") != "LORA" or _field(model, "mode", str, "") or _field(model, "availability", str, "Public") != "Public":
         return []
     result = []
     for version in model.get("modelVersions", []):
         if not isinstance(version, dict):
             raise ServiceError("Civitai returned an invalid version response.")
-        if not compatible(version.get("baseModel"), mode) or version.get("availability", "Public") != "Public":
+        if not compatible(_field(version, "baseModel", str, ""), mode) or _field(version, "availability", str, "Public") != "Public":
             continue
-        images = version.get("images", [])
-        image_url = next((image.get("url", "") for image in images if not image.get("nsfw") and image.get("nsfwLevel", 1) <= 1), "")
-        for file in version.get("files", []):
+        gallery = []
+        for image in _field(version, "images", list, []):
+            if not isinstance(image, dict):
+                raise ServiceError("Civitai returned an invalid image response.")
+            if _field(image, "type", str, "image") != "image":
+                continue
+            nsfw = _field(image, "nsfw", bool, False)
+            level = _field(image, "nsfwLevel", (int, float), 1)
+            url = _field(image, "url", str, "")
+            if url and not nsfw and level <= 1:
+                gallery.append({"url": url, "width": _field(image, "width", (int, float), None),
+                                "height": _field(image, "height", (int, float), None)})
+        triggers = _field(version, "trainedWords", list, [])
+        if any(not isinstance(word, str) for word in triggers):
+            raise ServiceError("Civitai returned invalid trainedWords.")
+        model_stats = _field(model, "stats", dict, {})
+        version_stats = _field(version, "stats", dict, {})
+        if any(not isinstance(stats[key], (int, float)) or isinstance(stats[key], bool)
+               for stats in (model_stats, version_stats) for key in STAT_FIELDS if stats.get(key) is not None):
+            raise ServiceError("Civitai returned invalid stats.")
+        for file in _field(version, "files", list, []):
             if not isinstance(file, dict):
                 raise ServiceError("Civitai returned an invalid file response.")
-            sha256 = str(file.get("hashes", {}).get("SHA256", "")).lower()
-            if file.get("type") != "Model" or not str(file.get("name", "")).lower().endswith(".safetensors") or not re.fullmatch(r"[0-9a-f]{64}", sha256) or not file.get("downloadUrl"):
+            sha256 = _field(_field(file, "hashes", dict, {}), "SHA256", str, "").lower()
+            file_name = _field(file, "name", str, "")
+            if _field(file, "type", str, "") != "Model" or not file_name.lower().endswith(".safetensors") or not re.fullmatch(r"[0-9a-f]{64}", sha256) or not _field(file, "downloadUrl", str, ""):
                 continue
-            candidate = {"model_id": model["id"], "version_id": version["id"], "file_id": file["id"],
-                "name": model.get("name", ""), "version_name": version.get("name", ""), "base_model": version.get("baseModel", ""),
-                "file_name": file["name"], "size_kb": file.get("sizeKB", 0), "sha256": sha256,
-                "triggers": version.get("trainedWords", []), "image_url": image_url,
-                "model_url": f"https://civitai.red/models/{model['id']}?modelVersionId={version['id']}",
-                "stats": model.get("stats", {}), "acquired": False, "lora_name": ""}
-            candidate_identity(candidate)
+            candidate = {"model_id": model.get("id"), "version_id": version.get("id"), "file_id": file.get("id"),
+                "name": _field(model, "name", str, ""), "version_name": _field(version, "name", str, ""), "base_model": _field(version, "baseModel", str, ""),
+                "file_name": file_name, "size_kb": _field(file, "sizeKB", (int, float), 0), "sha256": sha256,
+                "triggers": triggers, "image_url": gallery[0]["url"] if gallery else "", "gallery": gallery,
+                "description": _field(model, "description", str, ""), "version_description": _field(version, "description", str, ""),
+                "published_at": _field(version, "publishedAt", str, "") or _field(version, "createdAt", str, ""),
+                "model_url": f"https://{host}/models/{model.get('id')}?modelVersionId={version.get('id')}",
+                "stats": model_stats, "model_stats": model_stats, "version_stats": version_stats, "acquired": False, "lora_name": ""}
+            try:
+                candidate_identity(candidate)
+            except ValueError as exc:
+                raise ServiceError("Civitai returned invalid candidate identifiers.") from exc
             result.append(candidate)
     return result
 
@@ -233,22 +291,23 @@ def _discard_download(download):
             os.unlink(temporary)
 
 
-async def search(query, model_mode, sort="Most Downloaded"):
+async def search(query, model_mode, sort="Most Downloaded", host="civitai.red"):
+    host = validate_host(host)
     if sort not in SORTS:
         raise ValueError("Unsupported Civitai sort.")
     if model_mode not in MODES:
         raise ValueError("Unsupported model_mode.")
     data = await api_get("/api/v1/models", {"query": query, "types": "LORA", "limit": 30, "period": "AllTime", "sort": sort,
-        "baseModels": ["Illustrious", "NoobAI"] if model_mode == "Illustrious" else ["Anima"], "nsfw": "false"})
+        "baseModels": ["Illustrious", "NoobAI"] if model_mode == "Illustrious" else ["Anima"], "nsfw": "false"}, host=host)
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ServiceError("Civitai returned an invalid search response.")
     items = []
     for model in data["items"][:30]:
-        candidates = normalize(model, model_mode)
+        candidates = normalize(model, model_mode, host)
         if candidates:
             first_version = candidates[0]["version_id"]
             version = next(item for item in model["modelVersions"] if item["id"] == first_version)
-            primary_ids = {file["id"] for file in version.get("files", []) if file.get("primary")}
+            primary_ids = {file.get("id") for file in version.get("files", []) if _field(file, "primary", bool, False)}
             items.append(next((candidate for candidate in candidates if candidate["version_id"] == first_version and candidate["file_id"] in primary_ids), candidates[0]))
     root = lora_root()
     def mark_acquired():
@@ -260,14 +319,15 @@ async def search(query, model_mode, sort="Most Downloaded"):
     return {"items": items, "query": query, "sort": sort}
 
 
-async def download(identity, model_mode):
+async def download(identity, model_mode, host="civitai.red"):
     global _DOWNLOAD_LOCK
+    host = validate_host(host)
     ids = candidate_identity(identity)
     if _DOWNLOAD_LOCK is None:
         _DOWNLOAD_LOCK = asyncio.Lock()
     async with _DOWNLOAD_LOCK:
-        model = await api_get(f"/api/v1/models/{ids[0]}")
-        candidate = next((item for item in normalize(model, model_mode) if candidate_identity(item) == ids), None)
+        model = await api_get(f"/api/v1/models/{ids[0]}", host=host)
+        candidate = next((item for item in normalize(model, model_mode, host) if candidate_identity(item) == ids), None)
         if candidate is None:
             raise ValueError("Selected LoRA is unavailable or incompatible with this model mode.")
         root = lora_root()
@@ -276,8 +336,12 @@ async def download(identity, model_mode):
             version = next(item for item in model["modelVersions"] if item["id"] == ids[1])
             file = next(item for item in version["files"] if item["id"] == ids[2])
             url = file["downloadUrl"]
-            if not url.startswith(api_origin() + "/api/download/"):
+            parsed = urlsplit(url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            selected_origin = api_origin(host)
+            if origin not in (selected_origin, "https://civitai.red", "https://civitai.com") or not parsed.path.startswith("/api/download/") or parsed.fragment:
                 raise ValueError("Civitai did not provide a trusted API download URL.")
+            url = selected_origin + parsed.path + ("?" + parsed.query if parsed.query else "")
             folder = root / "llm"
             await _file_io(folder.mkdir, parents=True, exist_ok=True)
             stream, temporary = await _file_io(_create_download, folder, cancel_cleanup=_discard_download)

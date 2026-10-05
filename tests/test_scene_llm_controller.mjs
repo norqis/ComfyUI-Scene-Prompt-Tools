@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
-import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity, hasLLMTargets } from "../web/scene_prompt_llm.js";
+import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity, hasLLMTargets, compactCandidates, requestJSON } from "../web/scene_prompt_llm.js";
 import { createPresetOperation, preparePresetReference, hydratePresetReference, collectPresetLLMTargets, presetReferenceHasLLM } from "../web/scene_llm_presets.js";
+import { createGPUController } from "../web/scene_prompt_gpu.js";
+
+const reply = (data, ok = true, status = ok ? 200 : 503) => new Response(JSON.stringify(data), { status });
 
 function fixture() {
     let next = 1, linkID = 1;
@@ -20,6 +23,26 @@ function fixture() {
 }
 const field = (node, name) => node.widgets.find((widget) => widget.name === name);
 const candidate = (id) => ({ model_id: id, version_id: id + 10, file_id: id + 20, lora_name: `llm/${id}.safetensors`, triggers: [`trigger${id}`] });
+{
+    const { graph, node, create } = fixture();
+    const a = node("ScenePromptLLM", "A"), b = node("ScenePromptLLM", "B"), output = node("ScenePromptRandomRouteOutput"), expand = node("ScenePrompterExpand");
+    output.inputs = [{ name: "scene_prompt1", type: "SCENE_PROMPT" }, { name: "scene_prompt10", type: "SCENE_PROMPT" }];
+    a.connect(0, output, 0); b.connect(0, output, 1); output.connect(0, expand, 0);
+    assert.deepEqual(collectLLMTargets(graph, expand).map(({ node: target }) => target), [a, b]);
+    const [lora] = insertLoras(graph, b, [candidate(9)], create);
+    assert.equal(graph.links[output.inputs[1].link].origin_id, lora.id, "LoRA insertion preserves Output's tenth input edge");
+    assert.deepEqual(collectLLMTargets(graph, expand).map(({ node: target }) => target), [a, b]);
+}
+{
+    const rich = { ...candidate(1), name: "model", description: "full metadata", gallery: [{url:"preview"}], model_stats: {downloadCount:3} };
+    assert.deepEqual(Object.keys(compactCandidates([rich])[0]), ["model_id","version_id","file_id","name","version_name","base_model","triggers"]);
+    for (const [status, text] of [[200,""],[200,'{"items":'],[502,"<html>failure</html>"],[404,""]]) {
+        let reads = 0;
+        await assert.rejects(() => requestJSON({ fetchApi: async () => ({ok:status===200,status,text:async()=>{reads++;return text;}}) }, "/scene_prompt/civitai/search?query=private"),
+            error => error.message.includes(`HTTP ${status}`) && error.message.includes("/scene_prompt/civitai/search") && !/SyntaxError|Unexpected end|private|<html>/.test(error.message));
+        assert.equal(reads,1,"the HTTP body is consumed exactly once");
+    }
+}
 {
     const { graph, node } = fixture();
     const first = node("ScenePromptLLM", "first"), second = node("ScenePromptLLM", "second"), queue = node("ScenePrompterQueue"), unrelated = node("ScenePromptLLM", "model");
@@ -53,7 +76,7 @@ const candidate = (id) => ({ model_id: id, version_id: id + 10, file_id: id + 20
         calls.push(path); const body = options.body && JSON.parse(options.body);
         const data = path.endsWith("generate") ? { positive: body.description, negative: "bad", lora_queries: ["hat"], template_version: "scene-llm-v1" }
             : path.includes("search?") ? { items: [candidate(1)] } : path.endsWith("select_loras") ? { selected: [candidate(1)] } : { candidate: candidate(1), lora_name: candidate(1).lora_name };
-        return { ok: true, json: async () => data };
+        return reply(data);
     } };
     const controller = createLLMController({ app, api, createNode: create });
     assert.equal(calls.length, 0, "no implicit requests");
@@ -80,7 +103,7 @@ for (const change of ["output", "description", "tab", "delete", "connection"]) {
     if (change === "tab") app.graph = {};
     if (change === "delete") graph._nodes = [];
     if (change === "connection") target.connect(0, node("ScenePrompterExpand"), 0);
-    resolve({ ok: true, json: async () => ({ positive: "generated", negative: "", lora_queries: [], template_version: "scene-llm-v1" }) });
+    resolve(reply({ positive: "generated", negative: "", lora_queries: [], template_version: "scene-llm-v1" }));
     await pending;
     assert.notEqual(field(target, "positive").value, "generated", change);
     assert.equal(graph.before, 0, "stale graph never enters transaction");
@@ -99,8 +122,8 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
             calls.push(path);
             if (calls.length === 1 && ["stale-root", "stale-target"].includes(outcome)) await new Promise((done) => { finish = done; });
             const failing = calls.length === 1 && ["error", "retry"].includes(outcome);
-            return { ok: !failing, json: async () => failing ? { error: "test failure" }
-                : { positive: "generated", negative: "", lora_queries: [], template_version: "scene-llm-v1" } };
+            return reply(failing ? { error: "test failure" }
+                : { positive: "generated", negative: "", lora_queries: [], template_version: "scene-llm-v1" }, !failing);
         } },
         onError: (_error, _query, callback) => { retry = callback; },
     });
@@ -141,7 +164,15 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
     const sources = new Map([["retry-preset", compact]]), preparations = [];
     preparePresetReference(reference, sources);
     let retry, calls = 0, settledAvailable = false;
+    const resourceCalls = [];
+    const resources = {
+        snapshot: () => ({ releaseComfyBeforeLLM: true }),
+        beginLLM: async () => { const id = `preset-session-${preparations.length}`; resourceCalls.push(["begin", id]); return id; },
+        endLLM: async (id) => { assert.equal(preparations.at(-1).definitions.size, 0, "Preset operation disposes before its session ends"); resourceCalls.push(["end", id]); },
+        onCleanupError: (error) => { throw error; },
+    };
     const controller = createLLMController({ app, createNode: create,
+        resources,
         presetHasTargets: presetReferenceHasLLM,
         presetTargets: (reference, operation) => collectPresetLLMTargets(reference, operation.definitions),
         prepareTargets: async () => {
@@ -149,8 +180,8 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
             try { await hydratePresetReference(reference, operation, async () => full); return operation; }
             catch (error) { operation.dispose(); throw error; }
         },
-        api: { async fetchApi() { calls++; return { ok: calls !== 1, json: async () => calls === 1 ? { error: "service failure" }
-            : { positive: "new room", negative: "", lora_queries: [], template_version: "scene-llm-v1" } }; } },
+        api: { async fetchApi(_path, options) { calls++; assert.equal(JSON.parse(options.body).session_id, `preset-session-${preparations.length}`); return reply(calls === 1 ? { error: "service failure" }
+            : { positive: "new room", negative: "", lora_queries: [], template_version: "scene-llm-v1" }, calls !== 1); } },
         onError: (_error, _query, callback) => { retry = callback; },
         onBusy: (_node, busy) => { if (!busy) settledAvailable = presetReferenceHasLLM(reference); },
     });
@@ -164,6 +195,7 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
     assert(preparations.every((operation) => operation.definitions.size === 0));
     assert.equal(JSON.parse(field(reference, "llm_presets_json").value).presets["."].api_graph.output[1].inputs.positive, "new room");
     assert.strictEqual(sources.get("retry-preset"), compact);
+    assert.deepEqual(resourceCalls, [["begin", "preset-session-1"], ["end", "preset-session-1"], ["begin", "preset-session-2"], ["end", "preset-session-2"]]);
 }
 {
     const { graph, node, create } = fixture(), app = { graph };
@@ -171,7 +203,7 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
     expand.inputs.push({ name: "scene_prompt2", type: "SCENE_PROMPT", link: null });
     first.connect(0, expand, 0); second.connect(0, middle, 0); middle.connect(0, expand, 1);
     let finish; const calls = [];
-    const api = { async fetchApi(path) { calls.push(path); await new Promise((done)=>{finish=done;}); return { ok: true, json: async()=>({positive:"first",negative:"",lora_queries:[],template_version:"scene-llm-v1"}) }; } };
+    const api = { async fetchApi(path) { calls.push(path); await new Promise((done)=>{finish=done;}); return reply({positive:"first",negative:"",lora_queries:[],template_version:"scene-llm-v1"}); } };
     const pending = createLLMController({ app, api, createNode:create }).generate(expand);
     while (!finish) await new Promise((done)=>setImmediate(done));
     graph.removeLink(middle.inputs[0].link); finish(); await pending;
@@ -181,7 +213,7 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
 {
     const source = await readFile(new URL("../web/scene_prompt_ui.js", import.meta.url), "utf8");
     const start = source.indexOf("function endSceneLLMChange(");
-    const snippet = source.slice(start, source.indexOf("\nconst sceneLLMController", start));
+    const snippet = source.slice(start, source.indexOf("\nconst sceneGPUController", start));
     let completed = 0;
     assert.throws(() => vm.runInNewContext(`${snippet}; endSceneLLMChange(graph);`, {
         graph: { afterChange() { throw new Error("Graph callback failed"); } }, app: { canvas: { emitAfterChange() { completed++; } } },
@@ -198,9 +230,9 @@ for (const startWithExpand of [true, false]) {
     await controller.generate(startWithExpand ? target : expand, startWithExpand);
     assert.equal(requests, 1, "own and Expand operations cannot overlap");
     assert.equal(controller.busy.has(target), true, "upstream own button is busy during Expand");
-    resolve({ ok: false, status: 503, json: async () => ({ error: "Service unavailable" }) });
+    resolve(reply({ error: "Service unavailable" }, false));
     await operation;
-    assert.equal(target.sceneLLMStatus, "Service unavailable", "failing target displays settled error");
+    assert.equal(target.sceneLLMStatus, "API /scene_prompt/llm/generate · HTTP 503: Service unavailable", "failing target displays the API, HTTP status and settled error");
     assert.equal(controller.busy.has(target), false);
     assert.equal(controller.busy.has(expand), false);
 }
@@ -238,7 +270,7 @@ for (const stage of ["generate", "search?", "select_loras", "download"]) {
             const body = options.body && JSON.parse(options.body);
             const data = path.endsWith("generate") ? { positive: body.description, negative: "", lora_queries: ["hat"], template_version: "scene-llm-v1" }
                 : path.includes("search?") ? { items: [candidate(1)] } : path.endsWith("select_loras") ? { selected: [candidate(1)] } : { candidate: candidate(1), lora_name: candidate(1).lora_name };
-            return { ok: true, json: async () => data };
+            return reply(data);
         } };
         const pending = createLLMController({ app, api, createNode: create }).generate(expand);
         while (!finish) await new Promise((done) => setImmediate(done));
@@ -258,4 +290,62 @@ for (const stage of ["generate", "search?", "select_loras", "download"]) {
         if (change === "unrelated") assert.equal(field(second, "positive").value, "second", "own insertion keeps next target reachable");
     }
 }
-console.log("LLM controller traversal, insertion, reuse and ownership tests passed.");
+for (const outcome of ["success", "partial-error", "stale", "stale-begin", "retry"]) {
+    const { graph, node, create } = fixture();
+    const first = node("ScenePromptLLM", "first"), second = node("ScenePromptLLM", "second"), expand = node("ScenePrompterExpand");
+    first.connect(0, second, 0); second.connect(0, expand, 0);
+    const settings = { "ScenePrompt.ReleaseComfyBeforeLLM": true }, calls = [], cleanupErrors = [];
+    const app = { graph, extensionManager: { setting: { get: (id) => settings[id] } } };
+    let retry, finish, generationCount = 0, sessionCount = 0;
+    const api = { clientId: "test-client", async fetchApi(path, options) {
+        const body = JSON.parse(options.body || "{}"); calls.push({ path, body });
+        if ((outcome === "stale-begin" && path.endsWith("/begin")) || (outcome === "stale" && path.endsWith("/generate"))) {
+            await new Promise((done) => { finish = done; });
+        }
+        let data = {};
+        if (path.endsWith("/begin")) data = { session_id: `session-${++sessionCount}` };
+        if (path.endsWith("/generate")) {
+            generationCount++;
+            const fails = outcome === "partial-error" && body.description === "second" || outcome === "retry" && generationCount === 1;
+            if (fails) return reply({ error: "service failure" }, false);
+            data = { positive: body.description, negative: "", lora_queries: ["hat"], template_version: "scene-llm-v1" };
+        }
+        if (path.includes("/search?")) data = { items: [] };
+        if (path.endsWith("/select_loras")) data = { selected: [] };
+        if (path.endsWith("/end")) assert(controller.busy.has(expand), "the Generate button remains busy until resource cleanup finishes");
+        return reply(data);
+    } };
+    const resources = createGPUController({ app, api, onCleanupError: (error) => cleanupErrors.push(error) });
+    const controller = createLLMController({ app, api, resources, createNode: create,
+        onError: (_error, _query, callback) => { retry = callback; } });
+    const pending = controller.generate(expand);
+    if (outcome.startsWith("stale")) {
+        while (!finish) await new Promise((done) => setImmediate(done));
+        field(first, "positive").value = "manual";
+        settings["ScenePrompt.ReleaseComfyBeforeLLM"] = false;
+        finish();
+    }
+    await pending;
+    assert.equal(calls.filter(({ path }) => path.endsWith("/begin")).length, 1, outcome);
+    assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 1, outcome);
+    assert(calls.filter(({ path }) => path.endsWith("/generate") || path.endsWith("/select_loras"))
+        .every(({ body }) => body.session_id === "session-1" && body.client_id === "test-client"), "all target generation and LoRA selection use the same owned session");
+    assert(!calls.some(({ path }) => path.includes("/gpu/")), "finishing prompt generation never unloads the LLM");
+    assert.equal(cleanupErrors.length, 0);
+    if (outcome === "partial-error") assert.equal(field(first, "positive").value, "first", "completed targets keep partial commits");
+    if (outcome === "stale-begin") assert.equal(generationCount, 0, "a stale graph while waiting for GPU never starts inference");
+    if (outcome === "success") {
+        const before = calls.length;
+        await controller.generate(expand);
+        assert.equal(calls.length, before, "all cached targets skip resource and LLM requests");
+    }
+    if (outcome === "retry") {
+        await retry();
+        assert.equal(sessionCount, 2, "retry creates its own operation session");
+        assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 2);
+        assert.equal(field(second, "positive").value, "second");
+    }
+    assert.doesNotMatch(JSON.stringify(graph._nodes.map(({ widgets, properties }) => ({ widgets, properties }))), /session-\d|session_id/,
+        "private sessions never enter node state");
+}
+console.log("LLM controller traversal, insertion, reuse and GPU operation ownership tests passed.");

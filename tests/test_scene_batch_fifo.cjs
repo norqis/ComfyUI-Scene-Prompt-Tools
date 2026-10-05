@@ -194,6 +194,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
     ] };
     let preparedSnapshot = null;
     const tabContext = {
+        sceneGPUController: { snapshot: () => ({ releaseComfyBeforeLLM: false, releaseLLMBeforeImage: false }) },
         Map,
         Set,
         Object,
@@ -766,6 +767,8 @@ async function testSelectedExpandBranchOnlyQueues() {
 
 async function testCancelledPresetResolutionReleasesOnce() {
     const cancelledContext = {
+        sceneGPUController: { onCleanupError: (error) => { throw error; } },
+        releaseSceneBatchGPU: async () => {},
         Set,
         String,
         Object,

@@ -15,6 +15,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -175,6 +176,64 @@ class _DesktopCallbackClient:
             time.sleep(0.02)
         with self._lock:
             return list(self.notifications)
+
+
+class _GpuProvider:
+    """A deterministic loopback provider; never calls a real local LLM."""
+    def __enter__(self):
+        fixture = self
+        self.loaded = True
+        self.false_success = False
+        self.busy = False
+        self.calls = []
+        self.marker = None
+        class Handler(BaseHTTPRequestHandler):
+            def _json(self, data, status=200):
+                body = json.dumps(data).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def do_GET(self):
+                fixture.calls.append(self.path)
+                if self.path == "/v1/status":
+                    self._json({"service": "strata", "loaded": fixture.loaded,
+                        "model": "gpu-fixture", "activity": {"in_flight": int(fixture.busy)}})
+                elif self.path == "/v1/models":
+                    self._json({"data": [{"id": "gpu-fixture"}]})
+                else:
+                    self._json({}, 404)
+            def do_POST(self):
+                fixture.calls.append(self.path)
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if self.path == "/v1/unload":
+                    if not fixture.false_success:
+                        fixture.loaded = False
+                    if fixture.marker:
+                        with fixture.marker.open("a", encoding="utf-8") as handle:
+                            handle.write("llm-unload\n")
+                    self._json({"status": "unloaded"})
+                elif self.path == "/v1/chat/completions":
+                    fixture.loaded = True
+                    self._json({"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
+                        "positive": "fixture", "negative": "", "lora_queries": []})}}]})
+                else:
+                    self._json({}, 404)
+            def log_message(self, *_args):
+                pass
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return self
+    def __exit__(self, *_exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+    @property
+    def port(self):
+        return self.server.server_address[1]
 
 
 def _scene_prompt_inputs():
@@ -657,6 +716,61 @@ class TestSceneModelSink:
     def consume(self, model, clip, vae):
         return ()
 
+class TestSceneGPUImage:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"log_path": ("STRING",), "label": ("STRING",), "hold_path": ("STRING",)}}
+    RETURN_TYPES = ()
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    CATEGORY = "test"
+    def execute(self, log_path, label, hold_path):
+        import time
+        with Path(log_path).open("a", encoding="utf-8") as handle:
+            handle.write(label + "-start\\n")
+        while hold_path and Path(hold_path).exists():
+            comfy_nodes.before_node_execution()
+            time.sleep(0.01)
+        with Path(log_path).open("a", encoding="utf-8") as handle:
+            handle.write(label + "-done\\n")
+        return ()
+
+# These markers instrument only the isolated CPU process. They prove cache
+# release order at the real worker boundary without inspecting the live GPU.
+import execution as comfy_execution
+import comfy.model_management as management
+import gc
+gpu_marker = Path(__file__).parent.parent.parent / "gpu-worker.log"
+def gpu_record(label):
+    with gpu_marker.open("a", encoding="utf-8") as handle:
+        handle.write(label + "\\n")
+original_reset = comfy_execution.PromptExecutor.reset
+def gpu_reset(self):
+    gpu_record("comfy-reset")
+    return original_reset(self)
+comfy_execution.PromptExecutor.reset = gpu_reset
+original_unload = management.unload_all_models
+def gpu_unload():
+    gpu_record("comfy-unload")
+    return original_unload()
+management.unload_all_models = gpu_unload
+original_empty = management.soft_empty_cache
+def gpu_empty(*args, **kwargs):
+    gpu_record("comfy-empty")
+    return original_empty(*args, **kwargs)
+management.soft_empty_cache = gpu_empty
+original_collect = gc.collect
+def gpu_collect(*args, **kwargs):
+    gpu_record("comfy-gc")
+    return original_collect(*args, **kwargs)
+gc.collect = gpu_collect
+original_task_done = comfy_execution.PromptQueue.task_done
+def gpu_task_done(self, *args, **kwargs):
+    result = original_task_done(self, *args, **kwargs)
+    gpu_record("task-done")
+    return result
+comfy_execution.PromptQueue.task_done = gpu_task_done
+
 # Built-in names are excluded from custom-node registration. Replace this one
 # only inside the isolated CPU harness to record scheduling without model files.
 comfy_nodes.NODE_CLASS_MAPPINGS["LoraLoader"] = TestSceneLoraLoader
@@ -665,6 +779,7 @@ NODE_CLASS_MAPPINGS = {
     "TestSceneModelBundle": TestSceneModelBundle,
     "TestSceneModelSink": TestSceneModelSink,
     "TestSceneTextImage": TestSceneTextImage,
+    "TestSceneGPUImage": TestSceneGPUImage,
 }
 ''',
             encoding="utf-8",
@@ -754,7 +869,8 @@ NODE_CLASS_MAPPINGS = {
         )
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
-                return response.status, json.loads(response.read().decode("utf-8"))
+                body = response.read().decode("utf-8")
+                return response.status, json.loads(body) if body else None
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
 
@@ -787,6 +903,162 @@ NODE_CLASS_MAPPINGS = {
         if extra_data is not None:
             payload["extra_data"] = extra_data
         return self._wait_for_prompt(self._request("/prompt", payload)["prompt_id"], timeout)
+
+    def _gpu_graph(self, marker, label, hold_path=""):
+        return {"1": {"class_type": "TestSceneGPUImage", "inputs": {
+            "log_path": str(marker), "label": label, "hold_path": str(hold_path)}}}
+
+    def _gpu_settings(self, provider):
+        self._request("/scene_prompt/llm/settings", {"base_url": "http://127.0.0.1/v1",
+            "port": provider.port, "model": "gpu-fixture", "api_key": "gpu-private-secret"})
+
+
+    def test_gpu_handoff_real_worker_order_continuous_epoch_and_private_history(self):
+        with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-owner"):
+            self._gpu_settings(provider)
+            marker = provider.marker = self.base / "gpu-image.log"
+            worker_marker = self.base / "gpu-worker.log"
+            worker_marker.write_text("", encoding="utf-8")
+            begin = self._request("/scene_prompt/llm/begin", {"client_id": "gpu-owner"})
+            release = worker_marker.read_text(encoding="utf-8").splitlines()
+            reset = release.index("comfy-reset")
+            unload = release.index("comfy-unload", reset + 1)
+            collect = release.index("comfy-gc", unload + 1)
+            self.assertGreater(release.index("comfy-empty", collect + 1), collect)
+            session_id = begin["session_id"]
+            self._request("/scene_prompt/llm/generate", {"client_id": "gpu-owner", "session_id": session_id,
+                "description": "fixture", "model_mode": "Illustrious"})
+            self.assertTrue(provider.loaded)
+            queued = self._request("/prompt", {"prompt": self._gpu_graph(marker, "blocked")})
+            time.sleep(0.1)
+            self.assertFalse(marker.exists(), "An OFF image must wait until the controlled LLM operation ends")
+            self._request("/scene_prompt/llm/end", {"client_id": "gpu-owner", "session_id": session_id})
+            self._wait_for_prompt(queued["prompt_id"])
+            marker.write_text("", encoding="utf-8")
+            policy_id = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-owner", "continuous": True})["policy_id"]
+            # Change saved settings after preparation; queued policy retains its
+            # original connection, model and key rather than rereading globals.
+            self._request("/scene_prompt/llm/settings", {"model": "changed-model"})
+            for label in ("first", "second"):
+                queued = self._request("/prompt", {"client_id": "gpu-owner", "prompt": self._gpu_graph(marker, label),
+                    "extra_data": {"scene_gpu_policy": policy_id}})
+                history = self._wait_for_prompt(queued["prompt_id"])
+                self.assertNotIn(policy_id, json.dumps(history))
+                self.assertNotIn("gpu-private-secret", json.dumps(history))
+            self.assertEqual(provider.calls.count("/v1/unload"), 1)
+            self.assertEqual(marker.read_text(encoding="utf-8").splitlines(),
+                ["llm-unload", "first-start", "first-done", "second-start", "second-done"])
+            self._request("/scene_prompt/llm/settings", {"model": "gpu-fixture"})
+            self._request("/scene_prompt/llm/generate", {"description": "fixture", "model_mode": "Illustrious"})
+            queued = self._request("/prompt", {"client_id": "gpu-owner", "prompt": self._gpu_graph(marker, "third"),
+                "extra_data": {"scene_gpu_policy": policy_id}})
+            self._wait_for_prompt(queued["prompt_id"])
+            self.assertEqual(provider.calls.count("/v1/unload"), 2)
+            self.assertTrue(self._request("/scene_prompt/gpu/release", {"policy_id": policy_id, "client_id": "gpu-owner"})["released"])
+
+
+    def test_gpu_release_failure_stops_nodes_and_native_worker_accepts_next_job(self):
+        with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-failure"):
+            self._gpu_settings(provider)
+            marker = provider.marker = self.base / "gpu-failure.log"
+            for false_success in (True, False):
+                provider.false_success = false_success
+                provider.busy = not false_success
+                provider.loaded = True
+                policy_id = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-failure"})["policy_id"]
+                queued = self._request("/prompt", {"client_id": "gpu-failure", "prompt": self._gpu_graph(marker, "forbidden"),
+                    "extra_data": {"scene_gpu_policy": policy_id}})
+                history = self._wait_for_prompt_error(queued["prompt_id"])
+                self.assertTrue(any(message[0] == "execution_error" for message in history["status"]["messages"]))
+                self.assertNotIn("forbidden-start", marker.read_text(encoding="utf-8") if marker.exists() else "")
+                self.assertNotIn(policy_id, json.dumps(history))
+            history = self._queue_and_wait(self._gpu_graph(marker, "next"))
+            self.assertEqual(history["status"]["status_str"], "success")
+            self.assertIn("next-done", marker.read_text(encoding="utf-8"))
+
+
+    def test_gpu_begin_waits_active_image_and_disconnect_releases_blocked_images(self):
+        with _GpuProvider() as provider:
+            self._gpu_settings(provider)
+            marker = self.base / "gpu-active.log"
+            worker_marker = self.base / "gpu-worker.log"
+            worker_marker.write_text("", encoding="utf-8")
+            hold = self.base / "gpu-active.hold"
+            hold.touch()
+            queued = self._request("/prompt", {"prompt": self._gpu_graph(marker, "active", hold)})
+            deadline = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(marker.exists())
+            # Native /free is flag-only and may consume a handoff wake at the
+            # end of this image. Both controls must still finish on the worker.
+            self.assertEqual(self._request_status("/free", {"unload_models": True, "free_memory": True})[0], 200)
+            result = {}
+            def begin():
+                result.update(self._request("/scene_prompt/llm/begin", {"client_id": "gpu-active"}))
+            with _DesktopCallbackClient(self.port, "gpu-active"):
+                thread = Thread(target=begin)
+                thread.start()
+                time.sleep(0.1)
+                self.assertFalse(result)
+                hold.unlink()
+                self._wait_for_prompt(queued["prompt_id"])
+                thread.join(timeout=10)
+                self.assertIn("session_id", result)
+                events = worker_marker.read_text(encoding="utf-8").splitlines()
+                self.assertLess(events.index("task-done"), events.index("comfy-reset"))
+                after = self._request("/prompt", {"prompt": self._gpu_graph(marker, "after")})
+                time.sleep(0.1)
+                self.assertNotIn("after-start", marker.read_text(encoding="utf-8"))
+            self._wait_for_prompt(after["prompt_id"])
+            self.assertIn("after-done", marker.read_text(encoding="utf-8"))
+
+    def test_gpu_prompt_admission_queue_removal_interrupt_and_two_client_ownership(self):
+        with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-tab-a"), _DesktopCallbackClient(self.port, "gpu-tab-b"):
+            self._gpu_settings(provider)
+            marker = provider.marker = self.base / "gpu-ownership.log"
+            session_id = self._request("/scene_prompt/llm/begin", {"client_id": "gpu-tab-a"})["session_id"]
+            blocker = self._request("/prompt", {"prompt": self._gpu_graph(marker, "blocked")})
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if self._request("/queue")["queue_running"]:
+                    break
+                time.sleep(0.02)
+            policy_id = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b", "continuous": True})["policy_id"]
+            status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-a", "prompt": self._gpu_graph(marker, "foreign"),
+                "extra_data": {"scene_gpu_policy": policy_id}})
+            self.assertEqual(status, 403)
+            status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "missing"),
+                "extra_data": {"scene_gpu_policy": "missing"}})
+            self.assertEqual(status, 404)
+            prompt_id = str(uuid.uuid4())
+            self._request("/prompt", {"client_id": "gpu-tab-b", "prompt_id": prompt_id,
+                "prompt": self._gpu_graph(marker, "deleted"), "extra_data": {"scene_gpu_policy": policy_id}})
+            self.assertNotIn(policy_id, json.dumps(self._request("/queue")))
+            # An OFF client must not pick up another item's private policy by
+            # deliberately reusing the caller-supplied native UUID.
+            status, _ = self._request_status("/prompt", {"prompt_id": prompt_id, "prompt": self._gpu_graph(marker, "duplicate")})
+            self.assertEqual(status, 409)
+            self.assertEqual(self._request_status("/queue", {"delete": [prompt_id]})[0], 200)
+            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": policy_id})[0], 404)
+            wiped_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
+            self._request("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "wiped"),
+                "extra_data": {"scene_gpu_policy": wiped_policy}})
+            self.assertEqual(self._request_status("/queue", {"clear": True})[0], 200)
+            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": wiped_policy})[0], 404)
+            invalid_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
+            status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-b", "prompt": {},
+                "extra_data": {"scene_gpu_policy": invalid_policy}})
+            self.assertEqual(status, 400)
+            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": invalid_policy})[0], 404)
+            self.assertEqual(self._request_status("/interrupt", {})[0], 200)
+            interrupted = self._wait_for_prompt_error(blocker["prompt_id"])
+            self.assertTrue(any(message[0] == "execution_interrupted" for message in interrupted["status"]["messages"]))
+            self.assertFalse(marker.exists())
+            self._request("/scene_prompt/llm/end", {"client_id": "gpu-tab-a", "session_id": session_id})
+            self._queue_and_wait(self._gpu_graph(marker, "next"))
+            self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["next-start", "next-done"])
+
 
     def test_queue_v7_alternating_count_modes_execute_in_final_order(self):
         """Run real Queue -> Count -> Expand contracts in this isolated CPU server."""
@@ -826,6 +1098,109 @@ NODE_CLASS_MAPPINGS = {
                     }
                     self._queue_and_wait(graph)
                     self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], prompt_text)
+
+    def test_count_path_policy_native_order_preflight_and_selected_png_replay(self):
+        from PIL import Image
+        marker = self.base / "count-policy-results.json"
+        graph = {
+            "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "prompt_name": "A", "positive_base": "alpha"}},
+            "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "prompt_name": "B", "positive_base": "beta"}},
+            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 3, "enable_downstream_count": False}},
+            "4": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 2}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
+            "6": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["5", 0], "count": 10}},
+            "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["6", 0], "current_index": 0, "seed_base": 123, "run_id": "count-policy", "timestamp_dir": False}},
+            "8": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "9": {"class_type": "TestSceneTextImage", "inputs": {"image": ["8", 0], "positive": ["7", 0], "negative": ["7", 1], "log_path": str(marker)}},
+            "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["9", 0], "scene_info": ["7", 2], "path": "count-policy-native", "metadata_mode": "生成経路ノードのみ"}},
+        }
+        workflow = _workflow_for_graph(graph)
+        for node in workflow["nodes"]:
+            if node["type"] == "ScenePromptCounter":
+                inputs = graph[str(node["id"])]["inputs"]
+                node["widgets_values"] = [inputs["count"], inputs.get("enable_downstream_count", True)]
+                node["widgets_values_named"] = {"count": inputs["count"], "enable_downstream_count": inputs.get("enable_downstream_count", True)}
+        handle, workflow = self._prepare_callback_run(graph, "7", workflow)
+        try:
+            observed = []
+            for index in range(23):
+                graph["7"]["inputs"]["current_index"] = index
+                self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                observed.append(json.loads(marker.read_text(encoding="utf-8"))[0])
+            self.assertEqual(observed, ["alpha"] * 3 + ["beta"] * 20)
+            files = sorted((self.base / "output" / "count-policy-native").glob("*.png"), key=lambda path: path.stat().st_mtime_ns)
+            self.assertEqual(len(files), 23)
+            for selected, expected, rank in ((files[2], "alpha", 2), (files[-1], "beta", 19)):
+                with Image.open(selected) as image:
+                    replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                self.assertEqual(replay["7"]["inputs"]["current_index"], rank)
+                if expected == "alpha":
+                    self.assertIs(replay["3"]["inputs"]["enable_downstream_count"], False)
+                    visual = next(node for node in replay_workflow["nodes"] if node["id"] == 3)
+                    self.assertIs(visual["widgets_values_named"]["enable_downstream_count"], False)
+                    self.assertNotIn("2", replay)
+                else:
+                    self.assertNotIn("1", replay)
+                replay["10"]["inputs"]["path"] = "count-policy-replay-" + expected
+                replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
+                try:
+                    self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                    self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], expected)
+                finally:
+                    self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
+        graph["6"]["inputs"]["count"] = 0
+        prepared = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "expand_node_id": "7"})
+        self.assertEqual(prepared["total_batches"], 3)
+        self._request("/scene_prompt/runs/release", {"run_handle": prepared["run_handle"]})
+
+    def test_count_nested_preset_expanded_png_replay_keeps_protection(self):
+        from PIL import Image
+        child = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 0], "positive_base": "nested_count"}},
+            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 3, "enable_downstream_count": False}},
+            "4": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["3", 0]}},
+        }
+        outer = {
+            "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "count-native-child", "scene_prompt": ["4", 0]}},
+            "2": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 2}},
+            "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            "4": {"class_type": "ScenePresetInput", "inputs": {}},
+        }
+        for name, nodes, output_id in (("count-native-child", child, "4"), ("count-native-outer", outer, "3")):
+            self._request("/scene_presets/save", {"preset_id": name, "name": name, "output_node_id": output_id,
+                "api_graph": {"output": nodes}, "workflow": _workflow_for_graph(nodes)})
+        marker = self.base / "count-nested-results.json"
+        graph = {
+            "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "count-native-outer"}},
+            "2": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 10}},
+            "3": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["2", 0], "current_index": 2, "seed_base": 5, "timestamp_dir": False, "run_id": "count-nested"}},
+            "4": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "5": {"class_type": "TestSceneTextImage", "inputs": {"image": ["4", 0], "positive": ["3", 0], "negative": ["3", 1], "log_path": str(marker)}},
+            "6": {"class_type": "SceneSaveImage", "inputs": {"images": ["5", 0], "scene_info": ["3", 2], "path": "count-nested-native", "metadata_mode": "生成経路ノードのみ", "expand_preset_contents": True}},
+        }
+        prepared = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "expand_node_id": "3", "workflow": _workflow_for_graph(graph)})
+        self.assertEqual(prepared["total_batches"], 3)
+        handle = prepared["run_handle"]; _apply_run_handle(graph, handle)
+        try:
+            self._queue_callback_graph(graph, handle, _workflow_for_graph(graph), claim_run=True)
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], "nested_count")
+            files = list((self.base / "output" / "count-nested-native").glob("*.png")); self.assertEqual(len(files), 1)
+            with Image.open(files[0]) as image:
+                replay, visual = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+            self.assertNotIn("ScenePresetReference", {node["class_type"] for node in replay.values()})
+            self.assertTrue(any(node["class_type"] == "ScenePromptCounter" and node["inputs"].get("enable_downstream_count") is False for node in replay.values()))
+            replay["6"]["inputs"]["path"] = "count-nested-replay"
+            replay_handle, visual = self._prepare_callback_run(replay, "3", visual)
+            try:
+                self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], "nested_count")
+            finally:
+                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_model_route_executes_only_the_selected_lazy_loader(self):
         marker = self.base / "selected-model-loaders.txt"
@@ -1728,25 +2103,40 @@ NODE_CLASS_MAPPINGS = {
             self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_http_random_route_redraws_each_count_event_and_replays_selected_png(self):
+        self._assert_random_route_count_and_png("ScenePrompterQueue")
+
+    def test_http_random_output_nested_hundred_percent_count_and_png_replay(self):
+        self._assert_random_route_count_and_png("ScenePromptRandomRouteOutput")
+
+    def _assert_random_route_count_and_png(self, join_type):
         from PIL import Image
         import hashlib
-        marker = self.base / "random-route-result.json"
+        image_path = "random-output" if join_type == "ScenePromptRandomRouteOutput" else "random-route"
+        marker = self.base / (image_path + "-result.json")
         graph = {
             "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "base"}},
             "2": {"class_type": "ScenePromptRandomRoute", "inputs": {"scene_prompt": ["1", 0], "weights_json": json.dumps([5000, 5000] + [0] * 8)}},
             "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 0], "positive_base": "route_A"}},
             "4": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 1], "positive_base": "route_B"}},
             "11": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 2], "positive_base": "never_route"}},
-            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0], "scene_prompt3": ["11", 0],
+            "5": {"class_type": join_type, "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0], "scene_prompt3": ["11", 0],
                 "order_mode": "alternate", "alternate_block_size": 9, "downstream_count_mode": "fixed"}},
             "6": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["5", 0], "count": 10}},
             "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["6", 0], "current_index": 0, "seed_base": 123, "run_id": "random-route", "timestamp_dir": False}},
             "8": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
             "9": {"class_type": "TestSceneTextImage", "inputs": {"image": ["8", 0], "positive": ["7", 0], "negative": ["7", 1], "log_path": str(marker)}},
-            "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["9", 0], "scene_info": ["7", 2], "path": "random-route", "metadata_mode": "生成経路ノードのみ"}},
+            "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["9", 0], "scene_info": ["7", 2], "path": image_path, "metadata_mode": "生成経路ノードのみ"}},
         }
+        if join_type == "ScenePromptRandomRouteOutput":
+            for name in ("order_mode", "alternate_block_size", "downstream_count_mode"):
+                graph["5"]["inputs"].pop(name)
+            graph["2"]["inputs"]["preserve_join"] = True
+            graph["12"] = {"class_type": "ScenePromptRandomRoute", "inputs": {
+                "scene_prompt": ["2", 0], "weights_json": json.dumps([10000] + [0] * 9), "preserve_join": True}}
+            graph["13"] = {"class_type": "ScenePromptRandomRouteOutput", "inputs": {"scene_prompt1": ["12", 0]}}
+            graph["3"]["inputs"]["scene_prompt"] = ["13", 0]
         workflow = _workflow_for_graph(graph)
-        next(node for node in workflow["nodes"] if node["id"] == 2)["widgets_values"] = [graph["2"]["inputs"]["weights_json"]]
+        next(node for node in workflow["nodes"] if node["id"] == 2)["widgets_values"] = [graph["2"]["inputs"]["weights_json"]] + ([True] if join_type == "ScenePromptRandomRouteOutput" else [])
         handle, workflow = self._prepare_callback_run(graph, "7", workflow)
         labels = []
         try:
@@ -1763,7 +2153,7 @@ NODE_CLASS_MAPPINGS = {
                 labels.append(expected)
             self.assertIn("route_A", labels)
             self.assertIn("route_B", labels)
-            files = sorted((self.base / "output" / "random-route").glob("*.png"))
+            files = sorted((self.base / "output" / image_path).glob("*.png"))
             self.assertEqual(len(files), 10)
             with Image.open(files[-1]) as image:
                 replay = json.loads(image.text["prompt"])
@@ -1772,9 +2162,12 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(weights.count(10000), 1)
             self.assertEqual(sum(weights), 10000)
             self.assertTrue(replay["2"]["inputs"]["preserve_join"])
+            self.assertEqual(replay["5"]["class_type"], join_type)
+            if join_type == "ScenePromptRandomRouteOutput":
+                self.assertEqual("13" in replay, labels[-1] == "route_A", "Only the selected inner Output remains in the PNG route")
             route_visual = next(node for node in replay_workflow["nodes"] if node["id"] == 2)
             self.assertEqual(route_visual["widgets_values"], [replay["2"]["inputs"]["weights_json"], True])
-            replay["10"]["inputs"]["path"] = "random-route-replay"
+            replay["10"]["inputs"]["path"] = image_path + "-replay"
             replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
             try:
                 self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
@@ -1793,13 +2186,20 @@ NODE_CLASS_MAPPINGS = {
         self.assertIn("出力2", json.dumps(error, ensure_ascii=False))
 
     def test_http_random_route_inside_preset_expands_dynamic_edges(self):
+        self._assert_random_route_preset("ScenePrompterQueue")
+
+    def test_http_random_output_inside_preset_expands_dynamic_edges(self):
+        self._assert_random_route_preset("ScenePromptRandomRouteOutput")
+
+    def _assert_random_route_preset(self, join_type):
         from PIL import Image
         import hashlib
         def chosen(seed):
             payload = json.dumps([seed, "1/2"], ensure_ascii=False, separators=(",", ":"))
             return int.from_bytes(hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest(), "big") % 10000 < 5000
         text_seed = next(seed for seed in range(124, 1000) if chosen(seed) != chosen(123))
-        marker = self.base / "random-preset-result.json"
+        image_path = "random-output-preset" if join_type == "ScenePromptRandomRouteOutput" else "random-preset"
+        marker = self.base / (image_path + "-result.json")
         preset_graph = {"output": {
             "1": {"class_type": "ScenePresetInput", "inputs": {}},
             "2": {"class_type": "ScenePromptRandomRoute", "inputs": {
@@ -1807,7 +2207,7 @@ NODE_CLASS_MAPPINGS = {
             }},
             "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 0], "positive_base": "route_A"}},
             "4": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 1], "positive_base": "route_B"}},
-            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
+            "5": {"class_type": join_type, "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
             "6": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["5", 0]}},
         }}
         self._request("/scene_presets/save", {
@@ -1828,7 +2228,7 @@ NODE_CLASS_MAPPINGS = {
                 key = f"{expand_contents}-{with_text}"
                 graph["9"]["inputs"]["negative"] = ["12", 0] if with_text else ["7", 1]
                 graph["10"]["inputs"]["expand_preset_contents"] = expand_contents
-                graph["10"]["inputs"]["path"] = f"random-preset-{key}"
+                graph["10"]["inputs"]["path"] = f"{image_path}-{key}"
                 graph["7"]["inputs"]["current_index"] = 0
                 handle, workflow = self._prepare_callback_run(graph, "7")
                 try:
@@ -1839,12 +2239,13 @@ NODE_CLASS_MAPPINGS = {
                     if with_text:
                         self.assertEqual(sum(label in text_value for label in ("route_A", "route_B")), 1)
                         self.assertNotEqual("route_A" in positive, "route_A" in text_value)
-                    files = list((self.base / "output" / f"random-preset-{key}").glob("*.png"))
+                    files = list((self.base / "output" / f"{image_path}-{key}").glob("*.png"))
                     self.assertEqual(len(files), 1)
                     with Image.open(files[0]) as image:
                         replay = json.loads(image.text["prompt"])
                         replay_workflow = json.loads(image.text["workflow"])
                     self.assertNotIn("ScenePresetReference", {node["class_type"] for node in replay.values()})
+                    self.assertIn(join_type, {node["class_type"] for node in replay.values()})
                     routes = [node for node in replay.values() if node["class_type"] == "ScenePromptRandomRoute"]
                     self.assertEqual(len(routes), 1)
                     weights = json.loads(routes[0]["inputs"]["weights_json"])
@@ -1853,7 +2254,7 @@ NODE_CLASS_MAPPINGS = {
                     else:
                         self.assertEqual(weights.count(10000), 1)
                         self.assertTrue(routes[0]["inputs"]["preserve_join"])
-                    replay["10"]["inputs"]["path"] = f"random-preset-replay-{key}"
+                    replay["10"]["inputs"]["path"] = f"{image_path}-replay-{key}"
                     replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
                     try:
                         self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)

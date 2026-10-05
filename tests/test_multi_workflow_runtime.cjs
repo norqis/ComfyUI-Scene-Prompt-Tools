@@ -119,6 +119,8 @@ function testStoppingRunClearsQueueControlsImmediately() {
         rememberPendingSceneBatchRelease() {},
         clearPendingSceneBatchReleasesForRun() {},
         releaseSceneBatchPlan() {},
+        releaseSceneBatchGPU: async () => {},
+        sceneGPUController: { onCleanupError: (error) => { throw error; } },
         activateNextSceneBatchRun() {},
         resetSceneExpandRunControls(target) {
             target.widgets.find((widget) => widget.name === "current_index").value = 0;

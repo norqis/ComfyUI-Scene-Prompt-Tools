@@ -391,6 +391,8 @@ async function testClaimFailureHistoryCompletionUsesRealCleanupPath() {
         prepareSceneBatchRunSnapshot(run) { context.activated.push(`prepare:${run.runId}`); },
         queueNextSceneBatchItem() { context.activated.push(`queue:${context.sceneBatchRun.runId}`); },
         releaseSceneRunHandle(handle) { context.released.push(handle); },
+        releaseSceneBatchGPU: async () => {},
+        sceneGPUController: { onCleanupError: (error) => { throw error; } },
         refreshSceneBatchRunNode() {},
         showSceneBatchError(message) { context.errors.push(message); },
         clearTimeout(timer) { context.timers = context.timers.filter((item) => item !== timer); },

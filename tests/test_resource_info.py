@@ -58,9 +58,12 @@ class ResourceInfoTests(unittest.TestCase):
             "9": node("ScenePrompterExpand", scene_prompt=["7", 0]),
             "8": node("CheckpointLoaderSimple", ckpt_name="base.safetensors"),
         }}
-        result = self.info.connected_resources(graph, "9")
-        self.assertEqual([model["name"] for model in result["models"]], ["base.safetensors"])
-        self.assertEqual({lora["name"] for lora in result["loras"]}, {"A.safetensors", "B.safetensors"})
+        for join_type in ("ScenePrompterQueue", "ScenePromptRandomRouteOutput"):
+            with self.subTest(join_type=join_type):
+                graph["output"]["7"]["class_type"] = join_type
+                result = self.info.connected_resources(graph, "9")
+                self.assertEqual([model["name"] for model in result["models"]], ["base.safetensors"])
+                self.assertEqual({lora["name"] for lora in result["loras"]}, {"A.safetensors", "B.safetensors"})
 
     def test_separate_anima_files_and_standard_lora_chain(self):
         graph = {"output": {

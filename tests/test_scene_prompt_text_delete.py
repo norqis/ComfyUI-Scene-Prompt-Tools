@@ -433,14 +433,15 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             '20': {'class_type': 'ScenePromptRandomRoute', 'inputs': {
                 'scene_prompt': ['21', 0], 'weights_json': self.nodes.DEFAULT_RANDOM_WEIGHTS_JSON,
             }},
-            '19': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['20', 0]}},
+            '22': {'class_type': 'ScenePromptRandomRouteOutput', 'inputs': {'scene_prompt1': ['20', 0]}},
+            '19': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['22', 0]}},
         }
         reached = {node['class_type'] for node in api.values()}
         self.assertEqual(reached - {'ScenePrompterExpand', 'ScenePromptToText', 'SceneApplyModel'},
                          set(self.presets.SAFE_NODE_CLASSES) - {'ScenePresetReference'})
         scene_nodes, source = self.presets._scene_nodes_for_expand(api, '19')
         self.assertEqual(set(scene_nodes), set(api) - {'19'})
-        self.assertEqual(source, ['20', 0])
+        self.assertEqual(source, ['22', 0])
         handle = self.runs.create_run_context('default')
         with self.subTest('prepare'):
             result = self.presets.snapshot_presets_for_run(handle, {'output': api}, '19')

@@ -2,6 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ChangeTracker } from "../../scripts/changeTracker.js";
 import { createLLMController, LLM_TYPE } from "./scene_prompt_llm.js";
+import { createGPUController, GPU_HANDOFF_SETTINGS } from "./scene_prompt_gpu.js";
 import { openCivitaiSearch, openLLMSettings, showAPIError, lookupCivitaiByHash } from "./scene_prompt_civitai.js";
 import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference, createPresetOperation } from "./scene_llm_presets.js";
 import {
@@ -27,7 +28,8 @@ const SCENE_PROMPT_DELETE_NODE_NAMES = new Set(["ScenePromptDelete", "Scene Prom
 const SCENE_PROMPT_TO_TEXT_NODE_NAMES = new Set(["ScenePromptToText", "Scene Prompt To Text"]);
 const SCENE_PROMPT_REVERSE_NODE_NAMES = new Set(["ScenePromptReverse", "Scene Prompt Reverse"]);
 const SCENE_PROMPT_QUEUE_NODE_NAMES = new Set(["ScenePrompterQueue", "Scene Prompt Queue"]);
-const SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES = new Set(["ScenePromptRandomRoute", "Scene Prompt Random Route"]);
+const SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES = new Set(["ScenePromptRandomRoute", "Scene Prompt Random Route", "Scene Prompt Random Route Input"]);
+const SCENE_PROMPT_RANDOM_ROUTE_OUTPUT_NODE_NAMES = new Set(["ScenePromptRandomRouteOutput", "Scene Prompt Random Route Output"]);
 const SCENE_EMPTY_LATENT_NODE_NAMES = new Set(["SceneEmptyLatent", "Scene Empty Latent"]);
 const SCENE_APPLY_MODEL_NODE_NAMES = new Set(["SceneApplyModel", "Scene Apply Model"]);
 const SCENE_APPLY_LORA_NODE_NAMES = new Set(["SceneApplyLora", "Scene Apply LoRA"]);
@@ -79,6 +81,7 @@ const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePromptDelete",
     "ScenePrompterQueue",
     "ScenePromptRandomRoute",
+    "ScenePromptRandomRouteOutput",
     "SceneEmptyLatent",
     "SceneApplyModel",
     "SceneApplyLora",
@@ -99,6 +102,7 @@ const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
     "ScenePromptDelete",
     "ScenePrompterQueue",
     "ScenePromptRandomRoute",
+    "ScenePromptRandomRouteOutput",
     "SceneEmptyLatent",
     "SceneApplyModel",
     "SceneApplyLora",
@@ -116,6 +120,7 @@ const NODE_NAMES = new Set([
     ...SCENE_PROMPT_TO_TEXT_NODE_NAMES,
     ...SCENE_PROMPT_QUEUE_NODE_NAMES,
     ...SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES,
+    ...SCENE_PROMPT_RANDOM_ROUTE_OUTPUT_NODE_NAMES,
     ...SCENE_EMPTY_LATENT_NODE_NAMES,
     ...SCENE_APPLY_MODEL_NODE_NAMES,
     ...SCENE_APPLY_LORA_NODE_NAMES,
@@ -202,6 +207,7 @@ const SCENE_WIDGET_LABELS = {
     timestamp_dir: "タイムスタンプディレクトリ",
     prefix: "ファイル名プレフィックス",
     counter_position: "連番の位置",
+    enable_downstream_count: "後続Countを有効化",
     model_mode: "モデル種別",
     width: "width",
     height: "height",
@@ -243,7 +249,8 @@ const SCENE_NODE_DISPLAY_NAMES = {
     ScenePromptDelete: "Scene Prompt Delete",
     ScenePromptToText: "Scene Prompt To Text",
     ScenePrompterQueue: "Scene Prompt Queue",
-    ScenePromptRandomRoute: "Scene Prompt Random Route",
+    ScenePromptRandomRoute: "Scene Prompt Random Route Input",
+    ScenePromptRandomRouteOutput: "Scene Prompt Random Route Output",
     SceneEmptyLatent: "Scene Empty Latent",
     SceneApplyModel: "Scene Apply Model",
     SceneApplyLora: "Scene Apply LoRA",
@@ -3943,7 +3950,7 @@ function hideScenePathWidgets(node) {
 }
 
 function hideScenePromptCounterWidgets(node) {
-    const visibleWidgets = new Set(["count"]);
+    const visibleWidgets = new Set(["count", "enable_downstream_count"]);
     for (const widget of node.widgets || []) {
         if (widget?.sceneRole || visibleWidgets.has(widget?.name)) {
             showWidget(widget);
@@ -4896,8 +4903,9 @@ function endSceneLLMChange(graph) {
     finally { app.canvas?.emitAfterChange?.(); }
 }
 
+const sceneGPUController = createGPUController({ app, api });
 const sceneLLMController = createLLMController({
-    app, api,
+    app, api, resources: sceneGPUController,
     beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
     createNode: (type) => globalThis.LiteGraph.createNode(type),
     refresh: (node) => {
@@ -5003,6 +5011,22 @@ function sceneExpandConfigureValues(config) {
 
 const SCENE_LORA_STORED_WIDGET_NAMES = ["lora_name", "strength_model", "strength_clip", "model_mode", "positive", "negative", "positive_json", "negative_json", "category_order"];
 const SCENE_LORA_DISPLAY_WIDGET_NAMES = ["model_mode", "strength_model", "strength_clip", "positive", "negative", "lora_name", "positive_json", "negative_json", "category_order"];
+
+function sceneCounterConfiguredValues(config) {
+    const values = config?.widgets_values || [];
+    const names = typeof values[1] === "boolean"
+        ? ["count", "enable_downstream_count", "source_node_id", "source_node_name"]
+        : ["count", "source_node_id", "source_node_name"];
+    return { enable_downstream_count: true,
+        ...Object.fromEntries(names.slice(0, values.length).map((name, index) => [name, values[index]])),
+        ...config?.widgets_values_named };
+}
+
+function sceneCounterConfigureValues(node, config, named) {
+    const widgets = (node.widgets || []).filter((widget) => widget.serialize !== false);
+    return { ...config, widgets_values: widgets.map((widget) => Object.hasOwn(named, widget.name) ? named[widget.name] : widget.value),
+        widgets_values_named: { ...config?.widgets_values_named, ...named } };
+}
 
 function sceneLoraStoredValues(node) {
     return SCENE_LORA_STORED_WIDGET_NAMES.map((name) => {
@@ -5227,7 +5251,7 @@ function sceneLoraCatalogItem(path) {
 
 function sceneLoraDisplay(item) {
     const cached = cachedSceneLora(item);
-    return { title: cached?.title || (cached?.status === "not_found" ? "Civitaiに登録なし" : "Civitai名を確認中…") };
+    return { title: cached?.title || item.path.split(/[\\/]/u).at(-1) || item.path, status: cached?.status || "unknown" };
 }
 
 function currentSceneLoraResult(item, result) {
@@ -5287,7 +5311,9 @@ function closeSceneLoraPicker(node) {
 }
 
 async function openSceneLoraPicker(node) {
-    if (node.properties?.scene_civitai) return openSceneCivitaiSearch(node);
+    const selected = sceneLoraPathIdentity(findWidget(node, "lora_name")?.value);
+    if (selected && sceneLoraPathIdentity(node.properties?.scene_civitai?.lora_name) === selected)
+        return openSceneCivitaiSearch(node);
     closeSceneLoraDetails(node);
     closeSceneLoraPicker(node);
     injectStyle();
@@ -5310,7 +5336,10 @@ async function openSceneLoraPicker(node) {
     civitaiSearch.className = "pc-button";
     civitaiSearch.textContent = "Civitai Search";
     civitaiSearch.onclick = () => { closeSceneLoraPicker(node); openSceneCivitaiSearch(node); };
-    head.append(heading, civitaiSearch, close);
+    const headActions = document.createElement("div");
+    headActions.className = "pc-lora-head-actions";
+    headActions.append(civitaiSearch, close);
+    head.append(heading, headActions);
     const search = document.createElement("input");
     search.type = "search";
     search.className = "pc-lora-search";
@@ -5345,22 +5374,31 @@ async function openSceneLoraPicker(node) {
         if (busy) return;
         busy = true;
         while (pending.length && node.sceneLoraPickerCleanup === cleanup) {
-            const { item, row, title, revision } = pending.shift();
+            const { item, row, title, source, revision } = pending.shift();
             if (revision !== generation || !row.isConnected) continue;
             try {
                 const result = await resolveSceneLora(item);
                 if (revision === generation && row.isConnected) {
-                    if (result.key !== sceneLoraCacheKey(item) || !currentSceneLoraResult(item, result)) title.textContent = "ファイルが更新されました。再表示してください";
+                    if (result.key !== sceneLoraCacheKey(item) || !currentSceneLoraResult(item, result)) source.textContent = "再表示";
                     else {
-                        title.textContent = result.title || "Civitaiに登録なし";
+                        title.textContent = result.title || item.path.split(/[\\/]/u).at(-1) || item.path;
+                        updateSource(source, result.status);
                     }
                 }
             } catch (_error) {
-                if (revision === generation && row.isConnected) title.textContent = "Civitai名を取得できませんでした";
+                if (revision === generation && row.isConnected) { source.textContent = "再確認"; source.disabled = false; source.title = _error.message; }
             }
         }
         busy = false;
     };
+    function updateSource(source, status) {
+        source.removeAttribute("title");
+        source.classList.toggle("pc-lora-local", status === "not_found");
+        source.textContent = status === "found" ? "Civitai" : status === "not_found" ? "Local" : "確認中…";
+        source.disabled = status !== "found";
+        if (status === "not_found") { source.setAttribute("role", "status"); source.setAttribute("aria-label", "Local: Civitaiに登録なし"); }
+        else source.removeAttribute("role");
+    }
     const render = () => {
         generation += 1;
         pending = [];
@@ -5409,12 +5447,15 @@ async function openSceneLoraPicker(node) {
             const source = document.createElement("button");
             source.type = "button";
             source.className = "pc-lora-source";
-            source.textContent = "Civitai";
             source.setAttribute("aria-label", `${item.path} の詳細確認`);
-            source.onclick = () => openSceneLoraDetails(node, item, source);
+            updateSource(source, display.status);
+            source.onclick = () => {
+                if (cachedSceneLora(item)?.status === "found") { openSceneLoraDetails(node, item, source); return; }
+                updateSource(source, "unknown"); pending.push(row.sceneLoraJob); void work();
+            };
             row.append(select, source);
             if (!cachedSceneLora(item)) {
-                row.sceneLoraJob = { item, row, title, revision };
+                row.sceneLoraJob = { item, row, title, source, revision };
                 observer.observe(row);
             }
             select.onclick = async () => {
@@ -5599,6 +5640,14 @@ function isScenePromptQueueNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PROMPT_QUEUE_NODE_NAMES.has(name));
 }
 
+function isScenePromptRandomRouteOutputNode(node) {
+    return nodeClassNames(node).some((name) => SCENE_PROMPT_RANDOM_ROUTE_OUTPUT_NODE_NAMES.has(name));
+}
+
+function isScenePromptJoinNode(node) {
+    return isScenePromptQueueNode(node) || isScenePromptRandomRouteOutputNode(node);
+}
+
 function isScenePromptRandomRouteNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES.has(name));
 }
@@ -5660,6 +5709,7 @@ function isScenePromptSourceNode(node) {
         || isScenePromptReverseNode(node)
         || isScenePromptDeleteNode(node)
         || isScenePromptQueueNode(node)
+        || isScenePromptRandomRouteOutputNode(node)
         || isScenePromptRandomRouteNode(node)
         || isSceneEmptyLatentNode(node)
         || isSceneApplyModelNode(node)
@@ -6109,18 +6159,18 @@ function installScenePromptDeleteWidgetSyncHandlers(node) {
 }
 
 function installScenePromptCounterWidgetSyncHandlers(node) {
-    const widget = findWidget(node, "count");
-    if (!widget || widget.scenePromptCounterSyncWrapped) {
-        return;
+    for (const name of ["count", "enable_downstream_count"]) {
+        const widget = findWidget(node, name);
+        if (!widget || widget.scenePromptCounterSyncWrapped) continue;
+        const originalCallback = widget.callback;
+        widget.callback = function () {
+            const result = originalCallback?.apply(this, arguments);
+            clearSceneComputedCaches(node);
+            refreshDownstreamSceneNodes(node);
+            return result;
+        };
+        widget.scenePromptCounterSyncWrapped = true;
     }
-    const originalCallback = widget.callback;
-    widget.callback = function () {
-        const result = originalCallback?.apply(this, arguments);
-        clearSceneComputedCaches(node);
-        refreshDownstreamSceneNodes(node);
-        return result;
-    };
-    widget.scenePromptCounterSyncWrapped = true;
 }
 
 function installSceneEmptyLatentWidgetSyncHandlers(node) {
@@ -6605,9 +6655,9 @@ function flushDownstreamSceneRefreshes() {
     for (const source of sources) {
         collectDownstreamSceneNodes(source, targets);
     }
+    for (const target of targets) clearSceneComputedCaches(target);
     for (const target of targets) {
         if (isScenePromptQueueNode(target)) syncSceneQueueControls(target);
-        clearSceneComputedCaches(target);
         scheduleSceneNodeRefresh(target, { fitHeight: false }, 40);
     }
 }
@@ -6620,10 +6670,9 @@ function refreshDownstreamSceneNodes(node) {
         sceneWorkflowLoadSources.add(node);
         return;
     }
-    for (const target of collectDownstreamSceneNodes(node)) {
-        if (isScenePromptQueueNode(target)) syncSceneQueueControls(target);
-        clearSceneComputedCaches(target);
-    }
+    const targets = collectDownstreamSceneNodes(node);
+    for (const target of targets) clearSceneComputedCaches(target);
+    for (const target of targets) if (isScenePromptQueueNode(target)) syncSceneQueueControls(target);
     sceneDownstreamRefreshSources.add(node);
     clearTimeout(sceneDownstreamRefreshTimer);
     sceneDownstreamRefreshTimer = setTimeout(flushDownstreamSceneRefreshes, 100);
@@ -7049,6 +7098,7 @@ function scenePromptSourceLocalCacheKey(node) {
             id: node?.id ?? null,
             mode: sceneNodeMode(node),
             count: scenePromptCounterCount(node),
+            enable_downstream_count: scenePromptCounterDownstreamEnabled(node),
             input: linkedInputKey(node, "scene_prompt"),
             upstream: upstreamKey,
         });
@@ -7070,10 +7120,10 @@ function scenePromptSourceLocalCacheKey(node) {
             upstream: upstreamKey,
         });
     }
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         const graph = node?.graph || app.graph;
         return JSON.stringify({
-            type: "queue",
+            type: isScenePromptRandomRouteOutputNode(node) ? "random_output" : "queue",
             id: node?.id ?? null,
             mode: sceneNodeMode(node),
             controls: SCENE_QUEUE_CONTROL_NAMES.map((name) => findWidget(node, name)?.value ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]),
@@ -7185,6 +7235,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
     const nextStack = new Set(stack);
     nextStack.add(presetId);
     const memo = new Map();
+    let hasCountHold = false;
     const statsForNode = (nodeId) => {
         if (memo.has(nodeId)) {
             return memo.get(nodeId);
@@ -7216,6 +7267,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
         } else if (node.class_type === "ScenePromptReverse") {
             result = source("scene_prompt") || emptyScenePromptStats();
         } else if (node.class_type === "ScenePromptCounter") {
+            if (apiInput(node, "enable_downstream_count") === false) hasCountHold = true;
             const base = source("scene_prompt") || sceneStatsSeed();
             const count = clampSceneCount(apiInput(node, "count"), 1);
             result = sceneStatsCount(base, count);
@@ -7223,7 +7275,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             const first = source("scene_prompt1") || sceneStatsSeed();
             const second = source("scene_prompt2") || sceneStatsSeed();
             result = sceneStatsMerge(first, second);
-        } else if (node.class_type === "ScenePrompterQueue") {
+        } else if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(node.class_type)) {
             result = emptyScenePromptStats();
             let hasSource = false;
             for (let index = 1; index <= SCENE_PROMPT_QUEUE_INPUT_COUNT; index += 1) {
@@ -7242,11 +7294,15 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
         } else if (node.class_type === "ScenePromptCallback") {
             result = source("scene_prompt") || sceneStatsSeed();
         }
+        if (result.hasCountHold) hasCountHold = true;
         result = sceneStatsResult(result);
         memo.set(nodeId, result);
         return result;
     };
-    return statsForNode(outputSource);
+    const result = statsForNode(outputSource);
+    if (!hasCountHold) return result;
+    const base = upstream ? sceneSchedulePlan([{ kind: "tail", ...upstream }]) : null;
+    return sceneScheduleForPreset(presetId, base, stack, preferredPreset).stats;
 }
 
 function emptyScenePromptStats() {
@@ -7283,12 +7339,14 @@ function sceneStatsResult(stats) {
         || !Number.isSafeInteger(stats?.unsetBatches ?? stats?.total) || (stats.unsetBatches ?? stats.total) < 0) {
         return { ...emptyScenePromptStats(), error: stats?.error || "件数が大きすぎます。" };
     }
-    return {
+    const result = {
         rows: sceneStatNumber(stats.rows),
         total: sceneStatNumber(stats.total),
         totalImages: sceneStatNumber(stats.totalImages ?? stats.total),
         unsetBatches: sceneStatNumber(stats.unsetBatches ?? stats.total),
     };
+    if (stats.hasCountHold) Object.defineProperty(result, "hasCountHold", { value: true });
+    return result;
 }
 
 function sceneStatsMatrix(stats, factor) {
@@ -7379,11 +7437,14 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
     }
 
     const upstream = scenePromptInputSource(node);
-    if (isScenePromptRandomRouteNode(node) || (upstream && sceneRandomRouteInNode(upstream) && !isScenePromptQueueNode(node))) {
+    if (upstream && scenePromptStats(upstream, new Set(seen), memo).hasCountHold)
+        return finish(sceneScheduleForNode(node).stats);
+    if (isScenePromptRandomRouteNode(node) || (upstream && sceneRandomRouteInNode(upstream) && !isScenePromptJoinNode(node))) {
         return finish(sceneScheduleForNode(node).stats);
     }
     if (isScenePromptMergeNode(node) && connectedScenePromptSourcesForMerge(node)
-        .some(({ source }) => sceneRandomRouteInNode(source))) return finish(sceneScheduleForNode(node).stats);
+        .some(({ source }) => sceneRandomRouteInNode(source) || scenePromptStats(source, new Set(seen), memo).hasCountHold))
+        return finish(sceneScheduleForNode(node).stats);
     if (isScenePromptNode(node)) {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
@@ -7416,12 +7477,12 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
     }
     if (isScenePromptCounterNode(node)) {
         const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
-        if (upstream && sceneQueueBoundaryInNode(upstream)) {
+        if (!scenePromptCounterDownstreamEnabled(node) || (upstream && sceneQueueBoundaryInNode(upstream))) {
             return finish(sceneScheduleForNode(node).stats);
         }
         return finish(sceneStatsCount(base, scenePromptCounterCount(node)));
     }
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         return finish(sceneScheduleForNode(node).stats);
     }
     if (isSceneEmptyLatentNode(node)) {
@@ -7501,7 +7562,161 @@ function sceneSchedulePlan(units = [], boundary = false, randomGuards = []) {
         totalImages: sceneStatSum(sum.totalImages, unit.totalImages),
         unsetBatches: sceneStatSum(sum.unsetBatches, unit.unsetBatches),
     }), emptyScenePromptStats());
-    return { units, stats: sceneStatsResult(stats), boundary, randomGuards };
+    const plan = { units, stats: sceneStatsResult(stats), boundary, randomGuards };
+    if (units.some(sceneCountHasHold)) {
+        Object.defineProperty(plan, "hasCountHold", { value: true });
+        Object.defineProperty(plan.stats, "hasCountHold", { value: true });
+    }
+    return plan;
+}
+
+function sceneCountHasHold(unit) {
+    if (!Object.hasOwn(unit, "hasCountHold")) {
+        const held = unit.kind === "count_hold" || !!(unit.unit && sceneCountHasHold(unit.unit))
+            || !!unit.plan?.hasCountHold || !!unit.left?.hasCountHold || !!unit.right?.hasCountHold
+            || !!unit.plans?.some((plan) => plan.hasCountHold);
+        Object.defineProperty(unit, "hasCountHold", { value: held });
+    }
+    return unit.hasCountHold;
+}
+
+function sceneCountPolicyAdd(first, second, subtract = false) {
+    return first.map((value, index) => value === null || second[index] === null ? null
+        : value + (subtract ? -1 : 1) * second[index]);
+}
+
+function sceneCountPolicyProduct(first, second) {
+    const multiply = (a, b) => a === 0 || b === 0 ? 0 : a === null || b === null ? null : a * b;
+    const ownImages = multiply(first[0], second[1] === null || second[2] === null ? null : second[1] - second[2]);
+    const inheritedImages = multiply(first[1], second[2]);
+    return [multiply(first[0], second[0]), ownImages === null || inheritedImages === null ? null : ownImages + inheritedImages,
+        multiply(first[2], second[2])];
+}
+
+function sceneCountPlanPolicy(plan) {
+    return plan.units.reduce((sum, unit) => sceneCountUnitPolicy(unit)
+        .map((part, index) => sceneCountPolicyAdd(sum[index], part)), [[0, 0, 0], [0, 0, 0], [0, 0, 0]]);
+}
+
+function sceneCountUnitPolicy(unit) {
+    if (Object.hasOwn(unit, "countPolicy")) return unit.countPolicy;
+    const zero = [0, 0, 0];
+    const totals = (source) => [source.total, source.totalImages, source.unsetBatches];
+    const total = totals(unit);
+    let result;
+    if (unit.kind === "run" || unit.kind === "tail") result = [zero, zero, total];
+    else if (unit.kind === "count_hold") result = [total, zero, zero];
+    else if (unit.kind === "sequence") result = sceneCountPlanPolicy(unit.plan);
+    else if (unit.kind === "alternate") result = unit.plans.reduce((sum, plan) =>
+        sceneCountPlanPolicy(plan).map((part, index) => sceneCountPolicyAdd(sum[index], part)), [zero, zero, zero]);
+    else if (unit.kind === "random_choice") {
+        const parts = unit.plans.map(sceneCountPlanPolicy);
+        result = parts[0].map((part, index) => part.map((value, metric) =>
+            parts.every((policy) => policy[index][metric] === value) ? value : null));
+    } else if (unit.kind === "product") {
+        const left = sceneCountPlanPolicy(unit.left), right = sceneCountPlanPolicy(unit.right);
+        const free = sceneCountPolicyProduct(left[2], right[2]);
+        const nonstrict = sceneCountPolicyProduct(sceneCountPolicyAdd(totals(unit.left.stats), left[0], true),
+            sceneCountPolicyAdd(totals(unit.right.stats), right[0], true));
+        result = [sceneCountPolicyAdd(total, nonstrict, true), sceneCountPolicyAdd(nonstrict, free, true), free];
+    } else {
+        const child = unit.unit ? sceneCountUnitPolicy(unit.unit) : sceneCountPlanPolicy(unit.plan);
+        if (unit.kind === "fixed") result = [child[0], sceneCountPolicyAdd(total, child[0], true), zero];
+        else if (unit.kind === "count_scale") result = unit.factor === 0 ? [child[0], zero, zero]
+            : [child[0], child[1], child[2].map((value) => value === null ? null : value * unit.factor)];
+        else if (unit.kind === "map") result = unit.latentSize == null ? child
+            : child.map((part) => [part[0], part[0] === null ? null : part[0] * unit.latentSize, 0]);
+        else {
+            const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
+            result = child.map((part) => factor === 0 ? zero : part.map((value) => value === null ? null : value * factor));
+        }
+    }
+    Object.defineProperty(unit, "countPolicy", { value: result });
+    return result;
+}
+
+function sceneCountPrefixPlan(plan, end) {
+    let result = [0, 0, 0];
+    for (const unit of plan.units) {
+        const length = Math.min(end, unit.total);
+        const prefix = sceneCountPrefixUnit(unit, length);
+        result = result.map((value, index) => value + prefix[index]);
+        end -= length;
+        if (!end) break;
+    }
+    return result;
+}
+
+function sceneCountPrefixUnit(unit, end) {
+    if (!end) return [0, 0, 0];
+    const add = (first, second) => first.map((value, index) => value + second[index]);
+    if (unit.kind === "run" || unit.kind === "tail") return [0, 0, end];
+    if (unit.kind === "count_hold") return [end, 0, 0];
+    if (unit.kind === "sequence") return sceneCountPrefixPlan(unit.plan, end);
+    // Preview retains the existing Random placeholder. Use the same arm for its
+    // prefix and ordinal mapping; execution selects the seeded arm in Python.
+    if (unit.kind === "random_choice") return sceneCountPrefixPlan(unit.plans[0], end);
+    if (unit.kind === "alternate") {
+        const sizes = unit.plans.map((plan) => plan.stats.total), block = unit.blockSize;
+        let low = 0, high = Math.ceil(Math.max(0, ...sizes) / block);
+        const start = (round) => Math.min(Number.MAX_SAFE_INTEGER, round * block);
+        const through = (round) => sizes.reduce((sum, size) => sum + Math.min(size, start(round)), 0);
+        while (low < high) {
+            const middle = low + Math.floor((high - low + 1) / 2);
+            if (through(middle) <= end) low = middle;
+            else high = middle - 1;
+        }
+        let remaining = end - through(low), result = [0, 0, 0];
+        unit.plans.forEach((plan, index) => {
+            const from = Math.min(sizes[index], start(low));
+            const within = Math.min(remaining, block, sizes[index] - from);
+            result = add(result, sceneCountPrefixPlan(plan, from + within));
+            remaining -= within;
+        });
+        return result;
+    }
+    if (unit.kind === "product") {
+        const length = unit.right.stats.total;
+        const full = Math.floor(end / length), within = end % length;
+        const left = sceneCountPrefixPlan(unit.left, full), right = sceneCountPrefixPlan(unit.right, length);
+        const result = [0, 0, 0];
+        for (let a = 0; a < 3; a += 1) for (let b = 0; b < 3; b += 1) result[Math.min(a, b)] += left[a] * right[b];
+        if (within) {
+            const after = sceneCountPrefixPlan(unit.left, full + 1), prefix = sceneCountPrefixPlan(unit.right, within);
+            for (let a = 0; a < 3; a += 1) for (let b = 0; b < 3; b += 1) result[Math.min(a, b)] += (after[a] - left[a]) * prefix[b];
+        }
+        return result;
+    }
+    if (unit.kind === "count_scale") {
+        if (unit.factor === 0) return [end, 0, 0];
+        const first = Math.min(end, unit.unit.total), result = sceneCountPrefixUnit(unit.unit, first);
+        result[2] += end - first;
+        return result;
+    }
+    if (unit.kind === "fixed") {
+        const strict = sceneCountPrefixUnit(unit.unit, end)[0];
+        return [strict, end - strict, 0];
+    }
+    if (unit.kind === "map") return sceneCountPrefixUnit(unit.unit, end);
+    if (unit.kind === "repeat") {
+        const length = unit.unit.total, cycles = Math.floor(end / length);
+        return add(sceneCountPrefixUnit(unit.unit, length).map((value) => value * cycles), sceneCountPrefixUnit(unit.unit, end % length));
+    }
+    const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
+    const full = Math.floor(end / factor), within = end % factor;
+    const prefix = unit.unit ? sceneCountPrefixUnit(unit.unit, full) : sceneCountPrefixPlan(unit.plan, full);
+    const after = within ? unit.unit ? sceneCountPrefixUnit(unit.unit, full + 1) : sceneCountPrefixPlan(unit.plan, full + 1) : prefix;
+    return prefix.map((value, index) => value * factor + (after[index] - value) * within);
+}
+
+function sceneCountEligibleIndex(unit, ordinal, policy) {
+    let low = 0, high = unit.total;
+    while (low < high) {
+        const middle = low + Math.floor((high - low) / 2);
+        if (sceneCountPrefixUnit(unit, middle + 1)[policy] <= ordinal) low = middle + 1;
+        else high = middle;
+    }
+    return low;
 }
 
 function sceneScheduleRun(entry) {
@@ -7580,6 +7795,14 @@ function sceneScheduleAtUnit(unit, index) {
     if (unit.kind === "sequence") return sceneScheduleAt(unit.plan, index);
     if (unit.kind === "random_choice") return { parts: ["ランダム候補"], count: 1, row: emptyMatrixRow() };
     if (unit.kind === "repeat_each") return sceneScheduleAt(unit.plan, Math.floor(index / unit.factor));
+    if (unit.kind === "count_hold") return sceneScheduleAtUnit(unit.unit, index);
+    if (unit.kind === "count_scale") {
+        const child = unit.unit;
+        if (unit.factor === 0) return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, index, 0));
+        if (index < child.total) return sceneScheduleAtUnit(child, index);
+        const free = sceneCountPrefixUnit(child, child.total)[2];
+        return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, (index - child.total) % free, 2));
+    }
     if (unit.kind === "repeat" || unit.kind === "fixed") {
         return unit.unit.total ? sceneScheduleAtUnit(unit.unit, index % unit.unit.total) : null;
     }
@@ -7645,28 +7868,48 @@ function sceneSchedulePrefix(plan, limit) {
     return entries;
 }
 
-function sceneScheduleCount(plan, factor) {
+function sceneScheduleCount(plan, factor, enableDownstreamCount = true) {
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
-        return sceneScheduleError("ランダム分岐はQueueで合流してからCountを接続してください。");
-    const units = plan.units.map((unit) => factor === 0 ? sceneScheduleWrapper("repeat", unit, 0)
-        : unit.kind === "fixed" ? unit : sceneScheduleWrapper("repeat", unit, factor));
+        return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからCountを接続してください。");
+    let units;
+    const allStrict = plan.hasCountHold && sceneCountPlanPolicy(plan)[0]?.[0] === plan.stats.total;
+    if (allStrict) units = plan.units;
+    else if (plan.hasCountHold) {
+        const child = sceneScheduleSequence(plan);
+        const policy = sceneCountUnitPolicy(child)[factor === 0 ? 0 : 2];
+        if (policy.some((value) => value === null) && factor !== 1) return sceneScheduleError("ランダム分岐の各経路のCount適用後の件数が一致しません。");
+        const original = [child.total, child.totalImages, child.unsetBatches];
+        const totals = factor === 1 ? original : factor === 0 ? policy : original
+            .map((value, index) => value + (factor - 1) * policy[index]);
+        units = [{ kind: "count_scale", unit: child, factor, rows: child.rows,
+            total: totals[0], totalImages: totals[1], unsetBatches: totals[2] }];
+    } else {
+        units = plan.units.map((unit) => factor === 0 ? sceneScheduleWrapper("repeat", unit, 0)
+            : unit.kind === "fixed" ? unit : sceneScheduleWrapper("repeat", unit, factor));
+    }
+    if (!enableDownstreamCount && !allStrict) {
+        const child = units.length === 1 ? units[0] : sceneScheduleSequence(sceneSchedulePlan(units));
+        units = [{ kind: "count_hold", unit: child, total: child.total,
+            totalImages: child.totalImages, unsetBatches: child.unsetBatches, rows: child.rows }];
+    }
     return sceneSchedulePlan(units, plan.boundary, plan.randomGuards);
 }
 
-function sceneScheduleMap(plan, transform) {
+function sceneScheduleMap(plan, transform, latentSize = null) {
     if (plan.stats.error) return plan;
-    const mapUnit = (unit) => unit.kind === "fixed"
-        ? sceneScheduleWrapper("fixed", mapUnit(unit.unit))
-        : { kind: "map", unit, transform, total: unit.total, totalImages: unit.totalImages,
-            unsetBatches: unit.unsetBatches, rows: unit.rows };
+    const mapUnit = (unit) => ["fixed", "count_hold"].includes(unit.kind)
+        ? sceneScheduleWrapper(unit.kind, mapUnit(unit.unit))
+        : { kind: "map", unit, transform, latentSize, total: unit.total,
+            totalImages: latentSize === null ? unit.totalImages : sceneStatProduct(unit.total, latentSize),
+            unsetBatches: latentSize === null ? unit.unsetBatches : 0, rows: unit.rows };
     return sceneSchedulePlan(plan.units.map(mapUnit), plan.boundary, plan.randomGuards);
 }
 
 function sceneScheduleMatrix(plan, matrixRows) {
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
-        return sceneScheduleError("ランダム分岐はQueueで合流してからMatrixを接続してください。");
+        return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMatrixを接続してください。");
     if (!matrixRows.length) return sceneSchedulePlan([], plan.boundary, plan.randomGuards);
     const matrixEntry = (entry, matrixRow) => {
         const label = matrixLineLabel(matrixRow);
@@ -7675,8 +7918,8 @@ function sceneScheduleMatrix(plan, matrixRows) {
             row: { ...row, labels: [...(row.labels || []), label], path_parts: [...(row.path_parts || [])] } };
     };
     const mapUnit = (unit) => {
-        if (unit.kind === "fixed") return mapUnit(unit.unit)
-            .map((child) => sceneScheduleWrapper("fixed", child));
+        if (["fixed", "count_hold"].includes(unit.kind)) return mapUnit(unit.unit)
+            .map((child) => sceneScheduleWrapper(unit.kind, child));
         if (unit.kind === "run") return matrixRows.map((matrixRow) =>
             sceneScheduleRun(matrixEntry(unit.entry, matrixRow)));
         return [{
@@ -7693,6 +7936,7 @@ function sceneScheduleMatrix(plan, matrixRows) {
 function sceneScheduleHasComposite(plan) {
     const hasUnit = (unit) => unit.kind === "alternate" || unit.kind === "sequence" || unit.kind === "repeat_each"
         || unit.kind === "random_choice"
+        || unit.kind === "count_hold" || unit.kind === "count_scale"
         || (unit.unit && hasUnit(unit.unit))
         || (unit.left && sceneScheduleHasComposite(unit.left))
         || (unit.right && sceneScheduleHasComposite(unit.right));
@@ -7701,7 +7945,7 @@ function sceneScheduleHasComposite(plan) {
 
 function sceneScheduleMerge(left, right) {
     if (left.randomGuards?.length || right.randomGuards?.length)
-        return sceneScheduleError("ランダム分岐はQueueで合流してからMergeを接続してください。");
+        return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMergeを接続してください。");
     const boundary = left.boundary || right.boundary;
     if (!sceneScheduleHasComposite(left) && !sceneScheduleHasComposite(right)) {
         const units = [];
@@ -7788,19 +8032,22 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
         };
         let plan = null;
         if (entry.class_type === "ScenePresetInput") plan = upstream || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-        else if (entry.class_type === "ScenePrompterQueue") {
+        else if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(entry.class_type)) {
             const names = Array.from(SCENE_PROMPT_QUEUE_INPUT_NAMES).sort((a, b) => Number(a.slice(12)) - Number(b.slice(12)));
             const connected = names.map((name) => ({ name, plan: source(name) })).filter(({ plan: child }) => !!child);
-            plan = sceneScheduleQueue(connected.map(({ plan: child }) => child),
-                connected.map(({ name }) => name), Object.fromEntries(SCENE_QUEUE_CONTROL_NAMES.map((name) =>
-                    [name, apiInput(entry, name) ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]])));
+            plan = entry.class_type === "ScenePromptRandomRouteOutput" && !connected.length
+                ? sceneScheduleError("Scene Prompt Random Route Output に経路が接続されていません。")
+                : sceneScheduleQueue(connected.map(({ plan: child }) => child), connected.map(({ name }) => name),
+                    entry.class_type === "ScenePromptRandomRouteOutput" ? {} : Object.fromEntries(SCENE_QUEUE_CONTROL_NAMES.map((name) =>
+                        [name, apiInput(entry, name) ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]])));
         } else if (entry.class_type === "ScenePromptCounter") {
             const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-            plan = sceneScheduleCount(base, clampSceneCount(apiInput(entry, "count"), 1));
+            plan = sceneScheduleCount(base, clampSceneCount(apiInput(entry, "count"), 1), apiInput(entry, "enable_downstream_count") !== false);
         } else if (entry.class_type === "SceneEmptyLatent") {
             const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
             plan = base.randomGuards.length && !sceneRandomZeroArm(base)
-                ? sceneScheduleError("ランダム分岐はQueueで合流してからEmpty Latentを接続してください。") : base;
+                ? sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからEmpty Latentを接続してください。")
+                : sceneScheduleMap(base, (item) => item, clampSceneCount(apiInput(entry, "batch_size"), 1));
         } else if (entry.class_type === "ScenePresetReference") {
             plan = sceneScheduleForPreset(apiInput(entry, "preset_id"), source("scene_prompt"), nextStack,
                 preset?.scenePresetChildren?.get(String(nodeId)) || null, `${instancePath}/${nodeId}`);
@@ -7870,17 +8117,19 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         return finish(sceneSchedulePlan(base.units, base.boundary,
             [...base.randomGuards, { gateId: String(node.id), armIndex: outputSlot, weights }]));
     }
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         const sources = connectedScenePromptSourcesForQueue(node);
+        if (isScenePromptRandomRouteOutputNode(node) && !sources.length)
+            return finish(sceneScheduleError("Scene Prompt Random Route Output に経路が接続されていません。"));
         const plans = sources.map(({ input }) => sceneScheduleForLinkedInput(node, input.name, new Set(seen)));
-        return finish(sceneScheduleQueue(plans, sources.map(({ input }) => input.name), Object.fromEntries(
+        return finish(sceneScheduleQueue(plans, sources.map(({ input }) => input.name), isScenePromptRandomRouteOutputNode(node) ? {} : Object.fromEntries(
             SCENE_QUEUE_CONTROL_NAMES.map((name) => [name, findWidget(node, name)?.value ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]]))));
     }
     const upstream = scenePromptInputSource(node);
     if (isScenePromptCounterNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
             : sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-        return finish(sceneScheduleCount(base, scenePromptCounterCount(node)));
+        return finish(sceneScheduleCount(base, scenePromptCounterCount(node), scenePromptCounterDownstreamEnabled(node)));
     }
     if (isScenePresetReferenceNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
@@ -7895,17 +8144,18 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         const right = sources[1]?.source ? sceneScheduleForLinkedInput(node, "scene_prompt2", new Set(seen)) : seed();
         return finish(sceneScheduleMerge(left, right));
     }
-    if (isPromptMatrixNode(node) && upstream && (sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
+    const heldUpstream = upstream && scenePromptStats(upstream).hasCountHold;
+    if (isPromptMatrixNode(node) && upstream && (heldUpstream || sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
         const matrixRows = matrixLinesForNode(node);
         if (!matrixRows.length) return finish(matrixConfiguredLineCount(node) ? sceneSchedulePlan([], base.boundary) : base);
         return finish(sceneScheduleMatrix(base, matrixRows));
     }
-    if (upstream && (sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
+    if (upstream && (heldUpstream || sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
         if (base.stats.error) return finish(base);
         if (isSceneEmptyLatentNode(node) && base.randomGuards.length && !sceneRandomZeroArm(base))
-            return finish(sceneScheduleError("ランダム分岐はQueueで合流してからEmpty Latentを接続してください。"));
+            return finish(sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからEmpty Latentを接続してください。"));
         if (isScenePromptNode(node) || isScenePathNode(node) || isSceneEmptyLatentNode(node)) {
             const transform = (entry) => {
                 if (!entry) return null;
@@ -7917,15 +8167,8 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
                 if (isScenePathNode(node)) return { ...entry, row: { ...row, path_parts: appendScenePathPart(row.path_parts || [], scenePathTitle(node), normalizePathMode(findWidget(node, "path_mode")?.value)) } };
                 return { ...entry, row: { ...row, latent: sceneEmptyLatentConfig(node) } };
             };
-            const mapped = base.units.map((unit) => {
-                const inner = unit.kind === "fixed" ? unit.unit : unit;
-                const latent = isSceneEmptyLatentNode(node);
-                const mappedUnit = { ...inner, kind: "map", unit: inner, transform,
-                    totalImages: latent ? sceneStatProduct(inner.total, sceneEmptyLatentConfig(node).batch_size) : inner.totalImages,
-                    unsetBatches: latent ? 0 : inner.unsetBatches };
-                return unit.kind === "fixed" ? sceneScheduleWrapper("fixed", mappedUnit) : mappedUnit;
-            });
-            return finish(sceneSchedulePlan(mapped, base.boundary, base.randomGuards));
+            return finish(sceneScheduleMap(base, transform,
+                isSceneEmptyLatentNode(node) ? sceneEmptyLatentConfig(node).batch_size : null));
         }
         return finish(base);
     }
@@ -7977,7 +8220,7 @@ function sceneQueueBoundaryInPreset(presetId, upstream, stack = new Set(), prefe
         seen.add(nodeId);
         const entry = nodes[String(nodeId)];
         if (!entry) return false;
-        if (entry.class_type === "ScenePrompterQueue") return true;
+        if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(entry.class_type)) return true;
         if (entry.class_type === "ScenePresetInput") return upstream;
         if (entry.class_type === "ScenePresetReference") {
             const nested = sceneQueueBoundaryInPreset(apiInput(entry, "preset_id"),
@@ -7995,7 +8238,7 @@ function sceneQueueBoundaryInNode(node, seen = new Set()) {
     if (!node || seen.has(node.id) || isSceneNodeMuted(node)) return false;
     seen.add(node.id);
     if (isSceneNodeBypassed(node)) return sceneQueueBoundaryInNode(sceneBypassInputSource(node), seen);
-    if (isScenePromptQueueNode(node)) return true;
+    if (isScenePromptJoinNode(node)) return true;
     if (isScenePresetReferenceNode(node)) {
         const upstream = scenePromptInputSource(node);
         const inherited = sceneQueueBoundaryInNode(upstream, new Set(seen));
@@ -8013,6 +8256,8 @@ function sceneRandomRouteInNode(node, seen = new Set()) {
     seen.add(node.id);
     if (isSceneNodeBypassed(node)) return sceneRandomRouteInNode(sceneBypassInputSource(node), seen);
     if (isScenePromptRandomRouteNode(node)) return true;
+    if (isScenePromptJoinNode(node)) return connectedScenePromptSourcesForQueue(node)
+        .some(({ source }) => sceneRandomRouteInNode(source, new Set(seen)));
     if (isScenePresetReferenceNode(node)) {
         const plan = sceneScheduleForNode(node);
         const containsChoice = (unit) => unit?.kind === "random_choice"
@@ -8036,7 +8281,7 @@ function sceneQueuePendingInNode(node, seen = new Set()) {
     }
     if (isScenePromptMergeNode(node)) return connectedScenePromptSourcesForMerge(node)
         .some(({ source }) => sceneQueuePendingInNode(source, new Set(seen)));
-    if (isScenePromptQueueNode(node)) return connectedScenePromptSourcesForQueue(node)
+    if (isScenePromptJoinNode(node)) return connectedScenePromptSourcesForQueue(node)
         .some(({ source }) => sceneQueuePendingInNode(source, new Set(seen)));
     return sceneQueuePendingInNode(scenePromptInputSource(node), seen);
 }
@@ -8067,9 +8312,6 @@ function syncSceneQueueControls(node, allowDuringLoad = false) {
         widget.options.disabled = disabled;
         widget.label = lock ? `${SCENE_WIDGET_LABELS[name] || name}（${lock === "upstream" ? "上流Queueあり" : lock === "random" ? "ランダム分岐の合流" : "Preset読み込み中"}）`
             : SCENE_WIDGET_LABELS[name] || name;
-        if ((lock === "upstream" || lock === "random") && widget.value !== SCENE_QUEUE_CONTROL_DEFAULTS[name]) {
-            setWidgetValue(node, name, SCENE_QUEUE_CONTROL_DEFAULTS[name], { silent: true });
-        }
     }
     const json = findWidget(node, "input_repeats_json");
     if (json) {
@@ -8175,7 +8417,7 @@ function sceneBypassInputSource(node) {
             .find(Boolean);
         return source || null;
     }
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         const graph = node?.graph || app.graph;
         const input = (node.inputs || [])[0] || null;
         const source = input ? resolveLinkedSourceFromInput(graph, input).source : null;
@@ -8190,6 +8432,10 @@ function scenePromptCounterCount(node) {
         return clampSceneCount(findWidget(primitive, "value")?.value, 1);
     }
     return clampSceneCount(findWidget(node, "count")?.value, 1);
+}
+
+function scenePromptCounterDownstreamEnabled(node) {
+    return findWidget(node, "enable_downstream_count")?.value !== false;
 }
 
 function sceneEmptyLatentConfig(node) {
@@ -8227,7 +8473,7 @@ function scenePromptLineageKey(node) {
             linkedInputKey(current, "scene_prompt"),
         ].map((part) => String(part ?? "")).join(":"));
         if (isScenePromptCounterNode(current)) {
-            parts.push(`count:${scenePromptCounterCount(current)}`);
+            parts.push(`count:${scenePromptCounterCount(current)}:${scenePromptCounterDownstreamEnabled(current)}`);
         }
         if (isScenePromptRandomRouteNode(current)) {
             parts.push(`random:${findWidget(current, "weights_json")?.value || ""}:${Boolean(findWidget(current, "preserve_join")?.value)}`);
@@ -8252,7 +8498,7 @@ function scenePromptLineageKey(node) {
             }))));
             break;
         }
-        if (isScenePromptQueueNode(current)) {
+        if (isScenePromptJoinNode(current)) {
             break;
         }
         current = scenePromptInputSource(current);
@@ -8296,6 +8542,9 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const bypassSource = sceneBypassInputSource(node);
         return finish(bypassSource ? scenePromptPreviewEntries(bypassSource, maxEntries, new Set(seen), memo) : []);
     }
+
+    if (scenePromptStats(node).hasCountHold)
+        return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
 
     if (isScenePresetReferenceNode(node) && sceneQueueBoundaryInNode(node)) {
         return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
@@ -8450,7 +8699,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         })));
     }
 
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
     }
 
@@ -9061,7 +9310,7 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
         const graphNode = sceneNodeById(nodeId);
         if (!graphNode) continue;
         syncSceneRandomRoute(graphNode);
-        if (graphNode.sceneRandomError) throw new Error(`Scene Prompt Random Route #${nodeId}: ${graphNode.sceneRandomError}`);
+        if (graphNode.sceneRandomError) throw new Error(`Scene Prompt Random Route Input #${nodeId}: ${graphNode.sceneRandomError}`);
     }
     return snapshot;
 }
@@ -9242,6 +9491,34 @@ function releaseCancelledSceneBatchRun(run) {
     }
     run.snapshotReleased = true;
     releaseSceneRunHandle(run.runHandle);
+    releaseSceneBatchGPU(run).catch(sceneGPUController.onCleanupError);
+}
+
+async function prepareSceneBatchGPU(run) {
+    if (run.gpuPolicyId) return run.gpuPolicyId;
+    if (!run.gpuPolicyPromise) {
+        run.gpuPolicyPromise = sceneGPUController.prepareImage(run.gpuSettings, {
+            runHandle: run.runHandle, continuous: true,
+        });
+    }
+    try {
+        const policyId = await run.gpuPolicyPromise;
+        if (run.gpuReleaseRequested) {
+            await sceneGPUController.releaseImage(policyId);
+            throw new Error("連続生成を停止したため画像生成を中止しました。");
+        }
+        run.gpuPolicyId = policyId;
+        return policyId;
+    } finally { run.gpuPolicyPromise = null; }
+}
+
+async function releaseSceneBatchGPU(run) {
+    if (!run || run.gpuReleaseRequested) return;
+    run.gpuReleaseRequested = true;
+    // A still-pending preparation releases its own late response.
+    const policyId = run.gpuPolicyId;
+    run.gpuPolicyId = "";
+    if (policyId) await sceneGPUController.releaseImage(policyId);
 }
 
 function cancelSceneBatchRunPreparation(run) {
@@ -9593,9 +9870,10 @@ function installSceneBatchPromptCapture() {
     if (api.__ScenePromptBatchCaptureInstalled || typeof api.queuePrompt !== "function") {
         return;
     }
-    const originalQueuePrompt = api.queuePrompt.bind(api);
+    const originalQueuePrompt = api.queuePrompt;
     api.queuePrompt = async function (number, prompt) {
         const submissionRun = typeof sceneBatchRunFromPrompt === "function" ? sceneBatchRunFromPrompt(prompt) : null;
+        const gpuSettings = submissionRun?.gpuSettings || sceneGPUController.snapshot();
         const submissionWorkflow = submissionRun?.workflow
             || (typeof sceneWorkflowFromPrompt === "function" ? sceneWorkflowFromPrompt(prompt) : null);
         if (!submissionRun) {
@@ -9633,19 +9911,35 @@ function installSceneBatchPromptCapture() {
             && String(expandPrompt.inputs?.run_id || "") === run.runId
             && Number(expandPrompt.inputs?.current_index || 0) === 0;
         applyRandomizedSamplerSeeds(prompt, samplerSeedTargets);
-        if (matchesFirstBatchPrompt) {
-            run.firstApiPending = false;
-            run.cachedPrompt = buildSceneBatchCachedPrompt(prompt, run.nodeId);
-        }
         let result;
+        let policyId = "";
         try {
-            result = await originalQueuePrompt(...arguments);
+            policyId = submissionRun
+                ? await prepareSceneBatchGPU(submissionRun)
+                : await sceneGPUController.prepareImage(gpuSettings, { runHandle: preparedRunHandle });
+            sceneGPUController.applyImagePolicy(prompt, policyId);
+            const queueClient = sceneGPUController.queueClient(originalQueuePrompt, policyId);
+            if (matchesFirstBatchPrompt) {
+                run.firstApiPending = false;
+                run.cachedPrompt = buildSceneBatchCachedPrompt(prompt, run.nodeId);
+            }
+            result = await originalQueuePrompt.apply(queueClient, arguments);
         } catch (error) {
             releaseSceneRunHandle(preparedRunHandle);
+            if (submissionRun) releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
+            else sceneGPUController.releaseImage(policyId).catch(sceneGPUController.onCleanupError);
             showPromptValidationErrorFromThrown(error);
             throw error;
         }
         const promptId = scenePromptIdFromValue(result);
+        if (!promptId) {
+            if (submissionRun) releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
+            else sceneGPUController.releaseImage(policyId).catch(sceneGPUController.onCleanupError);
+        } else if (!submissionRun) {
+            sceneGPUController.acceptImage(policyId);
+        } else if (sceneBatchRun !== submissionRun) {
+            releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
+        }
         if (promptId && typeof scenePromptSubmissionsById !== "undefined") {
             scenePromptSubmissionsById.set(promptId, {
                 workflow: submissionWorkflow,
@@ -9732,7 +10026,10 @@ function releaseSceneBatchPlan(runId) {
         return run?.releasePromise || Promise.resolve(false);
     }
     run.releaseRequested = true;
-    const release = () => releaseSceneRunHandle(run.runHandle);
+    const release = () => Promise.all([
+        releaseSceneRunHandle(run.runHandle),
+        releaseSceneBatchGPU(run).catch(sceneGPUController.onCleanupError),
+    ]);
     run.releasePromise = run.runClaimPromise
         ? Promise.resolve(run.runClaimPromise).then(release, release)
         : release();
@@ -10238,6 +10535,7 @@ function stopSceneBatchRun(options = {}) {
         return;
     }
     const deferRelease = options.forceRelease !== true && !!run?.waiting;
+    if (run && !run.queueing) releaseSceneBatchGPU(run).catch(sceneGPUController.onCleanupError);
     if (deferRelease) {
         run.controlsResetPending = !previousNode;
         rememberDetachedSceneBatchRun(run);
@@ -10482,6 +10780,10 @@ function createSceneBatchRun(node, total) {
         nextIndex: 0,
         runId: `${sceneBatchRunId()}__${planId}`,
         runHandle: "",
+        gpuSettings: sceneGPUController.snapshot(),
+        gpuPolicyId: "",
+        gpuPolicyPromise: null,
+        gpuReleaseRequested: false,
         waiting: false,
         queueing: false,
         currentPromptId: "",
@@ -11589,12 +11891,15 @@ async function openSceneExpandResources(node) {
         }
         if (!data.models?.length) addText(modelSection, "接続されたモデルはありません。");
         const loraSection = addSection("LoRA");
-        for (const lora of data.loras || []) {
+        const variantRank = (variant) => variant.applies === true ? 0 : variant.applies === false ? 2 : 1;
+        const loraRank = (lora) => lora.variants?.some((variant) => variant.applies === true) ? 0
+            : lora.variants?.length && lora.variants.every((variant) => variant.applies === false) ? 2 : 1;
+        for (const lora of [...(data.loras || [])].sort((a, b) => loraRank(a) - loraRank(b))) {
             const card = document.createElement("div");
             card.className = "pc-resource-card";
             if (lora.variants?.length && lora.variants.every((variant) => variant.applies === false)) card.classList.add("pc-resource-unapplied");
             addText(card, lora.name, "pc-resource-name");
-            for (const variant of lora.variants || []) {
+            for (const variant of [...(lora.variants || [])].sort((a, b) => variantRank(a) - variantRank(b))) {
                 const roles = variant.roles || ["model", "clip"];
                 const strengths = [
                     roles.includes("model") ? `モデル強度 ${variant.strength_model ?? "取得不可"}` : "",
@@ -12196,11 +12501,11 @@ function openSceneRandomSettings(node) {
     dialog.className = "pc-lora-dialog pc-random-dialog";
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", "Scene Prompt Random Route 設定");
+    dialog.setAttribute("aria-label", "Scene Prompt Random Route Input 設定");
     const head = document.createElement("div");
     head.className = "pc-lora-head";
     const heading = document.createElement("strong");
-    heading.textContent = "Scene Prompt Random Route 設定";
+    heading.textContent = "Scene Prompt Random Route Input 設定";
     const close = document.createElement("button");
     close.type = "button";
     close.className = "pc-button";
@@ -12466,6 +12771,8 @@ function attachSceneNode(node, nodeName) {
         attachScenePromptCounter(node);
     } else if (isScenePromptQueueNode(node) || SCENE_PROMPT_QUEUE_NODE_NAMES.has(nodeName)) {
         attachScenePromptQueue(node);
+    } else if (isScenePromptRandomRouteOutputNode(node) || SCENE_PROMPT_RANDOM_ROUTE_OUTPUT_NODE_NAMES.has(nodeName)) {
+        attachSceneUtilityNode(node, nodeName);
     } else if (isScenePromptRandomRouteNode(node) || SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES.has(nodeName)) {
         attachScenePromptRandomRoute(node);
     } else if (isScenePromptCallbackNode(node) || SCENE_PROMPT_CALLBACK_NODE_NAMES.has(nodeName)) {
@@ -12820,6 +13127,7 @@ app.registerExtension({
     },
 
     settings: [
+        ...GPU_HANDOFF_SETTINGS,
         {
             id: "ScenePrompt.UndoHistoryLimit",
             name: "Scene Prompt Tools: Undo履歴数",
@@ -12844,6 +13152,7 @@ app.registerExtension({
         installSceneCompressedPngWorkflowLoader();
         installSceneWorkflowLoadGuard();
         window.addEventListener("pagehide", releaseSceneRunsOnPageHide);
+        window.addEventListener("pagehide", sceneGPUController.releaseOnPageHide);
         api.addEventListener("scene_prompt_desktop_notification", ({ detail }) => receiveSceneDesktopNotification(detail));
         api.addEventListener("execution_start", ({ detail }) => {
             const promptId = scenePromptIdFromValue(detail);
@@ -12935,11 +13244,49 @@ app.registerExtension({
             };
         }
 
+        if (nodeData.name === "ScenePromptCounter") {
+            const configure = nodeType.prototype.configure;
+            const serialize = nodeType.prototype.serialize;
+            nodeType.prototype.configure = function (...args) {
+                const named = sceneCounterConfiguredValues(args[0]);
+                this.sceneCounterSourceValues = Object.fromEntries(["source_node_id", "source_node_name"]
+                    .filter((name) => Object.hasOwn(named, name)).map((name) => [name, named[name]]));
+                args[0] = sceneCounterConfigureValues(this, args[0], named);
+                const result = configure?.apply(this, args);
+                for (const name of Object.keys(named)) setWidgetValue(this, name, named[name], { silent: true });
+                clearSceneComputedCaches(this);
+                return result;
+            };
+            nodeType.prototype.serialize = function (...args) {
+                const result = serialize?.apply(this, args);
+                if (!result) return result;
+                const named = Object.fromEntries((this.widgets || []).filter((widget) => widget.serialize !== false)
+                    .map((widget) => [widget.name, widget.value]));
+                return { ...result, widgets_values_named: { ...result.widgets_values_named, ...this.sceneCounterSourceValues, ...named,
+                    enable_downstream_count: scenePromptCounterDownstreamEnabled(this) } };
+            };
+        }
+
         if (nodeData.name === "ScenePrompterExpand") {
             const configure = nodeType.prototype.configure;
             nodeType.prototype.configure = function (...args) {
                 args[0] = sceneExpandConfigureValues(args[0]);
                 return configure?.apply(this, args);
+            };
+        }
+
+        if (SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES.has(nodeData.name)) {
+            const configure = nodeType.prototype.configure;
+            nodeType.prototype.configure = function (...args) {
+                const config = args[0];
+                const names = ["weights_json", "preserve_join"];
+                const named = { ...Object.fromEntries(names.slice(0, config?.widgets_values?.length || 0)
+                    .map((name, index) => [name, config.widgets_values[index]])), ...config?.widgets_values_named };
+                const result = configure?.apply(this, args);
+                for (const name of names) if (Object.hasOwn(named, name)) setWidgetValue(this, name, named[name], { silent: true });
+                if (!Object.hasOwn(named, "preserve_join")) setWidgetValue(this, "preserve_join", false, { silent: true });
+                clearSceneComputedCaches(this);
+                return result;
             };
         }
 

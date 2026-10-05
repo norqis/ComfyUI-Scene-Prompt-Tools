@@ -2,15 +2,29 @@ export function injectStyle() {
     const style = document.getElementById("scene-prompt-style") || document.createElement("style");
     style.id = "scene-prompt-style";
     style.textContent = `
-        .pc-civitai-dialog { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
-        .pc-civitai-controls { display: flex; gap: 8px; padding: 8px 0; }
+        .pc-lora-dialog.pc-civitai-dialog { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+        .pc-lora-dialog.pc-civitai-search-dialog { width: calc(100vw - 32px); display: flex; flex-direction: column; overflow: hidden; }
+        .pc-civitai-controls { display: flex; flex-wrap: wrap; flex-shrink: 0; gap: 8px; padding: 8px 0; }
         .pc-civitai-controls input { flex: 1; min-width: 0; }
         .pc-civitai-dialog input, .pc-civitai-dialog select { color: #eee; background: #292d35; border: 1px solid #59616d; border-radius: 4px; padding: 6px; box-sizing: border-box; min-width: 0; }
         .pc-civitai-dialog a { color: #a5c8ff; }
-        .pc-civitai-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; overflow: auto; }
-        .pc-civitai-card { display: flex; flex-direction: column; gap: 7px; padding: 12px; border: 1px solid #555; border-radius: 6px; }
+        .pc-civitai-results { display: grid; grid-template-columns: repeat(10, minmax(112px, 1fr)); gap: 8px; overflow: auto; min-height: 0; }
+        .pc-civitai-card { display: flex; flex-direction: column; gap: 5px; padding: 7px; border: 1px solid #555; border-radius: 6px; cursor: pointer; min-width: 0; box-sizing: border-box; }
+        .pc-civitai-card strong, .pc-civitai-card span { overflow-wrap: anywhere; }
+        .pc-civitai-card:focus-visible { outline: 2px solid #a5c8ff; outline-offset: -3px; }
         .pc-civitai-card.pc-lora-selected { border: 2px solid #60d082; background: #193c28; }
-        .pc-civitai-card img { width: 100%; height: 180px; object-fit: contain; }
+        .pc-civitai-card img, .pc-civitai-no-preview { width: 100%; height: 150px; object-fit: contain; }
+        .pc-civitai-no-preview { display: grid; place-items: center; color: #aeb7c5; background: #292d35; }
+        .pc-civitai-status:empty { display: none; }
+        .pc-civitai-status { flex-shrink: 0; }
+        .pc-civitai-detail { overflow: auto; min-height: 0; }
+        .pc-civitai-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .pc-civitai-gallery img { width: 100%; max-height: 48vh; object-fit: contain; }
+        .pc-civitai-pages, .pc-civitai-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 12px 0; }
+        .pc-civitai-metadata { display: grid; grid-template-columns: minmax(100px, 140px) minmax(0, 1fr); gap: 10px; }
+        .pc-civitai-metadata dt { font-weight: bold; }
+        .pc-civitai-metadata dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .pc-civitai-search-dialog [hidden] { display: none; }
         .pc-civitai-error { color: #ffb0a7; }
         .pc-civitai-dialog form { display: flex; flex-direction: column; gap: 10px; }
         .pc-civitai-dialog label { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
@@ -21,7 +35,7 @@ export function injectStyle() {
         .pc-connection-actions { display: flex; flex-wrap: wrap; gap: 8px; }
         .pc-connection-settings button[aria-pressed=true] { color: #fff; background: #863b35; border-color: #ff8175; }
         @media (max-width: 520px) { .pc-connection-settings label { align-items: stretch; flex-direction: column; gap: 5px; } .pc-civitai-dialog .pc-connection-settings label input { width: 100%; } }
-        @media (max-width: 520px) { .pc-civitai-controls { flex-wrap: wrap; } .pc-civitai-controls input { flex-basis: 100%; } .pc-civitai-controls select { flex: 1; } .pc-civitai-results { grid-template-columns: minmax(0, 1fr); } }
+        @media (max-width: 520px) { .pc-civitai-controls input { flex-basis: 100%; } .pc-civitai-controls select { flex: 1; } .pc-civitai-metadata { grid-template-columns: minmax(0, 1fr); gap: 5px; } .pc-civitai-metadata dd { margin-bottom: 8px; } }
         .pc-popup {
             position: fixed;
             z-index: 99999;
@@ -582,6 +596,9 @@ export function injectStyle() {
         .pc-lora-path { grid-column: 1 / -1; color: #b8c7d9; overflow-wrap: anywhere; }
         .pc-lora-title { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
         .pc-lora-source { border: 1px solid #667e9b; font: inherit; cursor: pointer; align-self: center; padding: 2px 6px; border-radius: 3px; background: #455366; color: #dceaff; white-space: nowrap; }
+        .pc-lora-source.pc-lora-local { cursor: default; background: #343941; color: #c5cbd5; }
+        .pc-lora-head-actions { display: flex; gap: 8px; margin-left: auto; flex-shrink: 0; }
+        .pc-lora-head > strong { min-width: 0; overflow-wrap: anywhere; }
     `;
     if (!style.parentNode) {
         document.head.appendChild(style);

@@ -17,6 +17,14 @@ function element(tag, text, className) {
     if (className) node.className = className;
     return node;
 }
+function descriptionText(html) {
+    const template = document.createElement("template");
+    template.innerHTML = html || "";
+    for (const node of template.content.querySelectorAll("script,style,iframe")) node.remove();
+    for (const node of template.content.querySelectorAll("br")) node.replaceWith(document.createTextNode("\n"));
+    for (const node of template.content.querySelectorAll("p,div,li,h1,h2,h3,h4,blockquote")) node.append(document.createTextNode("\n"));
+    return template.content.textContent.replace(/\n{3,}/gu, "\n\n").trim();
+}
 export function openModal(title, onDismiss) {
     const focus = document.activeElement;
     const overlay = element("div", undefined, "pc-lora-overlay");
@@ -38,7 +46,7 @@ export function openModal(title, onDismiss) {
         if (modals.at(-1) !== overlay) return;
         if (event.key === "Escape") dismiss();
         if (event.key === "Tab") {
-            const controls = [...dialog.querySelectorAll("button,input,select,a[href]")].filter((node) => !node.disabled);
+            const controls = [...dialog.querySelectorAll("button,input,select,a[href],[tabindex=\"0\"]")].filter((node) => !node.disabled && node.getClientRects().length && !node.closest("[inert]"));
             const first = controls[0], last = controls.at(-1);
             if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
             else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -55,81 +63,146 @@ export function showAPIError(error, query, retry) {
     button.onclick = () => { modal.dismiss(); void retry(); }; modal.dialog.append(button);
     return modal;
 }
-export function openCivitaiSearch({ node, api, refresh, details, activeGraph = () => node.graph,
+export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node.graph,
     beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const state = node.properties?.scene_civitai || {};
-    let revision = 0, currentResult = null;
-    const invalidate = () => { revision++; currentResult = null; list.replaceChildren(); };
-    const modal = openModal("Civitai Search", invalidate);
-    const controls = element("div", undefined, "pc-civitai-controls"), query = element("input"), sort = element("select");
+    let revision = 0, detailRevision = 0, currentResult = null, downloadBusy = false;
+    const modal = openModal("Civitai Search", () => {
+        revision++; detailRevision++; currentResult = null;
+        list.replaceChildren(); detail.replaceChildren();
+    });
+    modal.dialog.classList.add("pc-civitai-search-dialog");
+    const controls = element("div", undefined, "pc-civitai-controls"), query = element("input"), sort = element("select"),
+        model = element("select"), host = element("select");
     query.type = "search"; query.value = state.query || ""; query.placeholder = "LoRAを検索"; query.setAttribute("aria-label", "検索語");
-    sort.setAttribute("aria-label", "並び順");
-    for (const name of SORTS) { const option = element("option", name); option.value = name; sort.append(option); }
-    sort.value = state.sort || SORTS[0];
-    const search = element("button", "検索", "pc-button"), list = element("div", undefined, "pc-civitai-results");
-    controls.append(query, sort, search); modal.dialog.append(controls, list);
-    function render(items) {
-        list.replaceChildren();
-        if (!items.length) { list.append(element("p", "該当するLoRAはありません。")); return; }
-        const selected = node.properties?.scene_civitai;
-        if (selected && !items.some((item) => identity(item) === identity(selected))) {
-            list.append(element("p", `現在の選択（検索結果外）: ${selected.name || selected.lora_name} · ${selected.version_name || selected.version_id}`, "pc-lora-selected"));
+    function options(select, label, names, selected) {
+        select.setAttribute("aria-label", label);
+        for (const name of names) { const option = element("option", name); option.value = name; select.append(option); }
+        select.value = names.includes(selected) ? selected : names[0];
+    }
+    options(sort, "並び順", SORTS, state.sort);
+    options(model, "Base Model", ["Illustrious", "Anima"], value(node, "model_mode"));
+    options(host, "接続先", ["civitai.red", "civitai.com"], state.host);
+    const search = element("button", "検索", "pc-button"), status = element("p", "", "pc-civitai-status"),
+        list = element("div", undefined, "pc-civitai-results"), detail = element("div", undefined, "pc-civitai-detail");
+    status.setAttribute("role", "status"); detail.hidden = true;
+    controls.append(query, sort, model, host, search); modal.dialog.append(controls, status, list, detail);
+    const snapshot = () => Object.freeze({ query: query.value.trim(), sort: sort.value, host: host.value, model_mode: model.value });
+    function back(view, card, position) {
+        detailRevision++; detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = false;
+        if (currentResult !== view) return;
+        list.scrollLeft = position.left; list.scrollTop = position.top; modal.dialog.scrollTop = position.modal;
+        card.focus({ preventScroll: true });
+    }
+    function showDetails(item, view, card) {
+        if (currentResult !== view || view.serial !== revision) return;
+        const position = { left: list.scrollLeft, top: list.scrollTop, modal: modal.dialog.scrollTop };
+        const serial = ++detailRevision;
+        detail.replaceChildren(); controls.hidden = true; list.hidden = true; status.hidden = true; detail.hidden = false;
+        const goBack = element("button", "戻る", "pc-button"), title = element("h2", item.name || "—");
+        goBack.onclick = () => back(view, card, position);
+        detail.append(goBack, title, element("p", item.version_name || "—"));
+        const gallery = Array.isArray(item.gallery) ? item.gallery : item.image_url ? [{ url: item.image_url }] : [];
+        const images = element("div", undefined, "pc-civitai-gallery"), pages = element("div", undefined, "pc-civitai-pages"),
+            previous = element("button", "Previous", "pc-button"), next = element("button", "Next", "pc-button"), page = element("span");
+        let offset = 0;
+        function renderImages() {
+            images.replaceChildren();
+            if (!gallery.length) images.append(element("p", "プレビュー画像はありません。"));
+            for (const preview of gallery.slice(offset, offset + 2)) {
+                const image = element("img"); image.src = preview.url; image.alt = item.name || "LoRA preview";
+                if (preview.width > 0 && preview.height > 0) image.style.aspectRatio = `${preview.width} / ${preview.height}`;
+                images.append(image);
+            }
+            previous.disabled = offset === 0; next.disabled = offset + 2 >= gallery.length;
+            page.textContent = gallery.length ? `${offset + 1}–${Math.min(offset + 2, gallery.length)} / ${gallery.length}` : "0 / 0";
         }
-        // Keep the authoritative server ranking; selection changes only styling.
-        for (const item of items) {
-            const row = element("article", undefined, `pc-civitai-card${selected && identity(item) === identity(selected) ? " pc-lora-selected" : ""}`);
-            if (item.image_url) { const image = element("img"); image.src = item.image_url; image.loading = "lazy"; image.alt = item.name; row.append(image); }
-            row.append(element("strong", item.name), element("span", `${item.version_name} · ${item.base_model}`),
-                element("span", `${Number(item.size_kb || 0).toLocaleString()} KB`), element("span", `Trigger: ${(item.triggers || []).join(", ") || "—"}`));
-            const stats = item.stats || {};
-            row.append(element("span", `Downloads ${stats.downloadCount || 0} · Likes ${stats.thumbsUpCount ?? stats.favoriteCount ?? 0} · Collected ${stats.collectedCount || 0} · Rating ${stats.rating ?? "—"}`));
-            const link = element("a", "Civitai"); link.href = item.model_url; link.target = "_blank"; link.rel = "noopener noreferrer"; row.append(link);
-            const detailButton = element("button", "詳細確認", "pc-button");
-            detailButton.onclick = () => {
-                if (details) { details(item, detailButton); return; }
-                const detail = openModal(item.name);
-                detail.dialog.append(element("p", `${item.version_name} · ${item.base_model}`), element("p", `File: ${item.file_name} · ${Number(item.size_kb || 0).toLocaleString()} KB`),
-                    element("p", `Trigger: ${(item.triggers || []).join(", ") || "—"}`), element("p", `Model ${item.model_id} · Version ${item.version_id} · File ${item.file_id}`));
-                const source = element("a", "Civitaiで開く"); source.href = item.model_url; source.target = "_blank"; source.rel = "noopener noreferrer"; detail.dialog.append(source);
-            };
-            row.append(detailButton);
-            const choose = element("button", item.acquired ? "取得済み・選択" : "取得して選択", "pc-button");
-            choose.onclick = async () => {
-                const serial = revision, graph = node.graph, lora = value(node, "lora_name");
-                const current = captureTarget({ node, graph, ownerGraph: graph }, activeGraph);
-                choose.disabled = true;
-                try {
-                    const downloaded = await requestJSON(api, "/scene_prompt/civitai/download", { model_id: item.model_id, version_id: item.version_id, file_id: item.file_id, model_mode: value(node, "model_mode") });
-                    if (!modal.overlay.isConnected || revision !== serial || !current() || value(node, "lora_name") !== lora) return;
-                    beginChange(graph);
-                    try { applyCandidate(node, { ...downloaded.candidate, lora_name: downloaded.lora_name }, { query: query.value.trim(), sort: sort.value }); }
-                    finally { endChange(graph); }
-                    item.acquired = true; item.lora_name = downloaded.lora_name;
-                    refresh?.(node); render(items);
-                } catch (error) { if (modal.overlay.isConnected && revision === serial)
-                    showAPIError(error, query.value, () => { if (modal.overlay.isConnected && revision === serial) choose.click(); }); }
-                finally { choose.disabled = false; }
-            };
-            row.append(choose); list.append(row);
+        previous.onclick = () => { offset -= 2; renderImages(); }; next.onclick = () => { offset += 2; renderImages(); };
+        pages.append(previous, page, next); detail.append(images, pages); renderImages();
+        const metadata = element("dl", undefined, "pc-civitai-metadata");
+        function field(label, content) { metadata.append(element("dt", label), element("dd", content || "—")); }
+        function stats(data) {
+            return Object.entries({ downloadCount: "Downloads", thumbsUpCount: "Likes", favoriteCount: "Favorites", collectedCount: "Collected",
+                rating: "Rating", ratingCount: "Ratings", commentCount: "Comments", tippedAmountCount: "Tips" })
+                .filter(([key]) => data?.[key] != null).map(([key, label]) => `${label}: ${data[key]}`).join(" · ");
+        }
+        field("Base Model", item.base_model); field("Trigger Words", (item.triggers || []).join(", "));
+        field("Description", descriptionText(item.description)); field("Version Description", descriptionText(item.version_description));
+        field("Published", item.published_at); field("Model Stats", stats(item.model_stats || item.stats)); field("Version Stats", stats(item.version_stats));
+        field("File", `${item.file_name || "—"} · ${Number(item.size_kb || 0).toLocaleString()} KB`);
+        detail.append(metadata);
+        const actions = element("div", undefined, "pc-civitai-detail-actions"),
+            choose = element("button", item.acquired ? "取得済み・選択" : "取得して選択", "pc-button"), source = element("a", "Civitaiで開く");
+        source.href = `https://${view.snapshot.host}/models/${item.model_id}?modelVersionId=${item.version_id}`;
+        source.target = "_blank"; source.rel = "noopener noreferrer";
+        choose.disabled = downloadBusy;
+        actions.append(choose, source); detail.append(actions);
+        choose.onclick = async () => {
+            if (downloadBusy) return;
+            const graph = node.graph, lora = value(node, "lora_name"), current = captureTarget({ node, graph, ownerGraph: graph }, activeGraph);
+            const ownsAction = () => modal.overlay.isConnected && currentResult === view && revision === view.serial && detailRevision === serial;
+            downloadBusy = true; choose.disabled = true;
+            try {
+                const downloaded = await requestJSON(api, "/scene_prompt/civitai/download", { model_id: item.model_id, version_id: item.version_id,
+                    file_id: item.file_id, model_mode: view.snapshot.model_mode, host: view.snapshot.host });
+                if (!ownsAction() || !current() || value(node, "lora_name") !== lora) return;
+                if (!downloaded.candidate || !downloaded.lora_name) throw new Error("Civitai取得結果が無効です。");
+                beginChange(graph);
+                try { applyCandidate(node, { ...downloaded.candidate, lora_name: downloaded.lora_name }, view.snapshot); }
+                finally { endChange(graph); }
+                item.acquired = true; item.lora_name = downloaded.lora_name;
+                for (const row of list.querySelectorAll(".pc-civitai-card")) row.classList.toggle("pc-lora-selected", row.dataset.identity === identity(item));
+                choose.textContent = "取得済み・選択"; refresh?.(node);
+            } catch (error) { if (ownsAction()) showAPIError(error, view.snapshot.query, () => { if (ownsAction()) choose.click(); }); }
+            finally {
+                downloadBusy = false;
+                for (const button of detail.querySelectorAll(".pc-civitai-detail-actions button")) button.disabled = false;
+            }
+        };
+        goBack.focus();
+    }
+    function render(view) {
+        list.replaceChildren(); list.inert = false;
+        const saved = node.properties?.scene_civitai;
+        const selected = saved?.lora_name && saved.lora_name.replaceAll("\\", "/") === String(value(node, "lora_name")).replaceAll("\\", "/") ? saved : null;
+        if (!view.items.length) { list.append(element("p", "該当するLoRAはありません。")); return; }
+        const selectedLabel = selected?.name || selected?.lora_name;
+        if (selectedLabel && [selected.model_id, selected.version_id, selected.file_id].every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0)
+            && !view.items.some((item) => identity(item) === identity(selected)))
+            status.textContent = `現在の選択（検索結果外）: ${selectedLabel}${selected.version_name ? ` · ${selected.version_name}` : ""}`;
+        for (const item of view.items) {
+            const card = element("article", undefined, `pc-civitai-card${selected && identity(item) === identity(selected) ? " pc-lora-selected" : ""}`);
+            card.setAttribute("role", "button"); card.tabIndex = 0; card.dataset.identity = identity(item); card.setAttribute("aria-label", `${item.name} ${item.version_name || ""} の詳細`);
+            if (item.image_url) { const image = element("img"); image.src = item.image_url; image.loading = "lazy"; image.alt = ""; card.append(image); }
+            else card.append(element("div", "No preview", "pc-civitai-no-preview"));
+            card.append(element("strong", item.name || "—"), element("span", item.version_name || "—"), element("span", item.base_model || "—"));
+            card.onclick = () => showDetails(item, view, card);
+            card.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); showDetails(item, view, card); } };
+            list.append(card);
         }
     }
-    async function load(force = false) {
+    async function load(requested = snapshot()) {
         if (!modal.overlay.isConnected) return;
-        const serial = ++revision;
-        const key = new URLSearchParams({ query: query.value.trim(), model_mode: value(node, "model_mode"), sort: sort.value }).toString();
-        list.textContent = "検索中…";
-        let result = !force && currentResult?.key === key ? currentResult.data : null;
-        currentResult = null;
+        const serial = ++revision; detailRevision++;
+        detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = false;
+        status.textContent = "検索中…"; list.inert = true;
         try {
-            if (!result) result = await requestJSON(api, `/scene_prompt/civitai/search?${key}`);
+            const result = await requestJSON(api, `/scene_prompt/civitai/search?${new URLSearchParams(requested)}`);
             if (!modal.overlay.isConnected || serial !== revision) return;
-            currentResult = { key, data: result };
-            render(result.items);
+            if (!Array.isArray(result.items)) throw new Error("API /scene_prompt/civitai/search · HTTP 200: 無効な検索応答です。");
+            currentResult = { serial, snapshot: requested, items: result.items };
+            status.textContent = ""; render(currentResult);
         } catch (error) {
-            if (modal.overlay.isConnected && serial === revision) { list.textContent = "検索できませんでした。"; showAPIError(error, query.value, () => load(true)); }
+            if (modal.overlay.isConnected && serial === revision) {
+                status.textContent = currentResult ? "検索できませんでした。前の検索結果を表示しています。" : "検索できませんでした。";
+                if (currentResult) { currentResult.serial = serial; list.inert = false; }
+                showAPIError(error, requested.query, () => { if (modal.overlay.isConnected && serial === revision) void load(requested); });
+            }
         }
     }
-    search.onclick = () => void load(true); sort.onchange = () => void load(true); query.onkeydown = (event) => { if (event.key === "Enter") void load(true); };
+    search.onclick = () => void load();
+    for (const select of [sort, model, host]) select.onchange = () => void load();
+    query.onkeydown = (event) => { if (event.key === "Enter") void load(); };
     query.focus(); void load(); return modal;
 }
 export async function openLLMSettings(api) {
