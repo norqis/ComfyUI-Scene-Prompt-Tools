@@ -11,6 +11,7 @@ const assets = new Map([
     ["/extensions/scene-prompt/web/scene_prompt_state.js", "web/scene_prompt_state.js"],
     ["/extensions/scene-prompt/web/scene_prompt_style.js", "web/scene_prompt_style.js"],
     ["/extensions/scene-prompt/web/scene_prompt_llm.js", "web/scene_prompt_llm.js"],
+    ["/extensions/scene-prompt/web/scene_prompt_gpu.js", "web/scene_prompt_gpu.js"],
     ["/extensions/scene-prompt/web/scene_prompt_civitai.js", "web/scene_prompt_civitai.js"],
     ["/extensions/scene-prompt/web/scene_llm_presets.js", "web/scene_llm_presets.js"],
 ]);
@@ -71,13 +72,18 @@ const inactiveWorkflow = {
   },
 };
 const workflowWithoutTracker = {};
+const settingDefinitions = new Map();
+const nativeSettings = {
+  get(id) { const saved = localStorage.getItem("native-setting:" + id); return saved === null ? settingDefinitions.get(id)?.defaultValue : JSON.parse(saved); },
+  async set(id, value) { localStorage.setItem("native-setting:" + id, JSON.stringify(value)); await settingDefinitions.get(id)?.onChange?.(value); },
+};
 export const app = {
   graph,
   canvas: {},
-  extensionManager: { workflow: { activeWorkflow, openWorkflows: [activeWorkflow, inactiveWorkflow, workflowWithoutTracker] } },
+  extensionManager: { setting: nativeSettings, workflow: { activeWorkflow, openWorkflows: [activeWorkflow, inactiveWorkflow, workflowWithoutTracker] } },
   registerExtension(extension) {
     window.__scenePromptExtension = extension;
-    for (const setting of extension.settings || []) setting.onChange?.(setting.defaultValue);
+    for (const setting of extension.settings || []) { settingDefinitions.set(setting.id, setting); setting.onChange?.(nativeSettings.get(setting.id)); }
   },
   queuePrompt: async () => ({ prompt_id: "browser-test" }),
   graphToPrompt: async () => ({ output: {} }),
@@ -567,6 +573,28 @@ try {
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${address.port}/`);
     await page.waitForFunction(() => window.__scenePromptBrowserReady === true, null, { timeout: 5_000 });
+    const gpuDefaults = await page.evaluate(async () => {
+        const { createGPUController } = await import("/extensions/scene-prompt/web/scene_prompt_gpu.js");
+        const resources = createGPUController({ app: window.app, api: window.api });
+        const defaults = resources.snapshot();
+        await window.app.extensionManager.setting.set("ScenePrompt.ReleaseComfyBeforeLLM", true);
+        await window.app.extensionManager.setting.set("ScenePrompt.ReleaseLLMBeforeImage", false);
+        return { defaults, changed: resources.snapshot(), definitions: window.__scenePromptExtension.settings
+            .filter(({ id }) => id.startsWith("ScenePrompt.Release")).map(({ id, type, defaultValue }) => ({ id, type, defaultValue })) };
+    });
+    assert.deepEqual(gpuDefaults.defaults, { releaseComfyBeforeLLM: false, releaseLLMBeforeImage: false });
+    assert.deepEqual(gpuDefaults.changed, { releaseComfyBeforeLLM: true, releaseLLMBeforeImage: false });
+    assert.equal(gpuDefaults.definitions.length, 2);
+    assert(gpuDefaults.definitions.every(({ type, defaultValue }) => type === "boolean" && defaultValue === false));
+    await page.reload();
+    await page.waitForFunction(() => window.__scenePromptBrowserReady === true);
+    assert.deepEqual(await page.evaluate(async () => {
+        const { createGPUController } = await import("/extensions/scene-prompt/web/scene_prompt_gpu.js");
+        return createGPUController({ app: window.app, api: window.api }).snapshot();
+    }), gpuDefaults.changed, "resource controller reads persisted native settings after reload");
+    assert(!await page.evaluate(() => window.__scenePromptCalls.some(({ url }) => /\/gpu\/|\/llm\/(begin|end)/.test(url))),
+        "registration and reload do not acquire or release resources");
+    await page.evaluate(() => window.app.extensionManager.setting.set("ScenePrompt.ReleaseComfyBeforeLLM", false));
     const result = await page.evaluate(() => {
         const makeWidget = (owned) => {
             const widget = document.createElement("div");

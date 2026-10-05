@@ -2,6 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ChangeTracker } from "../../scripts/changeTracker.js";
 import { createLLMController, LLM_TYPE } from "./scene_prompt_llm.js";
+import { createGPUController, GPU_HANDOFF_SETTINGS } from "./scene_prompt_gpu.js";
 import { openCivitaiSearch, openLLMSettings, showAPIError, lookupCivitaiByHash } from "./scene_prompt_civitai.js";
 import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference, createPresetOperation } from "./scene_llm_presets.js";
 import {
@@ -4896,8 +4897,9 @@ function endSceneLLMChange(graph) {
     finally { app.canvas?.emitAfterChange?.(); }
 }
 
+const sceneGPUController = createGPUController({ app, api });
 const sceneLLMController = createLLMController({
-    app, api,
+    app, api, resources: sceneGPUController,
     beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
     createNode: (type) => globalThis.LiteGraph.createNode(type),
     refresh: (node) => {
@@ -9242,6 +9244,34 @@ function releaseCancelledSceneBatchRun(run) {
     }
     run.snapshotReleased = true;
     releaseSceneRunHandle(run.runHandle);
+    releaseSceneBatchGPU(run).catch(sceneGPUController.onCleanupError);
+}
+
+async function prepareSceneBatchGPU(run) {
+    if (run.gpuPolicyId) return run.gpuPolicyId;
+    if (!run.gpuPolicyPromise) {
+        run.gpuPolicyPromise = sceneGPUController.prepareImage(run.gpuSettings, {
+            runHandle: run.runHandle, continuous: true,
+        });
+    }
+    try {
+        const policyId = await run.gpuPolicyPromise;
+        if (run.gpuReleaseRequested) {
+            await sceneGPUController.releaseImage(policyId);
+            throw new Error("連続生成を停止したため画像生成を中止しました。");
+        }
+        run.gpuPolicyId = policyId;
+        return policyId;
+    } finally { run.gpuPolicyPromise = null; }
+}
+
+async function releaseSceneBatchGPU(run) {
+    if (!run || run.gpuReleaseRequested) return;
+    run.gpuReleaseRequested = true;
+    // A still-pending preparation releases its own late response.
+    const policyId = run.gpuPolicyId;
+    run.gpuPolicyId = "";
+    if (policyId) await sceneGPUController.releaseImage(policyId);
 }
 
 function cancelSceneBatchRunPreparation(run) {
@@ -9593,9 +9623,10 @@ function installSceneBatchPromptCapture() {
     if (api.__ScenePromptBatchCaptureInstalled || typeof api.queuePrompt !== "function") {
         return;
     }
-    const originalQueuePrompt = api.queuePrompt.bind(api);
+    const originalQueuePrompt = api.queuePrompt;
     api.queuePrompt = async function (number, prompt) {
         const submissionRun = typeof sceneBatchRunFromPrompt === "function" ? sceneBatchRunFromPrompt(prompt) : null;
+        const gpuSettings = submissionRun?.gpuSettings || sceneGPUController.snapshot();
         const submissionWorkflow = submissionRun?.workflow
             || (typeof sceneWorkflowFromPrompt === "function" ? sceneWorkflowFromPrompt(prompt) : null);
         if (!submissionRun) {
@@ -9633,19 +9664,35 @@ function installSceneBatchPromptCapture() {
             && String(expandPrompt.inputs?.run_id || "") === run.runId
             && Number(expandPrompt.inputs?.current_index || 0) === 0;
         applyRandomizedSamplerSeeds(prompt, samplerSeedTargets);
-        if (matchesFirstBatchPrompt) {
-            run.firstApiPending = false;
-            run.cachedPrompt = buildSceneBatchCachedPrompt(prompt, run.nodeId);
-        }
         let result;
+        let policyId = "";
         try {
-            result = await originalQueuePrompt(...arguments);
+            policyId = submissionRun
+                ? await prepareSceneBatchGPU(submissionRun)
+                : await sceneGPUController.prepareImage(gpuSettings, { runHandle: preparedRunHandle });
+            sceneGPUController.applyImagePolicy(prompt, policyId);
+            const queueClient = sceneGPUController.queueClient(originalQueuePrompt, policyId);
+            if (matchesFirstBatchPrompt) {
+                run.firstApiPending = false;
+                run.cachedPrompt = buildSceneBatchCachedPrompt(prompt, run.nodeId);
+            }
+            result = await originalQueuePrompt.apply(queueClient, arguments);
         } catch (error) {
             releaseSceneRunHandle(preparedRunHandle);
+            if (submissionRun) releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
+            else sceneGPUController.releaseImage(policyId).catch(sceneGPUController.onCleanupError);
             showPromptValidationErrorFromThrown(error);
             throw error;
         }
         const promptId = scenePromptIdFromValue(result);
+        if (!promptId) {
+            if (submissionRun) releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
+            else sceneGPUController.releaseImage(policyId).catch(sceneGPUController.onCleanupError);
+        } else if (!submissionRun) {
+            sceneGPUController.acceptImage(policyId);
+        } else if (sceneBatchRun !== submissionRun) {
+            releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
+        }
         if (promptId && typeof scenePromptSubmissionsById !== "undefined") {
             scenePromptSubmissionsById.set(promptId, {
                 workflow: submissionWorkflow,
@@ -9732,7 +9779,10 @@ function releaseSceneBatchPlan(runId) {
         return run?.releasePromise || Promise.resolve(false);
     }
     run.releaseRequested = true;
-    const release = () => releaseSceneRunHandle(run.runHandle);
+    const release = () => Promise.all([
+        releaseSceneRunHandle(run.runHandle),
+        releaseSceneBatchGPU(run).catch(sceneGPUController.onCleanupError),
+    ]);
     run.releasePromise = run.runClaimPromise
         ? Promise.resolve(run.runClaimPromise).then(release, release)
         : release();
@@ -10238,6 +10288,7 @@ function stopSceneBatchRun(options = {}) {
         return;
     }
     const deferRelease = options.forceRelease !== true && !!run?.waiting;
+    if (run && !run.queueing) releaseSceneBatchGPU(run).catch(sceneGPUController.onCleanupError);
     if (deferRelease) {
         run.controlsResetPending = !previousNode;
         rememberDetachedSceneBatchRun(run);
@@ -10482,6 +10533,10 @@ function createSceneBatchRun(node, total) {
         nextIndex: 0,
         runId: `${sceneBatchRunId()}__${planId}`,
         runHandle: "",
+        gpuSettings: sceneGPUController.snapshot(),
+        gpuPolicyId: "",
+        gpuPolicyPromise: null,
+        gpuReleaseRequested: false,
         waiting: false,
         queueing: false,
         currentPromptId: "",
@@ -12820,6 +12875,7 @@ app.registerExtension({
     },
 
     settings: [
+        ...GPU_HANDOFF_SETTINGS,
         {
             id: "ScenePrompt.UndoHistoryLimit",
             name: "Scene Prompt Tools: Undo履歴数",
@@ -12844,6 +12900,7 @@ app.registerExtension({
         installSceneCompressedPngWorkflowLoader();
         installSceneWorkflowLoadGuard();
         window.addEventListener("pagehide", releaseSceneRunsOnPageHide);
+        window.addEventListener("pagehide", sceneGPUController.releaseOnPageHide);
         api.addEventListener("scene_prompt_desktop_notification", ({ detail }) => receiveSceneDesktopNotification(detail));
         api.addEventListener("execution_start", ({ detail }) => {
             const promptId = scenePromptIdFromValue(detail);

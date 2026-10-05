@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity, hasLLMTargets } from "../web/scene_prompt_llm.js";
 import { createPresetOperation, preparePresetReference, hydratePresetReference, collectPresetLLMTargets, presetReferenceHasLLM } from "../web/scene_llm_presets.js";
+import { createGPUController } from "../web/scene_prompt_gpu.js";
 
 function fixture() {
     let next = 1, linkID = 1;
@@ -141,7 +142,15 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
     const sources = new Map([["retry-preset", compact]]), preparations = [];
     preparePresetReference(reference, sources);
     let retry, calls = 0, settledAvailable = false;
+    const resourceCalls = [];
+    const resources = {
+        snapshot: () => ({ releaseComfyBeforeLLM: true }),
+        beginLLM: async () => { const id = `preset-session-${preparations.length}`; resourceCalls.push(["begin", id]); return id; },
+        endLLM: async (id) => { assert.equal(preparations.at(-1).definitions.size, 0, "Preset operation disposes before its session ends"); resourceCalls.push(["end", id]); },
+        onCleanupError: (error) => { throw error; },
+    };
     const controller = createLLMController({ app, createNode: create,
+        resources,
         presetHasTargets: presetReferenceHasLLM,
         presetTargets: (reference, operation) => collectPresetLLMTargets(reference, operation.definitions),
         prepareTargets: async () => {
@@ -149,7 +158,7 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
             try { await hydratePresetReference(reference, operation, async () => full); return operation; }
             catch (error) { operation.dispose(); throw error; }
         },
-        api: { async fetchApi() { calls++; return { ok: calls !== 1, json: async () => calls === 1 ? { error: "service failure" }
+        api: { async fetchApi(_path, options) { calls++; assert.equal(JSON.parse(options.body).session_id, `preset-session-${preparations.length}`); return { ok: calls !== 1, json: async () => calls === 1 ? { error: "service failure" }
             : { positive: "new room", negative: "", lora_queries: [], template_version: "scene-llm-v1" } }; } },
         onError: (_error, _query, callback) => { retry = callback; },
         onBusy: (_node, busy) => { if (!busy) settledAvailable = presetReferenceHasLLM(reference); },
@@ -164,6 +173,7 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
     assert(preparations.every((operation) => operation.definitions.size === 0));
     assert.equal(JSON.parse(field(reference, "llm_presets_json").value).presets["."].api_graph.output[1].inputs.positive, "new room");
     assert.strictEqual(sources.get("retry-preset"), compact);
+    assert.deepEqual(resourceCalls, [["begin", "preset-session-1"], ["end", "preset-session-1"], ["begin", "preset-session-2"], ["end", "preset-session-2"]]);
 }
 {
     const { graph, node, create } = fixture(), app = { graph };
@@ -181,7 +191,7 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
 {
     const source = await readFile(new URL("../web/scene_prompt_ui.js", import.meta.url), "utf8");
     const start = source.indexOf("function endSceneLLMChange(");
-    const snippet = source.slice(start, source.indexOf("\nconst sceneLLMController", start));
+    const snippet = source.slice(start, source.indexOf("\nconst sceneGPUController", start));
     let completed = 0;
     assert.throws(() => vm.runInNewContext(`${snippet}; endSceneLLMChange(graph);`, {
         graph: { afterChange() { throw new Error("Graph callback failed"); } }, app: { canvas: { emitAfterChange() { completed++; } } },
@@ -258,4 +268,62 @@ for (const stage of ["generate", "search?", "select_loras", "download"]) {
         if (change === "unrelated") assert.equal(field(second, "positive").value, "second", "own insertion keeps next target reachable");
     }
 }
-console.log("LLM controller traversal, insertion, reuse and ownership tests passed.");
+for (const outcome of ["success", "partial-error", "stale", "stale-begin", "retry"]) {
+    const { graph, node, create } = fixture();
+    const first = node("ScenePromptLLM", "first"), second = node("ScenePromptLLM", "second"), expand = node("ScenePrompterExpand");
+    first.connect(0, second, 0); second.connect(0, expand, 0);
+    const settings = { "ScenePrompt.ReleaseComfyBeforeLLM": true }, calls = [], cleanupErrors = [];
+    const app = { graph, extensionManager: { setting: { get: (id) => settings[id] } } };
+    let retry, finish, generationCount = 0, sessionCount = 0;
+    const api = { clientId: "test-client", async fetchApi(path, options) {
+        const body = JSON.parse(options.body || "{}"); calls.push({ path, body });
+        if ((outcome === "stale-begin" && path.endsWith("/begin")) || (outcome === "stale" && path.endsWith("/generate"))) {
+            await new Promise((done) => { finish = done; });
+        }
+        let data = {};
+        if (path.endsWith("/begin")) data = { session_id: `session-${++sessionCount}` };
+        if (path.endsWith("/generate")) {
+            generationCount++;
+            const fails = outcome === "partial-error" && body.description === "second" || outcome === "retry" && generationCount === 1;
+            if (fails) return { ok: false, json: async () => ({ error: "service failure" }) };
+            data = { positive: body.description, negative: "", lora_queries: ["hat"], template_version: "scene-llm-v1" };
+        }
+        if (path.includes("/search?")) data = { items: [] };
+        if (path.endsWith("/select_loras")) data = { selected: [] };
+        if (path.endsWith("/end")) assert(controller.busy.has(expand), "the Generate button remains busy until resource cleanup finishes");
+        return { ok: true, json: async () => data };
+    } };
+    const resources = createGPUController({ app, api, onCleanupError: (error) => cleanupErrors.push(error) });
+    const controller = createLLMController({ app, api, resources, createNode: create,
+        onError: (_error, _query, callback) => { retry = callback; } });
+    const pending = controller.generate(expand);
+    if (outcome.startsWith("stale")) {
+        while (!finish) await new Promise((done) => setImmediate(done));
+        field(first, "positive").value = "manual";
+        settings["ScenePrompt.ReleaseComfyBeforeLLM"] = false;
+        finish();
+    }
+    await pending;
+    assert.equal(calls.filter(({ path }) => path.endsWith("/begin")).length, 1, outcome);
+    assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 1, outcome);
+    assert(calls.filter(({ path }) => path.endsWith("/generate") || path.endsWith("/select_loras"))
+        .every(({ body }) => body.session_id === "session-1" && body.client_id === "test-client"), "all target generation and LoRA selection use the same owned session");
+    assert(!calls.some(({ path }) => path.includes("/gpu/")), "finishing prompt generation never unloads the LLM");
+    assert.equal(cleanupErrors.length, 0);
+    if (outcome === "partial-error") assert.equal(field(first, "positive").value, "first", "completed targets keep partial commits");
+    if (outcome === "stale-begin") assert.equal(generationCount, 0, "a stale graph while waiting for GPU never starts inference");
+    if (outcome === "success") {
+        const before = calls.length;
+        await controller.generate(expand);
+        assert.equal(calls.length, before, "all cached targets skip resource and LLM requests");
+    }
+    if (outcome === "retry") {
+        await retry();
+        assert.equal(sessionCount, 2, "retry creates its own operation session");
+        assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 2);
+        assert.equal(field(second, "positive").value, "second");
+    }
+    assert.doesNotMatch(JSON.stringify(graph._nodes.map(({ widgets, properties }) => ({ widgets, properties }))), /session-\d|session_id/,
+        "private sessions never enter node state");
+}
+console.log("LLM controller traversal, insertion, reuse and GPU operation ownership tests passed.");

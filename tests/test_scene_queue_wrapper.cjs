@@ -19,6 +19,11 @@ function functionSource(name) {
 }
 
 const context = {
+    sceneGPUController: {
+        snapshot: () => ({ releaseComfyBeforeLLM: false, releaseLLMBeforeImage: false }),
+        prepareImage: async () => "", releaseImage: async () => {}, applyImagePolicy() {},
+        acceptImage() {}, queueClient: () => context.api, onCleanupError: (error) => { throw error; },
+    },
     sceneBatchSeedBase() { return 123456; },
     Date,
     Object,

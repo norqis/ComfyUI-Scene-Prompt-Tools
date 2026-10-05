@@ -119,6 +119,11 @@ async function testSubmissionWrapper() {
     let rejectNext = false;
     const sent = [];
     Object.assign(context, {
+        sceneGPUController: {
+            snapshot: () => ({ releaseComfyBeforeLLM: false, releaseLLMBeforeImage: false }),
+            prepareImage: async () => "", releaseImage: async () => {}, applyImagePolicy() {},
+            acceptImage() {}, queueClient: () => context.api, onCleanupError: (error) => { throw error; },
+        },
         app: { graph: graphA },
         sceneBatchRun: null,
         sceneBatchDetachedRuns: new Map(),

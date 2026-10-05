@@ -75,6 +75,8 @@ function lifecycleContext(response) {
             context.releaseCalls.push(runId);
             return release.promise;
         },
+        releaseSceneBatchGPU: async () => {},
+        sceneGPUController: { onCleanupError: (error) => { throw error; } },
         activateNextSceneBatchRun() { context.activated += 1; },
         scheduleNextSceneBatchItem() { context.scheduled += 1; },
         showSceneBatchError(message) { context.errors.push(message); },

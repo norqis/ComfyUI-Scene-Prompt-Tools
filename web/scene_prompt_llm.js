@@ -165,6 +165,7 @@ export function insertLoras(graph, origin, candidates, createNode) {
     return placedNodes;
 }
 export function createLLMController({ app, api, createNode, refresh, presetTargets, presetHasTargets, prepareTargets, onError, onBusy,
+    resources,
     beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const busy = new WeakSet();
     let operationBusy = false;
@@ -183,6 +184,8 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
         let preparation;
         let errorQuery = "";
         let currentNode = root;
+        const gpuSettings = resources?.snapshot();
+        let sessionId = "";
         try {
             if (!explicit) preparation = await prepareTargets?.(root);
             if (!initialRoot()) return;
@@ -205,14 +208,19 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                 const saved = readState(node);
                 const reusable = !explicit && saved.description === description && saved.model_mode === model_mode && saved.template_version === "scene-llm-v1";
                 if (reusable) { node.sceneLLMStatus = "生成済み"; continue; }
-                const output = await requestJSON(api, "/scene_prompt/llm/generate", { description, model_mode });
+                if (!sessionId && gpuSettings?.releaseComfyBeforeLLM) {
+                    sessionId = await resources.beginLLM(gpuSettings);
+                    if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; break; }
+                }
+                const session = sessionId ? { session_id: sessionId, client_id: api.clientId || "" } : {};
+                const output = await requestJSON(api, "/scene_prompt/llm/generate", { description, model_mode, ...session });
                 if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; break; }
                 const downloaded = [];
                 for (const query of output.lora_queries || []) {
                     errorQuery = query;
                     const result = await requestJSON(api, `/scene_prompt/civitai/search?${new URLSearchParams({ query, model_mode, sort: "Most Downloaded" })}`);
                     if (!current()) break;
-                    const selection = await requestJSON(api, "/scene_prompt/llm/select_loras", { description, model_mode, query, candidates: result.items });
+                    const selection = await requestJSON(api, "/scene_prompt/llm/select_loras", { description, model_mode, query, candidates: result.items, ...session });
                     if (!current()) break;
                     for (const selected of selection.selected || []) {
                         if (!current()) break;
@@ -245,11 +253,21 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
             currentNode.sceneLLMStatus = error.message;
             onError?.(error, errorQuery, () => generate(root, explicit));
         } finally {
-            preparation?.dispose();
-            operationBusy = false;
-            for (const node of new Set([root, ...list.map((target) => target.node)])) { busy.delete(node); onBusy?.(node, false); }
-            list = [];
-            app.graph?.setDirtyCanvas?.(true, true);
+            try {
+                preparation?.dispose();
+            } finally {
+                try {
+                    if (sessionId) await resources.endLLM(sessionId);
+                } catch (error) { resources.onCleanupError(error); }
+                finally {
+                    operationBusy = false;
+                    const affected = new Set([root, ...list.map((target) => target.node)]);
+                    list = [];
+                    for (const node of affected) busy.delete(node);
+                    for (const node of affected) onBusy?.(node, false);
+                    app.graph?.setDirtyCanvas?.(true, true);
+                }
+            }
         }
     }
     return { generate, targets, canGenerate, busy };

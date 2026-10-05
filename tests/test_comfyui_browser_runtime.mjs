@@ -55,7 +55,26 @@ const url = `http://127.0.0.1:${port}`;
 const output = [];
 let child;
 let browser;
+let gpuProvider;
+let gpuLoaded = true;
+const gpuEvents = [];
 try {
+    gpuProvider = http.createServer(async (request, response) => {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        gpuEvents.push({ path: request.url, method: request.method, body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null });
+        response.setHeader("Content-Type", "application/json");
+        if (request.url === "/v1/status") return response.end(JSON.stringify({ service: "strata", loaded: gpuLoaded, model: "gpu-fixture", activity: { in_flight: 0 } }));
+        if (request.url === "/v1/unload") { gpuLoaded = false; return response.end(JSON.stringify({ status: "unloaded" })); }
+        if (request.url === "/image_started") return response.end("{}");
+        if (request.url === "/v1/chat/completions") {
+            gpuLoaded = true;
+            return response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ positive: "fixture prompt", negative: "fixture exclusion", lora_queries: [] }) } }] }));
+        }
+        response.writeHead(404); response.end("{}");
+    });
+    await new Promise((done) => gpuProvider.listen(0, "127.0.0.1", done));
+    const gpuProviderUrl = `http://127.0.0.1:${gpuProvider.address().port}`;
     await mkdir(dirname(nodeDirectory), { recursive: true });
     await cp(root, nodeDirectory, {
         recursive: true,
@@ -78,8 +97,28 @@ try {
     await writeFile(resolve(markerDirectory, "__init__.py"), `import nodes
 import importlib
 from aiohttp import web
+import json
+import urllib.request
 from server import PromptServer
 executions = []
+gpu_checks = False
+empty_generate = nodes.EmptyImage.generate
+def checked_empty_image(self, *args, **kwargs):
+    if gpu_checks:
+        with urllib.request.urlopen("${gpuProviderUrl}/v1/status") as response:
+            state = json.load(response)
+        if state["loaded"]:
+            raise RuntimeError("Image execution began before the LLM was released")
+        request = urllib.request.Request("${gpuProviderUrl}/image_started", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request) as response:
+            response.read()
+    return empty_generate(self, *args, **kwargs)
+nodes.EmptyImage.generate = checked_empty_image
+@PromptServer.instance.routes.post("/scene_test/gpu_checks")
+async def set_gpu_checks(request):
+    global gpu_checks
+    gpu_checks = (await request.json()).get("enabled") is True
+    return web.json_response({"enabled": gpu_checks})
 for name in ("CheckpointLoaderSimple", "UNETLoader", "CLIPLoader", "VAELoader", "LoraLoader"):
     node_type = nodes.NODE_CLASS_MAPPINGS[name]
     def marked(self, *args, _name=name, **kwargs):
@@ -136,9 +175,18 @@ NODE_CLASS_MAPPINGS = {}
     });
     let deferredGeneration;
     let failNextGeneration = false;
+    let nativeGPUChecks = false;
+    const nativeGPURequests = [], nativeResourceRequests = [];
+    page.on("request", (request) => {
+        const path = new URL(request.url()).pathname.replace(/^\/api/u, "");
+        if (nativeGPUChecks && /\/scene_prompt\/(?:gpu\/|llm\/(?:begin|end|generate|select_loras))/u.test(path)) {
+            nativeResourceRequests.push({ path, body: request.postDataJSON() });
+        }
+    });
     const runtimeCandidate = { model_id: 100, version_id: 200, file_id: 300, name: "Runtime Hat", version_name: "v1", base_model: "Illustrious",
         file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["runtime_hat"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "runtime-hat.safetensors" };
     await page.route("**/scene_prompt/llm/**", async (route) => {
+        if (nativeGPUChecks) return route.continue();
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
         if (path.endsWith("/test")) { settingsRequests.push(path); return route.fulfill({ json: { ok: true, models: [{ id: "settings-fixture" }] } }); }
@@ -166,6 +214,7 @@ NODE_CLASS_MAPPINGS = {}
     });
     await page.route("**/prompt", async (route) => {
         if (route.request().method() !== "POST") return route.continue();
+        if (nativeGPUChecks) { nativeGPURequests.push(route.request().postDataJSON()); return route.continue(); }
         seedRequests.push(route.request().postDataJSON());
         await route.fulfill({ json: { prompt_id: `seed-test-${seedRequests.length}`, number: 0, node_errors: {} } });
     });
@@ -230,6 +279,118 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    nativeGPUChecks = true;
+    try {
+        const snapshot = () => page.evaluate(async () => {
+            const { app } = await import("/scripts/app.js");
+            return ["ScenePrompt.ReleaseComfyBeforeLLM", "ScenePrompt.ReleaseLLMBeforeImage"].map((id) => app.extensionManager.setting.get(id));
+        });
+        const setGPU = (llm, image) => page.evaluate(async ({ llm, image }) => {
+            const { app } = await import("/scripts/app.js");
+            await app.extensionManager.setting.set("ScenePrompt.ReleaseComfyBeforeLLM", llm);
+            await app.extensionManager.setting.set("ScenePrompt.ReleaseLLMBeforeImage", image);
+        }, { llm, image });
+        assert.deepEqual(await snapshot(), [false, false], "native GPU settings default independently off");
+        await setGPU(true, true);
+        await setGPU(true, false);
+        await page.reload({ waitUntil: "networkidle" });
+        await page.waitForFunction(() => window.LiteGraph?.registered_node_types?.ScenePrompter && window.app?.graph);
+        assert.deepEqual(await snapshot(), [true, false], "native setting values survive browser reload");
+        const storedGPUSettings = JSON.parse(await readFile(resolve(directory, "user", "default", "comfy.settings.json"), "utf8"));
+        assert.equal(storedGPUSettings["ScenePrompt.ReleaseComfyBeforeLLM"], true);
+        assert.equal(storedGPUSettings["ScenePrompt.ReleaseLLMBeforeImage"], false);
+        assert.equal(nativeResourceRequests.length, 0, "setting registration, changes and reload do not touch resources");
+        const originalConnection = await page.evaluate(async () => {
+            const { api } = await import("/scripts/api.js");
+            return (await api.fetchApi("/scene_prompt/llm/settings")).json();
+        });
+        await page.evaluate(async ({ baseUrl, port }) => {
+            const { api } = await import("/scripts/api.js");
+            const response = await api.fetchApi("/scene_prompt/llm/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ base_url: baseUrl, port, model: "gpu-fixture", api_key: "" }) });
+            if (!response.ok) throw new Error(JSON.stringify(await response.json()));
+        }, { baseUrl: "http://127.0.0.1/v1", port: gpuProvider.address().port });
+        const modulePath = await page.evaluate(async () => {
+            const { api } = await import("/scripts/api.js");
+            return (await api.getExtensions()).find((path) => path.endsWith("/scene_prompt_ui.js")).replace("scene_prompt_ui.js", "scene_prompt_gpu.js");
+        });
+        const promptOperation = await page.evaluate(async () => {
+            const { app } = await import("/scripts/app.js"); app.graph.clear();
+            const target = window.LiteGraph.createNode("ScenePromptLLM"); app.graph.add(target);
+            target.widgets.find((widget) => widget.name === "description").value = "native controlled prompt";
+            await target.widgets.find((widget) => widget.sceneRole === "llm_generate").callback();
+            return { positive: target.widgets.find((widget) => widget.name === "positive").value,
+                state: JSON.stringify(target.serialize()), status: target.sceneLLMStatus };
+        });
+        assert.equal(promptOperation.positive, "fixture prompt", promptOperation.status);
+        assert.deepEqual(nativeResourceRequests.map(({ path }) => path),
+            ["/scene_prompt/llm/begin", "/scene_prompt/llm/generate", "/scene_prompt/llm/end"], "native HTTP controls surround one actual UI prompt operation");
+        assert(nativeResourceRequests[1].body.session_id);
+        assert.equal(nativeResourceRequests[1].body.session_id, nativeResourceRequests[2].body.session_id);
+        assert.doesNotMatch(promptOperation.state, /session_id|scene_gpu_policy/);
+        assert.equal(gpuLoaded, true, "prompt completion keeps the mock LLM loaded");
+        assert.equal(gpuEvents.filter(({ path }) => path.endsWith("/unload")).length, 0);
+        await setGPU(false, true);
+        await fetch(`${url}/scene_test/gpu_checks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: true }) });
+        const queueImage = (color) => page.evaluate(async (color) => {
+            const { api } = await import("/scripts/api.js");
+            return api.queuePrompt(0, { output: {
+                1: { class_type: "EmptyImage", inputs: { width: 16, height: 16, batch_size: 1, color } },
+                2: { class_type: "SaveImage", inputs: { images: ["1", 0], filename_prefix: "gpu-browser-fixture" } },
+            }, workflow: { nodes: [], links: [], extra: {} } });
+        }, color);
+        const imageResult = await queueImage(0);
+        async function completedHistory(promptId) {
+            const deadline = Date.now() + 30_000;
+            while (Date.now() < deadline) {
+                const history = await page.evaluate(async (promptId) => {
+                    const { api } = await import("/scripts/api.js");
+                    return (await api.fetchApi(`/history/${promptId}`)).json();
+                }, promptId);
+                if (history[promptId]?.status) return history;
+                await new Promise((done) => setTimeout(done, 100));
+            }
+            throw new Error(`Native GPU image did not complete: ${promptId}\n${output.join("").slice(-4000)}`);
+        }
+        const imageHistory = await completedHistory(imageResult.prompt_id);
+        assert.equal(imageHistory[imageResult.prompt_id].status.status_str, "success", JSON.stringify(imageHistory));
+        const policyId = nativeGPURequests.at(-1).extra_data.scene_gpu_policy;
+        assert(policyId, "official api.queuePrompt puts the opaque policy into the actual /prompt request");
+        assert.doesNotMatch(JSON.stringify(nativeGPURequests.at(-1).extra_data.extra_pnginfo), /scene_gpu_policy/);
+        assert(!JSON.stringify(imageHistory).includes(policyId), "private policy is stripped before history retains the prompt");
+        assert.doesNotMatch(JSON.stringify(imageHistory), /scene_gpu_policy/);
+        assert.deepEqual(gpuEvents.filter(({ path }) => ["/v1/unload", "/image_started"].includes(path)).map(({ path }) => path),
+            ["/v1/unload", "/image_started"], "LLM release is confirmed before the first image node executes");
+        // A policy prepared from a previously captured ON setting survives OFF.
+        const capturedPolicy = await page.evaluate(async (modulePath) => {
+            const { app } = await import("/scripts/app.js"); const { api } = await import("/scripts/api.js");
+            const { createGPUController } = await import(modulePath);
+            const resources = createGPUController({ app, api });
+            const captured = resources.snapshot();
+            await app.extensionManager.setting.set("ScenePrompt.ReleaseLLMBeforeImage", false);
+            const policyId = await resources.prepareImage(captured, { continuous: true });
+            await resources.releaseImage(policyId);
+            return !!policyId;
+        }, modulePath);
+        assert.equal(capturedPolicy, true, "an ON FIFO snapshot can prepare after the setting changes to OFF");
+        const resourceCount = nativeResourceRequests.length, providerCount = gpuEvents.length;
+        gpuLoaded = true;
+        await fetch(`${url}/scene_test/gpu_checks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: false }) });
+        const offResult = await queueImage(1);
+        const offHistory = await completedHistory(offResult.prompt_id);
+        assert.equal(offHistory[offResult.prompt_id].status.status_str, "success");
+        assert(!nativeGPURequests.at(-1).extra_data.scene_gpu_policy);
+        assert.equal(nativeResourceRequests.length, resourceCount, "native OFF queue adds no resource-control requests");
+        assert.equal(gpuEvents.length, providerCount, "native OFF queue never touches the provider resource API");
+        await setGPU(false, false);
+        await page.evaluate(async (connection) => {
+            const { api } = await import("/scripts/api.js");
+            await api.fetchApi("/scene_prompt/llm/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ base_url: connection.base_url, port: connection.port ?? "", model: connection.model, api_key: "" }) });
+            window.app.graph.clear();
+        }, originalConnection);
+        console.log("real ComfyUI native GPU settings persistence, prompt control, scoped POST policy, release-before-image and OFF compatibility passed");
+    } finally { nativeGPUChecks = false; }
     if (process.env.COMFYUI_WORKFLOW_PNG) {
         const extracted = spawnSync(python, [
             "-c",
@@ -1466,6 +1627,10 @@ window.__sceneSeedRuntimeTest = {
     if (child?.exitCode === null) {
         child.kill();
         await new Promise((resolveChild) => child.once("exit", resolveChild));
+    }
+    if (gpuProvider) {
+        gpuProvider.closeAllConnections();
+        await new Promise((done) => gpuProvider.close(done));
     }
     await rm(directory, { recursive: true, force: true });
 }
