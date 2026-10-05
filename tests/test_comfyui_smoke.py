@@ -6,6 +6,7 @@ import asyncio
 import copy
 import gc
 import importlib.util
+import inspect
 import json
 import os
 import sys
@@ -43,7 +44,16 @@ class RealComfyUISmokeTests(unittest.TestCase):
         from server import PromptServer
 
         cls.loop = asyncio.new_event_loop()
-        PromptServer(cls.loop)
+        cls.addClassCleanup(cls.loop.close)
+        if "asset_manager" in inspect.signature(PromptServer).parameters:
+            from app.assets.manager import default_asset_manager
+
+            args.enable_assets = False
+            asset_manager = default_asset_manager()
+            cls.addClassCleanup(asset_manager.shutdown)
+            PromptServer(cls.loop, asset_manager)
+        else:
+            PromptServer(cls.loop)
 
         spec = importlib.util.spec_from_file_location(
             "scene_prompt_tools_smoke",
@@ -55,10 +65,6 @@ class RealComfyUISmokeTests(unittest.TestCase):
         cls.package = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = cls.package
         spec.loader.exec_module(cls.package)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.loop.close()
 
     def test_registers_current_nodes_and_web_directory(self):
         self.assertIn("ScenePrompter", self.package.NODE_CLASS_MAPPINGS)
