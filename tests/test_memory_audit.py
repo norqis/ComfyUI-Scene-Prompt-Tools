@@ -385,6 +385,68 @@ class FileMetadataMemoryTests(unittest.TestCase):
         self.assertEqual(self.info._MODEL_HASH_CACHE, {})
         self.assertEqual(self.info._MODEL_HASH_SELECTIONS, {})
 
+    def test_inventory_refresh_during_each_hash_chunk_reads_unchanged_file_once(self):
+        path = self.write_lora("selected.safetensors")
+        path.write_bytes(path.read_bytes() + b"weights" * 400000)
+        real_hash = hashlib.sha256
+        for kind in ("metadata", "acquired"):
+            for refresh in ("first", "same", "unrelated"):
+                with self.subTest(kind=kind, refresh=refresh):
+                    self.metadata._CACHE.clear()
+                    self.acquisition._HASH_CACHE.clear()
+                    self.metadata._CATALOG = {}
+                    self.acquisition._HASH_CATALOG = {}
+                    if refresh != "first":
+                        self.metadata.list_loras()
+                    digests, bytes_hashed, refreshes = [], 0, 0
+                    case = self
+                    class RefreshingDigest:
+                        def __init__(self):
+                            self.digest = real_hash()
+                            digests.append(self)
+                        def update(self, chunk):
+                            nonlocal bytes_hashed, refreshes
+                            bytes_hashed += len(chunk)
+                            self.digest.update(chunk)
+                            refreshes += 1
+                            if refresh == "unrelated":
+                                case.write_lora("unrelated.safetensors", "revision-" + str(refreshes))
+                            case.metadata.list_loras()
+                        def hexdigest(self):
+                            return self.digest.hexdigest()
+                    with mock.patch.object(self.metadata.hashlib, "sha256", side_effect=RefreshingDigest):
+                        result = self.metadata.read_lora_info(path.name)["sha256"] if kind == "metadata" else self.acquisition._sha256(path)
+                    self.assertEqual(result, real_hash(path.read_bytes()).hexdigest())
+                    self.assertEqual(len(digests), 1, "catalog refresh must not restart a full hash")
+                    self.assertEqual(bytes_hashed, path.stat().st_size)
+                    self.assertGreater(refreshes, 1)
+                    self.assertEqual(self.metadata._CATALOG[self.metadata.file_identity(path)], self.metadata.file_signature(path))
+
+    def test_selected_alias_remapped_during_hash_returns_current_physical_file(self):
+        first = self.write_lora("first.safetensors", "old")
+        second = self.write_lora("second.safetensors", "new")
+        self.catalogs["loras"]["selected.safetensors"] = str(first)
+        real_hash = hashlib.sha256
+        changed = False
+        case = self
+        class RemappingDigest:
+            def __init__(self):
+                self.digest = real_hash()
+            def update(self, chunk):
+                self.digest.update(chunk)
+            def hexdigest(self):
+                nonlocal changed
+                if not changed:
+                    changed = True
+                    case.catalogs["loras"]["selected.safetensors"] = str(second)
+                    case.metadata.list_loras()
+                return self.digest.hexdigest()
+        with mock.patch.object(self.metadata.hashlib, "sha256", side_effect=RemappingDigest):
+            result = self.metadata.read_lora_info("selected.safetensors")
+        self.assertEqual(result["sha256"], real_hash(second.read_bytes()).hexdigest())
+        self.assertEqual(result["trigger_phrases"], ["new"])
+        self.assertEqual(result["name"], "selected.safetensors")
+
     def test_hashing_revision_changed_before_publication_returns_only_current_file(self):
         path = self.write_lora("during-hash.safetensors", "old")
         self.catalogs["checkpoints"][path.name] = str(path)

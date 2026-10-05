@@ -50,27 +50,36 @@ def _prompt_key(part):
     return re.sub(r"\s+", " ", str(part).strip()).lower()
 
 
-def _explicit_prompt_weight(text):
-    if not text.startswith("(") or not text.endswith(")"):
+def _explicit_prompt_weight(text, start=0, end=None):
+    end = len(text) if end is None else end
+    if end - start < 2 or text[start] != "(" or text[end - 1] != ")":
         return None
-    content, separator, raw_weight = text[1:-1].rpartition(":")
-    if not separator:
+    colon = text.rfind(":", start + 1, end - 1)
+    if colon < 0:
         return None
     try:
-        weight = float(raw_weight)
+        weight = float(text[colon + 1:end - 1])
     except ValueError:
         return None
-    return (content.strip(), weight) if math.isfinite(weight) else None
+    if not math.isfinite(weight):
+        return None
+    start += 1
+    while start < colon and text[start].isspace():
+        start += 1
+    while colon > start and text[colon - 1].isspace():
+        colon -= 1
+    return start, colon, weight
 
 
 def _prompt_identity(part):
     text = str(part or "").strip()
-    explicit = _explicit_prompt_weight(text)
-    weight = explicit[1] if explicit is not None else 1.0
+    start, end = 0, len(text)
+    weight = 1.0
+    explicit = _explicit_prompt_weight(text, start, end)
     while explicit is not None:
-        text = explicit[0]
-        explicit = _explicit_prompt_weight(text)
-    return _prompt_key(text), weight
+        start, end, weight = explicit
+        explicit = _explicit_prompt_weight(text, start, end)
+    return _prompt_key(text[start:end]), weight
 
 
 def _prompt_override_key(part):
@@ -205,11 +214,12 @@ def _choice_rng(seed, stream):
 
 def _is_empty_weighted_part(text):
     value = str(text or "").strip()
-    while value:
-        explicit = _explicit_prompt_weight(value)
+    start, end = 0, len(value)
+    while start < end:
+        explicit = _explicit_prompt_weight(value, start, end)
         if explicit is None:
             return False
-        value = explicit[0]
+        start, end, _ = explicit
     return True
 
 

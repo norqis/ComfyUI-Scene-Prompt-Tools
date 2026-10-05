@@ -290,16 +290,25 @@ class PromptWeightDeduplicationTests(unittest.TestCase):
             with self.subTest(spelling=spelling):
                 self.assert_winners(["test", f"(test:{spelling})"], [expected])
 
-    def test_nested_weights_compare_the_outer_weight_and_share_the_inner_tag(self):
+    def test_nested_weights_compare_the_innermost_explicit_weight_like_comfy(self):
+        # ComfyUI comfy/sd1_clip.py token_weights assigns each explicit float
+        # before descending into the next wrapper; it does not multiply them.
         self.assert_winners(
             ["((test:4):0.5)", "between", "(test:1.2)", "((test:0.1):1.3)"],
-            ["((test:0.1):1.3)", "between"],
+            ["((test:4):0.5)", "between"],
         )
+        self.assert_winners(["((test:0.1):4)", "between", "(test:1.2)"], ["(test:1.2)", "between"])
+        self.assert_winners(["((Test:1.2):4)", "(test:1.2)"], ["((Test:1.2):4)"])
+        self.assert_winners(["(((test:1_0):0.5):1e-1)", "(test:9.)"], ["(((test:1_0):0.5):1e-1)"])
+        self.assert_winners(["( ( (Test: +1.4 ) : 0.1 ) : 3 )", "(test:1.2)"], ["( ( (Test: +1.4 ) : 0.1 ) : 3 )"])
 
     def test_other_syntax_and_nonfinite_weights_remain_distinct(self):
         parts = ["test", "(test)", "[test]", "(test;1.4)", "<lora:test:1>",
-                 "(test:nan)", "(test:inf)", "(test:-inf)", "(test:1e999)", "(test:invalid)"]
+                 "(test:nan)", "(test:inf)", "(test:-inf)", "(test:1e999)", "(test:invalid)",
+                 "((test:2):nan)"]
         self.assert_winners(parts, parts)
+        self.assert_winners(["test", "(test)", "((test):2)"], ["test", "((test):2)"])
+        self.assert_winners(["test", "(test:nan)", "((test:nan):2)"], ["test", "((test:nan):2)"])
 
     def test_negative_precedence_is_independent_of_weight(self):
         self.assertEqual(
@@ -319,6 +328,7 @@ class PromptWeightDeduplicationTests(unittest.TestCase):
                 }
                 self.assertEqual(outputs, {("before", "(test:1.2)", "after"), ("before", "(test:1.4)", "after")})
         self.assertEqual(_expand_prompt_parts(["({|}:1e-1)", "keep"], 1, "positive"), ["keep"])
+        self.assertEqual(_expand_prompt_parts(["{((test:4):.5)|((test:4):.5)}", "(test:1.2)"], 1, "positive"), ["((test:4):.5)"])
 
     def test_join_preserves_explicit_seen_key_filtering(self):
         seen = {"test"}

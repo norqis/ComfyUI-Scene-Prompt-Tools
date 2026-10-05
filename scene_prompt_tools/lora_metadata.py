@@ -13,6 +13,7 @@ import folder_paths
 MAX_HEADER_BYTES = 8 * 1024 * 1024
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
+_CATALOG = {}
 _CATALOG_GENERATION = 0
 
 
@@ -105,7 +106,9 @@ def read_lora_info(name):
             except OSError:
                 _CACHE.pop(key, None)
                 raise
-            if generation != _CATALOG_GENERATION or current_signature != signature:
+            if current_signature != signature:
+                continue
+            if generation != _CATALOG_GENERATION and _CATALOG.get(key) != signature:
                 continue
             _CACHE[key] = (signature, result)
         return {**result, "name": name, "trigger_phrases": list(result["trigger_phrases"])}
@@ -113,7 +116,7 @@ def read_lora_info(name):
 
 def list_loras():
     """List selectable LoRA paths and file identity without opening model files."""
-    global _CATALOG_GENERATION
+    global _CATALOG, _CATALOG_GENERATION
     result = []
     identities = {}
     for name in folder_paths.get_filename_list("loras"):
@@ -128,6 +131,7 @@ def list_loras():
                 pass
         result.append(item)
     with _CACHE_LOCK:
+        _CATALOG = identities
         _CATALOG_GENERATION += 1
         for key, entry in list(_CACHE.items()):
             if identities.get(key) != entry[0]:

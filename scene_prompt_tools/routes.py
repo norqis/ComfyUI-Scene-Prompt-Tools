@@ -621,7 +621,7 @@ def define_routes():
         # Lazy imports retain compatibility with lightweight Comfy/aiohttp route loaders.
         from .llm_settings import load_settings, request_settings, merge_settings, public_settings, public_civitai_settings, save_settings, LLM_FIELDS
         from .llm_service import ServiceError, generate, select_loras, test_connection
-        from .civitai import search, download
+        from .civitai import search, download, by_hash
         try:
             user_id = _request_user_id(request)
             if operation in ("generate", "select"):
@@ -634,6 +634,8 @@ def define_routes():
                 result = public_civitai_settings(settings)
             elif operation == "search":
                 result = await search(settings, request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"))
+            elif operation == "by_hash":
+                result = await by_hash(settings, request.query.get("sha256", ""))
             else:
                 payload = await request.json()
                 if not isinstance(payload, dict):
@@ -681,6 +683,10 @@ def define_routes():
     @PromptServer.instance.routes.get("/scene_prompt/civitai/search")
     async def scene_civitai_search(request):
         return await llm_operation(request, "search")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/by-hash")
+    async def scene_civitai_by_hash(request):
+        return await llm_operation(request, "by_hash")
 
     @PromptServer.instance.routes.get("/scene_prompt/civitai/settings")
     async def scene_civitai_settings_get(request):

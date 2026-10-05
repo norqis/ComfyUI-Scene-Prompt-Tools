@@ -6,11 +6,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import aiohttp
 from test_routes import load_routes
-from test_llm_service import service, settings_module
+import test_llm_service as llm_fixture
 from test_civitai import civitai
 
+aiohttp = llm_fixture.aiohttp
+service, settings_module = llm_fixture.service, llm_fixture.settings_module
 
 class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
     async def test_routes_settings_generate_error_and_user_identity(self):
@@ -72,7 +73,7 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                     with mock.patch.object(service, "test_connection", side_effect=service.ServiceError("LLM endpoint returned HTTP 401.")):
                         result = await registered[("POST", "/scene_prompt/llm/test")](request)
                         self.assertEqual(result["status"], 502)
-                    expected = {("GET", "/scene_prompt/civitai/search"), ("POST", "/scene_prompt/civitai/download"), ("POST", "/scene_prompt/llm/select_loras"), ("GET", "/scene_prompt/civitai/settings"), ("POST", "/scene_prompt/civitai/settings")}
+                    expected = {("GET", "/scene_prompt/civitai/search"), ("GET", "/scene_prompt/civitai/by-hash"), ("POST", "/scene_prompt/civitai/download"), ("POST", "/scene_prompt/llm/select_loras"), ("GET", "/scene_prompt/civitai/settings"), ("POST", "/scene_prompt/civitai/settings")}
                     self.assertTrue(expected.issubset(registered))
                     request.user_id = "alice"
                     request.payload = {"civitai_api_key": "civi-route-secret", "api_key": "wrong", "model": "wrong"}
@@ -84,6 +85,31 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(result["payload"]["model"], "configured")
                     result = await registered[("GET", "/scene_prompt/civitai/settings")](request)
                     self.assertEqual(result["payload"], {"civitai_api_key_set": True})
+                    by_hash = registered[("GET", "/scene_prompt/civitai/by-hash")]
+                    request.query = {"sha256": "A" * 64}
+                    version = {"id": 2, "modelId": 1, "name": "v1", "model": {"name": "model"}, "trainedWords": ["trigger"], "private": "provider body"}
+                    with mock.patch.object(civitai, "api_get", return_value=version) as lookup, \
+                            mock.patch.object(civitai, "_sha256", side_effect=AssertionError("local hash")), \
+                            mock.patch.object(civitai, "lora_root", side_effect=AssertionError("local model access")):
+                        result = await by_hash(request)
+                        self.assertEqual(result["status"], 200)
+                        self.assertEqual(result["payload"], {"found": True, "version": {key: value for key, value in version.items() if key != "private"}})
+                        self.assertEqual(lookup.call_args.args[0]["civitai_api_key"], "civi-route-secret")
+                        self.assertEqual(lookup.call_args.args[1], "/api/v1/model-versions/by-hash/" + "a" * 64)
+                        self.assertTrue(lookup.call_args.kwargs["missing_ok"])
+                        self.assertNotIn("secret", str(result))
+                        request.user_id = "bob"
+                        await by_hash(request)
+                        self.assertEqual(lookup.call_args.args[0]["civitai_api_key"], "")
+                        request.query = {"sha256": "invalid"}
+                        lookup.reset_mock()
+                        self.assertEqual((await by_hash(request))["status"], 400)
+                        lookup.assert_not_called()
+                    request.query = {"sha256": "a" * 64}
+                    with mock.patch.object(civitai, "api_get", return_value=civitai._NOT_FOUND):
+                        self.assertEqual((await by_hash(request))["payload"], {"found": False, "version": None})
+                    with mock.patch.object(civitai, "api_get", side_effect=service.ServiceError("Civitai API returned HTTP 401.")):
+                        self.assertEqual((await by_hash(request))["status"], 502)
             finally:
                 for name in list(sys.modules):
                     if name not in original_modules:
