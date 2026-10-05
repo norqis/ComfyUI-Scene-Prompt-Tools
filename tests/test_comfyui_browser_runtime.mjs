@@ -1309,7 +1309,8 @@ window.__sceneSeedRuntimeTest = {
         (await fetch('/scene_prompt/civitai/settings')).status,
         (await fetch('/scene_prompt/civitai/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,
     ]);
-    assert.deepEqual(retiredSettingsStatuses,[404,404]);
+    assert.equal(retiredSettingsStatuses[0],404);
+    assert([404,405].includes(retiredSettingsStatuses[1]),'removed POST route may fall through to ComfyUI static GET handling');
     assert.deepEqual(await page.evaluate(async()=>await(await fetch('/scene_test/model_executions')).json()),[]);
     assert.deepEqual(pageErrors,[]);
     console.log('real ComfyUI four-field LLM settings, anonymous Civitai search and absent Civitai settings passed');
