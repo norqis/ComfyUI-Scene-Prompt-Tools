@@ -76,6 +76,7 @@ try {
     const markerDirectory = resolve(directory, "custom_nodes", "scene-runtime-load-markers");
     await mkdir(markerDirectory, { recursive: true });
     await writeFile(resolve(markerDirectory, "__init__.py"), `import nodes
+import importlib
 from aiohttp import web
 from server import PromptServer
 executions = []
@@ -88,6 +89,22 @@ for name in ("CheckpointLoaderSimple", "UNETLoader", "CLIPLoader", "VAELoader", 
 @PromptServer.instance.routes.get("/scene_test/model_executions")
 async def model_executions(request):
     return web.json_response(executions)
+lookup_calls = []
+@PromptServer.instance.routes.post("/scene_test/civitai_lookup")
+async def civitai_lookup(request):
+    fixture = await request.json()
+    package = nodes.NODE_CLASS_MAPPINGS["SceneApplyLora"].__module__.rsplit(".", 1)[0]
+    civitai = importlib.import_module(package + ".civitai")
+    async def api_get(settings, path, params=None, *, missing_ok=False):
+        lookup_calls.append({"path": path, "missing_ok": missing_ok})
+        if fixture.get("mode") == "error":
+            raise civitai.ServiceError("Metadata fixture offline")
+        if fixture.get("mode") == "missing":
+            return civitai._NOT_FOUND
+        return {"id": 23, "modelId": 12, "name": "Fixture v1", "model": {"name": "Native metadata"},
+                "trainedWords": ["native_metadata_trigger"], "private_upstream_field": "omitted"}
+    civitai.api_get = api_get
+    return web.json_response({"calls": lookup_calls})
 NODE_CLASS_MAPPINGS = {}
 `);
     child = spawn(python, [
@@ -110,10 +127,12 @@ NODE_CLASS_MAPPINGS = {}
     const seedRequests = [];
     const llmRequests = [];
     const settingsRequests = [];
-    const runRequests = [], resourceRequests = [];
+    const runRequests = [], resourceRequests = [], metadataRequests = [], directCivitaiRequests = [];
     page.on("request", (request) => {
         const path = new URL(request.url()).pathname;
         if (/\/scene_prompt\/(?:expand\/resources|loras\/info|models\/)/u.test(path)) resourceRequests.push(path);
+        if (path.endsWith("/civitai/by-hash")) metadataRequests.push({ url: request.url(), method: request.method() });
+        if (/^https:\/\/civitai\.(?:com|red)\//u.test(request.url())) directCivitaiRequests.push(request.url());
     });
     let deferredGeneration;
     let failNextGeneration = false;
@@ -139,6 +158,7 @@ NODE_CLASS_MAPPINGS = {}
     await page.route("**/scene_prompt/civitai/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
+        if (path.endsWith("/by-hash")) return route.continue();
         llmRequests.push({ path, body: route.request().method() === "POST" ? route.request().postDataJSON() : null });
         if (path.endsWith("/search")) return route.fulfill({ json: { items: [runtimeCandidate], query: "hat", sort: "Most Downloaded" } });
         if (path.endsWith("/download")) return route.fulfill({ json: { candidate: runtimeCandidate, lora_name: runtimeCandidate.lora_name } });
@@ -1292,6 +1312,84 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(await page.evaluate(async()=>await(await fetch('/scene_test/model_executions')).json()),[]);
     assert.deepEqual(pageErrors,[]);
     console.log('real ComfyUI four-field LLM modal, scoped settings saves, protocol-default port and separate Civitai modal passed');
+
+    const metadataBefore = { prompts: seedRequests.length, runs: runRequests.length, services: llmRequests.length };
+    assert.equal((await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "found" }), headers: { "Content-Type": "application/json" } })).status, 200);
+    const metadataNodes = await page.evaluate(async () => {
+        const { app } = await import("/scripts/app.js"); app.graph.clear();
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const lora = window.LiteGraph.createNode("SceneApplyLora"); app.graph.add(lora);
+        field(lora, "lora_name").value = "runtime-hat.safetensors";
+        field(lora, "positive").value = "manual trigger";
+        field(lora, "negative").value = "manual negative";
+        const expand = window.LiteGraph.createNode("ScenePrompterExpand"); app.graph.add(expand);
+        const model = window.LiteGraph.createNode("SceneApplyModel"); app.graph.add(model);
+        const checkpoint = window.LiteGraph.createNode("CheckpointLoaderSimple"); app.graph.add(checkpoint);
+        field(checkpoint, "ckpt_name").value = "runtime-checkpoint.safetensors";
+        for (const [slot, name] of [[0, "model"], [1, "clip"], [2, "vae"]]) checkpoint.connect(slot, model, model.inputs.findIndex(input => input.name === name));
+        model.connect(0, lora, lora.inputs.findIndex(input => input.name === "scene_prompt"));
+        lora.connect(0, expand, expand.inputs.findIndex(input => input.name === "scene_prompt"));
+        const before = lora.serialize().widgets_values;
+        await lora.widgets.find(widget => widget.sceneRole === "lora_details").callback();
+        return { lora: lora.id, expand: expand.id, before };
+    });
+    const nativeDetail = page.getByRole("dialog", { name: "LoRA 詳細確認", exact: true });
+    await nativeDetail.getByText("Native metadata / Fixture v1", { exact: true }).waitFor();
+    assert.equal(await nativeDetail.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"), "https://civitai.red/models/12?modelVersionId=23");
+    assert.deepEqual(await page.evaluate(id => window.app.graph.getNodeById(id).serialize().widgets_values, metadataNodes.lora), metadataNodes.before);
+    await nativeDetail.locator(".pc-lora-word").filter({ hasText: "native_metadata_trigger" }).getByRole("button", { name: "注入" }).click();
+    assert.deepEqual(await page.evaluate(id => {
+        const node = window.app.graph.getNodeById(id);
+        return [node.widgets.find(widget => widget.name === "lora_name").value, node.widgets.find(widget => widget.name === "positive").value, node.widgets.find(widget => widget.name === "negative").value];
+    }, metadataNodes.lora), ["runtime-hat.safetensors", "manual trigger, native_metadata_trigger", "manual negative"]);
+    await page.keyboard.press("Escape");
+    const lookupsBeforeResources = metadataRequests.length;
+    await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.sceneRole === "expand_resources").callback(), metadataNodes.expand);
+    const nativeResources = page.getByRole("dialog", { name: "生成情報", exact: true });
+    const nativeModelCard = nativeResources.locator(".pc-resource-card").filter({ hasText: "runtime-checkpoint.safetensors" });
+    await nativeModelCard.getByRole("button", { name: "Civitaiを確認" }).waitFor();
+    assert.equal(metadataRequests.length, lookupsBeforeResources, "opening resource information does not start a hash metadata lookup");
+    await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "error" }), headers: { "Content-Type": "application/json" } });
+    await nativeModelCard.getByRole("button", { name: "Civitaiを確認" }).click();
+    await nativeModelCard.getByText("Metadata fixture offline", { exact: true }).waitFor();
+    await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "found" }), headers: { "Content-Type": "application/json" } });
+    await nativeModelCard.getByRole("button", { name: "Civitaiを確認" }).click();
+    await nativeModelCard.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    assert.equal(await nativeModelCard.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"), "https://civitai.red/models/12?modelVersionId=23");
+    await page.keyboard.press("Escape");
+    const directResult = await (await fetch(`${url}/scene_prompt/civitai/by-hash?sha256=${"a".repeat(64)}`)).json();
+    assert.deepEqual(directResult, { found: true, version: { id: 23, modelId: 12, name: "Fixture v1", model: { name: "Native metadata" }, trainedWords: ["native_metadata_trigger"] } });
+    await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "missing" }), headers: { "Content-Type": "application/json" } });
+    assert.deepEqual(await (await fetch(`${url}/scene_prompt/civitai/by-hash?sha256=${"a".repeat(64)}`)).json(), { found: false, version: null });
+    assert(metadataRequests.length >= lookupsBeforeResources + 2);
+    assert(metadataRequests.every(request => request.method === "GET" && /^[a-fA-F0-9]{64}$/u.test(new URL(request.url).searchParams.get("sha256"))));
+    assert.deepEqual(directCivitaiRequests, [], "native metadata never requests the provider directly from the browser");
+    assert.deepEqual({ prompts: seedRequests.length, runs: runRequests.length, services: llmRequests.length }, metadataBefore,
+        "metadata-only dialogs never queue, prepare a run, infer or download weights");
+    assert.deepEqual(await (await fetch(`${url}/scene_test/model_executions`)).json(), []);
+
+    const weightedInput = "first, ((TAG:4):0.5), (tag:1.2), (equal:1.), (EQUAL:1e0), (science:1_2e-1), (SCIENCE:1.1), (blocked:99)";
+    const nativeMatrixId = await page.evaluate(async () => {
+        const { app } = await import("/scripts/app.js");
+        const matrix = window.LiteGraph.createNode("SceneMatrix"); app.graph.add(matrix);
+        matrix.widgets.find(widget => widget.sceneRole === "matrix_rows").callback();
+        return matrix.id;
+    });
+    await page.getByRole("button", { name: "行を追加", exact: true }).click();
+    await page.getByRole("button", { name: "ポジティブ候補", exact: true }).click();
+    await page.getByPlaceholder("ポジティブ基本文").fill(weightedInput);
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    await page.getByRole("button", { name: "ネガティブ候補", exact: true }).click();
+    await page.getByPlaceholder("ネガティブ基本文").fill("(blocked:.1)");
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    const nativeWeightedLine = await page.evaluate(id => JSON.parse(window.app.graph.getNodeById(id).widgets.find(widget => widget.name === "matrix_json").value).sets[0], nativeMatrixId);
+    assert.equal(nativeWeightedLine.positive_base, weightedInput);
+    assert.deepEqual(nativeWeightedLine.positive_parts, ["first", "((TAG:4):0.5)", "(equal:1.)", "(science:1_2e-1)"]);
+    assert.deepEqual(nativeWeightedLine.negative_parts, ["(blocked:.1)"]);
+    await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    await page.waitForTimeout(100);
+    assert.deepEqual(pageErrors, []);
+    console.log("real ComfyUI local metadata HTTP, model/LoRA dialogs, retry, red links and weighted Matrix input preservation passed");
 } finally {
     await browser?.close();
     if (child?.exitCode === null) {

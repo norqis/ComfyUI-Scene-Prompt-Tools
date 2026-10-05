@@ -5,6 +5,14 @@ let settingsModalID = 0;
 const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated"];
 const modals = [];
 const searchInvalidators = new Set();
+export async function lookupCivitaiByHash(api, sha256) {
+    const data = await requestJSON(api, `/scene_prompt/civitai/by-hash?sha256=${encodeURIComponent(sha256)}`);
+    if (data?.found === false && data.version === null) return null;
+    if (data?.found !== true || typeof data.version?.model?.name !== "string" || !data.version.model.name.trim()) {
+        throw new Error("Civitai情報を取得できませんでした。");
+    }
+    return data.version;
+}
 function element(tag, text, className) {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;

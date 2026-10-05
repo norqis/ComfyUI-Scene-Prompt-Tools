@@ -917,7 +917,33 @@ async function testPopupRequestsUseOneIntentAcrossNodes() {
     assert.equal(await closed, null, "closing a popup invalidates its pending open");
 }
 
+function testPromptSummariesUseComfyWeights() {
+    const context = vm.createContext({ String, Number, Set, Map });
+    for (const name of ["promptIdentity", "promptOverrideKey", "uniquePromptParts", "promptOverrideKeys", "mergePositiveNegativeParts"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    const parts = Object.freeze(["First", "((TAG:4):0.5)", "(tag:1.2)", "(equal:1.)", "(EQUAL:1e0)",
+        "(science:1_2e-1)", "(SCIENCE:1.1)", "(negative:-1)", "(NEGATIVE: -0.5 )", "last"]);
+    assert.deepEqual(Array.from(context.uniquePromptParts(parts)), ["First", "((TAG:4):0.5)", "(equal:1.)",
+        "(science:1_2e-1)", "(NEGATIVE: -0.5 )", "last"], "innermost weights win while first positions and equal spellings remain");
+    assert.deepEqual(Array.from(context.uniquePromptParts(["((tag:0.5):4)", "tag", "(TAG:1.2)"])), ["(TAG:1.2)"]);
+    for (const raw of ["1e0", "1.", "1_0e-1", "1.0_0", " .1e1 ", "+1_0.e-1", "1e+0_0"]) {
+        assert.equal(context.promptOverrideKey(`(TAG:${raw})`), "tag", raw);
+    }
+    const distinct = ["tag", "(tag)", "[tag]", "(tag;1.4)", "(tag:NaN)", "(tag:Infinity)", "(tag:1e999)",
+        "(tag:1__0)", "(tag:1_.0)", "(tag:0x10)", "(tag:1 0)", "<lora:tag:1>"];
+    assert.deepEqual(Array.from(context.uniquePromptParts(distinct)), distinct, "implicit, invalid and nonfinite syntax stays distinct");
+    const merged = context.mergePositiveNegativeParts(parts, ["(tag:.1)"], ["(tag:99)", "new"], ["(TAG:0.2)"]);
+    assert.deepEqual(Array.from(merged.negativeParts), ["(TAG:0.2)"]);
+    assert.equal(merged.positiveParts.some((part) => context.promptOverrideKey(part) === "tag"), false,
+        "negative precedence ignores positive strength");
+    assert.equal(parts[1], "((TAG:4):0.5)", "summary computation leaves its source intact");
+    const deep = "(".repeat(5000) + "tag:4)" + ":1)".repeat(4999);
+    assert.deepEqual(Array.from(context.uniquePromptParts([deep, "(tag:3)"])), [deep], "deep wrappers are processed without recursion");
+}
+
 Promise.resolve()
+    .then(testPromptSummariesUseComfyWeights)
     .then(testPresetReferenceCandidatesAreSortedByDisplayName)
     .then(testPresetListRaceInNormalResponseOrder)
     .then(testPresetListRaceInReverseResponseOrder)
