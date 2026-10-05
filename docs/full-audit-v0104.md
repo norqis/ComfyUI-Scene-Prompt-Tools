@@ -46,3 +46,19 @@ For already-supported nested explicit numeric wrappers, use the innermost finite
 | Publication | Root final diff and regression review, gpt-5.6-sol medium APPROVE, required PR/main CI, squash merge and stable v0.10.4 release, exact installed tracked-file hashes, production process/queue/private settings preserved |
 
 References: https://docs.python.org/3/library/asyncio-task.html#asyncio.to_thread (thread tasks and cancellation), https://docs.aiohttp.org/en/stable/client_reference.html (streaming requests and timeout ownership), https://docs.comfy.org/custom-nodes/backend/server_overview (node validation and change keys). No claim of real local LLM quality or GPU throughput improvement follows from fixture tests.
+
+## Final implementation and independent verification
+
+Implementation commits are 6588b23 (frontend) and 1713e64 (backend). Root personally reviewed the complete runtime changes, new regression fixtures, ownership and cancellation paths, and publication metadata. No required correction remains from that review.
+
+- Independent full Python run: 539 tests, PASS in 46.314 seconds; the two explicitly opt-in smoke classes were skipped in this lightweight suite. Required CI separately runs real ComfyUI module and HTTP smoke tests.
+- Independent frontend run: syntax checks and all 22 suites, PASS, including actual Chromium metadata errors/retries, current-file and delayed-response ownership, title/link/trigger injection, and Matrix edits.
+- Public package/history and complete changed-range whitespace checks: PASS. Version is 0.10.4; no private settings or workflow contents are committed.
+- Unchanged inventory, initial inventory establishment and unrelated-file changes during every hash chunk each produce one complete read. Replacement, deletion and selected alias remapping still reject obsolete metadata.
+- Seven repeated-cancellation gates cover resource creation, write, late write failure, close, atomic promotion, manifest publication and unlink. Workers settle before cleanup and lock release; descriptors and partial files are removed; a queued next acquisition succeeds and reuses a verified promoted file. Open/close/network/hash failures also clean up.
+- Root independently extracted only the installed ComfyUI pure parse_parentheses/token_weights functions and compared seven ordinary, nested, equal, exponent, trailing-dot, digit-separated and whitespace cases. Winners agree without importing tensors or loading any model. The upstream implementation is https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/sd1_clip.py.
+- Separate CPU ComfyUI server with the actual frontend: PASS. Actual local metadata HTTP, model/LoRA detail widgets, retry, red links and trigger injection work. Weighted Matrix inputs retain their original text while producing the expected positive/negative parts. No delayed browser errors.
+- The same native run verifies old/current widget layouts and connected links, Preset bypass save/load, Random, favorites after reload, instance-local LLM Preset generation/editor Save/reload, delayed routing invalidation, and ordinary/cached batch seed submissions. Connected checkpoint/diffusion/CLIP/VAE/LoRA loader executions remain zero during prompt generation, with no image queue/run preparation/resource inspection requests.
+- The legacy PNG loads 175 nodes in 1490.6 ms and makes no LLM/Civitai service calls. This single isolated timing is a compatibility observation, not a GPU generation benchmark.
+
+Final independent medium review, required PR/main CI, stable release and installed-file verification remain publication gates. Production is not restarted or reloaded by this audit.
