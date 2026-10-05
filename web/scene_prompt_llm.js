@@ -57,6 +57,47 @@ export function captureTarget(target, activeGraph) {
     return () => activeGraph() === target.ownerGraph && graph.getNodeById(node.id) === node &&
         JSON.stringify([node.mode, value(node, "description"), value(node, "model_mode"), value(node, "positive"), value(node, "negative"), value(node, "generation_state_json"), node.properties?.scene_civitai, linksKey(node)]) === snapshot && (target.current?.() ?? true);
 }
+// Keep only the routes joining this occurrence to the requested root. Other
+// branches may change while a request is pending without cancelling its output.
+function routeRecords(graph, root, anchor) {
+    const records = [], visiting = new Set(), memo = new Map();
+    function visit(node) {
+        if (!node || visiting.has(node)) return false;
+        if (memo.has(node)) return memo.get(node);
+        visiting.add(node);
+        const edges = [];
+        let reaches = node === anchor;
+        if (!reaches && Number(node.mode) !== 2) {
+            for (const [slot, input] of (node.inputs || []).entries()) {
+                if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/.test(input.name || "") || className(node) === "Reroute")) continue;
+                const link = graph.links?.[input.link];
+                if (link && visit(graph.getNodeById(link.origin_id))) {
+                    edges.push({ slot, input, id: input.link, endpoints: [link.origin_id, link.origin_slot, link.target_id, link.target_slot] });
+                    reaches = true;
+                }
+            }
+        }
+        visiting.delete(node); memo.set(node, reaches);
+        if (reaches) records.push({ node, mode: node.mode, edges });
+        return reaches;
+    }
+    return visit(root) ? records : null;
+}
+function captureRoute(graph, root, anchor) {
+    const expected = routeRecords(graph, root, anchor);
+    return () => {
+        const current = routeRecords(graph, root, anchor);
+        return expected && current && expected.length === current.length && expected.every(({ node, mode, edges }, index) => {
+            const next = current[index];
+            return node === next.node && graph.getNodeById(node.id) === node && mode === next.mode && edges.length === next.edges.length &&
+                edges.every((edge, slot) => {
+                    const other = next.edges[slot];
+                    return edge.input === other.input && edge.slot === other.slot && edge.id === other.id &&
+                        edge.endpoints.every((value, endpoint) => value === other.endpoints[endpoint]);
+                });
+        });
+    };
+}
 export async function requestJSON(api, path, body) {
     const response = await api.fetchApi(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await response.json();
@@ -143,15 +184,17 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
             if (!explicit) await prepareTargets?.(root);
             if (!initialRoot()) return;
             list = explicit ? [{ node: root, graph: root.graph || ownerGraph }] : targets(root);
+            let routes = list.map((target) => captureRoute(ownerGraph, root, target.reference || target.node));
             for (const { node } of list) { busy.add(node); onBusy?.(node, true); }
             if (!list.length) root.sceneLLMStatus = "生成対象がありません";
-            for (const target of list) {
+            for (const [index, target] of list.entries()) {
+                if (!routes[index]()) break;
                 const { node, graph } = target;
                 currentNode = node;
                 target.ownerGraph = ownerGraph;
                 const captured = captureTarget(target, () => app.graph);
-                const rootMode = value(root, "model_mode"), rootLinks = linksKey(root);
-                const current = () => captured() && ownerGraph.getNodeById(root.id) === root && value(root, "model_mode") === rootMode && linksKey(root) === rootLinks;
+                const rootMode = value(root, "model_mode");
+                const current = () => captured() && routes[index]() && value(root, "model_mode") === rootMode;
                 const description = String(value(node, "description")).trim(), model_mode = explicit ? value(node, "model_mode") : value(root, "model_mode") || value(node, "model_mode");
                 errorQuery = description;
                 if (!description || !current()) continue;
@@ -160,7 +203,7 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                 const reusable = !explicit && saved.description === description && saved.model_mode === model_mode && saved.template_version === "scene-llm-v1";
                 if (reusable) { node.sceneLLMStatus = "生成済み"; continue; }
                 const output = await requestJSON(api, "/scene_prompt/llm/generate", { description, model_mode });
-                if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; continue; }
+                if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; break; }
                 const downloaded = [];
                 for (const query of output.lora_queries || []) {
                     errorQuery = query;
@@ -176,7 +219,8 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                         downloaded.push({ ...acquired.candidate, lora_name: acquired.lora_name, search_state: { query, sort: "Most Downloaded", model_mode } });
                     }
                 }
-                if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; continue; }
+                if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; break; }
+                const remainingCurrent = routes.slice(index + 1).every((current) => current());
                 beginChange(graph);
                 try {
                     if (widget(node, "positive")) widget(node, "positive").value = output.positive;
@@ -186,8 +230,12 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                     insertLoras(graph, node, downloaded, createNode);
                     target.commit?.();
                 } finally { endChange(graph); }
+                // Our own insertion changes these paths legitimately. Capture
+                // the new paths only after the synchronous generation commit.
+                if (remainingCurrent) routes = list.map((next) => captureRoute(ownerGraph, root, next.reference || next.node));
                 node.sceneLLMStatus = "完了";
                 refresh?.(target.reference || node);
+                if (!remainingCurrent) break;
             }
         } catch (error) {
             root.sceneLLMStatus = error.message;

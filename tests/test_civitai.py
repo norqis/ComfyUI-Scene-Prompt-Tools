@@ -109,6 +109,32 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
         self.assertEqual(list((self.root / "llm").iterdir()), [])
 
+    async def test_multichunk_download_hashes_during_write_without_temp_reread(self):
+        self.content = bytes(range(256)) * 13001
+        self.version["files"][0]["hashes"]["SHA256"] = hashlib.sha256(self.content).hexdigest()
+        original_hash = civitai._sha256
+        hashed_paths = []
+        def acquired_hash(path):
+            self.assertFalse(path.name.startswith(".download-"), "new download must not be reread for hashing")
+            hashed_paths.append(path)
+            return original_hash(path)
+        with mock.patch.object(civitai, "_sha256", side_effect=acquired_hash):
+            identity = {"model_id": 1, "version_id": 2, "file_id": 3}
+            result = await civitai.download(self.settings, identity, "Illustrious")
+            self.assertEqual((self.root / result["lora_name"]).read_bytes(), self.content)
+            self.assertEqual(hashed_paths, [])
+            await civitai.download(self.settings, identity, "Illustrious")
+            self.assertTrue(hashed_paths, "existing acquisition still validates its local file")
+            self.assertEqual(self.download_calls, 1)
+        self.assertFalse(list((self.root / "llm").glob(".download-*")))
+
+    async def test_multichunk_hash_mismatch_never_promotes_or_rereads_partial(self):
+        self.content = b"wrong content" * 200000
+        with mock.patch.object(civitai, "_sha256", side_effect=AssertionError("temporary file reread")):
+            with self.assertRaisesRegex(civitai.ServiceError, "SHA256"):
+                await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+        self.assertEqual(list((self.root / "llm").iterdir()), [])
+
     async def test_search_primary_only_and_cached_hash_invalidates(self):
         identity = {"model_id": 1, "version_id": 2, "file_id": 3}
         result = await civitai.download(self.settings, identity, "Illustrious")

@@ -86,6 +86,19 @@ for (const change of ["output", "description", "tab", "delete", "connection"]) {
 }
 assert.equal(identity(candidate(1)), "1/11/21");
 {
+    const { graph, node, create } = fixture(), app = { graph };
+    const first = node("ScenePromptLLM", "first"), second = node("ScenePromptLLM", "second"), middle = node("ScenePrompt"), expand = node("ScenePrompterExpand");
+    expand.inputs.push({ name: "scene_prompt2", type: "SCENE_PROMPT", link: null });
+    first.connect(0, expand, 0); second.connect(0, middle, 0); middle.connect(0, expand, 1);
+    let finish; const calls = [];
+    const api = { async fetchApi(path) { calls.push(path); await new Promise((done)=>{finish=done;}); return { ok: true, json: async()=>({positive:"first",negative:"",lora_queries:[],template_version:"scene-llm-v1"}) }; } };
+    const pending = createLLMController({ app, api, createNode:create }).generate(expand);
+    while (!finish) await new Promise((done)=>setImmediate(done));
+    graph.removeLink(middle.inputs[0].link); finish(); await pending;
+    assert.equal(field(first,"positive").value,"first","independent current path still commits");
+    assert.equal(calls.length,1,"own commit never refreshes away a user change to next target path");
+}
+{
     const source = await readFile(new URL("../web/scene_prompt_ui.js", import.meta.url), "utf8");
     const start = source.indexOf("function endSceneLLMChange(");
     const snippet = source.slice(start, source.indexOf("\nconst sceneLLMController", start));
@@ -131,5 +144,38 @@ for (const change of ["mode", "tab", "connection"]) {
     assert.equal(constructed, 0, "root changed during workflow hydration never constructs stale targets");
     assert.equal(requests, 0);
     assert.equal(controller.busy.has(expand), false);
+}
+for (const stage of ["generate", "search?", "select_loras", "download"]) {
+    for (const change of ["disconnect", "mute-root", "bypass-root", "mute-middle", "bypass-middle", "replace-middle", "reroute", "parallel", "unrelated"]) {
+        const { graph, node, create } = fixture(), app = { graph };
+        const first = node("ScenePromptLLM", "first"), a = node("ScenePrompt"), b = node("ScenePrompt"), second = node("ScenePromptLLM", "second"), expand = node("ScenePrompterExpand");
+        first.connect(0, a, 0); a.connect(0, b, 0); b.connect(0, second, 0); second.connect(0, expand, 0);
+        const unrelated = node("ScenePrompt"); expand.inputs.push({ name: "scene_prompt2", type: "SCENE_PROMPT", link: null }); unrelated.connect(0, expand, 1);
+        let finish, paused = false; const calls = [];
+        const api = { async fetchApi(path, options = {}) {
+            calls.push(path);
+            if (!paused && path.includes(stage)) { paused = true; await new Promise((done) => { finish = done; }); }
+            const body = options.body && JSON.parse(options.body);
+            const data = path.endsWith("generate") ? { positive: body.description, negative: "", lora_queries: ["hat"], template_version: "scene-llm-v1" }
+                : path.includes("search?") ? { items: [candidate(1)] } : path.endsWith("select_loras") ? { selected: [candidate(1)] } : { candidate: candidate(1), lora_name: candidate(1).lora_name };
+            return { ok: true, json: async () => data };
+        } };
+        const pending = createLLMController({ app, api, createNode: create }).generate(expand);
+        while (!finish) await new Promise((done) => setImmediate(done));
+        if (change === "disconnect") graph.removeLink(b.inputs[0].link);
+        if (change === "mute-root") expand.mode = 2;
+        if (change === "bypass-root") expand.mode = 4;
+        if (change === "mute-middle") b.mode = 2;
+        if (change === "bypass-middle") b.mode = 4;
+        if (change === "replace-middle") { const replacement = create("ScenePrompt"); replacement.id = b.id; replacement.graph = graph; replacement.inputs = b.inputs; replacement.outputs = b.outputs; graph._nodes[graph._nodes.indexOf(b)] = replacement; }
+        if (change === "reroute") node("ScenePrompt").connect(0, b, 0);
+        if (change === "parallel") { b.inputs.push({ name: "scene_prompt2", type: "SCENE_PROMPT", link: null }); a.connect(0, b, 1); }
+        if (change === "unrelated") node("ScenePrompt").connect(0, unrelated, 0);
+        finish(); await pending;
+        assert.equal(field(first, "positive").value, change === "unrelated" ? "first" : "", `${stage}/${change}`);
+        if (change !== "unrelated") assert.equal(graph.before, 0, `${stage}/${change}: stale path never commits`);
+        if (["mute-root", "bypass-root"].includes(change)) assert.equal(calls.filter((path) => path.endsWith("generate")).length, 1, "old remaining target is invalidated before inference");
+        if (change === "unrelated") assert.equal(field(second, "positive").value, "second", "own insertion keeps next target reachable");
+    }
 }
 console.log("LLM controller traversal, insertion, reuse and ownership tests passed.");

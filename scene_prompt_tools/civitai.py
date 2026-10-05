@@ -196,6 +196,10 @@ async def download(settings, identity, model_mode):
             await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True)
             descriptor, temporary = await asyncio.to_thread(tempfile.mkstemp, dir=folder, prefix=".download-", suffix=".part")
             stream = os.fdopen(descriptor, "wb")
+            digest = hashlib.sha256()
+            def write_chunk(chunk):
+                stream.write(chunk)
+                digest.update(chunk)
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=max(settings["timeout_seconds"], 600))) as session:
                     for _ in range(6):
@@ -214,9 +218,9 @@ async def download(settings, identity, model_mode):
                         if response.status != 200:
                             raise ServiceError(f"Civitai download returned HTTP {response.status}.")
                         async for chunk in response.content.iter_chunked(1024 * 1024):
-                            await asyncio.to_thread(stream.write, chunk)
+                            await asyncio.to_thread(write_chunk, chunk)
                 await asyncio.to_thread(stream.close)
-                if await asyncio.to_thread(_sha256, Path(temporary)) != candidate["sha256"]:
+                if digest.hexdigest() != candidate["sha256"]:
                     raise ServiceError("Downloaded LoRA SHA256 does not match the published file.")
                 destination = folder / _filename(candidate)
                 await asyncio.to_thread(os.replace, temporary, destination)

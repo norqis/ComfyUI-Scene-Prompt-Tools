@@ -59,7 +59,7 @@ try {
     await mkdir(dirname(nodeDirectory), { recursive: true });
     await cp(root, nodeDirectory, {
         recursive: true,
-        filter: (entry) => ![".git", ".venv", ".venv-http", ".venv-test", "node_modules", "__pycache__", ".pytest_cache", "test-results"].includes(entry.split(/[\\/]/u).at(-1)),
+        filter: (entry) => ![".git", ".venv", ".venv-http", ".venv-test", ".venv-audit", "node_modules", "__pycache__", ".pytest_cache", "test-results"].includes(entry.split(/[\\/]/u).at(-1)),
     });
     const fixtureLoras = resolve(directory, "models", "loras");
     await mkdir(fixtureLoras, { recursive: true });
@@ -85,13 +85,17 @@ try {
     page.on("pageerror", (error) => pageErrors.push(error.stack || error.message));
     const seedRequests = [];
     const llmRequests = [];
+    let deferredGeneration;
     const runtimeCandidate = { model_id: 100, version_id: 200, file_id: 300, name: "Runtime Hat", version_name: "v1", base_model: "Illustrious",
         file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["runtime_hat"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "runtime-hat.safetensors" };
     await page.route("**/scene_prompt/llm/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         const body = route.request().postDataJSON();
         llmRequests.push({ path, body });
-        if (path.endsWith("/generate")) return route.fulfill({ json: { positive: "1girl, hat", negative: "blurry", lora_queries: ["hat"], template_version: "scene-llm-v1" } });
+        if (path.endsWith("/generate")) {
+            if (deferredGeneration) { const gate = deferredGeneration; gate.started(); await gate.pending; }
+            return route.fulfill({ json: { positive: "1girl, hat", negative: "blurry", lora_queries: ["hat"], template_version: "scene-llm-v1" } });
+        }
         if (path.endsWith("/select_loras")) return route.fulfill({ json: { selected: [{ model_id: 100, version_id: 200, file_id: 300 }] } });
         throw new Error(`Unexpected LLM runtime request ${path}`);
     });
@@ -1055,6 +1059,40 @@ window.__sceneSeedRuntimeTest = {
     await page.waitForTimeout(300);
     assert.deepEqual(pageErrors, [], `native LLM/Preset lifecycle raised browser errors:\n${pageErrors.join("\n")}`);
     console.log("real ComfyUI instance-local Preset LLM generation, native LoRA editor widgets and explicit Save/reload passed");
+    for (const change of ["disconnect", "mute-root", "bypass-middle", "replace-middle", "parallel", "unrelated"]) {
+        let started, finish;
+        const began = new Promise((done) => { started = done; });
+        deferredGeneration = { started, pending: new Promise((done) => { finish = done; }) };
+        const beforeRequests = llmRequests.length;
+        await page.evaluate(async () => {
+            const { app } = await import("/scripts/app.js"); app.graph.clear();
+            const add = (type) => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const llm = add("ScenePromptLLM"), a = add("ScenePrompterQueue"), b = add("ScenePrompterQueue"), expand = add("ScenePrompterExpand");
+            llm.widgets.find((widget) => widget.name === "description").value = "stale path girl";
+            llm.widgets.find((widget) => widget.name === "positive").value = "";
+            llm.widgets.find((widget) => widget.name === "generation_state_json").value = "{}";
+            const scene = (node) => node.inputs.findIndex((input) => /^scene_prompt\d*$/.test(input.name));
+            llm.connect(0, a, scene(a)); a.connect(0, b, scene(b)); b.connect(0, expand, scene(expand));
+            window.__nativeRouteNodes = { llm, a, b, expand, scene };
+            window.__sceneSeedRuntimeTest.updateLLMExpand(expand);
+            window.__nativeRoutePromise = expand.widgets.find((widget) => widget.sceneRole === "expand_llm_generate").callback();
+        });
+        await began;
+        await page.evaluate(async (change) => {
+            const { app } = await import("/scripts/app.js"); const { a, b, expand, scene } = window.__nativeRouteNodes;
+            if (change === "disconnect") b.disconnectInput(scene(b));
+            if (change === "mute-root") expand.mode = 2;
+            if (change === "bypass-middle") b.mode = 4;
+            if (change === "replace-middle") { const replacement = window.LiteGraph.createNode("ScenePrompterQueue"); replacement.id = b.id; replacement.graph = app.graph; replacement.inputs = b.inputs; replacement.outputs = b.outputs; app.graph._nodes[app.graph._nodes.indexOf(b)] = replacement; app.graph._nodes_by_id[b.id] = replacement; }
+            if (change === "parallel") a.connect(0, b, b.inputs.findIndex((input) => input.name === "scene_prompt2"));
+            if (change === "unrelated") { const extra = window.LiteGraph.createNode("ScenePrompterQueue"); app.graph.add(extra); extra.connect(0, a, a.inputs.findIndex((input) => input.name === "scene_prompt2")); }
+        }, change);
+        deferredGeneration = null; finish();
+        const result = await page.evaluate(async () => { await window.__nativeRoutePromise; const { llm } = window.__nativeRouteNodes; return { positive: llm.widgets.find(widget=>widget.name==='positive').value, status: llm.sceneLLMStatus }; });
+        assert.equal(result.positive, change === "unrelated" ? "1girl, hat" : "", `native ${change}: ${result.status}`);
+        if (change !== "unrelated") assert.equal(llmRequests.length - beforeRequests, 1, "native stale route stops before LoRA search");
+    }
+    console.log("real ComfyUI deferred routing changes reject stale output and allow unrelated branch edits");
 
     const seedNodes = await page.evaluate(async () => {
         window.app.graph.clear();
