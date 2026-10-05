@@ -21,6 +21,7 @@ const previewContext = {
     MATRIX_SECTION_VISIBLE_ROWS: 160,
     emptyMatrixRow() { return {}; },
     scenePromptSourceCacheKey(node) { return node.id; },
+    scenePromptStats() { return {}; },
     isSceneNodeMuted() { return false; }, isSceneNodeBypassed() { return false; },
     isScenePresetReferenceNode() { return false; },
     isScenePromptRandomRouteNode() { return false; }, sceneRandomRouteInNode() { return false; },

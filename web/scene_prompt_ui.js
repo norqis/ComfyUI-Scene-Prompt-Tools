@@ -207,6 +207,7 @@ const SCENE_WIDGET_LABELS = {
     timestamp_dir: "タイムスタンプディレクトリ",
     prefix: "ファイル名プレフィックス",
     counter_position: "連番の位置",
+    enable_downstream_count: "後続Countを有効化",
     model_mode: "モデル種別",
     width: "width",
     height: "height",
@@ -3949,7 +3950,7 @@ function hideScenePathWidgets(node) {
 }
 
 function hideScenePromptCounterWidgets(node) {
-    const visibleWidgets = new Set(["count"]);
+    const visibleWidgets = new Set(["count", "enable_downstream_count"]);
     for (const widget of node.widgets || []) {
         if (widget?.sceneRole || visibleWidgets.has(widget?.name)) {
             showWidget(widget);
@@ -5010,6 +5011,22 @@ function sceneExpandConfigureValues(config) {
 
 const SCENE_LORA_STORED_WIDGET_NAMES = ["lora_name", "strength_model", "strength_clip", "model_mode", "positive", "negative", "positive_json", "negative_json", "category_order"];
 const SCENE_LORA_DISPLAY_WIDGET_NAMES = ["model_mode", "strength_model", "strength_clip", "positive", "negative", "lora_name", "positive_json", "negative_json", "category_order"];
+
+function sceneCounterConfiguredValues(config) {
+    const values = config?.widgets_values || [];
+    const names = typeof values[1] === "boolean"
+        ? ["count", "enable_downstream_count", "source_node_id", "source_node_name"]
+        : ["count", "source_node_id", "source_node_name"];
+    return { enable_downstream_count: true,
+        ...Object.fromEntries(names.slice(0, values.length).map((name, index) => [name, values[index]])),
+        ...config?.widgets_values_named };
+}
+
+function sceneCounterConfigureValues(node, config, named) {
+    const widgets = (node.widgets || []).filter((widget) => widget.serialize !== false);
+    return { ...config, widgets_values: widgets.map((widget) => Object.hasOwn(named, widget.name) ? named[widget.name] : widget.value),
+        widgets_values_named: { ...config?.widgets_values_named, ...named } };
+}
 
 function sceneLoraStoredValues(node) {
     return SCENE_LORA_STORED_WIDGET_NAMES.map((name) => {
@@ -6142,18 +6159,18 @@ function installScenePromptDeleteWidgetSyncHandlers(node) {
 }
 
 function installScenePromptCounterWidgetSyncHandlers(node) {
-    const widget = findWidget(node, "count");
-    if (!widget || widget.scenePromptCounterSyncWrapped) {
-        return;
+    for (const name of ["count", "enable_downstream_count"]) {
+        const widget = findWidget(node, name);
+        if (!widget || widget.scenePromptCounterSyncWrapped) continue;
+        const originalCallback = widget.callback;
+        widget.callback = function () {
+            const result = originalCallback?.apply(this, arguments);
+            clearSceneComputedCaches(node);
+            refreshDownstreamSceneNodes(node);
+            return result;
+        };
+        widget.scenePromptCounterSyncWrapped = true;
     }
-    const originalCallback = widget.callback;
-    widget.callback = function () {
-        const result = originalCallback?.apply(this, arguments);
-        clearSceneComputedCaches(node);
-        refreshDownstreamSceneNodes(node);
-        return result;
-    };
-    widget.scenePromptCounterSyncWrapped = true;
 }
 
 function installSceneEmptyLatentWidgetSyncHandlers(node) {
@@ -7081,6 +7098,7 @@ function scenePromptSourceLocalCacheKey(node) {
             id: node?.id ?? null,
             mode: sceneNodeMode(node),
             count: scenePromptCounterCount(node),
+            enable_downstream_count: scenePromptCounterDownstreamEnabled(node),
             input: linkedInputKey(node, "scene_prompt"),
             upstream: upstreamKey,
         });
@@ -7217,6 +7235,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
     const nextStack = new Set(stack);
     nextStack.add(presetId);
     const memo = new Map();
+    let hasCountHold = false;
     const statsForNode = (nodeId) => {
         if (memo.has(nodeId)) {
             return memo.get(nodeId);
@@ -7248,6 +7267,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
         } else if (node.class_type === "ScenePromptReverse") {
             result = source("scene_prompt") || emptyScenePromptStats();
         } else if (node.class_type === "ScenePromptCounter") {
+            if (apiInput(node, "enable_downstream_count") === false) hasCountHold = true;
             const base = source("scene_prompt") || sceneStatsSeed();
             const count = clampSceneCount(apiInput(node, "count"), 1);
             result = sceneStatsCount(base, count);
@@ -7274,11 +7294,15 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
         } else if (node.class_type === "ScenePromptCallback") {
             result = source("scene_prompt") || sceneStatsSeed();
         }
+        if (result.hasCountHold) hasCountHold = true;
         result = sceneStatsResult(result);
         memo.set(nodeId, result);
         return result;
     };
-    return statsForNode(outputSource);
+    const result = statsForNode(outputSource);
+    if (!hasCountHold) return result;
+    const base = upstream ? sceneSchedulePlan([{ kind: "tail", ...upstream }]) : null;
+    return sceneScheduleForPreset(presetId, base, stack, preferredPreset).stats;
 }
 
 function emptyScenePromptStats() {
@@ -7315,12 +7339,14 @@ function sceneStatsResult(stats) {
         || !Number.isSafeInteger(stats?.unsetBatches ?? stats?.total) || (stats.unsetBatches ?? stats.total) < 0) {
         return { ...emptyScenePromptStats(), error: stats?.error || "件数が大きすぎます。" };
     }
-    return {
+    const result = {
         rows: sceneStatNumber(stats.rows),
         total: sceneStatNumber(stats.total),
         totalImages: sceneStatNumber(stats.totalImages ?? stats.total),
         unsetBatches: sceneStatNumber(stats.unsetBatches ?? stats.total),
     };
+    if (stats.hasCountHold) Object.defineProperty(result, "hasCountHold", { value: true });
+    return result;
 }
 
 function sceneStatsMatrix(stats, factor) {
@@ -7411,11 +7437,14 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
     }
 
     const upstream = scenePromptInputSource(node);
+    if (upstream && scenePromptStats(upstream, new Set(seen), memo).hasCountHold)
+        return finish(sceneScheduleForNode(node).stats);
     if (isScenePromptRandomRouteNode(node) || (upstream && sceneRandomRouteInNode(upstream) && !isScenePromptJoinNode(node))) {
         return finish(sceneScheduleForNode(node).stats);
     }
     if (isScenePromptMergeNode(node) && connectedScenePromptSourcesForMerge(node)
-        .some(({ source }) => sceneRandomRouteInNode(source))) return finish(sceneScheduleForNode(node).stats);
+        .some(({ source }) => sceneRandomRouteInNode(source) || scenePromptStats(source, new Set(seen), memo).hasCountHold))
+        return finish(sceneScheduleForNode(node).stats);
     if (isScenePromptNode(node)) {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
@@ -7448,7 +7477,7 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
     }
     if (isScenePromptCounterNode(node)) {
         const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
-        if (upstream && sceneQueueBoundaryInNode(upstream)) {
+        if (!scenePromptCounterDownstreamEnabled(node) || (upstream && sceneQueueBoundaryInNode(upstream))) {
             return finish(sceneScheduleForNode(node).stats);
         }
         return finish(sceneStatsCount(base, scenePromptCounterCount(node)));
@@ -7533,7 +7562,161 @@ function sceneSchedulePlan(units = [], boundary = false, randomGuards = []) {
         totalImages: sceneStatSum(sum.totalImages, unit.totalImages),
         unsetBatches: sceneStatSum(sum.unsetBatches, unit.unsetBatches),
     }), emptyScenePromptStats());
-    return { units, stats: sceneStatsResult(stats), boundary, randomGuards };
+    const plan = { units, stats: sceneStatsResult(stats), boundary, randomGuards };
+    if (units.some(sceneCountHasHold)) {
+        Object.defineProperty(plan, "hasCountHold", { value: true });
+        Object.defineProperty(plan.stats, "hasCountHold", { value: true });
+    }
+    return plan;
+}
+
+function sceneCountHasHold(unit) {
+    if (!Object.hasOwn(unit, "hasCountHold")) {
+        const held = unit.kind === "count_hold" || !!(unit.unit && sceneCountHasHold(unit.unit))
+            || !!unit.plan?.hasCountHold || !!unit.left?.hasCountHold || !!unit.right?.hasCountHold
+            || !!unit.plans?.some((plan) => plan.hasCountHold);
+        Object.defineProperty(unit, "hasCountHold", { value: held });
+    }
+    return unit.hasCountHold;
+}
+
+function sceneCountPolicyAdd(first, second, subtract = false) {
+    return first.map((value, index) => value === null || second[index] === null ? null
+        : value + (subtract ? -1 : 1) * second[index]);
+}
+
+function sceneCountPolicyProduct(first, second) {
+    const multiply = (a, b) => a === 0 || b === 0 ? 0 : a === null || b === null ? null : a * b;
+    const ownImages = multiply(first[0], second[1] === null || second[2] === null ? null : second[1] - second[2]);
+    const inheritedImages = multiply(first[1], second[2]);
+    return [multiply(first[0], second[0]), ownImages === null || inheritedImages === null ? null : ownImages + inheritedImages,
+        multiply(first[2], second[2])];
+}
+
+function sceneCountPlanPolicy(plan) {
+    return plan.units.reduce((sum, unit) => sceneCountUnitPolicy(unit)
+        .map((part, index) => sceneCountPolicyAdd(sum[index], part)), [[0, 0, 0], [0, 0, 0], [0, 0, 0]]);
+}
+
+function sceneCountUnitPolicy(unit) {
+    if (Object.hasOwn(unit, "countPolicy")) return unit.countPolicy;
+    const zero = [0, 0, 0];
+    const totals = (source) => [source.total, source.totalImages, source.unsetBatches];
+    const total = totals(unit);
+    let result;
+    if (unit.kind === "run" || unit.kind === "tail") result = [zero, zero, total];
+    else if (unit.kind === "count_hold") result = [total, zero, zero];
+    else if (unit.kind === "sequence") result = sceneCountPlanPolicy(unit.plan);
+    else if (unit.kind === "alternate") result = unit.plans.reduce((sum, plan) =>
+        sceneCountPlanPolicy(plan).map((part, index) => sceneCountPolicyAdd(sum[index], part)), [zero, zero, zero]);
+    else if (unit.kind === "random_choice") {
+        const parts = unit.plans.map(sceneCountPlanPolicy);
+        result = parts[0].map((part, index) => part.map((value, metric) =>
+            parts.every((policy) => policy[index][metric] === value) ? value : null));
+    } else if (unit.kind === "product") {
+        const left = sceneCountPlanPolicy(unit.left), right = sceneCountPlanPolicy(unit.right);
+        const free = sceneCountPolicyProduct(left[2], right[2]);
+        const nonstrict = sceneCountPolicyProduct(sceneCountPolicyAdd(totals(unit.left.stats), left[0], true),
+            sceneCountPolicyAdd(totals(unit.right.stats), right[0], true));
+        result = [sceneCountPolicyAdd(total, nonstrict, true), sceneCountPolicyAdd(nonstrict, free, true), free];
+    } else {
+        const child = unit.unit ? sceneCountUnitPolicy(unit.unit) : sceneCountPlanPolicy(unit.plan);
+        if (unit.kind === "fixed") result = [child[0], sceneCountPolicyAdd(total, child[0], true), zero];
+        else if (unit.kind === "count_scale") result = unit.factor === 0 ? [child[0], zero, zero]
+            : [child[0], child[1], child[2].map((value) => value === null ? null : value * unit.factor)];
+        else if (unit.kind === "map") result = unit.latentSize == null ? child
+            : child.map((part) => [part[0], part[0] === null ? null : part[0] * unit.latentSize, 0]);
+        else {
+            const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
+            result = child.map((part) => factor === 0 ? zero : part.map((value) => value === null ? null : value * factor));
+        }
+    }
+    Object.defineProperty(unit, "countPolicy", { value: result });
+    return result;
+}
+
+function sceneCountPrefixPlan(plan, end) {
+    let result = [0, 0, 0];
+    for (const unit of plan.units) {
+        const length = Math.min(end, unit.total);
+        const prefix = sceneCountPrefixUnit(unit, length);
+        result = result.map((value, index) => value + prefix[index]);
+        end -= length;
+        if (!end) break;
+    }
+    return result;
+}
+
+function sceneCountPrefixUnit(unit, end) {
+    if (!end) return [0, 0, 0];
+    const add = (first, second) => first.map((value, index) => value + second[index]);
+    if (unit.kind === "run" || unit.kind === "tail") return [0, 0, end];
+    if (unit.kind === "count_hold") return [end, 0, 0];
+    if (unit.kind === "sequence") return sceneCountPrefixPlan(unit.plan, end);
+    // Preview retains the existing Random placeholder. Use the same arm for its
+    // prefix and ordinal mapping; execution selects the seeded arm in Python.
+    if (unit.kind === "random_choice") return sceneCountPrefixPlan(unit.plans[0], end);
+    if (unit.kind === "alternate") {
+        const sizes = unit.plans.map((plan) => plan.stats.total), block = unit.blockSize;
+        let low = 0, high = Math.ceil(Math.max(0, ...sizes) / block);
+        const start = (round) => Math.min(Number.MAX_SAFE_INTEGER, round * block);
+        const through = (round) => sizes.reduce((sum, size) => sum + Math.min(size, start(round)), 0);
+        while (low < high) {
+            const middle = low + Math.floor((high - low + 1) / 2);
+            if (through(middle) <= end) low = middle;
+            else high = middle - 1;
+        }
+        let remaining = end - through(low), result = [0, 0, 0];
+        unit.plans.forEach((plan, index) => {
+            const from = Math.min(sizes[index], start(low));
+            const within = Math.min(remaining, block, sizes[index] - from);
+            result = add(result, sceneCountPrefixPlan(plan, from + within));
+            remaining -= within;
+        });
+        return result;
+    }
+    if (unit.kind === "product") {
+        const length = unit.right.stats.total;
+        const full = Math.floor(end / length), within = end % length;
+        const left = sceneCountPrefixPlan(unit.left, full), right = sceneCountPrefixPlan(unit.right, length);
+        const result = [0, 0, 0];
+        for (let a = 0; a < 3; a += 1) for (let b = 0; b < 3; b += 1) result[Math.min(a, b)] += left[a] * right[b];
+        if (within) {
+            const after = sceneCountPrefixPlan(unit.left, full + 1), prefix = sceneCountPrefixPlan(unit.right, within);
+            for (let a = 0; a < 3; a += 1) for (let b = 0; b < 3; b += 1) result[Math.min(a, b)] += (after[a] - left[a]) * prefix[b];
+        }
+        return result;
+    }
+    if (unit.kind === "count_scale") {
+        if (unit.factor === 0) return [end, 0, 0];
+        const first = Math.min(end, unit.unit.total), result = sceneCountPrefixUnit(unit.unit, first);
+        result[2] += end - first;
+        return result;
+    }
+    if (unit.kind === "fixed") {
+        const strict = sceneCountPrefixUnit(unit.unit, end)[0];
+        return [strict, end - strict, 0];
+    }
+    if (unit.kind === "map") return sceneCountPrefixUnit(unit.unit, end);
+    if (unit.kind === "repeat") {
+        const length = unit.unit.total, cycles = Math.floor(end / length);
+        return add(sceneCountPrefixUnit(unit.unit, length).map((value) => value * cycles), sceneCountPrefixUnit(unit.unit, end % length));
+    }
+    const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
+    const full = Math.floor(end / factor), within = end % factor;
+    const prefix = unit.unit ? sceneCountPrefixUnit(unit.unit, full) : sceneCountPrefixPlan(unit.plan, full);
+    const after = within ? unit.unit ? sceneCountPrefixUnit(unit.unit, full + 1) : sceneCountPrefixPlan(unit.plan, full + 1) : prefix;
+    return prefix.map((value, index) => value * factor + (after[index] - value) * within);
+}
+
+function sceneCountEligibleIndex(unit, ordinal, policy) {
+    let low = 0, high = unit.total;
+    while (low < high) {
+        const middle = low + Math.floor((high - low) / 2);
+        if (sceneCountPrefixUnit(unit, middle + 1)[policy] <= ordinal) low = middle + 1;
+        else high = middle;
+    }
+    return low;
 }
 
 function sceneScheduleRun(entry) {
@@ -7612,6 +7795,14 @@ function sceneScheduleAtUnit(unit, index) {
     if (unit.kind === "sequence") return sceneScheduleAt(unit.plan, index);
     if (unit.kind === "random_choice") return { parts: ["ランダム候補"], count: 1, row: emptyMatrixRow() };
     if (unit.kind === "repeat_each") return sceneScheduleAt(unit.plan, Math.floor(index / unit.factor));
+    if (unit.kind === "count_hold") return sceneScheduleAtUnit(unit.unit, index);
+    if (unit.kind === "count_scale") {
+        const child = unit.unit;
+        if (unit.factor === 0) return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, index, 0));
+        if (index < child.total) return sceneScheduleAtUnit(child, index);
+        const free = sceneCountPrefixUnit(child, child.total)[2];
+        return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, (index - child.total) % free, 2));
+    }
     if (unit.kind === "repeat" || unit.kind === "fixed") {
         return unit.unit.total ? sceneScheduleAtUnit(unit.unit, index % unit.unit.total) : null;
     }
@@ -7677,21 +7868,41 @@ function sceneSchedulePrefix(plan, limit) {
     return entries;
 }
 
-function sceneScheduleCount(plan, factor) {
+function sceneScheduleCount(plan, factor, enableDownstreamCount = true) {
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからCountを接続してください。");
-    const units = plan.units.map((unit) => factor === 0 ? sceneScheduleWrapper("repeat", unit, 0)
-        : unit.kind === "fixed" ? unit : sceneScheduleWrapper("repeat", unit, factor));
+    let units;
+    const allStrict = plan.hasCountHold && sceneCountPlanPolicy(plan)[0]?.[0] === plan.stats.total;
+    if (allStrict) units = plan.units;
+    else if (plan.hasCountHold) {
+        const child = sceneScheduleSequence(plan);
+        const policy = sceneCountUnitPolicy(child)[factor === 0 ? 0 : 2];
+        if (policy.some((value) => value === null) && factor !== 1) return sceneScheduleError("ランダム分岐の各経路のCount適用後の件数が一致しません。");
+        const original = [child.total, child.totalImages, child.unsetBatches];
+        const totals = factor === 1 ? original : factor === 0 ? policy : original
+            .map((value, index) => value + (factor - 1) * policy[index]);
+        units = [{ kind: "count_scale", unit: child, factor, rows: child.rows,
+            total: totals[0], totalImages: totals[1], unsetBatches: totals[2] }];
+    } else {
+        units = plan.units.map((unit) => factor === 0 ? sceneScheduleWrapper("repeat", unit, 0)
+            : unit.kind === "fixed" ? unit : sceneScheduleWrapper("repeat", unit, factor));
+    }
+    if (!enableDownstreamCount && !allStrict) {
+        const child = units.length === 1 ? units[0] : sceneScheduleSequence(sceneSchedulePlan(units));
+        units = [{ kind: "count_hold", unit: child, total: child.total,
+            totalImages: child.totalImages, unsetBatches: child.unsetBatches, rows: child.rows }];
+    }
     return sceneSchedulePlan(units, plan.boundary, plan.randomGuards);
 }
 
-function sceneScheduleMap(plan, transform) {
+function sceneScheduleMap(plan, transform, latentSize = null) {
     if (plan.stats.error) return plan;
-    const mapUnit = (unit) => unit.kind === "fixed"
-        ? sceneScheduleWrapper("fixed", mapUnit(unit.unit))
-        : { kind: "map", unit, transform, total: unit.total, totalImages: unit.totalImages,
-            unsetBatches: unit.unsetBatches, rows: unit.rows };
+    const mapUnit = (unit) => ["fixed", "count_hold"].includes(unit.kind)
+        ? sceneScheduleWrapper(unit.kind, mapUnit(unit.unit))
+        : { kind: "map", unit, transform, latentSize, total: unit.total,
+            totalImages: latentSize === null ? unit.totalImages : sceneStatProduct(unit.total, latentSize),
+            unsetBatches: latentSize === null ? unit.unsetBatches : 0, rows: unit.rows };
     return sceneSchedulePlan(plan.units.map(mapUnit), plan.boundary, plan.randomGuards);
 }
 
@@ -7707,8 +7918,8 @@ function sceneScheduleMatrix(plan, matrixRows) {
             row: { ...row, labels: [...(row.labels || []), label], path_parts: [...(row.path_parts || [])] } };
     };
     const mapUnit = (unit) => {
-        if (unit.kind === "fixed") return mapUnit(unit.unit)
-            .map((child) => sceneScheduleWrapper("fixed", child));
+        if (["fixed", "count_hold"].includes(unit.kind)) return mapUnit(unit.unit)
+            .map((child) => sceneScheduleWrapper(unit.kind, child));
         if (unit.kind === "run") return matrixRows.map((matrixRow) =>
             sceneScheduleRun(matrixEntry(unit.entry, matrixRow)));
         return [{
@@ -7725,6 +7936,7 @@ function sceneScheduleMatrix(plan, matrixRows) {
 function sceneScheduleHasComposite(plan) {
     const hasUnit = (unit) => unit.kind === "alternate" || unit.kind === "sequence" || unit.kind === "repeat_each"
         || unit.kind === "random_choice"
+        || unit.kind === "count_hold" || unit.kind === "count_scale"
         || (unit.unit && hasUnit(unit.unit))
         || (unit.left && sceneScheduleHasComposite(unit.left))
         || (unit.right && sceneScheduleHasComposite(unit.right));
@@ -7830,11 +8042,12 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                         [name, apiInput(entry, name) ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]])));
         } else if (entry.class_type === "ScenePromptCounter") {
             const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-            plan = sceneScheduleCount(base, clampSceneCount(apiInput(entry, "count"), 1));
+            plan = sceneScheduleCount(base, clampSceneCount(apiInput(entry, "count"), 1), apiInput(entry, "enable_downstream_count") !== false);
         } else if (entry.class_type === "SceneEmptyLatent") {
             const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
             plan = base.randomGuards.length && !sceneRandomZeroArm(base)
-                ? sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからEmpty Latentを接続してください。") : base;
+                ? sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからEmpty Latentを接続してください。")
+                : sceneScheduleMap(base, (item) => item, clampSceneCount(apiInput(entry, "batch_size"), 1));
         } else if (entry.class_type === "ScenePresetReference") {
             plan = sceneScheduleForPreset(apiInput(entry, "preset_id"), source("scene_prompt"), nextStack,
                 preset?.scenePresetChildren?.get(String(nodeId)) || null, `${instancePath}/${nodeId}`);
@@ -7916,7 +8129,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
     if (isScenePromptCounterNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
             : sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-        return finish(sceneScheduleCount(base, scenePromptCounterCount(node)));
+        return finish(sceneScheduleCount(base, scenePromptCounterCount(node), scenePromptCounterDownstreamEnabled(node)));
     }
     if (isScenePresetReferenceNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
@@ -7931,13 +8144,14 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         const right = sources[1]?.source ? sceneScheduleForLinkedInput(node, "scene_prompt2", new Set(seen)) : seed();
         return finish(sceneScheduleMerge(left, right));
     }
-    if (isPromptMatrixNode(node) && upstream && (sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
+    const heldUpstream = upstream && scenePromptStats(upstream).hasCountHold;
+    if (isPromptMatrixNode(node) && upstream && (heldUpstream || sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
         const matrixRows = matrixLinesForNode(node);
         if (!matrixRows.length) return finish(matrixConfiguredLineCount(node) ? sceneSchedulePlan([], base.boundary) : base);
         return finish(sceneScheduleMatrix(base, matrixRows));
     }
-    if (upstream && (sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
+    if (upstream && (heldUpstream || sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
         if (base.stats.error) return finish(base);
         if (isSceneEmptyLatentNode(node) && base.randomGuards.length && !sceneRandomZeroArm(base))
@@ -7953,15 +8167,8 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
                 if (isScenePathNode(node)) return { ...entry, row: { ...row, path_parts: appendScenePathPart(row.path_parts || [], scenePathTitle(node), normalizePathMode(findWidget(node, "path_mode")?.value)) } };
                 return { ...entry, row: { ...row, latent: sceneEmptyLatentConfig(node) } };
             };
-            const mapped = base.units.map((unit) => {
-                const inner = unit.kind === "fixed" ? unit.unit : unit;
-                const latent = isSceneEmptyLatentNode(node);
-                const mappedUnit = { ...inner, kind: "map", unit: inner, transform,
-                    totalImages: latent ? sceneStatProduct(inner.total, sceneEmptyLatentConfig(node).batch_size) : inner.totalImages,
-                    unsetBatches: latent ? 0 : inner.unsetBatches };
-                return unit.kind === "fixed" ? sceneScheduleWrapper("fixed", mappedUnit) : mappedUnit;
-            });
-            return finish(sceneSchedulePlan(mapped, base.boundary, base.randomGuards));
+            return finish(sceneScheduleMap(base, transform,
+                isSceneEmptyLatentNode(node) ? sceneEmptyLatentConfig(node).batch_size : null));
         }
         return finish(base);
     }
@@ -8227,6 +8434,10 @@ function scenePromptCounterCount(node) {
     return clampSceneCount(findWidget(node, "count")?.value, 1);
 }
 
+function scenePromptCounterDownstreamEnabled(node) {
+    return findWidget(node, "enable_downstream_count")?.value !== false;
+}
+
 function sceneEmptyLatentConfig(node) {
     const dimension = (name) => Math.max(
         16,
@@ -8262,7 +8473,7 @@ function scenePromptLineageKey(node) {
             linkedInputKey(current, "scene_prompt"),
         ].map((part) => String(part ?? "")).join(":"));
         if (isScenePromptCounterNode(current)) {
-            parts.push(`count:${scenePromptCounterCount(current)}`);
+            parts.push(`count:${scenePromptCounterCount(current)}:${scenePromptCounterDownstreamEnabled(current)}`);
         }
         if (isScenePromptRandomRouteNode(current)) {
             parts.push(`random:${findWidget(current, "weights_json")?.value || ""}:${Boolean(findWidget(current, "preserve_join")?.value)}`);
@@ -8331,6 +8542,9 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const bypassSource = sceneBypassInputSource(node);
         return finish(bypassSource ? scenePromptPreviewEntries(bypassSource, maxEntries, new Set(seen), memo) : []);
     }
+
+    if (scenePromptStats(node).hasCountHold)
+        return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
 
     if (isScenePresetReferenceNode(node) && sceneQueueBoundaryInNode(node)) {
         return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
@@ -13027,6 +13241,29 @@ app.registerExtension({
                 if (!result) return result;
                 const named = Object.fromEntries(names.map((name) => [name, findWidget(this, name)?.value ?? (name === "generation_state_json" ? "{}" : "")]));
                 return { ...result, widgets_values: names.map((name) => named[name]), widgets_values_named: named };
+            };
+        }
+
+        if (nodeData.name === "ScenePromptCounter") {
+            const configure = nodeType.prototype.configure;
+            const serialize = nodeType.prototype.serialize;
+            nodeType.prototype.configure = function (...args) {
+                const named = sceneCounterConfiguredValues(args[0]);
+                this.sceneCounterSourceValues = Object.fromEntries(["source_node_id", "source_node_name"]
+                    .filter((name) => Object.hasOwn(named, name)).map((name) => [name, named[name]]));
+                args[0] = sceneCounterConfigureValues(this, args[0], named);
+                const result = configure?.apply(this, args);
+                for (const name of Object.keys(named)) setWidgetValue(this, name, named[name], { silent: true });
+                clearSceneComputedCaches(this);
+                return result;
+            };
+            nodeType.prototype.serialize = function (...args) {
+                const result = serialize?.apply(this, args);
+                if (!result) return result;
+                const named = Object.fromEntries((this.widgets || []).filter((widget) => widget.serialize !== false)
+                    .map((widget) => [widget.name, widget.value]));
+                return { ...result, widgets_values_named: { ...result.widgets_values_named, ...this.sceneCounterSourceValues, ...named,
+                    enable_downstream_count: scenePromptCounterDownstreamEnabled(this) } };
             };
         }
 

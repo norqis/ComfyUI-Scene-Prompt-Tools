@@ -30,6 +30,8 @@ UNIT_KEYS = {
     "repeat": {"unit", "factor"},
     "repeat_each": {"unit", "factor"},
     "count_fixed": {"unit"},
+    "count_hold": {"unit"},
+    "count_scale": {"unit", "factor"},
     "matrix_map": {"unit", "matrix_rows"},
     "product": {"left", "right"},
     "map": {"unit", "operations"},
@@ -57,7 +59,18 @@ class ScheduleUnit(dict):
             self.depth = 1 + max(data["left"].depth, data["right"].depth)
         else:
             self.depth = 1 + data["unit"].depth
+        self.has_count_hold = kind == "count_hold" or (
+            data["plan"].has_count_hold if kind == "sequence" else
+            any(plan.has_count_hold for plan in data["inputs"]) if kind in {"alternate", "random_choice"} else
+            data["left"].has_count_hold or data["right"].has_count_hold if kind == "product" else
+            data["unit"].has_count_hold if "unit" in data else False)
         self.digest = _fingerprint(data)
+
+    @property
+    def count_policy(self):
+        if not hasattr(self, "_count_policy"):
+            self._count_policy = _unit_policy(self)
+        return self._count_policy
 
 
 def _safe(value, label="Scene Prompt total"):
@@ -133,8 +146,18 @@ def _unit_stats(unit):
         factor = _old._require_int(unit["factor"], "Scene Prompt repeat factor",
                                    1 if kind == "repeat_each" else 0, MAX_SAFE_INTEGER)
         return _stats(*(_safe(stats[key] * factor) for key in ("total_batches", "total_images", "unset_batches")), stats["row_count"])
-    if kind == "count_fixed":
+    if kind in {"count_fixed", "count_hold"}:
         return dict(unit["unit"]["stats"])
+    if kind == "count_scale":
+        factor = _old._require_int(unit["factor"], "Scene Prompt count factor", 0, MAX_SAFE_INTEGER)
+        child = unit["unit"]
+        stats = child["stats"]
+        projection = child.count_policy[0 if factor == 0 else 2]
+        if any(value is None for value in projection) and factor != 1:
+            raise ScenePlanError("Scene Prompt Random Route の各経路のCount適用後の生成件数が一致しません。")
+        values = tuple(stats[key] for key in _POLICY_KEYS) if factor == 1 else projection if factor == 0 else tuple(
+            stats[key] + (factor - 1) * value for key, value in zip(_POLICY_KEYS, projection))
+        return _stats(*values, stats["row_count"])
     if kind == "matrix_map":
         stats = unit["unit"]["stats"]
         length = len(unit["matrix_rows"])
@@ -154,6 +177,92 @@ def _unit_stats(unit):
     raise ScenePlanError("Unsupported Scene Prompt schedule unit.")
 
 
+_POLICY_KEYS = ("total_batches", "total_images", "unset_batches")
+_POLICY_ZERO = (0, 0, 0)
+
+
+def _policy_add(first, second):
+    return tuple(None if a is None or b is None else a + b for a, b in zip(first, second))
+
+
+def _policy_sub(first, second):
+    return tuple(None if a is None or b is None else a - b for a, b in zip(first, second))
+
+
+def _policy_product(first, second):
+    if first == _POLICY_ZERO or second == _POLICY_ZERO:
+        return _POLICY_ZERO
+    def multiply(a, b):
+        return 0 if a == 0 or b == 0 else None if a is None or b is None else a * b
+
+    lb, li, lu = first
+    rb, ri, ru = second
+    own_images = multiply(lb, None if ri is None or ru is None else ri - ru)
+    inherited_images = multiply(li, ru)
+    images = None if own_images is None or inherited_images is None else own_images + inherited_images
+    return multiply(lb, rb), images, multiply(lu, ru)
+
+
+def _plan_policy(plan):
+    result = [_POLICY_ZERO] * 3
+    for unit in plan["units"]:
+        result = [_policy_add(first, second) for first, second in zip(result, unit.count_policy)]
+    return tuple(result)
+
+
+def _unit_policy(unit):
+    """Strict, legacy-fixed and free statistics, with unknown Random components."""
+    kind = unit["kind"]
+    total = tuple(unit["stats"][key] for key in _POLICY_KEYS)
+    if kind == "run":
+        return _POLICY_ZERO, _POLICY_ZERO, total
+    if kind == "sequence":
+        return _plan_policy(unit["plan"])
+    if kind == "alternate":
+        parts = [_plan_policy(plan) for plan in unit["inputs"]]
+        return tuple(_policy_sum(part[index] for part in parts) for index in range(3))
+    if kind == "random_choice":
+        selected = unit["selected_arm"]
+        parts = [_plan_policy(unit["inputs"][selected])] if selected is not None else [
+            _plan_policy(plan) for plan, weight in zip(unit["inputs"], unit["weights"]) if weight]
+        return tuple(tuple(parts[0][index][metric] if all(part[index][metric] == parts[0][index][metric] for part in parts)
+                           else None for metric in range(3)) for index in range(3))
+    if kind == "product":
+        left, right = _plan_policy(unit["left"]), _plan_policy(unit["right"])
+        free = _policy_product(left[2], right[2])
+        nonstrict = _policy_product(_policy_sub(tuple(unit["left"]["stats"][key] for key in _POLICY_KEYS), left[0]),
+                                   _policy_sub(tuple(unit["right"]["stats"][key] for key in _POLICY_KEYS), right[0]))
+        return _policy_sub(total, nonstrict), _policy_sub(nonstrict, free), free
+    if kind == "count_hold":
+        return total, _POLICY_ZERO, _POLICY_ZERO
+    child = unit["unit"].count_policy
+    if kind == "count_fixed":
+        return child[0], _policy_sub(total, child[0]), _POLICY_ZERO
+    if kind == "count_scale":
+        if unit["factor"] == 0:
+            return child[0], _POLICY_ZERO, _POLICY_ZERO
+        free = tuple(None if value is None else value * unit["factor"] for value in child[2])
+        return child[0], child[1], free
+    if kind in {"repeat", "repeat_each", "matrix_map"}:
+        factor = len(unit["matrix_rows"]) if kind == "matrix_map" else unit["factor"]
+        return tuple(_POLICY_ZERO if factor == 0 else tuple(None if value is None else value * factor for value in part)
+                     for part in child)
+    if kind == "map":
+        for operation in unit["operations"]:
+            if operation["kind"] == "latent_set":
+                size = operation["payload"]["batch_size"]
+                child = tuple((part[0], None if part[0] is None else part[0] * size, 0) for part in child)
+        return child
+    raise ScenePlanError("Unsupported Scene Prompt Count policy unit.")
+
+
+def _policy_sum(parts):
+    result = _POLICY_ZERO
+    for part in parts:
+        result = _policy_add(result, part)
+    return result
+
+
 def _plan(units, sources=None, boundary=False, guards=()):
     units = list(units)
     depth = max((1 + unit.depth for unit in units), default=0)
@@ -169,6 +278,7 @@ def _plan(units, sources=None, boundary=False, guards=()):
         "stats": _sum_stats(unit["stats"] for unit in units),
     })
     data.depth = depth
+    data.has_count_hold = any(unit.has_count_hold for unit in units)
     data.batch_prefix = []
     data.row_prefix = []
     batches = rows = 0
@@ -381,8 +491,8 @@ def _clone_operation(operation):
 
 
 def _map_unit(unit, operation):
-    if unit["kind"] == "count_fixed":
-        return _unit("count_fixed", unit=_map_unit(unit["unit"], operation))
+    if unit["kind"] in {"count_fixed", "count_hold"}:
+        return _unit(unit["kind"], unit=_map_unit(unit["unit"], operation))
     if unit["kind"] == "run":
         return _unit("run", row=_apply_operation(unit["row"], operation), count=unit["count"])
     if unit["kind"] == "map":
@@ -504,14 +614,14 @@ def transform(plan, transform_row=None, *, latent=None, operation=None):
         raise ScenePlanError("Scene Prompt transform must be callable.")
     units = []
     for unit in source["units"]:
-        fixed = unit["kind"] == "count_fixed"
+        fixed = unit["kind"] in {"count_fixed", "count_hold"}
         child = unit["unit"] if fixed else unit
         simple = _unwrap_run(child)
         if simple is None:
             raise ScenePlanError("A composite Scene Prompt transform needs a named operation.")
         row = _old._clone_row(transform_row(copy.deepcopy(simple["row"]), {"row": copy.deepcopy(simple["row"]), "count": simple["count"]}))
         result = _unit("run", row=row, count=simple["count"])
-        units.append(_unit("count_fixed", unit=result) if fixed else result)
+        units.append(_unit(unit["kind"], unit=result) if fixed else result)
     return _plan(units, source["sources"], source["contains_queue_boundary"], source["random_guards"])
 
 
@@ -558,25 +668,35 @@ def _inert_random_arm(plan):
     return gate["weights"][gate["arm_index"]] == 0
 
 
-def multiply_count(plan, factor):
+def multiply_count(plan, factor, enable_downstream_count=True):
     amount = _old._require_int(factor, "Scene Prompt count factor", 0, MAX_SAFE_INTEGER)
+    if type(enable_downstream_count) is not bool:
+        raise ScenePlanError("Scene Prompt enable_downstream_count must be a boolean.")
     source = normalize_plan(plan)
     if source["random_guards"] and not _inert_random_arm(source):
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Prompt Count は使えません。")
-    units = []
-    for unit in source["units"]:
-        if amount > 0 and unit["kind"] == "count_fixed":
-            units.append(unit)
-        elif amount == 0 and unit["kind"] == "count_fixed":
-            units.append(_unit("count_fixed", unit=_repeat(unit["unit"], 0)))
-        else:
-            units.append(_repeat(unit, amount))
+    all_strict = source.has_count_hold and _plan_policy(source)[0] == tuple(source["stats"][key] for key in _POLICY_KEYS)
+    if all_strict:
+        units = source["units"]
+    elif source.has_count_hold:
+        units = [_unit("count_scale", unit=_unit("sequence", plan=source), factor=amount)]
+    else:
+        units = []
+        for unit in source["units"]:
+            if amount > 0 and unit["kind"] == "count_fixed":
+                units.append(unit)
+            elif amount == 0 and unit["kind"] == "count_fixed":
+                units.append(_unit("count_fixed", unit=_repeat(unit["unit"], 0)))
+            else:
+                units.append(_repeat(unit, amount))
+    if not enable_downstream_count and not all_strict:
+        units = [_unit("count_hold", unit=units[0] if len(units) == 1 else _unit("sequence", plan=_plan(units)))]
     return mark_prompt_passthrough(_plan(units, source["sources"], source["contains_queue_boundary"], source["random_guards"]))
 
 
 def _contains_composite(unit):
     kind = unit["kind"]
-    if kind in {"alternate", "sequence", "repeat_each", "random_choice"}:
+    if kind in {"alternate", "sequence", "repeat_each", "random_choice", "count_hold", "count_scale"}:
         return True
     if kind == "product":
         return any(_contains_composite(subunit) for plan in (unit["left"], unit["right"]) for subunit in plan["units"])
@@ -605,7 +725,7 @@ def merge(left, right):
 
 
 def _unwrap_run(unit):
-    while unit["kind"] in {"count_fixed", "map"}:
+    while unit["kind"] in {"count_fixed", "count_hold", "map"}:
         if unit["kind"] == "map":
             child = _unwrap_run(unit["unit"])
             if child is None:
@@ -719,7 +839,7 @@ def matrix_product(plan, matrix_rows, configured):
         return mark_prompt_passthrough(source)
     units = []
     for unit in source["units"]:
-        fixed = unit["kind"] == "count_fixed"
+        fixed = unit["kind"] in {"count_fixed", "count_hold"}
         child = unit["unit"] if fixed else unit
         if child["kind"] == "run":
             derived = [_unit("run", row=_matrix_row(child["row"], matrix_row), count=child["count"]) for matrix_row in active]
@@ -727,7 +847,7 @@ def matrix_product(plan, matrix_rows, configured):
             derived = [_unit("matrix_map", unit=child, matrix_rows=active)]
         else:
             derived = []
-        units.extend(_unit("count_fixed", unit=item) if fixed else item for item in derived)
+        units.extend(_unit(unit["kind"], unit=item) if fixed else item for item in derived)
     return _plan(units, boundary=source["contains_queue_boundary"], guards=source["random_guards"])
 
 
@@ -769,6 +889,104 @@ def _select_plan(plan, index, seed=0):
     return item
 
 
+def _prefix_plan_policy(plan, end, seed=0):
+    result = [0, 0, 0]
+    for unit in plan["units"]:
+        length = min(end, unit["stats"]["total_batches"])
+        result = [a + b for a, b in zip(result, _prefix_unit_policy(unit, length, seed))]
+        end -= length
+        if not end:
+            break
+    return tuple(result)
+
+
+def _prefix_unit_policy(unit, end, seed=0):
+    """Count policy classes in a prefix without visiting generated events."""
+    if not end:
+        return 0, 0, 0
+    kind = unit["kind"]
+    if kind == "run":
+        return 0, 0, end
+    if kind == "count_hold":
+        return end, 0, 0
+    if kind == "sequence":
+        return _prefix_plan_policy(unit["plan"], end, seed)
+    if kind == "random_choice":
+        arm = unit["selected_arm"]
+        if arm is None:
+            arm = _random_arm(unit["weights"], unit["gate_id"], seed)
+        return _prefix_plan_policy(unit["inputs"][arm], end, seed)
+    if kind == "alternate":
+        lengths = [plan["stats"]["total_batches"] for plan in unit["inputs"]]
+        block = unit["block_size"]
+        lower, upper = 0, (max(lengths, default=0) + block - 1) // block
+        while lower < upper:
+            middle = (lower + upper + 1) // 2
+            if sum(min(length, block * middle) for length in lengths) <= end:
+                lower = middle
+            else:
+                upper = middle - 1
+        remaining = end - sum(min(length, block * lower) for length in lengths)
+        result = [0, 0, 0]
+        for plan, length in zip(unit["inputs"], lengths):
+            start = min(length, block * lower)
+            within = min(remaining, block, length - start)
+            result = [a + b for a, b in zip(result, _prefix_plan_policy(plan, start + within, seed))]
+            remaining -= within
+        return tuple(result)
+    if kind == "product":
+        right_total = unit["right"]["stats"]["total_batches"]
+        full, within = divmod(end, right_total)
+        left = _prefix_plan_policy(unit["left"], full, seed)
+        right = _prefix_plan_policy(unit["right"], right_total, seed)
+        result = [0, 0, 0]
+        for a in range(3):
+            for b in range(3):
+                result[min(a, b)] += left[a] * right[b]
+        if within:
+            next_left = _prefix_plan_policy(unit["left"], full + 1, seed)
+            right_prefix = _prefix_plan_policy(unit["right"], within, seed)
+            for a in range(3):
+                for b in range(3):
+                    result[min(a, b)] += (next_left[a] - left[a]) * right_prefix[b]
+        return tuple(result)
+    if kind == "count_scale":
+        if unit["factor"] == 0:
+            return end, 0, 0
+        first = min(end, unit["unit"]["stats"]["total_batches"])
+        strict, legacy, free = _prefix_unit_policy(unit["unit"], first, seed)
+        return strict, legacy, free + end - first
+    if kind == "count_fixed":
+        strict = _prefix_unit_policy(unit["unit"], end, seed)[0]
+        return strict, end - strict, 0
+    if kind == "repeat":
+        length = unit["unit"]["stats"]["total_batches"]
+        cycles, within = divmod(end, length)
+        total = _prefix_unit_policy(unit["unit"], length, seed)
+        partial = _prefix_unit_policy(unit["unit"], within, seed)
+        return tuple(value * cycles + rest for value, rest in zip(total, partial))
+    if kind in {"repeat_each", "matrix_map"}:
+        factor = len(unit["matrix_rows"]) if kind == "matrix_map" else unit["factor"]
+        full, within = divmod(end, factor)
+        prefix = _prefix_unit_policy(unit["unit"], full, seed)
+        after = _prefix_unit_policy(unit["unit"], full + 1, seed) if within else prefix
+        return tuple(value * factor + (next_value - value) * within for value, next_value in zip(prefix, after))
+    if kind == "map":
+        return _prefix_unit_policy(unit["unit"], end, seed)
+    raise ScenePlanError("Unsupported Scene Prompt Count prefix unit.")
+
+
+def _eligible_index(unit, ordinal, policy, seed):
+    lower, upper = 0, unit["stats"]["total_batches"]
+    while lower < upper:
+        middle = (lower + upper) // 2
+        if _prefix_unit_policy(unit, middle + 1, seed)[policy] <= ordinal:
+            lower = middle + 1
+        else:
+            upper = middle
+    return lower
+
+
 def _select_unit(unit, index, seed=0):
     kind = unit["kind"]
     if kind == "run":
@@ -782,6 +1000,34 @@ def _select_unit(unit, index, seed=0):
     if kind == "count_fixed":
         item = _select_unit(unit["unit"], index, seed)
         item["event_ref"] = (("fixed",), *item["event_ref"])
+        return item
+    if kind == "count_hold":
+        item = _select_unit(unit["unit"], index, seed)
+        item["event_ref"] = (("count_hold",), *item["event_ref"])
+        return item
+    if kind == "count_scale":
+        child = unit["unit"]
+        original = child["stats"]["total_batches"]
+        factor = unit["factor"]
+        cycle, projection = 0, "original"
+        if factor == 0:
+            projection = "strict"
+            local = _eligible_index(child, index, 0, seed)
+        elif index < original:
+            local = index
+        else:
+            eligible = _prefix_unit_policy(child, original, seed)[2]
+            cycle, ordinal = divmod(index - original, eligible)
+            cycle += 1
+            projection = "free"
+            local = _eligible_index(child, ordinal, 2, seed)
+        item = _select_unit(child, local, seed)
+        before = _prefix_unit_policy(child, local, seed)[2]
+        is_free = _prefix_unit_policy(child, local + 1, seed)[2] > before
+        if is_free and factor > 0:
+            item["repeat_index"] += cycle * item["count"]
+            item["count"] *= factor
+        item["event_ref"] = (("count_scale", cycle, projection), *item["event_ref"])
         return item
     if kind == "repeat":
         child_count = unit["unit"]["stats"]["total_batches"]
@@ -847,7 +1093,9 @@ def _select_unit(unit, index, seed=0):
         item["event_ref"] = (("map",), *item["event_ref"])
         return item
     if kind == "random_choice":
-        arm = _random_arm(unit["weights"], unit["gate_id"], seed)
+        arm = unit["selected_arm"]
+        if arm is None:
+            arm = _random_arm(unit["weights"], unit["gate_id"], seed)
         item = _select_plan(unit["inputs"][arm], index, seed)
         item["event_ref"] = (("random_choice", unit["gate_id"], arm), *item["event_ref"])
         return item
@@ -891,7 +1139,7 @@ def legacy_rows(plan):
         kind = unit["kind"]
         if kind == "run":
             rows.append({"row": copy.deepcopy(unit["row"]), "count": unit["count"]})
-        elif kind == "count_fixed":
+        elif kind in {"count_fixed", "count_hold"}:
             visit(unit["unit"])
         elif kind in {"repeat", "repeat_each"}:
             before = len(rows)
@@ -957,10 +1205,10 @@ def _prune_unit(unit, selected_sources, visible_sources, pending_operations=(), 
         child = _prune_unit(unit["unit"], selected_sources, visible_sources, (*unit["operations"], *pending_operations), selected_arms)
         return _unit("map", unit=child, operations=unit["operations"])
     child = _prune_unit(unit["unit"], selected_sources, visible_sources, pending_operations, selected_arms)
-    if kind in {"repeat", "repeat_each"}:
+    if kind in {"repeat", "repeat_each", "count_scale"}:
         return _unit(kind, unit=child, factor=unit["factor"])
-    if kind == "count_fixed":
-        return _unit("count_fixed", unit=child)
+    if kind in {"count_fixed", "count_hold"}:
+        return _unit(kind, unit=child)
     if kind == "matrix_map":
         return _unit("matrix_map", unit=child, matrix_rows=unit["matrix_rows"])
     raise ScenePlanError("Unsupported Scene Prompt replay unit.")
@@ -990,6 +1238,26 @@ def _rank_unit(unit, path):
         return _rank_plan(unit["plan"], path[1:])
     if kind == "count_fixed" and marker[0] == "fixed":
         return _rank_unit(unit["unit"], path[1:])
+    if kind == "count_hold" and marker[0] == "count_hold":
+        return _rank_unit(unit["unit"], path[1:])
+    if kind == "count_scale" and marker[0] == "count_scale" and len(marker) == 3:
+        cycle, projection = marker[1:]
+        child = unit["unit"]
+        local = _rank_unit(child, path[1:])
+        policy = 0 if unit["factor"] == 0 else 2
+        if projection == "original" and cycle == 0 and unit["factor"] > 0:
+            return local
+        expected = "strict" if unit["factor"] == 0 else "free"
+        if projection != expected or type(cycle) is not int or not (
+                cycle == 0 if unit["factor"] == 0 else 1 <= cycle < unit["factor"]):
+            raise ScenePlanError("Selected Scene Prompt Count cycle no longer exists.")
+        before = _prefix_unit_policy(child, local)[policy]
+        if _prefix_unit_policy(child, local + 1)[policy] == before:
+            raise ScenePlanError("Selected Scene Prompt Count event was pruned.")
+        if unit["factor"] == 0:
+            return before
+        length = child["stats"]["total_batches"]
+        return length + (cycle - 1) * _prefix_unit_policy(child, length)[2] + before
     if kind == "repeat" and marker[0] == "repeat":
         cycle = marker[1]
         if type(cycle) is not int or not 0 <= cycle < unit["factor"]:

@@ -1099,6 +1099,109 @@ NODE_CLASS_MAPPINGS = {
                     self._queue_and_wait(graph)
                     self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], prompt_text)
 
+    def test_count_path_policy_native_order_preflight_and_selected_png_replay(self):
+        from PIL import Image
+        marker = self.base / "count-policy-results.json"
+        graph = {
+            "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "prompt_name": "A", "positive_base": "alpha"}},
+            "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "prompt_name": "B", "positive_base": "beta"}},
+            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 3, "enable_downstream_count": False}},
+            "4": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 2}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
+            "6": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["5", 0], "count": 10}},
+            "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["6", 0], "current_index": 0, "seed_base": 123, "run_id": "count-policy", "timestamp_dir": False}},
+            "8": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "9": {"class_type": "TestSceneTextImage", "inputs": {"image": ["8", 0], "positive": ["7", 0], "negative": ["7", 1], "log_path": str(marker)}},
+            "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["9", 0], "scene_info": ["7", 2], "path": "count-policy-native", "metadata_mode": "生成経路ノードのみ"}},
+        }
+        workflow = _workflow_for_graph(graph)
+        for node in workflow["nodes"]:
+            if node["type"] == "ScenePromptCounter":
+                inputs = graph[str(node["id"])]["inputs"]
+                node["widgets_values"] = [inputs["count"], inputs.get("enable_downstream_count", True)]
+                node["widgets_values_named"] = {"count": inputs["count"], "enable_downstream_count": inputs.get("enable_downstream_count", True)}
+        handle, workflow = self._prepare_callback_run(graph, "7", workflow)
+        try:
+            observed = []
+            for index in range(23):
+                graph["7"]["inputs"]["current_index"] = index
+                self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                observed.append(json.loads(marker.read_text(encoding="utf-8"))[0])
+            self.assertEqual(observed, ["alpha"] * 3 + ["beta"] * 20)
+            files = sorted((self.base / "output" / "count-policy-native").glob("*.png"), key=lambda path: path.stat().st_mtime_ns)
+            self.assertEqual(len(files), 23)
+            for selected, expected, rank in ((files[2], "alpha", 2), (files[-1], "beta", 19)):
+                with Image.open(selected) as image:
+                    replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                self.assertEqual(replay["7"]["inputs"]["current_index"], rank)
+                if expected == "alpha":
+                    self.assertIs(replay["3"]["inputs"]["enable_downstream_count"], False)
+                    visual = next(node for node in replay_workflow["nodes"] if node["id"] == 3)
+                    self.assertIs(visual["widgets_values_named"]["enable_downstream_count"], False)
+                    self.assertNotIn("2", replay)
+                else:
+                    self.assertNotIn("1", replay)
+                replay["10"]["inputs"]["path"] = "count-policy-replay-" + expected
+                replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
+                try:
+                    self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                    self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], expected)
+                finally:
+                    self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
+        graph["6"]["inputs"]["count"] = 0
+        prepared = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "expand_node_id": "7"})
+        self.assertEqual(prepared["total_batches"], 3)
+        self._request("/scene_prompt/runs/release", {"run_handle": prepared["run_handle"]})
+
+    def test_count_nested_preset_expanded_png_replay_keeps_protection(self):
+        from PIL import Image
+        child = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 0], "positive_base": "nested_count"}},
+            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 3, "enable_downstream_count": False}},
+            "4": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["3", 0]}},
+        }
+        outer = {
+            "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "count-native-child", "scene_prompt": ["4", 0]}},
+            "2": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 2}},
+            "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            "4": {"class_type": "ScenePresetInput", "inputs": {}},
+        }
+        for name, nodes, output_id in (("count-native-child", child, "4"), ("count-native-outer", outer, "3")):
+            self._request("/scene_presets/save", {"preset_id": name, "name": name, "output_node_id": output_id,
+                "api_graph": {"output": nodes}, "workflow": _workflow_for_graph(nodes)})
+        marker = self.base / "count-nested-results.json"
+        graph = {
+            "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "count-native-outer"}},
+            "2": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 10}},
+            "3": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["2", 0], "current_index": 2, "seed_base": 5, "timestamp_dir": False, "run_id": "count-nested"}},
+            "4": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "5": {"class_type": "TestSceneTextImage", "inputs": {"image": ["4", 0], "positive": ["3", 0], "negative": ["3", 1], "log_path": str(marker)}},
+            "6": {"class_type": "SceneSaveImage", "inputs": {"images": ["5", 0], "scene_info": ["3", 2], "path": "count-nested-native", "metadata_mode": "生成経路ノードのみ", "expand_preset_contents": True}},
+        }
+        prepared = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "expand_node_id": "3", "workflow": _workflow_for_graph(graph)})
+        self.assertEqual(prepared["total_batches"], 3)
+        handle = prepared["run_handle"]; _apply_run_handle(graph, handle)
+        try:
+            self._queue_callback_graph(graph, handle, _workflow_for_graph(graph), claim_run=True)
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], "nested_count")
+            files = list((self.base / "output" / "count-nested-native").glob("*.png")); self.assertEqual(len(files), 1)
+            with Image.open(files[0]) as image:
+                replay, visual = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+            self.assertNotIn("ScenePresetReference", {node["class_type"] for node in replay.values()})
+            self.assertTrue(any(node["class_type"] == "ScenePromptCounter" and node["inputs"].get("enable_downstream_count") is False for node in replay.values()))
+            replay["6"]["inputs"]["path"] = "count-nested-replay"
+            replay_handle, visual = self._prepare_callback_run(replay, "3", visual)
+            try:
+                self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], "nested_count")
+            finally:
+                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
     def test_model_route_executes_only_the_selected_lazy_loader(self):
         marker = self.base / "selected-model-loaders.txt"
         graph = {

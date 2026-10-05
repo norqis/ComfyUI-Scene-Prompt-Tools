@@ -257,6 +257,8 @@ window.__sceneSeedRuntimeTest = {
             names: node.widgets.filter(widget => names.includes(widget.name)).map(widget => widget.name), values: node.serialize().widgets_values };
     },
     updateLLMExpand(node) { updateSceneExpandButton(node); },
+    countStats(node) { return scenePromptStats(node); },
+    countPreview(node) { return sceneSchedulePrefix(sceneScheduleForNode(node), 40).map(entry => entry.parts.join("")); },
     presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
     async refreshPresetReference(node) { await loadScenePresetList(true); refreshScenePresetReference(node); },
@@ -1256,6 +1258,73 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(queueModeRuntime.reloaded.map(item=>item.value),['alternate',3,'fixed']);
     assert(queueModeRuntime.reloaded.every(item=>!item.disabled));
     console.log('real ComfyUI bypass action updates downstream Queue controls/counts and preserves saved settings');
+    nativeRunChecks = true;
+    const countPolicyRuntime = await page.evaluate(async () => {
+        const app = window.app, { api } = await import('/scripts/api.js'); app.graph.clear();
+        const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const link = (from, to, name) => from.connect(0, to, to.inputs.findIndex(input => input.name === name));
+        const a = add('ScenePrompter'), b = add('ScenePrompter'), ca = add('ScenePromptCounter'), cb = add('ScenePromptCounter');
+        const queue = add('ScenePrompterQueue'), count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+        a.title = 'A'; b.title = 'B'; field(a, 'prompt_name').value = 'A'; field(b, 'prompt_name').value = 'B';
+        field(ca, 'count').value = 3; field(ca, 'enable_downstream_count').value = false;
+        field(cb, 'count').value = 2; field(count, 'count').value = 10;
+        link(a, ca, 'scene_prompt'); link(b, cb, 'scene_prompt');
+        link(ca, queue, 'scene_prompt1'); link(cb, queue, 'scene_prompt2'); link(queue, count, 'scene_prompt'); link(count, expand, 'scene_prompt');
+        const ids = { ca: ca.id, count: count.id, queue: queue.id, expand: expand.id };
+        const current = () => app.graph.getNodeById(ids.ca);
+        const snapshot = async () => { await new Promise(done => setTimeout(done, 250)); return {
+            total: window.__sceneSeedRuntimeTest.countStats(app.graph.getNodeById(ids.count)).total,
+            preview: window.__sceneSeedRuntimeTest.countPreview(app.graph.getNodeById(ids.count)),
+            displayed: app.graph.getNodeById(ids.expand).widgets.find(widget => widget.sceneRole === 'expand_total_count')?.sceneTotalCount,
+            enabled: field(current(), 'enable_downstream_count').value,
+            locked: app.graph.getNodeById(ids.queue).sceneQueueControlLock,
+        }; };
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        const initial = await snapshot();
+        const tracker = window.__sceneSeedRuntimeTest.tracker(); tracker.captureCanvasState();
+        tracker.beforeChange(); field(current(), 'enable_downstream_count').value = true;
+        field(current(), 'enable_downstream_count').callback?.(true); tracker.afterChange();
+        const enabled = await snapshot(); await tracker.undo(); const undone = await snapshot();
+        await tracker.redo(); const redone = await snapshot();
+        field(current(), 'enable_downstream_count').value = false; field(current(), 'enable_downstream_count').callback?.(false);
+        app.canvas.deselectAllNodes(); app.canvas.selectNode(current());
+        await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass'); const bypassed = await snapshot();
+        await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass'); const resumed = await snapshot();
+        const serialized = app.graph.serialize(); await app.loadGraphData(serialized, true, true); const reloaded = await snapshot();
+        const fresh = add('ScenePromptCounter');
+        const freshFlag = field(fresh, 'enable_downstream_count').value;
+        const names = fresh.widgets.filter(widget => !widget.hidden && widget.serialize !== false).map(widget => widget.name);
+        const saved = current().serialize();
+        current().configure({ ...saved, widgets_values: [3, 'legacy-source', 'legacy-title'], widgets_values_named: { count: 3 } });
+        const legacy = await snapshot(); const legacySources = current().serialize().widgets_values_named;
+        current().configure({ ...saved, widgets_values: [3, true], widgets_values_named: { count: 3, enable_downstream_count: false } });
+        const named = await snapshot();
+        const prompt = await app.graphToPrompt();
+        const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST', body: JSON.stringify({api_graph:prompt,workflow:prompt.workflow,expand_node_id:String(expand.id)}) });
+        const prepared = await response.json(); if (!response.ok) throw new Error(JSON.stringify(prepared));
+        await api.fetchApi('/scene_prompt/runs/release', {method:'POST',body:JSON.stringify({run_handle:prepared.run_handle})});
+        // A Merge has two sources and must preserve either source's strict policy.
+        const merge = add('ScenePrompterMerge'), extra = add('ScenePrompter');
+        link(app.graph.getNodeById(ids.queue), merge, 'scene_prompt1'); link(extra, merge, 'scene_prompt2');
+        link(merge, app.graph.getNodeById(ids.count), 'scene_prompt'); const merged = await snapshot();
+        return {initial,enabled,undone,redone,bypassed,resumed,reloaded,legacy,named,merged,freshFlag,names,legacySources,
+            apiFlag:prompt.output[String(ids.ca)].inputs.enable_downstream_count,total:prepared.total_batches};
+    });
+    nativeRunChecks = false;
+    for (const key of ['initial','undone','resumed','reloaded','named','merged']) {
+        assert.equal(countPolicyRuntime[key].total, 23, JSON.stringify(countPolicyRuntime));
+        assert.equal(countPolicyRuntime[key].displayed, 23);
+    }
+    for (const key of ['enabled','redone','legacy']) assert.equal(countPolicyRuntime[key].total, 50);
+    assert.equal(countPolicyRuntime.bypassed.total, 30);
+    assert.deepEqual(countPolicyRuntime.initial.preview, [...Array(3).fill('A'), ...Array(20).fill('B')]);
+    assert.equal(countPolicyRuntime.initial.locked, '');
+    assert.equal(countPolicyRuntime.freshFlag, true); assert.deepEqual(countPolicyRuntime.names.slice(0,2), ['count','enable_downstream_count']);
+    assert.equal(countPolicyRuntime.legacySources.source_node_id, 'legacy-source');
+    assert.equal(countPolicyRuntime.legacySources.source_node_name, 'legacy-title');
+    assert.equal(countPolicyRuntime.apiFlag, false); assert.equal(countPolicyRuntime.total, 23);
+    console.log('real ComfyUI Count path policy, cache refresh, native defaults/legacy/named migration, bypass, undo/redo, reload and Merge passed');
     const executionRequestsBefore = { prompts: seedRequests.length, runs: runRequests.length, resources: resourceRequests.length };
     const llmRuntime = await page.evaluate(async () => {
         const app = window.app;

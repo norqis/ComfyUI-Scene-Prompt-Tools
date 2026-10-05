@@ -29,6 +29,8 @@ vm.createContext(ctx);
 for (const name of [
     "emptyScenePromptStats", "sceneStatNumber", "sceneStatProduct", "sceneStatSum", "sceneStatsResult", "sceneStatsMerge",
     "sceneSchedulePlan", "sceneScheduleRun", "sceneScheduleWrapper", "sceneScheduleRepeatEach",
+    "sceneCountHasHold", "sceneCountPolicyAdd", "sceneCountPolicyProduct", "sceneCountPlanPolicy", "sceneCountUnitPolicy",
+    "sceneCountPrefixPlan", "sceneCountPrefixUnit", "sceneCountEligibleIndex",
     "sceneScheduleSequence", "sceneScheduleAlternate", "sceneScheduleAtUnit", "sceneScheduleAt",
     "sceneSchedulePrefix", "sceneScheduleCount", "sceneScheduleMap", "sceneScheduleMatrix", "sceneScheduleQueue",
     "sceneScheduleError", "sceneRandomGuard", "sceneRandomChoicePlan", "sceneRandomZeroArm", "sceneRandomJoinReady",
@@ -342,3 +344,81 @@ assert.equal(resolvedReroute.source.id, "random");
 assert.equal(resolvedReroute.slot, 1, "Reroute preserves the Random output slot");
 
 console.log("Scene Queue schedule, Count policy, chunking, and bounded preview tests passed.");
+
+// Strict Count is path-local across every compact preview unit.
+const hold = (plan, factor = 1) => ctx.sceneScheduleCount(plan, factor, false);
+assert.equal(ctx.sceneScheduleCount(hold(a, 10), 10).stats.total, 10);
+assert.equal(ctx.sceneScheduleCount(hold(ctx.sceneScheduleCount(a, 10), 10), 10).stats.total, 100);
+const partial = queue([hold(a, 2), leaf("B", 2), leaf("C")], controls());
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleCount(partial, 3)))), [..."AABBCBBCBBC"]);
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleCount(partial, 0)))), ["A", "A"]);
+const example = ctx.sceneScheduleCount(queue([hold(a, 3), ctx.sceneScheduleCount(b, 2)], controls()), 10);
+assert.equal(example.stats.total, 23);
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(example))), [...Array(3).fill("A"), ...Array(20).fill("B")]);
+const repeatedProtected = queue([hold(a, 2), b], controls("alternate", 3));
+assert.equal(repeatedProtected.stats.total, 9);
+assert.equal(repeatedProtected.boundary, true);
+assert.equal(ctx.sceneScheduleCount(repeatedProtected, 2).stats.total, 12);
+const protectedMerge = ctx.sceneScheduleMerge(queue([hold(a), b], controls()), queue([hold(leaf("X")), leaf("Y")], controls()));
+const multipliedMerge = ctx.sceneScheduleCount(protectedMerge, 3);
+assert.equal(multipliedMerge.stats.total, 6);
+assert.deepEqual(JSON.parse(JSON.stringify(prefix(multipliedMerge))), ["AX", "AY", "BX", "BY", "BY", "BY"]);
+assert.equal(ctx.sceneScheduleCount(protectedMerge, 0).stats.total, 3);
+const mappedPartial = ctx.sceneScheduleMap(partial, entry => ({ ...entry, parts: [...entry.parts, "mapped"] }), 5);
+const mappedResult = ctx.sceneScheduleCount(mappedPartial, 3);
+assert.equal(mappedResult.stats.totalImages, mappedResult.stats.total * 5);
+assert.equal(mappedResult.stats.unsetBatches, 0);
+assert.equal(ctx.sceneScheduleCount(ctx.sceneScheduleMatrix(partial, [{ label: "x" }, { label: "y" }]), 3).stats.total, 22);
+for (const factor of [0, 2]) {
+    const randomPolicyMismatch = ctx.sceneRandomChoicePlan([guarded(hold(a), 0), guarded(b, 1)]);
+    assert.match(ctx.sceneScheduleCount(randomPolicyMismatch, factor).stats.error, /Count.*一致/u);
+}
+const randomPositions = ctx.sceneRandomChoicePlan([guarded(partial, 0), guarded(queue([leaf("C"), hold(a, 2), leaf("B", 2)], controls()), 1)]);
+assert.equal(ctx.sceneScheduleCount(randomPositions, 3).stats.total, 11);
+assert(prefix(ctx.sceneScheduleCount(randomPositions, 3)).every(label => label === "ランダム候補"));
+const randomImagePolicy = ctx.sceneRandomChoicePlan([
+    guarded(queue([hold(leaf("A", 1, 2)), leaf("B", 1, 1)], controls()), 0),
+    guarded(queue([hold(leaf("C", 1, 1)), leaf("D", 1, 2)], controls()), 1),
+]);
+assert(ctx.sceneScheduleCount(randomImagePolicy, 2).stats.error);
+const resolvedImagePolicy = ctx.sceneScheduleMap(randomImagePolicy, entry => entry, 5);
+assert.equal(ctx.sceneScheduleCount(resolvedImagePolicy, 2).stats.totalImages, 15);
+assert.equal(ctx.sceneScheduleCount(resolvedImagePolicy, 0).stats.totalImages, 5);
+const unresolvedBatchPolicy = ctx.sceneScheduleMap(ctx.sceneRandomChoicePlan([guarded(hold(a), 0), guarded(b, 1)]), entry => entry, 5);
+for (const factor of [0, 2]) assert(ctx.sceneScheduleCount(unresolvedBatchPolicy, factor).stats.error);
+const hugeHeld = ctx.sceneScheduleCount(queue([hold(a, 2), leaf("B", 10_000_000)], controls("alternate")), 100_000_000);
+assert.equal(hugeHeld.stats.total, 1_000_000_000_000_002);
+assert.equal(ctx.sceneScheduleAt(hugeHeld, hugeHeld.stats.total - 1).parts[0], "B");
+assert(JSON.stringify(hugeHeld).length < 12000);
+assert(!JSON.stringify(hugeHeld).includes("countPolicy"));
+assert(ctx.sceneScheduleCount(queue([hold(a), leaf("B", Math.floor(Number.MAX_SAFE_INTEGER / 2))], controls()), 3).stats.error);
+let entirelyHeld = hold(a, 3);
+const heldUnits = entirelyHeld.units;
+for (let index = 0; index < 200; index += 1) {
+    entirelyHeld = ctx.sceneScheduleCount(entirelyHeld, index % 2 ? 0 : 100, index % 3 !== 0);
+    assert.strictEqual(entirelyHeld.units, heldUnits);
+}
+const innerCount = { api_graph: { output: {
+    1: { class_type: "ScenePresetInput", inputs: {} },
+    2: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["1", 0], count: 3, enable_downstream_count: false } },
+    3: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+} } };
+ctx.scenePresetDisplayGraphs.set("inner-count", innerCount);
+const outerCount = { api_graph: { output: {
+    1: { class_type: "ScenePresetReference", inputs: { preset_id: "inner-count" } },
+    2: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["1", 0], count: 10 } },
+    3: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+} } };
+const presetHeld = ctx.sceneScheduleForPreset("outer-count", null, new Set(), outerCount);
+assert.equal(presetHeld.stats.total, 3);
+assert.equal(presetHeld.stats.hasCountHold, true);
+assert.equal(ctx.sceneScheduleCount(presetHeld, 0).stats.total, 3);
+for (const name of ["sceneCounterConfiguredValues", "sceneCounterConfigureValues", "scenePromptCounterDownstreamEnabled"])
+    vm.runInContext(functionSource(name), ctx);
+for (const config of [{}, { widgets_values: [10] }, { widgets_values: [10], widgets_values_named: { count: 10 } },
+    { widgets_values: [10, "source-id", "source-title"] }]) assert.equal(ctx.sceneCounterConfiguredValues(config).enable_downstream_count, true);
+const oldSources = ctx.sceneCounterConfiguredValues({ widgets_values: [10, "source-id", "source-title"] });
+assert.equal(oldSources.source_node_id, "source-id"); assert.equal(oldSources.source_node_name, "source-title");
+assert.equal(ctx.sceneCounterConfiguredValues({ widgets_values: [10, false] }).enable_downstream_count, false);
+assert.equal(ctx.sceneCounterConfiguredValues({ widgets_values: [10, true], widgets_values_named: { enable_downstream_count: false } }).enable_downstream_count, false);
+console.log("Strict Count preview composition, Random policy, compact huge access, nested Presets and legacy widget migration passed.");

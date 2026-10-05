@@ -2249,7 +2249,7 @@ class ScenePromptToText:
 
 
 class ScenePromptCounter:
-    DESCRIPTION = """入力された scene_prompt の全行の生成回数へ、指定値を掛けます。\nCountを直列につなぐと値は積算されます。0を指定すると生成対象は0件になります。\n未接続なら1行の空計画から開始します。"""
+    DESCRIPTION = """入力された scene_prompt の生成回数へ、指定値を掛けます。\n後続Countを有効化をOFFにすると、このCountを適用した後、この経路への後続Count（0を含む）を無視します。\nQueueの並び順・行の繰り返しやMatrix・Mergeは引き続き適用されます。未接続なら1行の空計画から開始します。"""
     CATEGORY = "Scene/prompt"
     RETURN_TYPES = (SCENE_PROMPT_TYPE,)
     RETURN_NAMES = ("scene_prompt",)
@@ -2270,7 +2270,11 @@ class ScenePromptCounter:
                     },
                 ),
             },
-            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"})},
+            "optional": {
+                "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"}),
+                "enable_downstream_count": ("BOOLEAN", {"default": True,
+                    "display_name": "後続Countを有効化", "label": "後続Countを有効化"}),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
@@ -2280,11 +2284,12 @@ class ScenePromptCounter:
         }
 
     @classmethod
-    def IS_CHANGED(cls, scene_prompt=None, count=1, **kwargs):
+    def IS_CHANGED(cls, scene_prompt=None, count=1, enable_downstream_count=True, **kwargs):
         return "|".join(
             [
                 _scene_prompt_change_key(scene_prompt),
                 str(_scene_count(count)),
+                str(enable_downstream_count),
             ]
         )
 
@@ -2296,8 +2301,9 @@ class ScenePromptCounter:
         source_node_id="",
         source_node_name="",
         prompt_trace_kind="",
+        enable_downstream_count=True,
     ):
-        plan = multiply_count(scene_prompt, count)
+        plan = multiply_count(scene_prompt, count, enable_downstream_count)
         if prompt_trace_kind == "whole":
             plan = mark_prompt_whole(plan)
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)

@@ -151,7 +151,11 @@ Within a branch, Prompt, Path, Delete, Reverse, Apply Model/LoRA, and Callback p
 
 **Scene Prompt Queue** accepts up to ten connected Scene plans. **並び順** selects **入力順** (finish each input in socket order) or **交互** (take turns between inputs). **1行の回数** repeats each generated row before moving on. For example, two single-row inputs A and B with a value of 2 produce `A,A,B,B`. With multiple rows per input, **交互** moves to the next input after the repeated row. The default value of 1 preserves the order and count behavior of older workflows. The former per-input repeat setting is no longer used.
 
-**後続Count** applies to the whole configurable Queue: **乗算** (the default) lets a later Scene Prompt Count multiply its output; **固定** keeps that Queue's batches at their specified counts. Count 0 still produces no batches in either mode. A Count placed *before* Queue has already changed its incoming plan and is unaffected by this setting.
+**後続Count** applies to the whole configurable Queue: **乗算** (the default) lets a later Scene Prompt Count multiply its output; **固定** keeps that Queue's batches at their specified counts. Count 0 still cancels these Queue batches unless a preceding Count has protected their path with the option below. A Count placed *before* Queue has already changed its incoming plan and is unaffected by this setting.
+
+Scene Prompt Count has **後続Countを有効化**, enabled by default. Turn it off to apply this Count and then ignore subsequent Counts on that path, including Count 0. Count 10 with this option off followed by Count 10 stays at 10 batches; leaving it on produces 100. Existing workflows and Presets without the option keep it enabled.
+
+Protection follows each input through Queue, Matrix, Merge and Presets. For example, A → Count 3 (off) and B → Count 2 (on), joined by Queue → Count 10, produce A three times and B twenty times. The first Queue cycle keeps its original order; remaining cycles contain only paths eligible for multiplication. Queue row repetitions and Matrix/Merge combinations still apply normally. This option does not lock Queue controls.
 
 For example, connect one-row inputs A and B and set **1行の回数** to 2. A later Count 10 leaves `A,A,B,B` unchanged with **固定**. With **乗算**, it produces `(A,A,B,B) × 10`.
 
@@ -242,7 +246,7 @@ Unknown variables stay unchanged, so a literal placeholder is never silently rem
 | Scene Matrix | Creates one variation for each enabled row. |
 | Scene Prompt Merge | Creates every combination of two Scene plans. |
 | Scene Prompt Queue | Orders up to ten Scene plans, repeats each row as requested, and applies the downstream Count policy. |
-| Scene Prompt Count | Repeats countable Scene batches; Count 0 suppresses every batch. |
+| Scene Prompt Count | Repeats countable Scene batches; optionally protects its path from subsequent Counts, including Count 0. |
 | Scene Prompt To Text | Outputs the current row or previous node contribution as positive/negative strings. |
 | Scene Prompt Delete | Removes exact tags from each prompt side, preserving empty choice slots. |
 | Scene Prompt Reverse | Swaps positive and negative prompts for the complete plan or only the immediately preceding Scene node. |
