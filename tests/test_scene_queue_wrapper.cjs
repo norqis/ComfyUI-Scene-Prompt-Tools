@@ -34,6 +34,7 @@ const context = {
     sceneBatchDetachedRuns: new Map(),
     sceneRunHandlesByPromptId: new Map(),
     sceneRunTerminalPromptIds: new Map(),
+    sceneBatchTerminalEvents: new Map(),
     sceneRunHandleReconcileTimers: new Map(),
     SCENE_RUN_TERMINAL_RETENTION_MS: 10 * 60 * 1000,
     prepared: 0,
@@ -77,11 +78,34 @@ const context = {
     ]),
 };
 vm.createContext(context);
+let terminalClock = 1000, terminalContinued = 0;
+const terminalRun = { waiting: true, pendingPromptIds: new Set() };
+const terminalContext = vm.createContext({ Map, Set, Date: { now: () => terminalClock },
+    SCENE_RUN_TERMINAL_RETENTION_MS: 10 * 60 * 1000,
+    sceneBatchTerminalEvents: new Map(), sceneBatchRun: terminalRun,
+    scenePromptIdFromValue: (detail) => detail.prompt_id,
+    scheduleActiveSceneBatchReconcile() {}, refreshSceneBatchRunNode() {},
+    queueMicrotask: (callback) => callback(), continueSceneBatchRun: () => { terminalContinued++; },
+});
+for (const name of ["rememberSceneBatchTerminalEvent", "pruneSceneBatchTerminalEvents", "acceptSceneBatchPrompt"])
+    vm.runInContext(functionSource(name), terminalContext);
+for (let index = 0; index < 100; index++) terminalContext.rememberSceneBatchTerminalEvent("success", { prompt_id: `terminal-${index}` });
+assert.equal(terminalContext.sceneBatchTerminalEvents.size, 100, "pending terminal delivery records survive beyond former count thresholds");
+terminalContext.acceptSceneBatchPrompt(terminalRun, { prompt_id: "terminal-0" });
+assert.equal(terminalContinued, 1);
+assert(!terminalContext.sceneBatchTerminalEvents.has("terminal-0"), "accepted terminal delivery is consumed exactly once");
+terminalClock += terminalContext.SCENE_RUN_TERMINAL_RETENTION_MS;
+terminalContext.rememberSceneBatchTerminalEvent("success", { prompt_id: "terminal-current" });
+assert.equal(terminalContext.sceneBatchTerminalEvents.size, 1, "subsequent terminal access retires only expired records");
+assert(terminalContext.sceneBatchTerminalEvents.has("terminal-current"));
+assert.equal(terminalRun.waiting, true, "terminal retention never evicts an accepted active run");
 for (const name of [
     "randomizeStandardSceneSeeds",
     "sceneRunTargetNodes",
     "sceneHistoryStatus",
     "pruneSceneRunTerminalPromptIds",
+    "pruneSceneBatchTerminalEvents",
+    "rememberSceneBatchTerminalEvent",
     "rememberSceneRunTerminalPromptId",
     "consumeSceneRunTerminalPromptId",
     "clearQueuedSceneRunReconcile",

@@ -1,6 +1,5 @@
 import { requestJSON, identity, value, applyCandidate, captureTarget } from "./scene_prompt_llm.js";
 
-const cache = new Map();
 let cacheEpoch = 0;
 let settingsModalID = 0;
 const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated"];
@@ -11,7 +10,7 @@ function element(tag, text, className) {
     if (className) node.className = className;
     return node;
 }
-export function openModal(title) {
+export function openModal(title, onDismiss) {
     const focus = document.activeElement;
     const overlay = element("div", undefined, "pc-lora-overlay");
     const dialog = element("div", undefined, "pc-lora-dialog pc-civitai-dialog");
@@ -23,6 +22,7 @@ export function openModal(title) {
     let closed = false;
     function dismiss() {
         if (closed) return; closed = true;
+        onDismiss?.();
         document.removeEventListener("keydown", onKey); overlay.remove(); const index = modals.indexOf(overlay); if (index >= 0) modals.splice(index, 1);
         const current = modals.at(-1); if (current) current.inert = false;
         if (focus?.isConnected) focus.focus?.();
@@ -51,7 +51,8 @@ export function showAPIError(error, query, retry) {
 export function openCivitaiSearch({ node, api, refresh, details, activeGraph = () => node.graph,
     beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const state = node.properties?.scene_civitai || {};
-    const modal = openModal("Civitai Search");
+    let revision = 0, currentResult = null;
+    const modal = openModal("Civitai Search", () => { revision++; currentResult = null; list.replaceChildren(); });
     const controls = element("div", undefined, "pc-civitai-controls"), query = element("input"), sort = element("select");
     query.type = "search"; query.value = state.query || ""; query.placeholder = "LoRAを検索"; query.setAttribute("aria-label", "検索語");
     sort.setAttribute("aria-label", "並び順");
@@ -59,7 +60,6 @@ export function openCivitaiSearch({ node, api, refresh, details, activeGraph = (
     sort.value = state.sort || SORTS[0];
     const search = element("button", "検索", "pc-button"), list = element("div", undefined, "pc-civitai-results");
     controls.append(query, sort, search); modal.dialog.append(controls, list);
-    let revision = 0;
     function render(items) {
         list.replaceChildren();
         if (!items.length) { list.append(element("p", "該当するLoRAはありません。")); return; }
@@ -98,25 +98,25 @@ export function openCivitaiSearch({ node, api, refresh, details, activeGraph = (
                     finally { endChange(graph); }
                     item.acquired = true; item.lora_name = downloaded.lora_name;
                     refresh?.(node); render(items);
-                } catch (error) { if (modal.overlay.isConnected) showAPIError(error, query.value, () => choose.click()); }
+                } catch (error) { if (modal.overlay.isConnected && revision === serial && epoch === cacheEpoch)
+                    showAPIError(error, query.value, () => { if (modal.overlay.isConnected && revision === serial && epoch === cacheEpoch) choose.click(); }); }
                 finally { choose.disabled = false; }
             };
             row.append(choose); list.append(row);
         }
     }
     async function load(force = false) {
+        if (!modal.overlay.isConnected) return;
         const serial = ++revision, epoch = cacheEpoch;
         const key = new URLSearchParams({ query: query.value.trim(), model_mode: value(node, "model_mode"), sort: sort.value }).toString();
         list.textContent = "検索中…";
+        let result = !force && currentResult?.key === key && currentResult.epoch === epoch ? currentResult.data : null;
+        currentResult = null;
         try {
-            let result = force ? null : cache.get(key);
-            if (!result) {
-                result = await requestJSON(api, `/scene_prompt/civitai/search?${key}`);
-                if (epoch !== cacheEpoch) return;
-                cache.delete(key); cache.set(key, result);
-                while (cache.size > 20) cache.delete(cache.keys().next().value);
-            }
-            if (modal.overlay.isConnected && serial === revision && epoch === cacheEpoch) render(result.items);
+            if (!result) result = await requestJSON(api, `/scene_prompt/civitai/search?${key}`);
+            if (!modal.overlay.isConnected || serial !== revision || epoch !== cacheEpoch) return;
+            currentResult = { key, epoch, data: result };
+            render(result.items);
         } catch (error) {
             if (modal.overlay.isConnected && serial === revision && epoch === cacheEpoch) { list.textContent = "検索できませんでした。"; showAPIError(error, query.value, () => load(true)); }
         }
@@ -164,7 +164,7 @@ export async function openLLMSettings(api) {
             saving = true; save.disabled = true;
             try {
                 const saved = await requestJSON(api, "/scene_prompt/llm/settings", submitted);
-                cacheEpoch++; cache.clear();
+                cacheEpoch++;
                 if (!modal.overlay.isConnected) return;
                 for (const name of ["api_key", "civitai_api_key"]) {
                     if (drafts[name] === submittedDrafts[name] && fields[name].value === submitted[name]) fields[name].value = "";

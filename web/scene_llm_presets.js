@@ -2,9 +2,6 @@
 const cache = new WeakMap();
 const contexts = new WeakMap();
 const operations = new WeakMap();
-const fullSources = new Map();
-const FULL_SOURCE_BYTES = 16 * 1024 * 1024;
-let fullSourceBytes = 0;
 const EMPTY = '{"version":1,"presets":{}}';
 const field = (node, name) => node?.widgets?.find((widget) => widget.name === name);
 const copy = (value) => JSON.parse(JSON.stringify(value));
@@ -50,28 +47,6 @@ export function createPresetOperation(sources, currentSources = () => sources) {
     };
     operations.set(definitions, operation);
     return operation;
-}
-
-function cachedFullSource(key) {
-    const entry = fullSources.get(key);
-    if (!entry) return null;
-    fullSources.delete(key);
-    fullSources.set(key, entry);
-    return entry.definition;
-}
-
-function cacheFullSource(key, definition) {
-    const bytes = JSON.stringify(definition).length * 2;
-    const previous = fullSources.get(key);
-    if (previous) { fullSourceBytes -= previous.bytes; fullSources.delete(key); }
-    if (bytes > FULL_SOURCE_BYTES) return;
-    fullSources.set(key, { definition, bytes });
-    fullSourceBytes += bytes;
-    while (fullSources.size > 32 || fullSourceBytes > FULL_SOURCE_BYTES) {
-        const oldest = fullSources.keys().next().value;
-        fullSourceBytes -= fullSources.get(oldest).bytes;
-        fullSources.delete(oldest);
-    }
 }
 
 export function parsePresetOverrides(serialized) {
@@ -198,15 +173,9 @@ export async function hydratePresetReference(reference, operation, loadFull) {
         if (!missing) return prepared;
         const context = contexts.get(missing);
         if (prepared.localPaths.has(context.path)) throw new Error("Preset customization is incomplete. Reload its full source before generating.");
-        const id = String(missing.metadata.preset_id), hash = String(missing.metadata.sha256 || "");
-        const key = `${id}:${hash}`;
-        let full = cachedFullSource(key);
-        if (!full) {
-            full = await loadFull(id);
-            if (!fullDefinition(full) || String(full.metadata?.preset_id) !== id) throw new Error("Full Preset response is invalid.");
-            const actualKey = `${id}:${String(full.metadata.sha256 || "")}`;
-            cacheFullSource(actualKey, full);
-        }
+        const id = String(missing.metadata.preset_id);
+        const full = await loadFull(id);
+        if (!fullDefinition(full) || String(full.metadata?.preset_id) !== id) throw new Error("Full Preset response is invalid.");
         if (String(field(reference, "llm_presets_json")?.value || "") !== initialValue
             || String(field(reference, "preset_id")?.value || "") !== initialId || !operation.current(prepared))
             throw new Error("Preset changed while loading its source.");

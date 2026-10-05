@@ -281,7 +281,9 @@ assert.equal(requests.length, requestsBeforeCached);
 const cachedReference = reference(61, "{}"); cachedReference.widgets[0].value = "lazy-parent";
 const freshCompact = new Map([["lazy-parent", compactPreset(fullParent)], ["lazy-child", compactPreset(fullChild)]]);
 const cachedOperation = createPresetOperation(freshCompact);
-await hydratePresetReference(cachedReference, cachedOperation, async () => { throw new Error("Identity/hash full source cache should reuse"); });
+let nextActionRequests = 0;
+await hydratePresetReference(cachedReference, cachedOperation, async () => { nextActionRequests++; return fullParent; });
+assert.equal(nextActionRequests, 1, "a new action fetches its current full source instead of a completed action's payload");
 assert(presetReferenceHasLLM(cachedReference));
 const sharedParent = structuredClone(fullParent); sharedParent.metadata.preset_id = "lazy-shared-parent";
 delete sharedParent.api_graph.output[5].inputs.llm_presets_json;
@@ -300,12 +302,12 @@ assert(presetReferenceHasLLM(cachedReference), "disposed hydration restores comp
 // cleanup when another operation has already replaced the live Reference cache.
 const lifecycleReference = reference(63); lifecycleReference.widgets[0].value = "lazy-shared-parent";
 const firstOperation = createPresetOperation(sharedDefinitions);
-await hydratePresetReference(lifecycleReference, firstOperation, async () => { throw new Error("cached source should reuse"); });
+await hydratePresetReference(lifecycleReference, firstOperation, async (id) => id === "lazy-shared-parent" ? sharedParent : fullChild);
 const firstPrepared = preparePresetReference(lifecycleReference, firstOperation.definitions);
 const firstTargets = collectPresetLLMTargets(lifecycleReference, firstOperation.definitions);
 assert(firstTargets[0].current());
 const nextOperation = createPresetOperation(sharedDefinitions);
-await hydratePresetReference(lifecycleReference, nextOperation, async () => { throw new Error("cached source should reuse"); });
+await hydratePresetReference(lifecycleReference, nextOperation, async (id) => id === "lazy-shared-parent" ? sharedParent : fullChild);
 const nextPrepared = preparePresetReference(lifecycleReference, nextOperation.definitions);
 firstOperation.dispose(); firstOperation.dispose();
 assert.equal(firstOperation.definitions.size, 0);
@@ -342,7 +344,7 @@ assert.strictEqual(staleSources.get("pending-full").api_graph, oldSource.api_gra
 const freshOperation = createPresetOperation(staleSources);
 await hydratePresetReference(staleReference, freshOperation, async () => staleFull);
 assert.equal(collectPresetLLMTargets(staleReference, freshOperation.definitions).length, 1,
-    "retry starts a fresh context and can reuse a matching hash response");
+    "retry starts a fresh context and fetches its current source");
 const freshPrepared = preparePresetReference(staleReference, freshOperation.definitions);
 staleSources.set("unrelated", unrelated);
 assert(freshOperation.current(freshPrepared), "unrelated source updates do not invalidate this action");
@@ -350,7 +352,7 @@ staleSources.set("pending-full", { ...oldSource });
 assert(!freshOperation.current(freshPrepared), "same Map replacement of a required source invalidates targets");
 freshOperation.dispose();
 
-async function cachedSourceProbe(id, full, loader) {
+async function operationSourceProbe(id, full, loader) {
     const sources = new Map([[id, compactPreset(full)]]);
     const instance = reference(`probe-${id}`); instance.widgets[0].value = id;
     const operation = createPresetOperation(sources);
@@ -363,58 +365,104 @@ function largeSource(id, bytes) {
         2: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["1", 0] } },
     });
 }
-const memorySources = Array.from({ length: 5 }, (_, index) => largeSource(`byte-budget-${index}`, 1024 * 1024));
-const retainedOperation = await cachedSourceProbe("byte-budget-0", memorySources[0], async () => memorySources[0]);
-for (const full of memorySources.slice(1)) (await cachedSourceProbe(full.metadata.preset_id, full, async () => full)).dispose();
-const cachedRecent = await cachedSourceProbe("byte-budget-4", memorySources[4], async () => { throw new Error("recent byte-budget entry should remain cached"); });
-cachedRecent.dispose();
-let evictedReloads = 0;
-(await cachedSourceProbe("byte-budget-0", memorySources[0], async () => { evictedReloads++; return memorySources[0]; })).dispose();
-assert.equal(evictedReloads, 1, "16 MiB estimate evicts full payloads before the count cap");
-assert.equal(retainedOperation.definitions.get("byte-budget-0").api_graph.output[1].inputs.positive.length, 1024 * 1024,
-    "cache eviction never invalidates an active operation's payload");
-retainedOperation.dispose();
-const oversizedFull = largeSource("oversized-full", 5 * 1024 * 1024);
-let oversizedRequests = 0;
-for (let index = 0; index < 2; index++) {
-    const operation = await cachedSourceProbe("oversized-full", oversizedFull, async () => { oversizedRequests++; return oversizedFull; });
-    assert.equal(operation.definitions.get("oversized-full").api_graph.output[1].inputs.positive.length, 5 * 1024 * 1024);
-    operation.dispose();
-}
-assert.equal(oversizedRequests, 2, "oversized valid full definitions remain usable without long-lived caching");
-const countSources = Array.from({ length: 34 }, (_, index) => largeSource(`count-budget-${index}`, 10));
-for (const full of countSources) (await cachedSourceProbe(full.metadata.preset_id, full, async () => full)).dispose();
-let countReloads = 0;
-(await cachedSourceProbe("count-budget-0", countSources[0], async () => { countReloads++; return countSources[0]; })).dispose();
-assert.equal(countReloads, 1, "full payload entry cap stays at 32");
+const activeSources = Array.from({ length: 40 }, (_, index) => largeSource(`active-source-${index}`, 512 * 1024));
+const activeCompact = new Map(activeSources.map((full) => [full.metadata.preset_id, compactPreset(full)]));
+const activeBefore = JSON.stringify([...activeCompact]);
+const activeOperation = createPresetOperation(activeCompact);
+let activeLoads = 0, hydrationSerializations = 0;
+const savedStringify = JSON.stringify;
+JSON.stringify = (...args) => { hydrationSerializations++; return savedStringify(...args); };
+try {
+    for (const full of activeSources) {
+        const instance = reference(`active-${full.metadata.preset_id}`); instance.widgets[0].value = full.metadata.preset_id;
+        await hydratePresetReference(instance, activeOperation, async () => { activeLoads++; return full; });
+    }
+    const duplicate = reference("active-duplicate"); duplicate.widgets[0].value = activeSources[0].metadata.preset_id;
+    await hydratePresetReference(duplicate, activeOperation, async () => { throw new Error("one active action shares its full source across references"); });
+} finally { JSON.stringify = savedStringify; }
+assert.equal(activeLoads, 40);
+assert.equal(hydrationSerializations, 0, "full hydration performs no payload-size serialization");
+for (const full of activeSources) assert.strictEqual(activeOperation.definitions.get(full.metadata.preset_id), full,
+    "all active full sources remain owned beyond the former entry and byte thresholds");
+assert.equal(JSON.stringify([...activeCompact]), activeBefore);
+activeOperation.dispose();
+assert.equal(activeOperation.definitions.size, 0);
+let independentLoads = 0;
+(await operationSourceProbe(activeSources[0].metadata.preset_id, activeSources[0], async () => { independentLoads++; return activeSources[0]; })).dispose();
+assert.equal(independentLoads, 1, "disposed action does not retain a full-source history");
 
 const titleStart = uiSource.indexOf('const SCENE_LORA_CACHE_KEY =');
 const titleEnd = uiSource.indexOf('function closeSceneLoraPicker(', titleStart);
-let titleDisk = "[]", titleInfoCalls = 0;
+let titleDisk = "[]", titleInfoCalls = 0, finishTitleInfo, finishTitleVersion, pauseTitleInfo = false, pauseTitleVersion = false, failTitleInfo = false;
 const titleContext = vm.createContext({ Map, Set, Array, String, JSON, Object,
     localStorage: { getItem: () => titleDisk, setItem: (_key, value) => { titleDisk = value; } },
-    api: { async fetchApi() { titleInfoCalls++; return { ok: true, json: async () => ({ size: 1, mtime_ns: 1, sha256: "hash", trigger_phrases: [] }) }; } },
+    api: { async fetchApi() {
+        titleInfoCalls++;
+        if (pauseTitleInfo) { pauseTitleInfo = false; await new Promise((done) => { finishTitleInfo = done; }); }
+        if (failTitleInfo) { failTitleInfo = false; return { ok: false, json: async () => ({ error: "missing file" }) }; }
+        return { ok: true, json: async () => ({ size: 1, mtime_ns: 1, sha256: "hash", trigger_phrases: [] }) };
+    } },
     readApiJson: (response) => response.json(),
-    fetch: async () => ({ ok: true, status: 200, json: async () => ({ id: 1, model: { name: "Resolved again" } }) }),
+    fetch: async () => {
+        if (pauseTitleVersion) { pauseTitleVersion = false; await new Promise((done) => { finishTitleVersion = done; }); }
+        return { ok: true, status: 200, json: async () => ({ id: 1, model: { name: "Resolved again" } }) };
+    },
 });
-vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.titles = { cachedSceneLora, saveSceneLoraCache, resolveSceneLora, sceneLoraSessionCache, sceneLoraResolutions, sceneLoraCacheKey };`, titleContext);
+vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.titles = { cachedSceneLora, saveSceneLoraCache, resolveSceneLora, reconcileSceneLoraTitles, sceneLoraSessionCache, sceneLoraFileIdentities, sceneLoraResolutions, sceneLoraCacheKey };`, titleContext);
+const legacyTitleContext = vm.createContext({ Map, Array, String, JSON,
+    localStorage: { getItem: () => JSON.stringify([{ key: "folder\\legacy.safetensors\u00001\u00001", title: "Legacy cached title", status: "found" }]) },
+});
+vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.legacyTitle = cachedSceneLora({path:'folder/legacy.safetensors',size:1,mtime_ns:1});`, legacyTitleContext);
+assert.equal(legacyTitleContext.legacyTitle.title, "Legacy cached title", "legacy persisted Windows separators migrate to the current normalized identity");
 const titles = titleContext.titles, titleItem = (index, revision = 1) => ({ path: `lora-${index}`, size: 1, mtime_ns: revision });
 for (let index = 0; index < 300; index++) titles.saveSceneLoraCache(titleItem(index), {}, { model: { name: `Title ${index}` } }, "found");
-assert.equal(titles.sceneLoraSessionCache.size, 120);
-assert.equal(JSON.parse(titleDisk).length, 120);
-titles.cachedSceneLora(titleItem(180));
+assert.equal(titles.sceneLoraSessionCache.size, 300, "all current file titles remain usable beyond former count thresholds");
+assert.equal(JSON.parse(titleDisk).length, 300);
+assert.equal(titles.cachedSceneLora(titleItem(0)).title, "Title 0");
 titles.saveSceneLoraCache(titleItem(300), {}, { model: { name: "New" } }, "found");
-assert(titles.sceneLoraSessionCache.has(titles.sceneLoraCacheKey(titleItem(180))), "cache hits touch LRU order");
-assert(!titles.sceneLoraSessionCache.has(titles.sceneLoraCacheKey(titleItem(181))), "least recently used title is evicted");
 for (let revision = 2; revision < 302; revision++) titles.saveSceneLoraCache(titleItem(300, revision), {}, { model: { name: "Revision" } }, "found");
-assert.equal(titles.sceneLoraSessionCache.size, 120, "file revisions cannot accumulate beyond the session cap");
+assert.equal(titles.sceneLoraSessionCache.size, 301, "same-path revisions replace obsolete titles instead of accumulating history");
+assert.equal(JSON.parse(titleDisk).filter((entry) => entry.path === "lora-300").length, 1);
+const currentCatalog = Array.from({ length: 300 }, (_, index) => titleItem(index + 1, index === 0 ? 2 : index === 299 ? 301 : 1));
+titles.reconcileSceneLoraTitles(currentCatalog);
+assert.equal(titles.sceneLoraSessionCache.size, 299, "catalog refresh removes deleted and changed file titles");
+assert.equal(JSON.parse(titleDisk).length, 299);
 assert.equal(titles.cachedSceneLora(titleItem(0)), null);
-const [resolvedTitle, duplicateTitle] = await Promise.all([titles.resolveSceneLora(titleItem(0)), titles.resolveSceneLora(titleItem(0))]);
+const unlisted = titleItem("resolve"); currentCatalog.push(unlisted); titles.reconcileSceneLoraTitles(currentCatalog);
+const [resolvedTitle, duplicateTitle] = await Promise.all([titles.resolveSceneLora(unlisted), titles.resolveSceneLora(unlisted)]);
 assert.equal(resolvedTitle.title, "Resolved again");
 assert.strictEqual(resolvedTitle, duplicateTitle);
-assert.equal(titleInfoCalls, 1, "evicted entries resolve again with in-flight deduplication");
+assert.equal(titleInfoCalls, 1, "current uncached file resolves with in-flight deduplication");
 assert.equal(titles.sceneLoraResolutions.size, 0);
-assert.equal(titles.sceneLoraSessionCache.size, 120);
+assert.equal(titles.sceneLoraSessionCache.size, 300);
+for (const stage of ["info", "version"]) {
+    const late = titleItem(`late-${stage}`); currentCatalog.push(late); titles.reconcileSceneLoraTitles(currentCatalog);
+    if (stage === "info") pauseTitleInfo = true; else pauseTitleVersion = true;
+    const pending = titles.resolveSceneLora(late);
+    while (!(stage === "info" ? finishTitleInfo : finishTitleVersion)) await new Promise((done) => setImmediate(done));
+    currentCatalog.splice(currentCatalog.indexOf(late), 1); titles.reconcileSceneLoraTitles(currentCatalog);
+    (stage === "info" ? finishTitleInfo : finishTitleVersion)();
+    await assert.rejects(pending, /再表示/);
+    assert(!titles.sceneLoraSessionCache.has(late.path), "late metadata cannot repopulate a removed file identity");
+    assert(!JSON.parse(titleDisk).some((entry) => entry.path === late.path));
+    assert.equal(titles.sceneLoraResolutions.size, 0);
+}
+const acquiredFile = { path: "llm/newly-acquired.safetensors" };
+const acquired = await titles.resolveSceneLora(acquiredFile);
+assert.equal(acquired.title, "Resolved again", "newly acquired selected file can resolve before the old catalog is refreshed");
+assert.equal(titles.sceneLoraFileIdentities.get(acquiredFile.path).key, titles.sceneLoraCacheKey({ ...acquiredFile, size: 1, mtime_ns: 1 }));
+failTitleInfo = true;
+const absentFile = { path: "missing.safetensors" };
+await assert.rejects(titles.resolveSceneLora(absentFile), /missing file/);
+assert(!titles.sceneLoraFileIdentities.has(absentFile.path), "failed uncatalogued lookup releases its temporary identity");
+const changedFile = titleItem("changed-file"); currentCatalog.push(changedFile); titles.reconcileSceneLoraTitles(currentCatalog);
+finishTitleVersion = null; pauseTitleVersion = true;
+const changedLookup = titles.resolveSceneLora(changedFile);
+while (!finishTitleVersion) await new Promise((done) => setImmediate(done));
+changedFile.mtime_ns = 2; titles.reconcileSceneLoraTitles(currentCatalog);
+finishTitleVersion();
+await assert.rejects(changedLookup, /再表示/);
+assert(!titles.sceneLoraSessionCache.has(changedFile.path), "late version reply cannot publish an obsolete same-path revision");
 
 const largeOutput = {};
 for (let index = 1; index <= 1500; index++) largeOutput[index] = { class_type: "ScenePromptCounter", inputs: { count: index } };

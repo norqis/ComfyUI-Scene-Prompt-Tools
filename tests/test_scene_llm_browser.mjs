@@ -21,9 +21,10 @@ const server = http.createServer(async (request, response) => {
         const submitted=options.body&&JSON.parse(options.body);
         if(window.deferSettings&&path.endsWith('/settings')&&submitted){window.deferSettings=false;await new Promise(done=>window.finishSettings=done);}
         const searchHost=window.savedSettings.civitai_host;
+        const searchQuery=new URL(path,'http://local').searchParams.get('query');
         if(window.deferSearch&&path.includes('search?')){window.deferSearch=false;await new Promise(done=>window.finishSearch=done);}
         if(window.fail&&path.includes('search?'))return {ok:false,status:503,json:async()=>({error:'Network unavailable'})};
-        if(path.includes('search?'))data={items:[candidate(1),candidate(2)].map(item=>({...item,name:item.name+' '+searchHost}))};
+        if(path.includes('search?'))data={items:[candidate(1),candidate(2)].map(item=>({...item,name:item.name+' '+searchHost+(window.queryLabels?' '+searchQuery:'')}))};
         else if(path.endsWith('/download'))data={candidate:candidate(1),lora_name:'llm/1.safetensors'};
         else if(path.endsWith('/test'))data={ok:true,models:[{id:'model-a'},{id:'model-b'}]};
         else {if(submitted){for(const name of ['api_key','civitai_api_key']){if(submitted['clear_'+name])window.savedSettings[name+'_set']=false;else if(submitted[name])window.savedSettings[name+'_set']=true;}window.savedSettings.civitai_host=submitted.civitai_host;}data={base_url:'http://127.0.0.1:8080/v1',model:'model-a',response_format:'json_object',timeout_seconds:120,max_tokens:8192,reasoning_effort:'',...window.savedSettings};}
@@ -116,8 +117,49 @@ try {
     await page.keyboard.press("Escape");
     const beforeReopen = await page.evaluate(() => window.calls.filter(call=>call.path.includes('search?')).length);
     await page.evaluate(() => window.search()); await modal.locator('.pc-civitai-card').first().waitFor();
-    assert.equal(await page.evaluate(() => window.calls.filter(call=>call.path.includes('search?')).length), beforeReopen+1, "old in-flight response cannot restore cache");
+    assert.equal(await page.evaluate(() => window.calls.filter(call=>call.path.includes('search?')).length), beforeReopen+1, "old in-flight response cannot restore dismissed search state");
     assert.match(await modal.locator('.pc-civitai-card strong').first().textContent(), /civitai.red/);
     await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+        window.queryLabels=true; window.deferSearch=true; window.finishSearch=null;
+        window.node.properties.scene_civitai.query='older-query'; window.pendingModal=window.search();
+    });
+    await page.waitForFunction(() => window.finishSearch);
+    await modal.getByRole("searchbox", { name: "検索語" }).fill("newer-query");
+    await modal.getByRole("button", { name: "検索", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.pc-civitai-card strong')?.textContent.includes('newer-query'));
+    await page.evaluate(() => window.finishSearch()); await page.waitForTimeout(30);
+    assert((await modal.locator('.pc-civitai-card strong').allTextContents()).every((title)=>title.includes('newer-query')),
+        "superseded search cannot replace the modal's current result");
+    await page.evaluate(() => window.pendingModal.dismiss());
+    assert.equal(await page.evaluate(() => window.pendingModal.dialog.querySelector('.pc-civitai-results').childElementCount), 0,
+        "dismissal releases result DOM even when a caller still holds the modal facade");
+    await page.evaluate(() => {
+        window.deferSearch=true; window.finishSearch=null; window.node.properties.scene_civitai.query='closed-query'; window.closedModal=window.search();
+    });
+    await page.waitForFunction(() => window.finishSearch);
+    await page.evaluate(() => { window.closedModal.dismiss(); window.finishSearch(); });
+    await page.waitForTimeout(30);
+    assert.equal(await page.evaluate(() => window.closedModal.dialog.querySelector('.pc-civitai-results').childElementCount), 0,
+        "late search cannot repopulate a dismissed modal");
+    const closedSearches = await page.evaluate(() => window.calls.filter(call=>call.path.includes('query=closed-query')).length);
+    await page.evaluate(() => window.search()); await modal.locator('.pc-civitai-card').first().waitFor();
+    assert.equal(await page.evaluate(() => window.calls.filter(call=>call.path.includes('query=closed-query')).length), closedSearches+1,
+        "a new modal fetches its own current result rather than closed result history");
+    await page.keyboard.press('Escape');
+    await page.evaluate(async () => {
+        window.ownedModals=[];
+        for(let index=0;index<24;index++) {
+            window.node.properties.scene_civitai.query='current-modal-'+index;
+            const current=window.search(); window.ownedModals.push(current);
+            while(!current.dialog.querySelector('.pc-civitai-card')) await new Promise(done=>setTimeout(done,0));
+        }
+    });
+    assert.equal(await page.evaluate(() => window.ownedModals.filter(current=>current.dialog.querySelectorAll('.pc-civitai-card').length===2).length), 24,
+        "concurrent open modals retain all current results without a capacity cap");
+    assert.match(await page.evaluate(() => window.ownedModals[0].dialog.querySelector('.pc-civitai-card strong').textContent), /current-modal-0$/);
+    await page.evaluate(() => [...window.ownedModals].reverse().forEach(current=>current.dismiss()));
+    assert.equal(await page.evaluate(() => window.ownedModals.reduce((sum,current)=>sum+current.dialog.querySelector('.pc-civitai-results').childElementCount,0)), 0,
+        "ending each owner releases all modal results");
     console.log("Actual Chromium Civitai search, download, error/retry, focus and masked settings tests passed.");
 } finally { await browser.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); }

@@ -408,6 +408,7 @@ async function testClaimFailureHistoryCompletionUsesRealCleanupPath() {
         "sceneBatchEventMatchesRun",
         "markSceneBatchReleaseBlocked",
         "claimSceneRunHandle",
+        "pruneSceneBatchTerminalEvents",
         "acceptSceneBatchPrompt",
         "clearPendingSceneBatchReleasesForRun",
         "releaseSceneBatchPlan",
