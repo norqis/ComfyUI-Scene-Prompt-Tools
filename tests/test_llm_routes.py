@@ -47,7 +47,8 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                     with mock.patch.object(service, "test_connection", return_value={"ok": True, "models": [], "model": "unsaved-model"}) as connection:
                         result = await registered[("POST", "/scene_prompt/llm/test")](request)
                         supplied = connection.call_args.args[0]
-                        self.assertEqual(supplied["base_url"], request.payload["base_url"])
+                        self.assertEqual(supplied["base_url"], "http://127.0.0.1/v1")
+                        self.assertEqual(supplied["port"], 19001)
                         self.assertEqual(supplied["model"], "unsaved-model")
                         self.assertEqual(supplied["api_key"], "unsaved-secret")
                         self.assertNotIn("unsaved-secret", str(result))
@@ -71,8 +72,18 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                     with mock.patch.object(service, "test_connection", side_effect=service.ServiceError("LLM endpoint returned HTTP 401.")):
                         result = await registered[("POST", "/scene_prompt/llm/test")](request)
                         self.assertEqual(result["status"], 502)
-                    expected = {("GET", "/scene_prompt/civitai/search"), ("POST", "/scene_prompt/civitai/download"), ("POST", "/scene_prompt/llm/select_loras")}
+                    expected = {("GET", "/scene_prompt/civitai/search"), ("POST", "/scene_prompt/civitai/download"), ("POST", "/scene_prompt/llm/select_loras"), ("GET", "/scene_prompt/civitai/settings"), ("POST", "/scene_prompt/civitai/settings")}
                     self.assertTrue(expected.issubset(registered))
+                    request.user_id = "alice"
+                    request.payload = {"civitai_api_key": "civi-route-secret", "api_key": "wrong", "model": "wrong"}
+                    result = await registered[("POST", "/scene_prompt/civitai/settings")](request)
+                    self.assertEqual(result["payload"], {"civitai_api_key_set": True})
+                    self.assertNotIn("civi-route-secret", str(result))
+                    result = await registered[("GET", "/scene_prompt/llm/settings")](request)
+                    self.assertNotIn("civitai_api_key_set", result["payload"])
+                    self.assertEqual(result["payload"]["model"], "configured")
+                    result = await registered[("GET", "/scene_prompt/civitai/settings")](request)
+                    self.assertEqual(result["payload"], {"civitai_api_key_set": True})
             finally:
                 for name in list(sys.modules):
                     if name not in original_modules:

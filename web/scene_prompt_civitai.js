@@ -4,6 +4,7 @@ let cacheEpoch = 0;
 let settingsModalID = 0;
 const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated"];
 const modals = [];
+const searchInvalidators = new Set();
 function element(tag, text, className) {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
@@ -52,14 +53,18 @@ export function openCivitaiSearch({ node, api, refresh, details, activeGraph = (
     beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const state = node.properties?.scene_civitai || {};
     let revision = 0, currentResult = null;
-    const modal = openModal("Civitai Search", () => { revision++; currentResult = null; list.replaceChildren(); });
+    const invalidate = () => { revision++; currentResult = null; list.replaceChildren(); };
+    const modal = openModal("Civitai Search", () => { invalidate(); searchInvalidators.delete(invalidate); });
+    searchInvalidators.add(invalidate);
     const controls = element("div", undefined, "pc-civitai-controls"), query = element("input"), sort = element("select");
     query.type = "search"; query.value = state.query || ""; query.placeholder = "LoRAを検索"; query.setAttribute("aria-label", "検索語");
     sort.setAttribute("aria-label", "並び順");
     for (const name of SORTS) { const option = element("option", name); option.value = name; sort.append(option); }
     sort.value = state.sort || SORTS[0];
     const search = element("button", "検索", "pc-button"), list = element("div", undefined, "pc-civitai-results");
-    controls.append(query, sort, search); modal.dialog.append(controls, list);
+    const settings = element("button", "Civitai設定", "pc-button");
+    settings.onclick = () => void openCivitaiSettings(api);
+    controls.append(query, sort, search, settings); modal.dialog.append(controls, list);
     function render(items) {
         list.replaceChildren();
         if (!items.length) { list.append(element("p", "該当するLoRAはありません。")); return; }
@@ -124,66 +129,99 @@ export function openCivitaiSearch({ node, api, refresh, details, activeGraph = (
     search.onclick = () => void load(true); sort.onchange = () => void load(true); query.onkeydown = (event) => { if (event.key === "Enter") void load(true); };
     query.focus(); void load(); return modal;
 }
-export async function openLLMSettings(api) {
-    const modal = openModal("LLM接続設定"), form = element("form"), status = element("p");
+export function openLLMSettings(api) {
+    return openConnectionSettings(api, "llm");
+}
+export function openCivitaiSettings(api) {
+    return openConnectionSettings(api, "civitai");
+}
+async function openConnectionSettings(api, service) {
+    const llm = service === "llm", keyName = llm ? "api_key" : "civitai_api_key";
+    const modal = openModal(llm ? "LLM接続設定" : "Civitai設定"), form = element("form"), status = element("p");
+    form.className = "pc-connection-settings"; status.setAttribute("role", "status");
     modal.dialog.append(form, status);
     const fields = {};
-    const labels = { base_url: "API URL", model: "モデル", api_key: "API Key", response_format: "応答形式", timeout_seconds: "タイムアウト（秒）", reasoning_effort: "Reasoning effort", max_tokens: "最大出力トークン", civitai_api_key: "Civitai API Key", civitai_host: "Civitai Host" };
-    function field(name, initial) {
-        const label = element("label", labels[name]);
-        let input;
-        const options = { response_format: ["json_object", "json_schema", "instructions"], reasoning_effort: ["", "none", "low", "medium", "high"], civitai_host: ["civitai.com", "civitai.red"] }[name];
-        if (options) { input = element("select"); for (const value of options) { const option = element("option", value || "既定"); option.value = value; input.append(option); } }
-        else { input = element("input"); input.type = name.includes("api_key") ? "password" : ["timeout_seconds", "max_tokens"].includes(name) ? "number" : "text"; }
-        input.name = name; input.value = initial ?? ""; fields[name] = input; label.append(input); form.append(label);
+    function field(name, labelText, initial, help) {
+        const label = element("label"), caption = element("span", labelText), input = element("input");
+        input.type = name === keyName ? "password" : name === "base_url" ? "url" : "text";
+        input.name = name; input.value = initial ?? "";
+        if (name === "base_url") { caption.append(element("span", " *", "pc-required-star")); input.required = true; input.setAttribute("aria-required", "true"); }
+        if (name === "port") input.inputMode = "numeric";
+        label.append(caption, input); fields[name] = input; form.append(label);
+        if (help) { const note = element("small", help, "pc-connection-help"); note.id = `pc-connection-help-${++settingsModalID}`; input.setAttribute("aria-describedby", note.id); form.append(note); }
     }
     try {
-        const settings = await requestJSON(api, "/scene_prompt/llm/settings");
-        if (!modal.overlay.isConnected) return;
-        for (const name of Object.keys(labels)) field(name, settings[name]);
-        for (const name of ["api_key", "civitai_api_key"]) {
-            fields[name].placeholder = settings[`${name}_set`] ? "保存済み（空欄で保持）" : "未設定";
-            const label = element("label", `${labels[name]}を削除`), input = element("input"); input.type = "checkbox"; input.name = `clear_${name}`; fields[`clear_${name}`] = input; label.append(input); form.append(label);
+        const settings = await requestJSON(api, `/scene_prompt/${service}/settings`);
+        if (!modal.overlay.isConnected) return modal;
+        if (llm) {
+            field("base_url", "API URL", settings.base_url);
+            field("port", "ポート（任意）", settings.port, "空欄ならHTTP/HTTPSの既定ポートを使います。");
+            field("model", "モデル名（任意）", settings.model, "空欄ならLLMサーバーの既定モデルを使います。");
         }
-        const save = element("button", "保存", "pc-button"), test = element("button", "接続テスト・モデル取得", "pc-button"); test.type = "button";
-        form.append(save, test);
-        const datalist = element("datalist"); datalist.id = `pc-llm-models-${++settingsModalID}`;
-        fields.model.setAttribute("list", datalist.id); form.append(datalist);
-        const body = () => Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value]));
-        const drafts = {};
-        for (const name of ["api_key", "civitai_api_key", "clear_api_key", "clear_civitai_api_key"]) {
-            drafts[name] = 0;
-            fields[name].addEventListener("input", () => drafts[name]++);
+        field(keyName, llm ? "LLM API Key（任意）" : "Civitai API Key（任意）", "", llm
+            ? "接続先LLMサーバーの認証キーです。Codexのキーではありません。空欄で保存済みのキーを保持します。"
+            : "civitai.redの認証キーです。空欄で保存済みのキーを保持します。");
+        const key = fields[keyName];
+        key.placeholder = settings[`${keyName}_set`] ? "保存済み（空欄で保持）" : "未設定";
+        let clearKey = false, keyDraft = 0, clearDraft = 0;
+        const clear = element("button", "API Keyを削除", "pc-button"); clear.type = "button"; clear.setAttribute("aria-pressed", "false");
+        function renderClear() { clear.setAttribute("aria-pressed", String(clearKey)); clear.textContent = clearKey ? "API Key削除を取り消す" : "API Keyを削除"; }
+        clear.onclick = () => { clearKey = !clearKey; clearDraft++; renderClear(); };
+        key.addEventListener("input", () => keyDraft++); form.append(clear);
+        const actions = element("div", undefined, "pc-connection-actions"), save = element("button", "保存", "pc-button"), test = llm ? element("button", "接続テスト・モデル取得", "pc-button") : null;
+        actions.append(save); if (test) { test.type = "button"; actions.append(test); } form.append(actions);
+        let portEdited = false;
+        if (llm) {
+            fields.port.addEventListener("input", () => { portEdited = true; });
+            fields.base_url.addEventListener("blur", splitURL);
         }
-        let saving = false;
-        form.onsubmit = async (event) => {
-            event.preventDefault();
-            if (saving) return;
-            const submitted = body();
-            const submittedDrafts = { ...drafts };
-            saving = true; save.disabled = true;
+        function splitURL() {
             try {
-                const saved = await requestJSON(api, "/scene_prompt/llm/settings", submitted);
-                cacheEpoch++;
+                const url = new URL(fields.base_url.value.trim());
+                if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) return;
+                // A non-default scheme lets URL preserve explicit HTTP 80 / HTTPS 443.
+                const pastedPort = new URL(fields.base_url.value.trim().replace(/^https?:/i, "scene-port:")).port;
+                if (pastedPort) { if (!portEdited) fields.port.value = pastedPort; url.port = ""; fields.base_url.value = url.href.replace(/\/$/, ""); }
+            } catch { /* Keep the draft for the validation message. */ }
+        }
+        function body() {
+            if (llm) {
+                splitURL();
+                const url = new URL(fields.base_url.value.trim());
+                if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) throw new Error("API URLには認証情報・クエリ・フラグメントを含まないHTTP(S) URLを入力してください。");
+                const port = fields.port.value;
+                if (port !== "" && (!/^[0-9]+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) throw new Error("ポートは1〜65535の整数、または空欄にしてください。");
+            }
+            return { ...Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value])), [`clear_${keyName}`]: clearKey };
+        }
+        const datalist = llm ? element("datalist") : null;
+        if (datalist) { datalist.id = `pc-llm-models-${++settingsModalID}`; fields.model.setAttribute("list", datalist.id); form.append(datalist); }
+        let busy = false;
+        async function run(saving) {
+            if (busy || !form.reportValidity()) return;
+            let submitted;
+            try { submitted = body(); } catch (error) { status.textContent = error.message; return; }
+            const submittedKeyDraft = keyDraft, submittedClearDraft = clearDraft;
+            busy = true; save.disabled = true; if (test) test.disabled = true;
+            try {
+                const result = await requestJSON(api, `/scene_prompt/${service}/${saving ? "settings" : "test"}`, submitted);
+                if (saving && !llm) { cacheEpoch++; for (const invalidate of searchInvalidators) invalidate(); }
                 if (!modal.overlay.isConnected) return;
-                for (const name of ["api_key", "civitai_api_key"]) {
-                    if (drafts[name] === submittedDrafts[name] && fields[name].value === submitted[name]) fields[name].value = "";
-                    if (submitted[`clear_${name}`] && drafts[`clear_${name}`] === submittedDrafts[`clear_${name}`]) fields[`clear_${name}`].checked = false;
-                    fields[name].placeholder = saved[`${name}_set`] ? "保存済み（空欄で保持）" : "未設定";
+                if (saving) {
+                    if (keyDraft === submittedKeyDraft && key.value === submitted[keyName]) key.value = "";
+                    if (submitted[`clear_${keyName}`] && clearDraft === submittedClearDraft) { clearKey = false; renderClear(); }
+                    key.placeholder = result[`${keyName}_set`] ? "保存済み（空欄で保持）" : "未設定";
+                    status.textContent = "保存しました";
+                } else {
+                    status.textContent = `接続成功: ${(result.models || []).map((model) => model.id).join(", ")}`;
+                    datalist.replaceChildren();
+                    for (const model of result.models || []) { const option = element("option"); option.value = model.id; datalist.append(option); }
                 }
-                status.textContent = "保存しました";
-            } catch (error) { status.textContent = error.message; }
-            finally { saving = false; save.disabled = false; }
-        };
-        test.onclick = async () => {
-            try {
-                const result = await requestJSON(api, "/scene_prompt/llm/test", body());
-                if (!modal.overlay.isConnected) return;
-                status.textContent = `接続成功: ${(result.models || []).map((model) => model.id).join(", ")}`;
-                datalist.replaceChildren();
-                for (const model of result.models || []) { const option = element("option"); option.value = model.id; datalist.append(option); }
-            } catch (error) { status.textContent = error.message; }
-        };
-    } catch (error) { status.textContent = error.message; }
+            } catch (error) { if (modal.overlay.isConnected) status.textContent = error.message; }
+            finally { busy = false; save.disabled = false; if (test) test.disabled = false; }
+        }
+        form.onsubmit = (event) => { event.preventDefault(); void run(true); };
+        if (test) test.onclick = () => void run(false);
+    } catch (error) { if (modal.overlay.isConnected) status.textContent = error.message; }
     return modal;
 }

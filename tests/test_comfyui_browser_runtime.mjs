@@ -109,6 +109,7 @@ NODE_CLASS_MAPPINGS = {}
     page.on("pageerror", (error) => pageErrors.push(error.stack || error.message));
     const seedRequests = [];
     const llmRequests = [];
+    const settingsRequests = [];
     const runRequests = [], resourceRequests = [];
     page.on("request", (request) => {
         const path = new URL(request.url()).pathname;
@@ -120,6 +121,8 @@ NODE_CLASS_MAPPINGS = {}
         file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["runtime_hat"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "runtime-hat.safetensors" };
     await page.route("**/scene_prompt/llm/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
+        if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
+        if (path.endsWith("/test")) { settingsRequests.push(path); return route.fulfill({ json: { ok: true, models: [{ id: "settings-fixture" }] } }); }
         const body = route.request().postDataJSON();
         llmRequests.push({ path, body });
         if (path.endsWith("/generate")) {
@@ -135,6 +138,7 @@ NODE_CLASS_MAPPINGS = {}
     });
     await page.route("**/scene_prompt/civitai/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
+        if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
         llmRequests.push({ path, body: route.request().method() === "POST" ? route.request().postDataJSON() : null });
         if (path.endsWith("/search")) return route.fulfill({ json: { items: [runtimeCandidate], query: "hat", sort: "Most Downloaded" } });
         if (path.endsWith("/download")) return route.fulfill({ json: { candidate: runtimeCandidate, lora_name: runtimeCandidate.lora_name } });
@@ -1238,6 +1242,56 @@ window.__sceneSeedRuntimeTest = {
     await page.waitForTimeout(300);
     assert.deepEqual(pageErrors, [], `complete native harness raised browser errors:\n${pageErrors.join("\n")}`);
     console.log("real ComfyUI normal Queue and cached batch sampler seed submissions passed");
+
+    const servicesBeforeSettings = llmRequests.length;
+    const generationsBeforeSettings = llmRequests.filter(request=>request.path.endsWith('/generate')).length;
+    await page.evaluate(async () => {
+        const { app } = await import("/scripts/app.js"); app.graph.clear();
+        const llm = window.LiteGraph.createNode("ScenePromptLLM"); app.graph.add(llm);
+        await llm.widgets.find(widget=>widget.sceneRole==='llm_settings').callback();
+    });
+    const llmSettings = page.getByRole('dialog',{name:'LLM接続設定',exact:true});
+    await llmSettings.getByRole('button',{name:'保存',exact:true}).waitFor();
+    assert.deepEqual(await llmSettings.locator('input').evaluateAll(inputs=>inputs.map(input=>input.name)), ['base_url','port','model','api_key']);
+    assert.equal(await llmSettings.locator('input[name="base_url"]').evaluate(input=>input.required),true);
+    assert.equal(await llmSettings.locator('.pc-required-star').evaluate(star=>getComputedStyle(star).color),'rgb(255, 91, 91)');
+    assert(await llmSettings.locator('form').evaluate(form=>parseFloat(getComputedStyle(form).paddingTop))>=20);
+    await llmSettings.locator('input[name="model"]').fill('');
+    await llmSettings.locator('input[name="port"]').fill('');
+    await llmSettings.getByRole('button',{name:'保存',exact:true}).click();
+    await llmSettings.getByText('保存しました',{exact:true}).waitFor();
+    const savedLLMSettings = await page.evaluate(async()=>await (await fetch('/scene_prompt/llm/settings')).json());
+    assert.equal(savedLLMSettings.model,''); assert.equal(savedLLMSettings.port,null);
+    assert.equal(savedLLMSettings.civitai_api_key_set,undefined);
+    await llmSettings.getByRole('button',{name:'接続テスト・モデル取得'}).click();
+    await llmSettings.getByText('接続成功: settings-fixture',{exact:true}).waitFor();
+    await page.setViewportSize({width:360,height:740});
+    assert.equal(await llmSettings.evaluate(dialog=>dialog.scrollWidth<=dialog.clientWidth),true);
+    await page.keyboard.press('Escape');
+    await page.setViewportSize({width:1280,height:720});
+    await page.evaluate(async()=>{
+        const { app }=await import('/scripts/app.js');
+        const lora=window.LiteGraph.createNode('SceneApplyLora'); app.graph.add(lora);
+        lora.properties.scene_civitai={query:'hat'};
+        await lora.widgets.find(widget=>widget.sceneRole==='lora_select').callback();
+    });
+    const nativeSearch=page.getByRole('dialog',{name:'Civitai Search',exact:true});
+    await nativeSearch.getByRole('button',{name:'Civitai設定',exact:true}).click();
+    const nativeCivi=page.getByRole('dialog',{name:'Civitai設定',exact:true});
+    await nativeCivi.getByRole('button',{name:'保存',exact:true}).waitFor();
+    assert.deepEqual(await nativeCivi.locator('input').evaluateAll(inputs=>inputs.map(input=>input.name)),['civitai_api_key']);
+    assert.equal(await nativeCivi.locator('select').count(),0);
+    await nativeCivi.getByRole('button',{name:'保存',exact:true}).click();
+    await nativeCivi.getByText('保存しました',{exact:true}).waitFor();
+    const savedCiviSettings=await page.evaluate(async()=>await(await fetch('/scene_prompt/civitai/settings')).json());
+    assert.deepEqual(savedCiviSettings,{civitai_api_key_set:false});
+    await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+    assert.equal(llmRequests.length-servicesBeforeSettings,1,'native settings trigger only the explicitly opened Civitai search');
+    assert.equal(llmRequests.filter(request=>request.path.endsWith('/generate')).length,generationsBeforeSettings,'settings never request inference');
+    assert(settingsRequests.includes('/scene_prompt/llm/settings')&&settingsRequests.includes('/scene_prompt/civitai/settings'));
+    assert.deepEqual(await page.evaluate(async()=>await(await fetch('/scene_test/model_executions')).json()),[]);
+    assert.deepEqual(pageErrors,[]);
+    console.log('real ComfyUI four-field LLM modal, scoped settings saves, protocol-default port and separate Civitai modal passed');
 } finally {
     await browser?.close();
     if (child?.exitCode === null) {

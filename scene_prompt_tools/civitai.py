@@ -31,7 +31,7 @@ def compatible(base_model, mode):
 
 
 def api_origin(settings):
-    return "https://" + settings["civitai_host"]
+    return "https://civitai.red"
 
 
 def _headers(settings, url):
@@ -44,7 +44,7 @@ def _headers(settings, url):
 async def api_get(settings, path, params=None):
     url = api_origin(settings) + path
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=settings["timeout_seconds"])) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             async with session.get(url, params=params, headers=_headers(settings, url), allow_redirects=False) as response:
                 if response.status != 200:
                     raise ServiceError(f"Civitai API returned HTTP {response.status}.")
@@ -53,7 +53,7 @@ async def api_get(settings, path, params=None):
         raise ServiceError("Civitai connection failed, timed out, or returned invalid JSON.") from exc
 
 
-def normalize(model, mode, host="civitai.com"):
+def normalize(model, mode):
     if not isinstance(model, dict) or not isinstance(model.get("modelVersions", []), list):
         raise ServiceError("Civitai returned an invalid model response.")
     if model.get("type") != "LORA" or model.get("mode") or model.get("availability", "Public") != "Public":
@@ -76,7 +76,7 @@ def normalize(model, mode, host="civitai.com"):
                 "name": model.get("name", ""), "version_name": version.get("name", ""), "base_model": version.get("baseModel", ""),
                 "file_name": file["name"], "size_kb": file.get("sizeKB", 0), "sha256": sha256,
                 "triggers": version.get("trainedWords", []), "image_url": image_url,
-                "model_url": f"https://{host}/models/{model['id']}?modelVersionId={version['id']}",
+                "model_url": f"https://civitai.red/models/{model['id']}?modelVersionId={version['id']}",
                 "stats": model.get("stats", {}), "acquired": False, "lora_name": ""}
             candidate_identity(candidate)
             result.append(candidate)
@@ -188,7 +188,7 @@ async def search(settings, query, model_mode, sort="Most Downloaded"):
         raise ServiceError("Civitai returned an invalid search response.")
     items = []
     for model in data["items"][:30]:
-        candidates = normalize(model, model_mode, settings["civitai_host"])
+        candidates = normalize(model, model_mode)
         if candidates:
             first_version = candidates[0]["version_id"]
             version = next(item for item in model["modelVersions"] if item["id"] == first_version)
@@ -211,7 +211,7 @@ async def download(settings, identity, model_mode):
         _DOWNLOAD_LOCK = asyncio.Lock()
     async with _DOWNLOAD_LOCK:
         model = await api_get(settings, f"/api/v1/models/{ids[0]}")
-        candidate = next((item for item in normalize(model, model_mode, settings["civitai_host"]) if candidate_identity(item) == ids), None)
+        candidate = next((item for item in normalize(model, model_mode) if candidate_identity(item) == ids), None)
         if candidate is None:
             raise ValueError("Selected LoRA is unavailable or incompatible with this model mode.")
         root = lora_root()
@@ -231,7 +231,7 @@ async def download(settings, identity, model_mode):
                 stream.write(chunk)
                 digest.update(chunk)
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=max(settings["timeout_seconds"], 600))) as session:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
                     for _ in range(6):
                         response = await session.get(url, headers=_headers(settings, url), allow_redirects=False)
                         if response.status not in (301, 302, 303, 307, 308):

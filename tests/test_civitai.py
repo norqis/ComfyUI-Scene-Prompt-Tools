@@ -26,7 +26,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         folder_paths.filename_list_cache = {"loras": "old"}
         self.content = b"safetensors-test-content"
         self.sha = hashlib.sha256(self.content).hexdigest()
-        self.origin = self.settings["base_url"].removesuffix("/v1")
+        self.origin = llm_fixture.settings_module.endpoint(self.settings).removesuffix("/v1")
         self.origin_patch = mock.patch.object(civitai, "api_origin", return_value=self.origin)
         self.origin_patch.start()
         civitai._DOWNLOAD_LOCK = None
@@ -66,6 +66,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertEqual(result["items"][0]["version_id"], 2)
             self.assertEqual(result["items"][0]["file_id"], 3)
             self.assertEqual(result["items"][0]["image_url"], "version-image")
+            self.assertTrue(result["items"][0]["model_url"].startswith("https://civitai.red/models/"))
             params, authorization = self.model_requests[-1]
             self.assertEqual(params["limit"], "30")
             self.assertEqual(params["period"], "AllTime")
@@ -73,6 +74,17 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertEqual(authorization, "Bearer civitai-secret")
             self.assertEqual(self.base_model_parameters[-1], ["Illustrious", "NoobAI"])
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])
+
+    async def test_fixed_red_origin_ignores_legacy_host_and_no_time_budget(self):
+        self.settings["civitai_host"] = "civitai.com"
+        self.settings["timeout_seconds"] = .001
+        self.origin_patch.stop()
+        self.assertEqual(civitai.api_origin(self.settings), "https://civitai.red")
+        self.origin_patch.start()
+        with mock.patch.object(llm_fixture.aiohttp, "ClientTimeout", wraps=llm_fixture.aiohttp.ClientTimeout) as timeout:
+            await civitai.search(self.settings, "cat", "Illustrious")
+            await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+            self.assertEqual(timeout.call_args_list, [mock.call(total=None)] * 3)
 
     async def test_noobai_family_search_and_anima_parameters(self):
         self.version["baseModel"] = "NoobAI"

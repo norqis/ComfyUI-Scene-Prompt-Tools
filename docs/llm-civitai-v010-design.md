@@ -1,5 +1,7 @@
 # v0.10.0 LLM prompts and Civitai LoRA selection
 
+Connection settings and transport tuning are superseded by [the v0.10.3 correction](llm-settings-v0103.md).
+
 Status: implemented after design review approval. Frontend regression tests and an isolated CPU ComfyUI browser run passed, including LLM widgets, saved prompt/API round trips, native LoRA insertion and Undo/Redo, and two-LLM instance-local Preset generation with editor Save/reload. The legacy 175-node PNG loaded in 1.74 seconds with no LLM/Civitai calls. Real LLM prompt quality remains unverified because no suitable endpoint was already running. Release checks and publication are tracked separately.
 
 ## User contract
