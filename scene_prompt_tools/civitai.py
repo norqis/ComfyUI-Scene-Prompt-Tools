@@ -31,22 +31,15 @@ def compatible(base_model, mode):
     return base in ("illustrious", "illustrious xl", "noobai", "noobai xl") if mode == "Illustrious" else base == "anima"
 
 
-def api_origin(settings):
+def api_origin():
     return "https://civitai.red"
 
 
-def _headers(settings, url):
-    def origin(value):
-        parsed = urlsplit(value)
-        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
-    return {"Authorization": "Bearer " + settings["civitai_api_key"]} if settings["civitai_api_key"] and origin(url) == origin(api_origin(settings)) else {}
-
-
-async def api_get(settings, path, params=None, *, missing_ok=False):
-    url = api_origin(settings) + path
+async def api_get(path, params=None, *, missing_ok=False):
+    url = api_origin() + path
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
-            async with session.get(url, params=params, headers=_headers(settings, url), allow_redirects=False) as response:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), cookie_jar=aiohttp.DummyCookieJar()) as session:
+            async with session.get(url, params=params, allow_redirects=False) as response:
                 if missing_ok and response.status == 404:
                     return _NOT_FOUND
                 if response.status != 200:
@@ -56,10 +49,10 @@ async def api_get(settings, path, params=None, *, missing_ok=False):
         raise ServiceError("Civitai connection failed, timed out, or returned invalid JSON.") from exc
 
 
-async def by_hash(settings, sha256):
+async def by_hash(sha256):
     if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
         raise ValueError("SHA256 must contain exactly 64 hexadecimal digits.")
-    version = await api_get(settings, "/api/v1/model-versions/by-hash/" + sha256.lower(), missing_ok=True)
+    version = await api_get("/api/v1/model-versions/by-hash/" + sha256.lower(), missing_ok=True)
     if version is _NOT_FOUND:
         return {"found": False, "version": None}
     if (not isinstance(version, dict)
@@ -237,12 +230,12 @@ def _discard_download(download):
             os.unlink(temporary)
 
 
-async def search(settings, query, model_mode, sort="Most Downloaded"):
+async def search(query, model_mode, sort="Most Downloaded"):
     if sort not in SORTS:
         raise ValueError("Unsupported Civitai sort.")
     if model_mode not in MODES:
         raise ValueError("Unsupported model_mode.")
-    data = await api_get(settings, "/api/v1/models", {"query": query, "types": "LORA", "limit": 30, "period": "AllTime", "sort": sort,
+    data = await api_get("/api/v1/models", {"query": query, "types": "LORA", "limit": 30, "period": "AllTime", "sort": sort,
         "baseModels": ["Illustrious", "NoobAI"] if model_mode == "Illustrious" else ["Anima"], "nsfw": "false"})
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ServiceError("Civitai returned an invalid search response.")
@@ -264,13 +257,13 @@ async def search(settings, query, model_mode, sort="Most Downloaded"):
     return {"items": items, "query": query, "sort": sort}
 
 
-async def download(settings, identity, model_mode):
+async def download(identity, model_mode):
     global _DOWNLOAD_LOCK
     ids = candidate_identity(identity)
     if _DOWNLOAD_LOCK is None:
         _DOWNLOAD_LOCK = asyncio.Lock()
     async with _DOWNLOAD_LOCK:
-        model = await api_get(settings, f"/api/v1/models/{ids[0]}")
+        model = await api_get(f"/api/v1/models/{ids[0]}")
         candidate = next((item for item in normalize(model, model_mode) if candidate_identity(item) == ids), None)
         if candidate is None:
             raise ValueError("Selected LoRA is unavailable or incompatible with this model mode.")
@@ -280,7 +273,7 @@ async def download(settings, identity, model_mode):
             version = next(item for item in model["modelVersions"] if item["id"] == ids[1])
             file = next(item for item in version["files"] if item["id"] == ids[2])
             url = file["downloadUrl"]
-            if not url.startswith(api_origin(settings) + "/api/download/"):
+            if not url.startswith(api_origin() + "/api/download/"):
                 raise ValueError("Civitai did not provide a trusted API download URL.")
             folder = root / "llm"
             await _file_io(folder.mkdir, parents=True, exist_ok=True)
@@ -290,9 +283,9 @@ async def download(settings, identity, model_mode):
                 stream.write(chunk)
                 digest.update(chunk)
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), cookie_jar=aiohttp.DummyCookieJar()) as session:
                     for _ in range(6):
-                        response = await session.get(url, headers=_headers(settings, url), allow_redirects=False)
+                        response = await session.get(url, allow_redirects=False)
                         if response.status not in (301, 302, 303, 307, 308):
                             break
                         from urllib.parse import urljoin

@@ -28,11 +28,10 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         folder_paths.filename_list_cache = {"loras": "old"}
         self.content = b"safetensors-test-content"
         self.sha = hashlib.sha256(self.content).hexdigest()
-        self.origin = llm_fixture.settings_module.endpoint(self.settings).removesuffix("/v1")
+        self.origin = llm_fixture.settings_module.endpoint(self.settings).removesuffix("/v1").replace("127.0.0.1", "localhost")
         self.origin_patch = mock.patch.object(civitai, "api_origin", return_value=self.origin)
         self.origin_patch.start()
         civitai._DOWNLOAD_LOCK = None
-        self.settings["civitai_api_key"] = "civitai-secret"
         self.version = {"id": 2, "name": "version", "baseModel": "Illustrious", "trainedWords": ["cat"],
             "images": [{"url": "version-image", "nsfwLevel": 1}], "files": [{"id": 3, "name": "../../unsafe.safetensors", "type": "Model", "hashes": {"SHA256": self.sha}, "downloadUrl": self.origin + "/api/download/models/2"}]}
         self.model = {"id": 1, "name": "cat", "type": "LORA", "modelVersions": [self.version]}
@@ -54,11 +53,16 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         await super().asyncTearDown()
 
     async def handle(self, request):
+        self.assertIsNone(request.headers.get("Authorization"))
+        self.assertIsNone(request.headers.get("Cookie"))
+        self.assertNotIn("token", request.query)
         if request.path.startswith("/api/v1/model-versions/by-hash/"):
             self.hash_requests.append((request.path, request.headers.get("Authorization")))
             if self.hash_raw:
                 return web.Response(text="private provider body", content_type="application/json", status=self.hash_status)
-            return web.json_response(self.hash_result, status=self.hash_status)
+            response = web.json_response(self.hash_result, status=self.hash_status)
+            response.set_cookie("provider_session", "should-not-be-replayed")
+            return response
         if request.path.startswith("/api/v1/models"):
             self.model_requests.append((dict(request.query), request.headers.get("Authorization")))
             self.base_model_parameters.append(request.query.getall("baseModels", []))
@@ -67,52 +71,54 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.download_calls += 1
             if self.redirect:
                 # Distinct authority even though both servers are localhost.
-                raise web.HTTPFound(self.storage_origin + "/storage")
+                response = web.HTTPFound(self.storage_origin + "/storage?signature=provider-signature")
+                response.set_cookie("provider_session", "should-not-be-replayed")
+                raise response
             return web.Response(body=self.content)
         return await super().handle(request)
 
     async def test_by_hash_returns_only_metadata_without_any_local_model_access(self):
         with mock.patch.object(civitai, "lora_root", side_effect=AssertionError("local model access")), \
                 mock.patch.object(civitai, "_sha256", side_effect=AssertionError("local hash")):
-            result = await civitai.by_hash(self.settings, self.sha.upper())
+            result = await civitai.by_hash(self.sha.upper())
         self.assertEqual(result, {"found": True, "version": {"id": 2, "modelId": 1, "name": "version",
                                 "model": {"name": "cat"}, "trainedWords": ["cat"]}})
-        self.assertEqual(self.hash_requests, [("/api/v1/model-versions/by-hash/" + self.sha, "Bearer civitai-secret")])
+        self.assertEqual(self.hash_requests, [("/api/v1/model-versions/by-hash/" + self.sha, None)])
         self.assertNotIn("private", str(result))
         self.assertNotIn("secret", str(result))
 
     async def test_by_hash_missing_is_explicit_but_other_failures_remain_errors(self):
         self.hash_status = 404
-        self.assertEqual(await civitai.by_hash(self.settings, self.sha), {"found": False, "version": None})
+        self.assertEqual(await civitai.by_hash(self.sha), {"found": False, "version": None})
         for status in (401, 429, 500):
             self.hash_status = status
             with self.subTest(status=status), self.assertRaisesRegex(civitai.ServiceError, str(status)) as error:
-                await civitai.by_hash(self.settings, self.sha)
+                await civitai.by_hash(self.sha)
             self.assertNotIn("secret", str(error.exception))
             self.assertNotIn("private", str(error.exception))
         self.hash_status, self.hash_raw = 200, True
         with self.assertRaisesRegex(civitai.ServiceError, "invalid JSON"):
-            await civitai.by_hash(self.settings, self.sha)
+            await civitai.by_hash(self.sha)
         with mock.patch.object(civitai.aiohttp.ClientSession, "get", side_effect=llm_fixture.aiohttp.ClientConnectionError()):
             with self.assertRaisesRegex(civitai.ServiceError, "connection failed"):
-                await civitai.by_hash(self.settings, self.sha)
+                await civitai.by_hash(self.sha)
 
     async def test_by_hash_rejects_bad_hash_before_http_and_malformed_success(self):
         for value in ("", "a" * 63, "g" * 64, "a" * 64 + "/file", None, 1):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                await civitai.by_hash(self.settings, value)
+                await civitai.by_hash(value)
         self.assertEqual(self.hash_requests, [])
         valid = self.hash_result
         for value in (None, [], {}, {**valid, "id": True}, {**valid, "modelId": "1"},
                       {**valid, "model": {}}, {**valid, "trainedWords": "cat"}, {**valid, "trainedWords": [1]}):
             self.hash_result = value
             with self.subTest(value=value), self.assertRaisesRegex(civitai.ServiceError, "invalid version"):
-                await civitai.by_hash(self.settings, self.sha)
+                await civitai.by_hash(self.sha)
 
     async def test_search_sorts_version_file_image_alignment(self):
         self.model["modelVersions"].insert(0, {"id": 99, "baseModel": "Anima", "images": [{"url": "wrong-image"}], "files": []})
         for sort in civitai.SORTS:
-            result = await civitai.search(self.settings, "cat", "Illustrious", sort)
+            result = await civitai.search("cat", "Illustrious", sort)
             self.assertEqual(result["items"][0]["version_id"], 2)
             self.assertEqual(result["items"][0]["file_id"], 3)
             self.assertEqual(result["items"][0]["image_url"], "version-image")
@@ -121,54 +127,46 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertEqual(params["limit"], "30")
             self.assertEqual(params["period"], "AllTime")
             self.assertEqual(params["sort"], sort)
-            self.assertEqual(authorization, "Bearer civitai-secret")
+            self.assertEqual(authorization, None)
             self.assertEqual(self.base_model_parameters[-1], ["Illustrious", "NoobAI"])
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])
 
-    async def test_fixed_red_origin_ignores_legacy_host_and_no_time_budget(self):
-        self.settings["civitai_host"] = "civitai.com"
-        self.settings["timeout_seconds"] = .001
+    async def test_fixed_red_origin_and_no_time_budget(self):
         self.origin_patch.stop()
-        self.assertEqual(civitai.api_origin(self.settings), "https://civitai.red")
+        self.assertEqual(civitai.api_origin(), "https://civitai.red")
         self.origin_patch.start()
         with mock.patch.object(llm_fixture.aiohttp, "ClientTimeout", wraps=llm_fixture.aiohttp.ClientTimeout) as timeout:
-            await civitai.search(self.settings, "cat", "Illustrious")
-            await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+            await civitai.search("cat", "Illustrious")
+            await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
             self.assertEqual(timeout.call_args_list, [mock.call(total=None)] * 3)
 
     async def test_noobai_family_search_and_anima_parameters(self):
         self.version["baseModel"] = "NoobAI"
-        result = await civitai.search(self.settings, "cat", "Illustrious")
+        result = await civitai.search("cat", "Illustrious")
         self.assertEqual(result["items"][0]["base_model"], "NoobAI")
         self.version["baseModel"] = "Anima"
-        result = await civitai.search(self.settings, "cat", "Anima")
+        result = await civitai.search("cat", "Anima")
         self.assertEqual(result["items"][0]["base_model"], "Anima")
         self.assertEqual(self.base_model_parameters[-1], ["Anima"])
 
-    async def test_authorization_origin_includes_scheme_host_and_port(self):
-        with mock.patch.object(civitai, "api_origin", return_value="https://civitai.com"):
-            self.assertEqual(civitai._headers(self.settings, "https://civitai.com:443/api/download/models/2"), {"Authorization": "Bearer civitai-secret"})
-            for url in ("http://civitai.com/api/download/models/2", "http://civitai.com:443/api/download/models/2", "https://civitai.com:444/api/download/models/2", "https://other.example/api/download/models/2"):
-                self.assertEqual(civitai._headers(self.settings, url), {}, url)
-
     async def test_download_safe_path_atomic_hash_dedup_and_incompatible(self):
         identity = {"model_id": 1, "version_id": 2, "file_id": 3}
-        result = await civitai.download(self.settings, identity, "Illustrious")
+        result = await civitai.download(identity, "Illustrious")
         self.assertEqual(result["lora_name"], "llm/civitai-1-2-3.safetensors")
         self.assertEqual((self.root / result["lora_name"]).read_bytes(), self.content)
         self.assertNotIn("loras", folder_paths.filename_list_cache)
-        await civitai.download(self.settings, identity, "Illustrious")
+        await civitai.download(identity, "Illustrious")
         self.assertEqual(self.download_calls, 1)
         self.version["files"][0]["id"] = 4
-        await civitai.download(self.settings, {**identity, "file_id": 4}, "Illustrious")
+        await civitai.download({**identity, "file_id": 4}, "Illustrious")
         self.assertEqual(self.download_calls, 1, "same published SHA256 reuses existing content")
         with self.assertRaises(ValueError):
-            await civitai.download(self.settings, identity, "Anima")
+            await civitai.download(identity, "Anima")
 
     async def test_hash_mismatch_cleans_partial(self):
         self.content = b"corrupt"
         with self.assertRaises(civitai.ServiceError):
-            await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+            await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
         self.assertEqual(list((self.root / "llm").iterdir()), [])
 
     async def test_multichunk_download_hashes_during_write_without_temp_reread(self):
@@ -182,10 +180,10 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             return original_hash(path)
         with mock.patch.object(civitai, "_sha256", side_effect=acquired_hash):
             identity = {"model_id": 1, "version_id": 2, "file_id": 3}
-            result = await civitai.download(self.settings, identity, "Illustrious")
+            result = await civitai.download(identity, "Illustrious")
             self.assertEqual((self.root / result["lora_name"]).read_bytes(), self.content)
             self.assertEqual(hashed_paths, [])
-            await civitai.download(self.settings, identity, "Illustrious")
+            await civitai.download(identity, "Illustrious")
             self.assertTrue(hashed_paths, "existing acquisition still validates its local file")
             self.assertEqual(self.download_calls, 1)
         self.assertFalse(list((self.root / "llm").glob(".download-*")))
@@ -194,7 +192,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.content = b"wrong content" * 200000
         with mock.patch.object(civitai, "_sha256", side_effect=AssertionError("temporary file reread")):
             with self.assertRaisesRegex(civitai.ServiceError, "SHA256"):
-                await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+                await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
         self.assertEqual(list((self.root / "llm").iterdir()), [])
 
     async def cancel_at_file_stage(self, stage):
@@ -257,7 +255,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
                 mock.patch.object(civitai.os, "replace", side_effect=replace), \
                 mock.patch.object(civitai.os, "unlink", side_effect=unlink), \
                 mock.patch.object(civitai, "_discard_download", side_effect=discard):
-            task = asyncio.create_task(civitai.download(self.settings, identity, "Illustrious"))
+            task = asyncio.create_task(civitai.download(identity, "Illustrious"))
             following = None
             try:
                 await asyncio.wait_for(started.wait(), 3)
@@ -272,7 +270,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
                     self.assertTrue(list((self.root / "llm").glob(".download-*.part")))
                     civitai.os.fstat(descriptors[0])
                 self.content = b"safetensors-test-content"
-                following = asyncio.create_task(civitai.download(self.settings, identity, "Illustrious"))
+                following = asyncio.create_task(civitai.download(identity, "Illustrious"))
                 await asyncio.sleep(0)
                 self.assertFalse(following.done())
             finally:
@@ -332,7 +330,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             return FailingClose(stream), temporary
         with mock.patch.object(civitai, "_create_download", side_effect=create):
             with self.assertRaisesRegex(OSError, "close failed"):
-                await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+                await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
         self.assertTrue(owned[0].closed)
         self.assertEqual(list((self.root / "llm").iterdir()), [])
         self.assertFalse(civitai._DOWNLOAD_LOCK.locked())
@@ -347,7 +345,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         with mock.patch.object(civitai.tempfile, "mkstemp", side_effect=mkstemp), \
                 mock.patch.object(civitai.os, "fdopen", side_effect=OSError("open failed")):
             with self.assertRaisesRegex(OSError, "open failed"):
-                await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+                await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
         with self.assertRaises(OSError):
             civitai.os.fstat(descriptors[0])
         self.assertEqual(list((self.root / "llm").iterdir()), [])
@@ -357,61 +355,75 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         with mock.patch.object(civitai, "api_get", return_value=self.model), \
                 mock.patch.object(civitai.aiohttp.ClientSession, "get", side_effect=llm_fixture.aiohttp.ClientConnectionError()):
             with self.assertRaisesRegex(civitai.ServiceError, "download failed"):
-                await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+                await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
         self.assertEqual(list((self.root / "llm").iterdir()), [])
         self.assertFalse(civitai._DOWNLOAD_LOCK.locked())
 
     async def test_search_primary_only_and_cached_hash_invalidates(self):
         identity = {"model_id": 1, "version_id": 2, "file_id": 3}
-        result = await civitai.download(self.settings, identity, "Illustrious")
+        result = await civitai.download(identity, "Illustrious")
         self.version["files"].append({**self.version["files"][0], "id": 4, "primary": True})
         with mock.patch.object(civitai.hashlib, "sha256", wraps=hashlib.sha256) as hash_function:
-            found = await civitai.search(self.settings, "cat", "Illustrious")
+            found = await civitai.search("cat", "Illustrious")
             self.assertEqual(len(found["items"]), 1)
             self.assertEqual(found["items"][0]["file_id"], 4)
             self.assertTrue(found["items"][0]["acquired"])
             first_count = hash_function.call_count
-            await civitai.search(self.settings, "cat", "Illustrious")
+            await civitai.search("cat", "Illustrious")
             self.assertEqual(hash_function.call_count, first_count)
             (self.root / result["lora_name"]).write_bytes(b"modified")
-            found = await civitai.search(self.settings, "cat", "Illustrious")
+            found = await civitai.search("cat", "Illustrious")
             self.assertFalse(found["items"][0]["acquired"])
             self.assertGreater(hash_function.call_count, first_count)
 
     async def test_refetched_download_url_rejects_untrusted_source(self):
         self.version["files"][0]["downloadUrl"] = "https://untrusted.example/file"
         with self.assertRaises(ValueError):
-            await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+            await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
         self.assertEqual(self.download_calls, 0)
 
     async def test_api_error_empty_and_invalid_parameters(self):
         self.api_status = 429
         with self.assertRaises(civitai.ServiceError) as error:
-            await civitai.search(self.settings, "query", "Illustrious")
+            await civitai.search("query", "Illustrious")
         self.assertIn("429", str(error.exception))
         self.assertNotIn("civitai-secret", str(error.exception))
         self.api_status = 200
         self.model["modelVersions"] = []
-        self.assertEqual((await civitai.search(self.settings, "query", "Illustrious"))["items"], [])
+        self.assertEqual((await civitai.search("query", "Illustrious"))["items"], [])
         for mode, sort in (("bad", "Most Downloaded"), ("Illustrious", "bad")):
             with self.assertRaises(ValueError):
-                await civitai.search(self.settings, "query", mode, sort)
+                await civitai.search("query", mode, sort)
 
-    async def test_redirect_strips_token_on_storage_origin(self):
+    async def test_api_and_redirected_download_are_anonymous_without_cookie_replay(self):
         async def storage(request):
-            self.storage_headers.append(request.headers.get("Authorization"))
+            self.storage_headers.append((request.path, request.headers.get("Authorization"), request.headers.get("Cookie"), dict(request.query)))
+            if request.path == "/storage":
+                response = web.HTTPFound("/storage-final?signature=provider-signature")
+                response.set_cookie("storage_session", "should-not-be-replayed")
+                raise response
             return web.Response(body=self.content)
         app = web.Application()
         app.router.add_get("/storage", storage)
+        app.router.add_get("/storage-final", storage)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
-        self.storage_origin = "http://127.0.0.1:" + str(site._server.sockets[0].getsockname()[1])
+        self.storage_origin = "http://localhost:" + str(site._server.sockets[0].getsockname()[1])
         self.redirect = True
         try:
-            await civitai.download(self.settings, {"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
-            self.assertEqual(self.storage_headers, [None])
+            with mock.patch.object(civitai.aiohttp, "ClientSession", wraps=llm_fixture.aiohttp.ClientSession) as sessions:
+                await civitai.by_hash(self.sha)
+                await civitai.search("cat", "Illustrious")
+                await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+            self.assertEqual(self.storage_headers, [(path, None, None, {"signature": "provider-signature"})
+                                                   for path in ("/storage", "/storage-final")])
+            self.assertEqual(sessions.call_count, 4)
+            for call in sessions.call_args_list:
+                self.assertIsInstance(call.kwargs["cookie_jar"], llm_fixture.aiohttp.DummyCookieJar)
+                self.assertNotIn("headers", call.kwargs)
+                self.assertNotIn("auth", call.kwargs)
         finally:
             await runner.cleanup()
 

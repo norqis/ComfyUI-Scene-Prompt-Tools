@@ -1,5 +1,7 @@
 # Full audit and corrective release v0.10.4
 
+Historical audit: v0.10.5 supersedes the Civitai API-key settings and authenticated transport described here. Current Civitai operations use anonymous public access and have no API-key settings.
+
 ## Scope and baseline
 
 Root inspected node execution and cache keys, lazy Queue/Count/Random schedules, prompt normalization and Delete/To Text, Preset save/expansion/run snapshots, PNG metadata and filename allocation, callback/run/FIFO lifecycle, browser ownership and resource information, LLM settings/transport/controller, Civitai acquisition and metadata caches. Baseline is v0.10.3 (ef8476f). All 523 Python tests passed with the two opt-in smoke skips; all 22 frontend suites passed. Passing existing checks does not prove the cases below correct.

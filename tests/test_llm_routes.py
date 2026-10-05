@@ -73,43 +73,51 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                     with mock.patch.object(service, "test_connection", side_effect=service.ServiceError("LLM endpoint returned HTTP 401.")):
                         result = await registered[("POST", "/scene_prompt/llm/test")](request)
                         self.assertEqual(result["status"], 502)
-                    expected = {("GET", "/scene_prompt/civitai/search"), ("GET", "/scene_prompt/civitai/by-hash"), ("POST", "/scene_prompt/civitai/download"), ("POST", "/scene_prompt/llm/select_loras"), ("GET", "/scene_prompt/civitai/settings"), ("POST", "/scene_prompt/civitai/settings")}
+                    expected = {("GET", "/scene_prompt/civitai/search"), ("GET", "/scene_prompt/civitai/by-hash"), ("POST", "/scene_prompt/civitai/download"), ("POST", "/scene_prompt/llm/select_loras")}
                     self.assertTrue(expected.issubset(registered))
+                    for method in ("GET", "POST"):
+                        self.assertNotIn((method, "/scene_prompt/civitai/settings"), registered)
                     request.user_id = "alice"
-                    request.payload = {"civitai_api_key": "civi-route-secret", "api_key": "wrong", "model": "wrong"}
-                    result = await registered[("POST", "/scene_prompt/civitai/settings")](request)
-                    self.assertEqual(result["payload"], {"civitai_api_key_set": True})
-                    self.assertNotIn("civi-route-secret", str(result))
-                    result = await registered[("GET", "/scene_prompt/llm/settings")](request)
-                    self.assertNotIn("civitai_api_key_set", result["payload"])
+                    request.payload = {"civitai_api_key": {"malformed": True}, "clear_civitai_api_key": True}
+                    result = await registered[("POST", "/scene_prompt/llm/settings")](request)
+                    self.assertEqual(result["status"], 200)
                     self.assertEqual(result["payload"]["model"], "configured")
-                    result = await registered[("GET", "/scene_prompt/civitai/settings")](request)
-                    self.assertEqual(result["payload"], {"civitai_api_key_set": True})
+                    self.assertNotIn("civitai_api_key_set", result["payload"])
+                    self.assertNotIn("civitai_api_key", settings_module.load_settings("alice"))
                     by_hash = registered[("GET", "/scene_prompt/civitai/by-hash")]
-                    request.query = {"sha256": "A" * 64}
                     version = {"id": 2, "modelId": 1, "name": "v1", "model": {"name": "model"}, "trainedWords": ["trigger"], "private": "provider body"}
-                    with mock.patch.object(civitai, "api_get", return_value=version) as lookup, \
+                    with mock.patch.object(settings_module, "load_settings", side_effect=ValueError("malformed LLM settings")), \
+                            mock.patch.object(settings_module, "storage_directory", side_effect=AssertionError("private settings access")), \
+                            mock.patch.object(civitai, "api_get", return_value=version) as lookup, \
                             mock.patch.object(civitai, "_sha256", side_effect=AssertionError("local hash")), \
                             mock.patch.object(civitai, "lora_root", side_effect=AssertionError("local model access")):
-                        result = await by_hash(request)
-                        self.assertEqual(result["status"], 200)
-                        self.assertEqual(result["payload"], {"found": True, "version": {key: value for key, value in version.items() if key != "private"}})
-                        self.assertEqual(lookup.call_args.args[0]["civitai_api_key"], "civi-route-secret")
-                        self.assertEqual(lookup.call_args.args[1], "/api/v1/model-versions/by-hash/" + "a" * 64)
-                        self.assertTrue(lookup.call_args.kwargs["missing_ok"])
-                        self.assertNotIn("secret", str(result))
-                        request.user_id = "bob"
-                        await by_hash(request)
-                        self.assertEqual(lookup.call_args.args[0]["civitai_api_key"], "")
+                        for user in ("alice", "bob"):
+                            request.user_id = user
+                            request.query = {"sha256": "A" * 64}
+                            result = await by_hash(request)
+                            self.assertEqual(result["status"], 200)
+                            self.assertEqual(result["payload"], {"found": True, "version": {key: value for key, value in version.items() if key != "private"}})
+                            self.assertEqual(lookup.call_args.args, ("/api/v1/model-versions/by-hash/" + "a" * 64,))
+                            self.assertTrue(lookup.call_args.kwargs["missing_ok"])
                         request.query = {"sha256": "invalid"}
                         lookup.reset_mock()
                         self.assertEqual((await by_hash(request))["status"], 400)
                         lookup.assert_not_called()
-                    request.query = {"sha256": "a" * 64}
-                    with mock.patch.object(civitai, "api_get", return_value=civitai._NOT_FOUND):
-                        self.assertEqual((await by_hash(request))["payload"], {"found": False, "version": None})
-                    with mock.patch.object(civitai, "api_get", side_effect=service.ServiceError("Civitai API returned HTTP 401.")):
-                        self.assertEqual((await by_hash(request))["status"], 502)
+                        request.query = {"query": "hat", "model_mode": "Anima", "sort": "Highest Rated"}
+                        with mock.patch.object(civitai, "search", return_value={"items": []}) as search:
+                            self.assertEqual((await registered[("GET", "/scene_prompt/civitai/search")](request))["payload"], {"items": []})
+                            search.assert_awaited_once_with("hat", "Anima", "Highest Rated")
+                        request.payload = {"model_id": 1, "version_id": 2, "file_id": 3, "model_mode": "Anima"}
+                        with mock.patch.object(civitai, "download", return_value={"lora_name": "llm/public.safetensors"}) as download:
+                            self.assertEqual((await registered[("POST", "/scene_prompt/civitai/download")](request))["status"], 200)
+                            download.assert_awaited_once_with(request.payload, "Anima")
+                        request.query = {"sha256": "a" * 64}
+                        with mock.patch.object(civitai, "api_get", return_value=civitai._NOT_FOUND):
+                            self.assertEqual((await by_hash(request))["payload"], {"found": False, "version": None})
+                        with mock.patch.object(civitai, "api_get", side_effect=service.ServiceError("Civitai API returned HTTP 401.")):
+                            self.assertEqual((await by_hash(request))["status"], 502)
+                        request.payload = []
+                        self.assertEqual((await registered[("POST", "/scene_prompt/civitai/download")](request))["status"], 400)
             finally:
                 for name in list(sys.modules):
                     if name not in original_modules:

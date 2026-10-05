@@ -1,4 +1,4 @@
-"""Per-public-user connections, with scoped atomic saves and private secrets."""
+"""Per-public-user LLM connections, with atomic saves and private secrets."""
 import json
 import os
 import tempfile
@@ -7,8 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .storage import storage_directory
 
-DEFAULTS = {"base_url": "http://127.0.0.1/v1", "port": 8080, "model": "", "api_key": "", "civitai_api_key": ""}
-LLM_FIELDS = ("base_url", "port", "model", "api_key")
+DEFAULTS = {"base_url": "http://127.0.0.1/v1", "port": 8080, "model": "", "api_key": ""}
 _LOCK = threading.Lock()
 
 
@@ -33,21 +32,20 @@ def normalize_url(base_url, port=None, *, infer_port=False):
     return urlunsplit((url.scheme, host, url.path, "", "")), _port(embedded_port if infer_port else port)
 
 
-def merge_settings(saved, changes, fields=None):
+def merge_settings(saved, changes):
     if not isinstance(changes, dict):
         raise ValueError("Settings must be a JSON object.")
     settings = {key: saved.get(key, default) for key, default in DEFAULTS.items()}
-    allowed = tuple(DEFAULTS) if fields is None else fields
-    for key in allowed:
-        if key in changes and not (key.endswith("api_key") and changes[key] == ""):
+    for key in DEFAULTS:
+        if key in changes and not (key == "api_key" and changes[key] == ""):
             settings[key] = changes[key]
-        if key.endswith("api_key") and changes.get("clear_" + key) is True:
-            settings[key] = ""
-    for key in ("model", "api_key", "civitai_api_key"):
+    if changes.get("clear_api_key") is True:
+        settings["api_key"] = ""
+    for key in ("model", "api_key"):
         if not isinstance(settings[key], str):
             raise ValueError(f"{key} must be text.")
     settings["model"] = settings["model"].strip()
-    infer = "base_url" in allowed and "base_url" in changes and "port" not in changes
+    infer = "base_url" in changes and "port" not in changes
     settings["base_url"], settings["port"] = normalize_url(settings["base_url"], settings["port"], infer_port=infer)
     return settings
 
@@ -74,10 +72,6 @@ def public_settings(settings):
             "api_key_set": bool(settings["api_key"]), "template_version": "scene-llm-v1"}
 
 
-def public_civitai_settings(settings):
-    return {"civitai_api_key_set": bool(settings["civitai_api_key"])}
-
-
 def request_settings(user_id):
     from .llm_service import negotiation_state
     # Snapshot and ownership share the save lock; a delayed read cannot restore an old identity.
@@ -86,11 +80,10 @@ def request_settings(user_id):
         return settings, negotiation_state(user_id, settings)
 
 
-def save_settings(user_id, changes, *, service=None):
+def save_settings(user_id, changes):
     from .llm_service import invalidate_negotiation
-    fields = LLM_FIELDS if service == "llm" else ("civitai_api_key",) if service == "civitai" else None
     with _LOCK:
-        settings = merge_settings(load_settings(user_id), changes, fields)
+        settings = merge_settings(load_settings(user_id), changes)
         path = storage_directory(user_id) / "llm_settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".settings-")
@@ -101,6 +94,5 @@ def save_settings(user_id, changes, *, service=None):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        if service != "civitai":
-            invalidate_negotiation(user_id)
-        return public_civitai_settings(settings) if service == "civitai" else public_settings(settings)
+        invalidate_negotiation(user_id)
+        return public_settings(settings)

@@ -95,7 +95,7 @@ async def civitai_lookup(request):
     fixture = await request.json()
     package = nodes.NODE_CLASS_MAPPINGS["SceneApplyLora"].__module__.rsplit(".", 1)[0]
     civitai = importlib.import_module(package + ".civitai")
-    async def api_get(settings, path, params=None, *, missing_ok=False):
+    async def api_get(path, params=None, *, missing_ok=False):
         lookup_calls.append({"path": path, "missing_ok": missing_ok})
         if fixture.get("mode") == "error":
             raise civitai.ServiceError("Metadata fixture offline")
@@ -1296,22 +1296,23 @@ window.__sceneSeedRuntimeTest = {
         await lora.widgets.find(widget=>widget.sceneRole==='lora_select').callback();
     });
     const nativeSearch=page.getByRole('dialog',{name:'Civitai Search',exact:true});
-    await nativeSearch.getByRole('button',{name:'Civitai設定',exact:true}).click();
-    const nativeCivi=page.getByRole('dialog',{name:'Civitai設定',exact:true});
-    await nativeCivi.getByRole('button',{name:'保存',exact:true}).waitFor();
-    assert.deepEqual(await nativeCivi.locator('input').evaluateAll(inputs=>inputs.map(input=>input.name)),['civitai_api_key']);
-    assert.equal(await nativeCivi.locator('select').count(),0);
-    await nativeCivi.getByRole('button',{name:'保存',exact:true}).click();
-    await nativeCivi.getByText('保存しました',{exact:true}).waitFor();
-    const savedCiviSettings=await page.evaluate(async()=>await(await fetch('/scene_prompt/civitai/settings')).json());
-    assert.deepEqual(savedCiviSettings,{civitai_api_key_set:false});
-    await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
-    assert.equal(llmRequests.length-servicesBeforeSettings,1,'native settings trigger only the explicitly opened Civitai search');
+    await nativeSearch.locator('.pc-civitai-card').first().waitFor();
+    assert.equal(await nativeSearch.getByRole('button',{name:'Civitai設定',exact:true}).count(),0);
+    assert.equal(await page.getByRole('dialog',{name:'Civitai設定',exact:true}).count(),0);
+    assert.equal(await page.evaluate(async()=> 'openCivitaiSettings' in await import('/extensions/scene-prompt-tools-browser-smoke/scene_prompt_civitai.js')),false);
+    await page.keyboard.press('Escape');
+    assert.equal(llmRequests.length-servicesBeforeSettings,1,'opening the search requests only public Civitai results');
     assert.equal(llmRequests.filter(request=>request.path.endsWith('/generate')).length,generationsBeforeSettings,'settings never request inference');
-    assert(settingsRequests.includes('/scene_prompt/llm/settings')&&settingsRequests.includes('/scene_prompt/civitai/settings'));
+    assert(settingsRequests.includes('/scene_prompt/llm/settings'));
+    assert(!settingsRequests.includes('/scene_prompt/civitai/settings'));
+    const retiredSettingsStatuses=await page.evaluate(async()=>[
+        (await fetch('/scene_prompt/civitai/settings')).status,
+        (await fetch('/scene_prompt/civitai/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,
+    ]);
+    assert.deepEqual(retiredSettingsStatuses,[404,404]);
     assert.deepEqual(await page.evaluate(async()=>await(await fetch('/scene_test/model_executions')).json()),[]);
     assert.deepEqual(pageErrors,[]);
-    console.log('real ComfyUI four-field LLM modal, scoped settings saves, protocol-default port and separate Civitai modal passed');
+    console.log('real ComfyUI four-field LLM settings, anonymous Civitai search and absent Civitai settings passed');
 
     const metadataBefore = { prompts: seedRequests.length, runs: runRequests.length, services: llmRequests.length };
     assert.equal((await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "found" }), headers: { "Content-Type": "application/json" } })).status, 200);

@@ -14,7 +14,7 @@ const server = http.createServer(async (request, response) => {
         import {injectStyle} from '/web/scene_prompt_style.js';
         injectStyle();
         const candidate=(id)=>({model_id:id,version_id:id+10,file_id:id+20,name:'LoRA '+id,version_name:'v'+id,base_model:'Illustrious',triggers:['tag'+id],size_kb:1200,image_url:'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="20" height="20"%3E%3C/svg%3E',model_url:'https://civitai.red/models/'+id,stats:{downloadCount:id},acquired:id===2,lora_name:'llm/'+id+'.safetensors'});
-        window.calls=[];window.fail=false;window.savedSettings={base_url:'http://127.0.0.1/v1',port:8080,model:'model-a',api_key_set:true,civitai_api_key_set:true};
+        window.calls=[];window.fail=false;window.savedSettings={base_url:'http://127.0.0.1/v1',port:8080,model:'model-a',api_key_set:true};
         const graph={getNodeById:()=>window.node,beforeChange(){window.transactions=(window.transactions||0)+1},afterChange(){}};
         window.node={id:1,graph,properties:{scene_civitai:{query:'hat',sort:'Most Downloaded',...candidate(2),managed_triggers:['tag2']}},widgets:Object.entries({model_mode:'Illustrious',positive:'manual, tag2',lora_name:'llm/2.safetensors'}).map(([name,value])=>({name,value}))};
         window.api={async fetchApi(path,options={}){window.calls.push({path,body:options.body&&JSON.parse(options.body)});let data;
@@ -29,7 +29,8 @@ const server = http.createServer(async (request, response) => {
         if(path.includes('search?'))data={items:[candidate(1),candidate(2)].map(item=>({...item,name:item.name+' '+searchHost+(window.queryLabels?' '+searchQuery:'')}))};
         else if(path.endsWith('/download'))data={candidate:candidate(1),lora_name:'llm/1.safetensors'};
         else if(path.endsWith('/test'))data={ok:true,models:[{id:'model-a'},{id:'model-b'}]};
-        else {const llm=path.includes('/llm/'),name=llm?'api_key':'civitai_api_key';if(submitted){if(submitted['clear_'+name])window.savedSettings[name+'_set']=false;else if(submitted[name])window.savedSettings[name+'_set']=true;if(llm)for(const field of ['base_url','port','model'])window.savedSettings[field]=submitted[field];}data=llm?{base_url:window.savedSettings.base_url,port:window.savedSettings.port,model:window.savedSettings.model,api_key_set:window.savedSettings.api_key_set,template_version:'scene-llm-v1'}:{civitai_api_key_set:window.savedSettings.civitai_api_key_set};}
+        else if(path==='/scene_prompt/llm/settings'){if(submitted){if(submitted.clear_api_key)window.savedSettings.api_key_set=false;else if(submitted.api_key)window.savedSettings.api_key_set=true;for(const field of ['base_url','port','model'])window.savedSettings[field]=submitted[field];}data={...window.savedSettings,template_version:'scene-llm-v1'};}
+        else throw new Error('Unexpected service route: '+path);
         return {ok:true,json:async()=>data};}};
         window.search=()=>openCivitaiSearch({node:window.node,api:window.api});window.settings=()=>openLLMSettings(window.api);
         document.querySelector('#launch').onclick=window.search;window.ready=true;
@@ -166,21 +167,13 @@ try {
     assert.equal(await modal.locator('.pc-civitai-card').count(),2,'LLM saves do not invalidate Civitai search');
     await page.evaluate(()=>{window.deferSearch=true;window.finishSearch=null;});
     await modal.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForFunction(()=>window.finishSearch);
-    const llmKeyBeforeCivi = await page.evaluate(()=>window.savedSettings.api_key_set);
-    await modal.getByRole('button', {name:'Civitai設定',exact:true}).click();
-    const civiSettings = page.getByRole('dialog', {name:'Civitai設定',exact:true});
-    assert.deepEqual(await civiSettings.locator('input').evaluateAll(inputs=>inputs.map(input=>input.name)), ['civitai_api_key']);
-    assert.equal(await civiSettings.locator('select').count(), 0);
-    assert.equal(await civiSettings.locator('input').inputValue(),'');
-    assert.equal(await civiSettings.locator('input').getAttribute('placeholder'),'保存済み（空欄で保持）');
-    await page.screenshot({path:resolve(reviewDirectory,'civitai-settings.png')});
-    await civiSettings.locator('input').fill('separate-secret');
-    await civiSettings.getByRole("button", { name: "保存", exact: true }).click(); await civiSettings.getByText("保存しました", { exact: true }).waitFor();
-    assert.equal(await page.evaluate(()=>window.savedSettings.api_key_set),llmKeyBeforeCivi);
+    assert.equal(await modal.getByRole('button', {name:'Civitai設定',exact:true}).count(), 0);
+    assert.equal(await page.getByRole('dialog', {name:'Civitai設定',exact:true}).count(), 0);
+    assert.equal(await page.evaluate(async () => 'openCivitaiSettings' in await import('/web/scene_prompt_civitai.js')), false);
+    assert.equal(await page.evaluate(() => window.calls.some(call => call.path.includes('/civitai/settings'))), false);
     await page.keyboard.press("Escape"); await page.evaluate(() => window.finishSearch());
-    await page.waitForTimeout(50);
-    assert.equal(await modal.locator('.pc-civitai-card').count(), 0, "old in-flight response cannot render after settings save");
-    await page.keyboard.press("Escape");
+    await page.waitForTimeout(30);
+    assert.equal(await page.getByRole('dialog').count(), 0, "late search remains owned by its dismissed modal");
     const beforeReopen = await page.evaluate(() => window.calls.filter(call=>call.path.includes('search?')).length);
     await page.evaluate(() => window.search()); await modal.locator('.pc-civitai-card').first().waitFor();
     assert.equal(await page.evaluate(() => window.calls.filter(call=>call.path.includes('search?')).length), beforeReopen+1, "old in-flight response cannot restore dismissed search state");

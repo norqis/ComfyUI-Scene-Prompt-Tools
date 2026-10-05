@@ -302,9 +302,10 @@ class SettingsTest(unittest.TestCase):
                 "timeout_seconds": 120, "max_tokens": 8192, "response_format": "json_schema", "reasoning_effort": "high"})
             loaded = settings_module.load_settings("alice")
             self.assertEqual((loaded["base_url"], loaded["port"]), (base, port))
-            settings_module.save_settings("alice", {}, service="llm")
+            settings_module.save_settings("alice", {})
             self.assertEqual(set(json.loads(path.read_text(encoding="utf-8"))), set(settings_module.DEFAULTS))
-            self.assertEqual(loaded["api_key"], "secret"); self.assertEqual(loaded["civitai_api_key"], "other")
+            self.assertEqual(loaded["api_key"], "secret")
+            self.assertNotIn("civitai_api_key", loaded)
         self.assertEqual(settings_module.load_settings("new"), settings_module.DEFAULTS)
 
     def test_port_precedence_explicit_blank_default_url_only_and_integer_strings(self):
@@ -322,45 +323,58 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings_module.endpoint(settings_module.load_settings("alice")), "https://host/v1")
         self.assertEqual(settings_module.endpoint({**settings_module.DEFAULTS, "base_url": "http://[::1]/proxy/v1", "port": 9090}), "http://[::1]:9090/proxy/v1")
 
-    def test_secrets_scoped_saves_per_user_and_cache_invalidation(self):
-        public = settings_module.save_settings("alice", {"api_key": "secret", "civitai_api_key": "other"})
+    def test_llm_secrets_per_user_blank_retention_clear_and_cache_invalidation(self):
+        public = settings_module.save_settings("alice", {"api_key": "secret", "model": "alice-model"})
         self.assertEqual(set(public), {"base_url", "port", "model", "api_key_set", "template_version"})
-        settings, state = settings_module.request_settings("alice")
-        settings_module.save_settings("alice", {"api_key": "", "civitai_api_key": "wrong", "clear_civitai_api_key": True}, service="llm")
+        self.assertNotIn("secret", str(public))
+        settings_module.save_settings("bob", {"api_key": "bob-secret"})
+        _, bob_state = settings_module.request_settings("bob")
+        settings_module.request_settings("alice")
+        settings_module.save_settings("alice", {"api_key": "", "model": "updated"})
         self.assertNotIn("alice", service._CAPABILITIES)
+        self.assertIs(service._CAPABILITIES["bob"], bob_state)
         self.assertEqual(settings_module.load_settings("alice")["api_key"], "secret")
-        self.assertEqual(settings_module.load_settings("alice")["civitai_api_key"], "other")
-        _, state = settings_module.request_settings("alice")
-        public = settings_module.save_settings("alice", {"civitai_api_key": "replacement", "api_key": "wrong", "model": "wrong"}, service="civitai")
-        self.assertEqual(public, {"civitai_api_key_set": True})
-        self.assertIs(service._CAPABILITIES["alice"], state)
-        self.assertEqual(settings_module.load_settings("alice")["api_key"], "secret")
-        self.assertEqual(settings_module.load_settings("alice")["model"], "")
-        self.assertFalse(settings_module.public_settings(settings_module.load_settings("bob"))["api_key_set"])
-        settings_module.save_settings("alice", {"clear_api_key": True}, service="llm")
-        settings_module.save_settings("alice", {"clear_civitai_api_key": True}, service="civitai")
+        self.assertEqual(settings_module.load_settings("alice")["model"], "updated")
+        self.assertFalse(settings_module.public_settings(settings_module.load_settings("new"))["api_key_set"])
+        settings_module.save_settings("alice", {"clear_api_key": True})
         self.assertEqual(settings_module.load_settings("alice")["api_key"], "")
-        self.assertEqual(settings_module.load_settings("alice")["civitai_api_key"], "")
+        self.assertEqual(settings_module.load_settings("bob")["api_key"], "bob-secret")
 
-    def test_concurrent_scoped_saves_preserve_both_services(self):
+    def test_retired_civitai_fields_are_ignored_and_removed_only_on_an_ordinary_save(self):
+        for obsolete in ("retired-secret", 123, None, {"malformed": True}, []):
+            with self.subTest(obsolete=obsolete):
+                path = self.legacy({**settings_module.DEFAULTS, "api_key": "llm-secret", "model": "original",
+                    "civitai_api_key": obsolete, "clear_civitai_api_key": {"ignored": True}, "civitai_host": "invalid"})
+                original = path.read_bytes()
+                loaded = settings_module.load_settings("alice")
+                self.assertEqual(set(loaded), set(settings_module.DEFAULTS))
+                self.assertEqual(loaded["api_key"], "llm-secret")
+                self.assertEqual(path.read_bytes(), original, "reading legacy settings must not rewrite private files")
+                settings_module.save_settings("alice", {"model": "updated", "api_key": "", "civitai_api_key": obsolete,
+                    "clear_civitai_api_key": True, "civitai_host": "evil"})
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(saved, {**settings_module.DEFAULTS, "api_key": "llm-secret", "model": "updated"})
+
+    def test_concurrent_llm_field_saves_preserve_both_updates_atomically(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             for index in range(12):
-                futures = [executor.submit(settings_module.save_settings, "alice", {"model": str(index), "api_key": "llm"}, service="llm"),
-                           executor.submit(settings_module.save_settings, "alice", {"civitai_api_key": "civi" + str(index)}, service="civitai")]
+                futures = [executor.submit(settings_module.save_settings, "alice", {"model": str(index)}),
+                           executor.submit(settings_module.save_settings, "alice", {"api_key": "llm" + str(index), "civitai_api_key": 123})]
                 for future in futures:
                     future.result()
                 saved = settings_module.load_settings("alice")
-                self.assertEqual((saved["model"], saved["api_key"], saved["civitai_api_key"]), (str(index), "llm", "civi"+str(index)))
+                self.assertEqual((saved["model"], saved["api_key"]), (str(index), "llm" + str(index)))
+                self.assertNotIn("civitai_api_key", saved)
         self.assertFalse(list(self.root.rglob(".settings-*")))
 
     def test_protocol_validation_and_obsolete_values_ignored(self):
         for url in ("", "invalid", "ftp://host/v1", "http://secret@host/v1", "https://host/v1?q=1", "https://host/v1#part", "http://host:65536/v1"):
             with self.assertRaises(ValueError):
-                settings_module.save_settings("alice", {"base_url": url}, service="llm")
+                settings_module.save_settings("alice", {"base_url": url})
         for port in (0, 65536, -1, 1.5, True, False, "1.0", "x", "-1", " "):
             with self.assertRaises(ValueError):
-                settings_module.save_settings("alice", {"port": port}, service="llm")
-        for key in ("api_key", "civitai_api_key", "model"):
+                settings_module.save_settings("alice", {"port": port})
+        for key in ("api_key", "model"):
             with self.assertRaises(ValueError):
                 settings_module.save_settings("alice", {key: 123})
         result = settings_module.save_settings("alice", {"response_format": "bad", "timeout_seconds": 0, "max_tokens": 1, "civitai_host": "evil"})
