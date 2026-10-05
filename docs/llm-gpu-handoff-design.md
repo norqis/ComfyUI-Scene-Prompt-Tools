@@ -16,7 +16,7 @@
 
 Prompt generation remains OpenAI-compatible. A separate module exposes provider detection and unload/confirmation. Initially support Strata, Ollama and LM Studio using their official APIs. Detect providers by positive JSON response identity/schema, not a URL string or a mutation probe. Preserve configured reverse-proxy prefixes. A different provider can add an adapter without changing Scene nodes or Expand.
 
-Provider state is keyed by endpoint, port, model and authentication identity and becomes unused when settings change. Never retain credentials in workflow, prompt history, PNG metadata or browser-facing responses. No new model/cache capacity limits.
+Each operation privately snapshots its endpoint, port, model and authentication settings. Provider detection does not retain a cross-operation cache. Never retain credentials in workflow, prompt history, PNG metadata or browser-facing responses. No new model/cache capacity limits.
 
 ComfyUI's `/free` acknowledges flags rather than completed work. Controlled prompt generation queues a worker command and wakes the worker with a queue flag. Wrap `PromptQueue.get` once: process pending controls on the worker thread, reset inactive executor caches, unload models, collect garbage and soft-empty-cache, then acknowledge actual completion before starting the LLM. Register executors weakly at construction. Never reset an executor from an HTTP thread: the worker still reads its success/status/history after execute returns. Do not patch the installed ComfyUI source.
 
@@ -24,7 +24,7 @@ One prompt-generation operation includes all target LLM nodes and LoRA selection
 
 The queue hook admits images and confirms provider release on the worker before returning the item. Retain the image lease through `task_done`, not just through `execute`, and handle already-popped items without blocking worker control acknowledgement. All ordinary image/LLM requests register as shared readers; pending exclusive operations prevent reader starvation using writer priority. Session-owned HTTP requests reuse their exclusive lease. Continuous runs avoid repeated release calls while no intervening LLM request has loaded the provider again. If another prompt operation runs between images, the next image must ensure release again.
 
-Release failures must not escape the executor hook and kill ComfyUI's worker. Produce the failed job's normal status/history and release ownership after task completion. Queue delete/wipe release unused policy references. Bind a session to one user/client lifetime, rejecting duplicate active begins; closed websocket ownership retires abandoned state without arbitrary capacity limits or execution deadlines.
+Release failures must not escape the executor hook and kill ComfyUI's worker. Produce the failed job's normal status/history and release ownership after task completion. Queue delete/wipe release unused policy references. Bind a session to one user/client lifetime, rejecting duplicate active begins; native websocket removal/replacement retires abandoned state directly, without polling, arbitrary capacity limits or execution deadlines. Already queued images keep their snapshot through completion.
 
 The native frontend `api.queuePrompt` ignores additional prompt properties and builds its own extra_data. Use a per-call API receiver whose fetchApi inserts the opaque token into the actual POST body. Preserve receiver propagation through this package's wrappers; never temporarily replace the global fetchApi. An incompatible pre-bound foreign queue wrapper must not silently claim resource control succeeded.
 
@@ -34,10 +34,12 @@ Resource-control HTTP endpoints are owned by the authenticated ComfyUI user. Pro
 
 - `POST /scene_prompt/gpu/prepare` with `{client_id, run_handle?, continuous?}` creates/snapshots a private image policy and returns `{policy_id}`. Only used when ReleaseLLMBeforeImage is true.
 - Images carry only `extra_data.scene_gpu_policy = policy_id` through `api.queuePrompt`. API/headless requests without an explicitly prepared policy remain off.
-- `POST /scene_prompt/gpu/release` with `{policy_id}` retires an unused/completed continuous policy. Running or already queued work retains its required snapshot until completion.
+- `POST /scene_prompt/gpu/release` with `{policy_id, client_id}` retires an unused/completed continuous policy. Running or already queued work retains its required snapshot until completion.
 - `POST /scene_prompt/llm/begin` with `{client_id}` acquires the controlled prompt operation and releases Comfy resources, returning `{session_id}`. Only used when ReleaseComfyBeforeLLM is true and at least one actual LLM request is needed.
-- `/llm/generate` and `/llm/select_loras` carry `session_id` for that operation; settings are fixed by the session.
-- `POST /scene_prompt/llm/end` with `{session_id}` ends the operation. Frontend invokes in finally and on page teardown; backend also retires abandoned ownership on client disconnect.
+- `/llm/generate` and `/llm/select_loras` carry `session_id` and `client_id` for that operation; connection settings are fixed by the session.
+- `POST /scene_prompt/llm/end` with `{session_id, client_id}` ends the operation. Frontend invokes in finally and on page teardown; backend also retires abandoned ownership on client disconnect.
+
+An authenticated prepare/begin call is explicit handoff intent. Do not reject a previously captured ON choice by rereading the current native checkbox after a FIFO or Preset wait. Connection settings apply when the operation is prepared. Strip the opaque image token before the queue stores its item; ownership remains in a private prompt-id map and is absent from queue history and saved PNG metadata.
 
 The backend may reuse existing run-context ownership for policies rather than build duplicate stores. Session/policy ownership must be checked at prompt admission, before dispatching queued work. Queue rejection/deletion, normal/error completion, stop, client disconnect and preparation failure release unused state. Use lifetime ownership and weak executor references instead of arbitrary capacity limits.
 
