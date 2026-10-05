@@ -554,7 +554,7 @@ def _slice_workflow_for_output(
 
 
 SCENE_NODE_TYPES = {
-    "ScenePrompter", "ScenePromptLLM", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePromptRandomRoute", "ScenePrompterExpand",
+    "ScenePrompter", "ScenePromptLLM", "ScenePrompterMerge", "ScenePrompterQueue", "ScenePromptRandomRoute", "ScenePromptRandomRouteOutput", "ScenePrompterExpand",
     "ScenePromptCounter", "ScenePromptReverse", "ScenePromptDelete", "SceneMatrix", "ScenePath", "SceneEmptyLatent",
     "SceneApplyModel", "SceneApplyLora",
     "ScenePromptCallback",
@@ -818,7 +818,7 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
 
 def _scene_prompt_input_names(node):
     class_type = node.get("class_type") if isinstance(node, dict) else ""
-    if class_type == "ScenePrompterQueue":
+    if class_type in {"ScenePrompterQueue", "ScenePromptRandomRouteOutput"}:
         return SCENE_PROMPT_INPUT_NAMES
     if class_type == "ScenePrompterMerge":
         return ("scene_prompt1", "scene_prompt2")
@@ -1957,7 +1957,7 @@ class ScenePromptRandomRoute:
             "required": {"weights_json": ("STRING", {"default": DEFAULT_RANDOM_WEIGHTS_JSON, "display_name": "確率設定", "hidden": True})},
             "optional": {
                 "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt"}),
-                "preserve_join": ("BOOLEAN", {"default": False, "hidden": True}),
+                "preserve_join": ("BOOLEAN", {"default": True, "hidden": True}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1984,9 +1984,42 @@ class ScenePromptRandomRoute:
             }
             missing = [str(index + 1) for index, weight in enumerate(weights) if weight and index not in connected]
             if missing:
-                raise ScenePlanError(f"Scene Prompt Random Route #{gate_id}: 出力{', '.join(missing)}が未接続です。")
+                raise ScenePlanError(f"Scene Prompt Random Route Input #{gate_id}: 出力{', '.join(missing)}が未接続です。")
         plan = with_source_node(scene_prompt, gate_id, source_node_name)
         return random_route(plan, weights, gate_id, preserve_join=_scene_bool(preserve_join))
+
+
+class ScenePromptRandomRouteOutput:
+    DESCRIPTION = "Random Route Inputの各経路を合流し、当選した1つの経路を通します。確率が0%でない全経路を接続してください。後続のCountで各生成の抽選回数を指定できます。"
+    CATEGORY = "Scene/prompt"
+    RETURN_TYPES = (SCENE_PROMPT_TYPE,)
+    RETURN_NAMES = ("scene_prompt",)
+    FUNCTION = "join"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {name: (SCENE_PROMPT_TYPE, {"display_name": name, "label": name})
+                         for name in SCENE_PROMPT_INPUT_NAMES},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "source_node_id": ("STRING", {"default": "", "hidden": True}),
+                "source_node_name": ("STRING", {"default": "", "hidden": True}),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return "|".join(_scene_prompt_change_key(kwargs[name]) for name in SCENE_PROMPT_INPUT_NAMES
+                        if kwargs.get(name) is not None)
+
+    def join(self, unique_id=None, source_node_id="", source_node_name="", **kwargs):
+        values = [kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES]
+        if not any(value is not None for value in values):
+            raise ScenePlanError("Scene Prompt Random Route Output に経路が接続されていません。")
+        result = queue(values)
+        return (with_source_node(result, source_node_id or unique_id, source_node_name),)
 
 
 class ScenePromptQueue:

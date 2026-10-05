@@ -207,6 +207,30 @@ assert.equal(frozenPlan.units[0].kind, "random_choice",
     "PNG replay's frozen 100/0 Random preserves the original Queue join");
 assert.equal(frozenPlan.boundary, true);
 assert.equal(ctx.sceneScheduleCount(frozenPlan, 10).stats.total, 10);
+const outputPreset = structuredClone(randomPreset);
+outputPreset.api_graph.output[5].class_type = "ScenePromptRandomRouteOutput";
+outputPreset.api_graph.output[2].inputs.preserve_join = true;
+const outputPlan = ctx.sceneScheduleForPreset("output-preset", leaf("X"), new Set(), outputPreset, "output-reference");
+assert.equal(outputPlan.units[0].kind, "random_choice");
+assert.equal(ctx.sceneScheduleCount(outputPlan, 10).stats.total, 10);
+assert.equal(ctx.sceneScheduleCount(outputPlan, 1_000_000).units.length, 1);
+const innerOutputPreset = structuredClone(outputPreset);
+innerOutputPreset.api_graph.output[7] = { class_type: "ScenePromptRandomRoute", inputs: {
+    scene_prompt: ["2", 0], weights_json: JSON.stringify([10000, 0, 0, 0, 0, 0, 0, 0, 0, 0]), preserve_join: true } };
+innerOutputPreset.api_graph.output[8] = { class_type: "ScenePromptRandomRouteOutput", inputs: { scene_prompt10: ["7", 0] } };
+innerOutputPreset.api_graph.output[3].inputs.scene_prompt = ["8", 0];
+const nestedOutputPlan = ctx.sceneScheduleForPreset("nested-output", leaf("X"), new Set(), innerOutputPreset, "nested-reference");
+assert.equal(nestedOutputPlan.stats.total, 1, "an inner 100% Output preserves the outer guarded group");
+assert.equal(nestedOutputPlan.randomGuards.length, 0);
+assert.equal(nestedOutputPlan.units[0].plans[0].units[0].kind, "map");
+for (const [kind, inputs, pattern] of [
+    ["empty", {}, /Output.*接続/u],
+    ["missing", { scene_prompt1: ["3", 0] }, /ランダム分岐/u],
+    ["duplicate", { scene_prompt1: ["3", 0], scene_prompt2: ["4", 0], scene_prompt3: ["3", 0] }, /ランダム分岐/u],
+]) {
+    const invalid = structuredClone(outputPreset); invalid.api_graph.output[5].inputs = inputs;
+    assert.match(ctx.sceneScheduleForPreset(kind, leaf("X"), new Set(), invalid).stats.error, pattern);
+}
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleForPreset("inner", leaf("A"), new Set(), preset)))),
     ["Ab1", "Ab2"], "Preset rehydration retains the internal Queue order and Prompt labels");
 const compactInner = { api_graph: { output: {
@@ -241,6 +265,7 @@ Object.assign(ctx, {
     isSceneNodeBypassed: (node) => node.mode === 4,
     sceneBypassInputSource: (node) => node.upstream || null,
     isScenePromptQueueNode: (node) => node.kind === "queue",
+    isScenePromptRandomRouteOutputNode: (node) => node.kind === "random_output",
     isScenePresetReferenceNode: () => false,
     isScenePromptMergeNode: () => false,
     scenePromptInputSource: (node) => node.upstream || null,
@@ -252,7 +277,7 @@ Object.assign(ctx, {
     hideWidget: (widget) => { widget.hidden = true; },
     findSceneWidget: () => null,
 });
-for (const name of ["sceneQueueBoundaryInNode", "sceneQueuePendingInNode", "sceneQueueLockState", "syncSceneQueueControls"])
+for (const name of ["isScenePromptJoinNode", "sceneQueueBoundaryInNode", "sceneQueuePendingInNode", "sceneQueueLockState", "syncSceneQueueControls"])
     vm.runInContext(functionSource(name), ctx);
 const previous = { id: "previous", kind: "queue" };
 const middle = { id: "middle", kind: "prompt", upstream: previous };
@@ -263,7 +288,7 @@ const widgets = [
 ];
 const receiving = { id: "receiving", kind: "queue", sources: [middle], widgets };
 assert.equal(ctx.syncSceneQueueControls(receiving), "upstream", "Queue → Prompt → Queue locks all controls");
-assert.deepEqual(widgets.map((widget) => widget.value), ["input_order", 1, "{}", "multiply"]);
+assert.deepEqual(widgets.map((widget) => widget.value), ["alternate", 3, "{}", "fixed"]);
 assert.ok(widgets.filter((widget) => widget.name !== "input_repeats_json")
     .every((widget) => widget.disabled && widget.options.disabled));
 assert.equal(widgets[2].hidden, true, "legacy repeat widget stays hidden in its serialized slot");
@@ -277,10 +302,17 @@ ctx.sceneScheduleForLinkedInput = () => null;
 receiving.sources = [{ id: "ordinary", kind: "prompt" }];
 assert.equal(ctx.syncSceneQueueControls(receiving), "", "disconnecting upstream Queue unlocks controls");
 assert.equal(widgets[1].disabled, false, "row repeat is active in input order mode");
-assert.deepEqual(widgets.map((widget) => widget.value), ["input_order", 1, "{}", "multiply"],
-    "old nondefault settings do not reappear after unlocking");
+assert.deepEqual(widgets.map((widget) => widget.value), ["alternate", 3, "{}", "fixed"],
+    "locking and unlocking retain the Queue's own visible settings");
 receiving.sources = [{ id: "bypass", kind: "queue", mode: 4, upstream: { id: "ordinary-2", kind: "prompt" } }];
 assert.equal(ctx.syncSceneQueueControls(receiving), "", "bypassed Queue without effective Queue path does not lock");
+receiving.sources.push(previous);
+assert.equal(ctx.syncSceneQueueControls(receiving), "upstream", "a second active Queue keeps controls disabled");
+previous.mode = 4; previous.upstream = { id: "previous-ordinary", kind: "prompt" };
+assert.equal(ctx.syncSceneQueueControls(receiving), "");
+previous.mode = 0;
+assert.equal(ctx.syncSceneQueueControls(receiving), "upstream");
+assert.deepEqual(widgets.map((widget) => widget.value), ["alternate", 3, "{}", "fixed"]);
 ctx.isScenePromptRandomRouteNode = (node) => node.kind === "random";
 vm.runInContext(functionSource("sceneRandomRouteInNode"), ctx);
 const activeRoute = { id: "route-active", kind: "random" };

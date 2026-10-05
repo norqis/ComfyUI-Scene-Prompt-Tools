@@ -42,6 +42,8 @@ const previewContext = {
     matrixLineLabel(row) { return row.label; },
     isScenePathNode() { return false; }, isScenePromptCounterNode() { return false; }, isScenePromptReverseNode() { return false; }, isScenePromptDeleteNode() { return false; }, isSceneEmptyLatentNode() { return false; },
     isScenePromptQueueNode(node) { return node.kind === "queue"; },
+    isScenePromptJoinNode(node) { return node.kind === "queue"; },
+    isScenePromptRandomRouteOutputNode() { return false; },
     connectedScenePromptSourcesForQueue(node) { return (node.sources || []).map((source) => ({ source })); },
     sceneQueueDisplayPartsForEntry(entry) { return entry.parts; },
     isScenePromptMergeNode(node) { return node.kind === "merge"; },

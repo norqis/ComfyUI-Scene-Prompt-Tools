@@ -978,8 +978,13 @@ try {
         status: 200, contentType: "application/json",
         body: JSON.stringify({ found: true, version: { id: 20, modelId: 10, name: "Version One", model: { name: "Civitai Style" }, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle"] } }),
     }); });
-    await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
+    await page.evaluate(() => {
+        window.__sceneLoraTestNode.properties ||= {};
+        window.__sceneLoraTestNode.properties.scene_civitai = { query: "remembered query" };
+        return window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback();
+    });
     const loraPicker = page.getByRole("dialog", { name: "LoRAを選択" });
+    assert.equal(await page.getByRole("dialog", { name: "Civitai Search", exact: true }).count(), 0, "query-only Civitai history keeps local picker entry");
     await loraPicker.locator(".pc-lora-select").filter({ hasText: "style.safetensors" }).waitFor();
     await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-title").getByText("Civitai Style").waitFor();
     assert.equal(await loraPicker.locator(".pc-lora-select").first().locator(":scope > :first-child").getAttribute("class"), "pc-lora-title",
@@ -2449,17 +2454,17 @@ try {
             ({ value: widget.value, disabled: widget.disabled }));
         return { locked, unlocked, reloaded, presetLocked, reattachedLabels, plainPreset };
     });
-    assert.deepEqual(queueControls.locked.map(({ value }) => value), ["input_order", 1, "{}", "multiply"]);
+    assert.deepEqual(queueControls.locked.map(({ value }) => value), ["alternate", 3, "{}", "fixed"]);
     assert.ok(queueControls.locked.filter((_, index) => index !== 2).every(({ disabled, label }) => disabled && label.includes("上流Queueあり")),
         "Queue → Scene Prompt → Queue greys the three active controls");
     assert.equal(queueControls.unlocked[0].disabled, false);
     assert.equal(queueControls.unlocked[1].disabled, false, "row repeat works in input order mode");
     assert.equal(queueControls.unlocked[3].disabled, false);
-    assert.deepEqual(queueControls.unlocked.map(({ value }) => value), ["input_order", 1, "{}", "multiply"],
-        "disconnect does not resurrect saved nondefaults");
-    assert.deepEqual(queueControls.reloaded, ["input_order", 1, "{}", "multiply"],
-        "graph reload normalizes all four saved Queue controls");
-    assert.deepEqual(queueControls.presetLocked.map(({ value }) => value), ["input_order", 1, "{}", "multiply"]);
+    assert.deepEqual(queueControls.unlocked.map(({ value }) => value), ["alternate", 3, "{}", "fixed"],
+        "disconnect retains the Queue's own settings");
+    assert.deepEqual(queueControls.reloaded, ["alternate", 2, "{}", "fixed"],
+        "graph reload retains visible settings and clears only obsolete per-input repeats");
+    assert.deepEqual(queueControls.presetLocked.map(({ value }) => value), ["alternate", 2, "{}", "fixed"]);
     assert.ok(queueControls.presetLocked.filter((_, index) => index !== 2).every(({ disabled }) => disabled),
         "saved Preset-internal Queue locks the active controls after rehydration");
     assert.ok(queueControls.reattachedLabels.filter((_, index) => index !== 2).every((label) => label.includes("上流Queueあり")),
@@ -2529,13 +2534,19 @@ try {
                 { kind: "clip", name: "text-encoder.safetensors", roles: ["clip"], source_class: "CLIPLoader" },
                 { kind: "vae", name: "vae.safetensors", roles: ["vae"], source_class: "VAELoader" },
             ],
-            loras: [{ name: "style.safetensors", variants: [
-                { model_mode: "Anima", strength_model: 0.8, strength_clip: 0.6, roles: ["model", "clip"], applies: true },
-                { model_mode: "Illustrious", strength_model: 1, strength_clip: 1, roles: ["model", "clip"], applies: false },
-            ] }, { name: "inactive.safetensors", variants: [
+            loras: [{ name: "inactive.safetensors", variants: [
                 { model_mode: "Illustrious", strength_model: 0.5, strength_clip: 0.5, roles: ["model", "clip"], applies: false },
-            ] }],
+            ] }, { name: "unknown-before.safetensors", variants: [{ model_mode: null, applies: null }] },
+            { name: "style.safetensors", variants: [
+                { model_mode: "Illustrious", strength_model: 1, strength_clip: 1, roles: ["model", "clip"], applies: false },
+                { model_mode: null, strength_model: 0.4, roles: ["model"], applies: null },
+                { model_mode: "Anima", strength_model: 0.8, strength_clip: 0.6, roles: ["model", "clip"], applies: true },
+                { model_mode: null, strength_model: 0.45, roles: ["model"], applies: null },
+                { model_mode: "Anima", strength_model: 0.9, strength_clip: 0.7, roles: ["model", "clip"], applies: true },
+            ] }, { name: "applied-peer.safetensors", variants: [{ model_mode: "Anima", strength_model: 0.2, applies: true }] },
+            { name: "unknown-after.safetensors", variants: [] }],
         };
+        window.__sceneResourceOriginal = JSON.stringify(window.__sceneResourceResponse);
         window.__originalResourceGraphToPrompt = window.app.graphToPrompt;
         window.app.graphToPrompt = async () => ({ output: { [node.id]: { class_type: "ScenePrompterExpand", inputs: {} } } });
         return {
@@ -2559,12 +2570,22 @@ try {
     assert.equal(await resources.getByText(/モデル種別が異なるため適用外/u).count(), 2);
     const loraCard = resources.locator(".pc-resource-card").filter({ hasText: "style.safetensors" });
     const inactiveCard = resources.locator(".pc-resource-card").filter({ hasText: "inactive.safetensors" });
+    const loraNames = await resources.locator(".pc-resource-name").allTextContents();
+    assert.deepEqual(loraNames.slice(-5), ["style.safetensors", "applied-peer.safetensors", "unknown-before.safetensors", "unknown-after.safetensors", "inactive.safetensors"],
+        "applicable, unknown and inapplicable cards preserve same-group order");
+    assert.equal(new Set(loraNames).size, loraNames.length, "resource cards remain duplicate-free");
+    const details = await loraCard.locator(".pc-resource-detail").allTextContents();
+    assert.match(details[0], /モデル強度 0.8.*適用対象/u); assert.match(details[1], /モデル強度 0.9.*適用対象/u);
+    assert.match(details[2], /モデル強度 0.4.*適用可否を取得不可/u); assert.match(details[3], /モデル強度 0.45.*適用可否を取得不可/u);
+    assert.match(details[4], /モデル強度 1.*適用外/u);
+    assert.equal(await page.evaluate(() => JSON.stringify(window.__sceneResourceResponse) === window.__sceneResourceOriginal), true,
+        "display sorting does not mutate response arrays or variants");
     assert.equal(await inactiveCard.evaluate((node) => node.classList.contains("pc-resource-unapplied")), true, "entire inapplicable LoRA row is muted");
     assert.equal(await inactiveCard.getByRole("button", { name: "Civitaiを確認" }).isEnabled(), true, "gray resource rows retain usable lookup buttons");
     assert.equal(await loraCard.evaluate((node) => node.classList.contains("pc-resource-unapplied")), false, "mixed LoRA variants preserve active row appearance");
     const inactiveVariant = loraCard.locator(".pc-resource-detail.pc-resource-unapplied");
     assert.equal(await inactiveVariant.evaluate((node) => getComputedStyle(node).color), "rgb(144, 150, 159)");
-    assert.notEqual(await loraCard.locator(".pc-resource-detail:not(.pc-resource-unapplied)").evaluate((node) => getComputedStyle(node).color), "rgb(144, 150, 159)");
+    assert.notEqual(await loraCard.locator(".pc-resource-detail:not(.pc-resource-unapplied)").first().evaluate((node) => getComputedStyle(node).color), "rgb(144, 150, 159)");
     await loraCard.getByRole("button", { name: "Civitaiを確認" }).click();
     await loraCard.getByRole("link", { name: "Civitaiで見る" }).waitFor();
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/models/hash?")).length), 0,
@@ -2656,7 +2677,7 @@ try {
         window.__sceneRandomTestNode.onNodeCreated();
         window.__sceneRandomTestNode.widgets.find((widget) => widget.sceneRole === "random_settings").callback();
     });
-    const randomDialog = page.getByRole("dialog", { name: "Scene Prompt Random Route 設定" });
+    const randomDialog = page.getByRole("dialog", { name: "Scene Prompt Random Route Input 設定" });
     await randomDialog.getByRole("spinbutton", { name: "scene_prompt1 の確率（%）" }).fill("60");
     await randomDialog.getByRole("spinbutton", { name: "scene_prompt2 の確率（%）" }).fill("40");
     assert.equal(await page.evaluate(() => window.__sceneRandomTestNode.widgets[0].value), "[10000,0,0,0,0,0,0,0,0,0]",

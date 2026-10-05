@@ -29,6 +29,7 @@ from .nodes import (
     ScenePromptDelete,
     ScenePromptToText,
     ScenePromptRandomRoute,
+    ScenePromptRandomRouteOutput,
     ScenePromptCallback,
     ScenePromptCallbackDiscord,
     ScenePromptCallbackRequest,
@@ -64,6 +65,7 @@ SAFE_NODE_CLASSES = {
     "ScenePromptDelete": ScenePromptDelete,
     "ScenePrompterQueue": ScenePromptQueue,
     "ScenePromptRandomRoute": ScenePromptRandomRoute,
+    "ScenePromptRandomRouteOutput": ScenePromptRandomRouteOutput,
     "SceneEmptyLatent": SceneEmptyLatent,
     "SceneApplyLora": SceneApplyLora,
     "ScenePromptCallback": ScenePromptCallback,
@@ -103,7 +105,8 @@ DEFAULT_SOURCE_NODE_NAMES = {
     "ScenePromptReverse": "Scene Prompt Reverse",
     "ScenePromptDelete": "Scene Prompt Delete",
     "ScenePrompterQueue": "Scene Prompt Queue",
-    "ScenePromptRandomRoute": "Scene Prompt Random Route",
+    "ScenePromptRandomRoute": "Scene Prompt Random Route Input",
+    "ScenePromptRandomRouteOutput": "Scene Prompt Random Route Output",
     "SceneEmptyLatent": "Scene Empty Latent",
     "SceneApplyModel": "Scene Apply Model",
     "SceneApplyLora": "Scene Apply LoRA",
@@ -631,7 +634,7 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
     if nodes[str(output_link[0])].get("class_type") == "ScenePromptRandomRoute":
         result = result[output_link[1]]
     if isinstance(result, dict) and result.get("random_guards"):
-        raise ScenePresetError("Scene Prompt Random Route の分岐をPreset内のQueueで合流してください。")
+        raise ScenePresetError("Scene Prompt Random Route Input の分岐をPreset内のOutputまたはQueueで合流してください。")
 
 
 def _preset_nodes(preset):
@@ -915,7 +918,7 @@ def _validate_random_route_connections(nodes, scene_nodes):
         missing = [str(index + 1) for index, weight in enumerate(values) if weight and index not in connected]
         if missing:
             raise ScenePresetResolutionError(
-                f"Scene Prompt Random Route #{node_id}: 出力{', '.join(missing)}が未接続です。",
+                f"Scene Prompt Random Route Input #{node_id}: 出力{', '.join(missing)}が未接続です。",
                 str(node_id),
             )
 
@@ -1274,7 +1277,7 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
             plan = plan[source[1]]
         if plan["random_guards"]:
             guard = plan["random_guards"][-1]
-            raise ScenePresetError(f"Scene Prompt Random Route {guard['gate_id']} の分岐をQueueで合流してください。")
+            raise ScenePresetError(f"Scene Prompt Random Route Input {guard['gate_id']} の分岐をOutputまたはQueueで合流してください。")
         response = {
             "presets": [
                 {

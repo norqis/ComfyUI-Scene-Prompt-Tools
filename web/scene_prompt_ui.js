@@ -28,7 +28,8 @@ const SCENE_PROMPT_DELETE_NODE_NAMES = new Set(["ScenePromptDelete", "Scene Prom
 const SCENE_PROMPT_TO_TEXT_NODE_NAMES = new Set(["ScenePromptToText", "Scene Prompt To Text"]);
 const SCENE_PROMPT_REVERSE_NODE_NAMES = new Set(["ScenePromptReverse", "Scene Prompt Reverse"]);
 const SCENE_PROMPT_QUEUE_NODE_NAMES = new Set(["ScenePrompterQueue", "Scene Prompt Queue"]);
-const SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES = new Set(["ScenePromptRandomRoute", "Scene Prompt Random Route"]);
+const SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES = new Set(["ScenePromptRandomRoute", "Scene Prompt Random Route", "Scene Prompt Random Route Input"]);
+const SCENE_PROMPT_RANDOM_ROUTE_OUTPUT_NODE_NAMES = new Set(["ScenePromptRandomRouteOutput", "Scene Prompt Random Route Output"]);
 const SCENE_EMPTY_LATENT_NODE_NAMES = new Set(["SceneEmptyLatent", "Scene Empty Latent"]);
 const SCENE_APPLY_MODEL_NODE_NAMES = new Set(["SceneApplyModel", "Scene Apply Model"]);
 const SCENE_APPLY_LORA_NODE_NAMES = new Set(["SceneApplyLora", "Scene Apply LoRA"]);
@@ -80,6 +81,7 @@ const SCENE_PLAN_NODE_CLASS_TYPES = new Set([
     "ScenePromptDelete",
     "ScenePrompterQueue",
     "ScenePromptRandomRoute",
+    "ScenePromptRandomRouteOutput",
     "SceneEmptyLatent",
     "SceneApplyModel",
     "SceneApplyLora",
@@ -100,6 +102,7 @@ const SCENE_SOURCE_NODE_CLASS_TYPES = new Set([
     "ScenePromptDelete",
     "ScenePrompterQueue",
     "ScenePromptRandomRoute",
+    "ScenePromptRandomRouteOutput",
     "SceneEmptyLatent",
     "SceneApplyModel",
     "SceneApplyLora",
@@ -117,6 +120,7 @@ const NODE_NAMES = new Set([
     ...SCENE_PROMPT_TO_TEXT_NODE_NAMES,
     ...SCENE_PROMPT_QUEUE_NODE_NAMES,
     ...SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES,
+    ...SCENE_PROMPT_RANDOM_ROUTE_OUTPUT_NODE_NAMES,
     ...SCENE_EMPTY_LATENT_NODE_NAMES,
     ...SCENE_APPLY_MODEL_NODE_NAMES,
     ...SCENE_APPLY_LORA_NODE_NAMES,
@@ -244,7 +248,8 @@ const SCENE_NODE_DISPLAY_NAMES = {
     ScenePromptDelete: "Scene Prompt Delete",
     ScenePromptToText: "Scene Prompt To Text",
     ScenePrompterQueue: "Scene Prompt Queue",
-    ScenePromptRandomRoute: "Scene Prompt Random Route",
+    ScenePromptRandomRoute: "Scene Prompt Random Route Input",
+    ScenePromptRandomRouteOutput: "Scene Prompt Random Route Output",
     SceneEmptyLatent: "Scene Empty Latent",
     SceneApplyModel: "Scene Apply Model",
     SceneApplyLora: "Scene Apply LoRA",
@@ -5289,7 +5294,9 @@ function closeSceneLoraPicker(node) {
 }
 
 async function openSceneLoraPicker(node) {
-    if (node.properties?.scene_civitai) return openSceneCivitaiSearch(node);
+    const selected = sceneLoraPathIdentity(findWidget(node, "lora_name")?.value);
+    if (selected && sceneLoraPathIdentity(node.properties?.scene_civitai?.lora_name) === selected)
+        return openSceneCivitaiSearch(node);
     closeSceneLoraDetails(node);
     closeSceneLoraPicker(node);
     injectStyle();
@@ -5616,6 +5623,14 @@ function isScenePromptQueueNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PROMPT_QUEUE_NODE_NAMES.has(name));
 }
 
+function isScenePromptRandomRouteOutputNode(node) {
+    return nodeClassNames(node).some((name) => SCENE_PROMPT_RANDOM_ROUTE_OUTPUT_NODE_NAMES.has(name));
+}
+
+function isScenePromptJoinNode(node) {
+    return isScenePromptQueueNode(node) || isScenePromptRandomRouteOutputNode(node);
+}
+
 function isScenePromptRandomRouteNode(node) {
     return nodeClassNames(node).some((name) => SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES.has(name));
 }
@@ -5677,6 +5692,7 @@ function isScenePromptSourceNode(node) {
         || isScenePromptReverseNode(node)
         || isScenePromptDeleteNode(node)
         || isScenePromptQueueNode(node)
+        || isScenePromptRandomRouteOutputNode(node)
         || isScenePromptRandomRouteNode(node)
         || isSceneEmptyLatentNode(node)
         || isSceneApplyModelNode(node)
@@ -6622,9 +6638,9 @@ function flushDownstreamSceneRefreshes() {
     for (const source of sources) {
         collectDownstreamSceneNodes(source, targets);
     }
+    for (const target of targets) clearSceneComputedCaches(target);
     for (const target of targets) {
         if (isScenePromptQueueNode(target)) syncSceneQueueControls(target);
-        clearSceneComputedCaches(target);
         scheduleSceneNodeRefresh(target, { fitHeight: false }, 40);
     }
 }
@@ -6637,10 +6653,9 @@ function refreshDownstreamSceneNodes(node) {
         sceneWorkflowLoadSources.add(node);
         return;
     }
-    for (const target of collectDownstreamSceneNodes(node)) {
-        if (isScenePromptQueueNode(target)) syncSceneQueueControls(target);
-        clearSceneComputedCaches(target);
-    }
+    const targets = collectDownstreamSceneNodes(node);
+    for (const target of targets) clearSceneComputedCaches(target);
+    for (const target of targets) if (isScenePromptQueueNode(target)) syncSceneQueueControls(target);
     sceneDownstreamRefreshSources.add(node);
     clearTimeout(sceneDownstreamRefreshTimer);
     sceneDownstreamRefreshTimer = setTimeout(flushDownstreamSceneRefreshes, 100);
@@ -7087,10 +7102,10 @@ function scenePromptSourceLocalCacheKey(node) {
             upstream: upstreamKey,
         });
     }
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         const graph = node?.graph || app.graph;
         return JSON.stringify({
-            type: "queue",
+            type: isScenePromptRandomRouteOutputNode(node) ? "random_output" : "queue",
             id: node?.id ?? null,
             mode: sceneNodeMode(node),
             controls: SCENE_QUEUE_CONTROL_NAMES.map((name) => findWidget(node, name)?.value ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]),
@@ -7240,7 +7255,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             const first = source("scene_prompt1") || sceneStatsSeed();
             const second = source("scene_prompt2") || sceneStatsSeed();
             result = sceneStatsMerge(first, second);
-        } else if (node.class_type === "ScenePrompterQueue") {
+        } else if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(node.class_type)) {
             result = emptyScenePromptStats();
             let hasSource = false;
             for (let index = 1; index <= SCENE_PROMPT_QUEUE_INPUT_COUNT; index += 1) {
@@ -7396,7 +7411,7 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
     }
 
     const upstream = scenePromptInputSource(node);
-    if (isScenePromptRandomRouteNode(node) || (upstream && sceneRandomRouteInNode(upstream) && !isScenePromptQueueNode(node))) {
+    if (isScenePromptRandomRouteNode(node) || (upstream && sceneRandomRouteInNode(upstream) && !isScenePromptJoinNode(node))) {
         return finish(sceneScheduleForNode(node).stats);
     }
     if (isScenePromptMergeNode(node) && connectedScenePromptSourcesForMerge(node)
@@ -7438,7 +7453,7 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
         }
         return finish(sceneStatsCount(base, scenePromptCounterCount(node)));
     }
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         return finish(sceneScheduleForNode(node).stats);
     }
     if (isSceneEmptyLatentNode(node)) {
@@ -7665,7 +7680,7 @@ function sceneSchedulePrefix(plan, limit) {
 function sceneScheduleCount(plan, factor) {
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
-        return sceneScheduleError("ランダム分岐はQueueで合流してからCountを接続してください。");
+        return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからCountを接続してください。");
     const units = plan.units.map((unit) => factor === 0 ? sceneScheduleWrapper("repeat", unit, 0)
         : unit.kind === "fixed" ? unit : sceneScheduleWrapper("repeat", unit, factor));
     return sceneSchedulePlan(units, plan.boundary, plan.randomGuards);
@@ -7683,7 +7698,7 @@ function sceneScheduleMap(plan, transform) {
 function sceneScheduleMatrix(plan, matrixRows) {
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
-        return sceneScheduleError("ランダム分岐はQueueで合流してからMatrixを接続してください。");
+        return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMatrixを接続してください。");
     if (!matrixRows.length) return sceneSchedulePlan([], plan.boundary, plan.randomGuards);
     const matrixEntry = (entry, matrixRow) => {
         const label = matrixLineLabel(matrixRow);
@@ -7718,7 +7733,7 @@ function sceneScheduleHasComposite(plan) {
 
 function sceneScheduleMerge(left, right) {
     if (left.randomGuards?.length || right.randomGuards?.length)
-        return sceneScheduleError("ランダム分岐はQueueで合流してからMergeを接続してください。");
+        return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMergeを接続してください。");
     const boundary = left.boundary || right.boundary;
     if (!sceneScheduleHasComposite(left) && !sceneScheduleHasComposite(right)) {
         const units = [];
@@ -7805,19 +7820,21 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
         };
         let plan = null;
         if (entry.class_type === "ScenePresetInput") plan = upstream || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-        else if (entry.class_type === "ScenePrompterQueue") {
+        else if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(entry.class_type)) {
             const names = Array.from(SCENE_PROMPT_QUEUE_INPUT_NAMES).sort((a, b) => Number(a.slice(12)) - Number(b.slice(12)));
             const connected = names.map((name) => ({ name, plan: source(name) })).filter(({ plan: child }) => !!child);
-            plan = sceneScheduleQueue(connected.map(({ plan: child }) => child),
-                connected.map(({ name }) => name), Object.fromEntries(SCENE_QUEUE_CONTROL_NAMES.map((name) =>
-                    [name, apiInput(entry, name) ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]])));
+            plan = entry.class_type === "ScenePromptRandomRouteOutput" && !connected.length
+                ? sceneScheduleError("Scene Prompt Random Route Output に経路が接続されていません。")
+                : sceneScheduleQueue(connected.map(({ plan: child }) => child), connected.map(({ name }) => name),
+                    entry.class_type === "ScenePromptRandomRouteOutput" ? {} : Object.fromEntries(SCENE_QUEUE_CONTROL_NAMES.map((name) =>
+                        [name, apiInput(entry, name) ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]])));
         } else if (entry.class_type === "ScenePromptCounter") {
             const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
             plan = sceneScheduleCount(base, clampSceneCount(apiInput(entry, "count"), 1));
         } else if (entry.class_type === "SceneEmptyLatent") {
             const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
             plan = base.randomGuards.length && !sceneRandomZeroArm(base)
-                ? sceneScheduleError("ランダム分岐はQueueで合流してからEmpty Latentを接続してください。") : base;
+                ? sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからEmpty Latentを接続してください。") : base;
         } else if (entry.class_type === "ScenePresetReference") {
             plan = sceneScheduleForPreset(apiInput(entry, "preset_id"), source("scene_prompt"), nextStack,
                 preset?.scenePresetChildren?.get(String(nodeId)) || null, `${instancePath}/${nodeId}`);
@@ -7887,10 +7904,12 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         return finish(sceneSchedulePlan(base.units, base.boundary,
             [...base.randomGuards, { gateId: String(node.id), armIndex: outputSlot, weights }]));
     }
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         const sources = connectedScenePromptSourcesForQueue(node);
+        if (isScenePromptRandomRouteOutputNode(node) && !sources.length)
+            return finish(sceneScheduleError("Scene Prompt Random Route Output に経路が接続されていません。"));
         const plans = sources.map(({ input }) => sceneScheduleForLinkedInput(node, input.name, new Set(seen)));
-        return finish(sceneScheduleQueue(plans, sources.map(({ input }) => input.name), Object.fromEntries(
+        return finish(sceneScheduleQueue(plans, sources.map(({ input }) => input.name), isScenePromptRandomRouteOutputNode(node) ? {} : Object.fromEntries(
             SCENE_QUEUE_CONTROL_NAMES.map((name) => [name, findWidget(node, name)?.value ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]]))));
     }
     const upstream = scenePromptInputSource(node);
@@ -7922,7 +7941,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
         if (base.stats.error) return finish(base);
         if (isSceneEmptyLatentNode(node) && base.randomGuards.length && !sceneRandomZeroArm(base))
-            return finish(sceneScheduleError("ランダム分岐はQueueで合流してからEmpty Latentを接続してください。"));
+            return finish(sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからEmpty Latentを接続してください。"));
         if (isScenePromptNode(node) || isScenePathNode(node) || isSceneEmptyLatentNode(node)) {
             const transform = (entry) => {
                 if (!entry) return null;
@@ -7994,7 +8013,7 @@ function sceneQueueBoundaryInPreset(presetId, upstream, stack = new Set(), prefe
         seen.add(nodeId);
         const entry = nodes[String(nodeId)];
         if (!entry) return false;
-        if (entry.class_type === "ScenePrompterQueue") return true;
+        if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(entry.class_type)) return true;
         if (entry.class_type === "ScenePresetInput") return upstream;
         if (entry.class_type === "ScenePresetReference") {
             const nested = sceneQueueBoundaryInPreset(apiInput(entry, "preset_id"),
@@ -8012,7 +8031,7 @@ function sceneQueueBoundaryInNode(node, seen = new Set()) {
     if (!node || seen.has(node.id) || isSceneNodeMuted(node)) return false;
     seen.add(node.id);
     if (isSceneNodeBypassed(node)) return sceneQueueBoundaryInNode(sceneBypassInputSource(node), seen);
-    if (isScenePromptQueueNode(node)) return true;
+    if (isScenePromptJoinNode(node)) return true;
     if (isScenePresetReferenceNode(node)) {
         const upstream = scenePromptInputSource(node);
         const inherited = sceneQueueBoundaryInNode(upstream, new Set(seen));
@@ -8030,6 +8049,8 @@ function sceneRandomRouteInNode(node, seen = new Set()) {
     seen.add(node.id);
     if (isSceneNodeBypassed(node)) return sceneRandomRouteInNode(sceneBypassInputSource(node), seen);
     if (isScenePromptRandomRouteNode(node)) return true;
+    if (isScenePromptJoinNode(node)) return connectedScenePromptSourcesForQueue(node)
+        .some(({ source }) => sceneRandomRouteInNode(source, new Set(seen)));
     if (isScenePresetReferenceNode(node)) {
         const plan = sceneScheduleForNode(node);
         const containsChoice = (unit) => unit?.kind === "random_choice"
@@ -8053,7 +8074,7 @@ function sceneQueuePendingInNode(node, seen = new Set()) {
     }
     if (isScenePromptMergeNode(node)) return connectedScenePromptSourcesForMerge(node)
         .some(({ source }) => sceneQueuePendingInNode(source, new Set(seen)));
-    if (isScenePromptQueueNode(node)) return connectedScenePromptSourcesForQueue(node)
+    if (isScenePromptJoinNode(node)) return connectedScenePromptSourcesForQueue(node)
         .some(({ source }) => sceneQueuePendingInNode(source, new Set(seen)));
     return sceneQueuePendingInNode(scenePromptInputSource(node), seen);
 }
@@ -8084,9 +8105,6 @@ function syncSceneQueueControls(node, allowDuringLoad = false) {
         widget.options.disabled = disabled;
         widget.label = lock ? `${SCENE_WIDGET_LABELS[name] || name}（${lock === "upstream" ? "上流Queueあり" : lock === "random" ? "ランダム分岐の合流" : "Preset読み込み中"}）`
             : SCENE_WIDGET_LABELS[name] || name;
-        if ((lock === "upstream" || lock === "random") && widget.value !== SCENE_QUEUE_CONTROL_DEFAULTS[name]) {
-            setWidgetValue(node, name, SCENE_QUEUE_CONTROL_DEFAULTS[name], { silent: true });
-        }
     }
     const json = findWidget(node, "input_repeats_json");
     if (json) {
@@ -8192,7 +8210,7 @@ function sceneBypassInputSource(node) {
             .find(Boolean);
         return source || null;
     }
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         const graph = node?.graph || app.graph;
         const input = (node.inputs || [])[0] || null;
         const source = input ? resolveLinkedSourceFromInput(graph, input).source : null;
@@ -8269,7 +8287,7 @@ function scenePromptLineageKey(node) {
             }))));
             break;
         }
-        if (isScenePromptQueueNode(current)) {
+        if (isScenePromptJoinNode(current)) {
             break;
         }
         current = scenePromptInputSource(current);
@@ -8467,7 +8485,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         })));
     }
 
-    if (isScenePromptQueueNode(node)) {
+    if (isScenePromptJoinNode(node)) {
         return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
     }
 
@@ -9078,7 +9096,7 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
         const graphNode = sceneNodeById(nodeId);
         if (!graphNode) continue;
         syncSceneRandomRoute(graphNode);
-        if (graphNode.sceneRandomError) throw new Error(`Scene Prompt Random Route #${nodeId}: ${graphNode.sceneRandomError}`);
+        if (graphNode.sceneRandomError) throw new Error(`Scene Prompt Random Route Input #${nodeId}: ${graphNode.sceneRandomError}`);
     }
     return snapshot;
 }
@@ -11659,12 +11677,15 @@ async function openSceneExpandResources(node) {
         }
         if (!data.models?.length) addText(modelSection, "接続されたモデルはありません。");
         const loraSection = addSection("LoRA");
-        for (const lora of data.loras || []) {
+        const variantRank = (variant) => variant.applies === true ? 0 : variant.applies === false ? 2 : 1;
+        const loraRank = (lora) => lora.variants?.some((variant) => variant.applies === true) ? 0
+            : lora.variants?.length && lora.variants.every((variant) => variant.applies === false) ? 2 : 1;
+        for (const lora of [...(data.loras || [])].sort((a, b) => loraRank(a) - loraRank(b))) {
             const card = document.createElement("div");
             card.className = "pc-resource-card";
             if (lora.variants?.length && lora.variants.every((variant) => variant.applies === false)) card.classList.add("pc-resource-unapplied");
             addText(card, lora.name, "pc-resource-name");
-            for (const variant of lora.variants || []) {
+            for (const variant of [...(lora.variants || [])].sort((a, b) => variantRank(a) - variantRank(b))) {
                 const roles = variant.roles || ["model", "clip"];
                 const strengths = [
                     roles.includes("model") ? `モデル強度 ${variant.strength_model ?? "取得不可"}` : "",
@@ -12266,11 +12287,11 @@ function openSceneRandomSettings(node) {
     dialog.className = "pc-lora-dialog pc-random-dialog";
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", "Scene Prompt Random Route 設定");
+    dialog.setAttribute("aria-label", "Scene Prompt Random Route Input 設定");
     const head = document.createElement("div");
     head.className = "pc-lora-head";
     const heading = document.createElement("strong");
-    heading.textContent = "Scene Prompt Random Route 設定";
+    heading.textContent = "Scene Prompt Random Route Input 設定";
     const close = document.createElement("button");
     close.type = "button";
     close.className = "pc-button";
@@ -12536,6 +12557,8 @@ function attachSceneNode(node, nodeName) {
         attachScenePromptCounter(node);
     } else if (isScenePromptQueueNode(node) || SCENE_PROMPT_QUEUE_NODE_NAMES.has(nodeName)) {
         attachScenePromptQueue(node);
+    } else if (isScenePromptRandomRouteOutputNode(node) || SCENE_PROMPT_RANDOM_ROUTE_OUTPUT_NODE_NAMES.has(nodeName)) {
+        attachSceneUtilityNode(node, nodeName);
     } else if (isScenePromptRandomRouteNode(node) || SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES.has(nodeName)) {
         attachScenePromptRandomRoute(node);
     } else if (isScenePromptCallbackNode(node) || SCENE_PROMPT_CALLBACK_NODE_NAMES.has(nodeName)) {
@@ -13012,6 +13035,21 @@ app.registerExtension({
             nodeType.prototype.configure = function (...args) {
                 args[0] = sceneExpandConfigureValues(args[0]);
                 return configure?.apply(this, args);
+            };
+        }
+
+        if (SCENE_PROMPT_RANDOM_ROUTE_NODE_NAMES.has(nodeData.name)) {
+            const configure = nodeType.prototype.configure;
+            nodeType.prototype.configure = function (...args) {
+                const config = args[0];
+                const names = ["weights_json", "preserve_join"];
+                const named = { ...Object.fromEntries(names.slice(0, config?.widgets_values?.length || 0)
+                    .map((name, index) => [name, config.widgets_values[index]])), ...config?.widgets_values_named };
+                const result = configure?.apply(this, args);
+                for (const name of names) if (Object.hasOwn(named, name)) setWidgetValue(this, name, named[name], { silent: true });
+                if (!Object.hasOwn(named, "preserve_join")) setWidgetValue(this, "preserve_join", false, { silent: true });
+                clearSceneComputedCaches(this);
+                return result;
             };
         }
 

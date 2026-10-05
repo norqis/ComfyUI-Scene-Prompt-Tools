@@ -59,6 +59,7 @@ const applyContext = {
     isPromptMatrixNode() { return false; }, isScenePathNode() { return false; },
     isScenePromptMergeNode() { return false; }, isScenePromptReverseNode() { return false; }, isScenePromptDeleteNode() { return false; },
     isScenePromptCounterNode() { return false; }, isScenePromptQueueNode() { return false; },
+    isScenePromptJoinNode() { return false; }, isScenePromptRandomRouteOutputNode() { return false; },
     isScenePromptRandomRouteNode() { return false; }, sceneRandomRouteInNode() { return false; },
     isSceneEmptyLatentNode() { return false; }, isScenePresetReferenceNode() { return false; },
     isScenePromptCallbackNode() { return false; },

@@ -24,6 +24,16 @@ function fixture() {
 const field = (node, name) => node.widgets.find((widget) => widget.name === name);
 const candidate = (id) => ({ model_id: id, version_id: id + 10, file_id: id + 20, lora_name: `llm/${id}.safetensors`, triggers: [`trigger${id}`] });
 {
+    const { graph, node, create } = fixture();
+    const a = node("ScenePromptLLM", "A"), b = node("ScenePromptLLM", "B"), output = node("ScenePromptRandomRouteOutput"), expand = node("ScenePrompterExpand");
+    output.inputs = [{ name: "scene_prompt1", type: "SCENE_PROMPT" }, { name: "scene_prompt10", type: "SCENE_PROMPT" }];
+    a.connect(0, output, 0); b.connect(0, output, 1); output.connect(0, expand, 0);
+    assert.deepEqual(collectLLMTargets(graph, expand).map(({ node: target }) => target), [a, b]);
+    const [lora] = insertLoras(graph, b, [candidate(9)], create);
+    assert.equal(graph.links[output.inputs[1].link].origin_id, lora.id, "LoRA insertion preserves Output's tenth input edge");
+    assert.deepEqual(collectLLMTargets(graph, expand).map(({ node: target }) => target), [a, b]);
+}
+{
     const rich = { ...candidate(1), name: "model", description: "full metadata", gallery: [{url:"preview"}], model_stats: {downloadCount:3} };
     assert.deepEqual(Object.keys(compactCandidates([rich])[0]), ["model_id","version_id","file_id","name","version_name","base_model","triggers"]);
     for (const [status, text] of [[200,""],[200,'{"items":'],[502,"<html>failure</html>"],[404,""]]) {

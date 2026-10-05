@@ -549,6 +549,8 @@ function testWorkflowConnectionStormDefersSceneWork() {
         installSceneModeWatcher() {},
         isSceneApplyLoraNode: () => true,
         isScenePromptQueueNode: () => true,
+        isScenePromptJoinNode: () => true,
+        isScenePromptRandomRouteOutputNode: () => false,
         isScenePromptRandomRouteNode: () => true,
         syncSceneLoraSelectLabel: () => { work.label += 1; },
         syncSceneQueueControls: () => { work.queue += 1; },
@@ -627,6 +629,8 @@ function testWorkflowLoadFlushTraversesOldGraphOnce() {
         isScenePromptSourceNode: (node) => node.type === "ScenePrompter" || node.type === "ScenePrompterQueue",
         isSceneExpandNode: () => false,
         isScenePromptQueueNode: (node) => node.type === "ScenePrompterQueue",
+        isScenePromptJoinNode: (node) => node.type === "ScenePrompterQueue",
+        isScenePromptRandomRouteOutputNode: () => false,
         findWidget: (node, name) => node.widgets.find((widget) => widget.name === name),
         syncSceneQueueControls(node) {
             work.queue += 1;

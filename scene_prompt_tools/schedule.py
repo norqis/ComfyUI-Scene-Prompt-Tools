@@ -638,26 +638,26 @@ def queue(values, *, order_mode="input_order", alternate_block_size=1, input_rep
     if zero_guards and not slots:
         gate = zero_guards[0]
         missing = [str(index + 1) for index, weight in enumerate(gate["weights"]) if weight]
-        raise ScenePlanError(f"Scene Prompt Random Route {gate['gate_id']} の出力{', '.join(missing)}が合流Queueに接続されていません。")
+        raise ScenePlanError(f"Scene Prompt Random Route Input {gate['gate_id']} の出力{', '.join(missing)}が合流OutputまたはQueueに接続されていません。")
     guarded = [(index, plan) for index, plan in slots if plan["random_guards"]]
     if guarded:
         if len(guarded) != len(slots):
-            raise ScenePlanError("Scene Prompt Random Route の合流Queueに無関係な入力を混ぜられません。")
+            raise ScenePlanError("Scene Prompt Random Route の合流OutputまたはQueueに無関係な入力を混ぜられません。")
         stack = guarded[0][1]["random_guards"]
         gate = stack[-1]
         if any(plan["random_guards"][:-1] != stack[:-1] or
                plan["random_guards"][-1]["gate_id"] != gate["gate_id"] or
                plan["random_guards"][-1]["weights"] != gate["weights"] for _, plan in guarded):
-            raise ScenePlanError("Scene Prompt Random Route の分岐を交差させず、同じQueueへ合流してください。")
+            raise ScenePlanError("Scene Prompt Random Route の分岐を交差させず、同じOutputまたはQueueへ合流してください。")
         inputs = [None] * 10
         for _, plan in guarded:
             arm = plan["random_guards"][-1]["arm_index"]
             if inputs[arm] is not None:
-                raise ScenePlanError(f"Scene Prompt Random Route の出力{arm + 1}が同じQueueに複数接続されています。")
+                raise ScenePlanError(f"Scene Prompt Random Route の出力{arm + 1}が同じOutputまたはQueueに複数接続されています。")
             inputs[arm] = _plan(plan["units"], plan["sources"], plan["contains_queue_boundary"], stack[:-1])
         missing = [str(index + 1) for index, weight in enumerate(gate["weights"]) if weight and inputs[index] is None]
         if missing:
-            raise ScenePlanError(f"Scene Prompt Random Route {gate['gate_id']} の出力{', '.join(missing)}が合流Queueに接続されていません。")
+            raise ScenePlanError(f"Scene Prompt Random Route Input {gate['gate_id']} の出力{', '.join(missing)}が合流OutputまたはQueueに接続されていません。")
         empty = _plan([])
         inputs = [plan if plan is not None else empty for plan in inputs]
         unit = _unit("random_choice", gate_id=gate["gate_id"], weights=gate["weights"], inputs=inputs, selected_arm=None)
@@ -856,7 +856,7 @@ def _select_unit(unit, index, seed=0):
 
 def item_for_normalized_plan(plan, index, seed=0):
     if plan["random_guards"]:
-        raise ScenePlanError(f"Scene Prompt Random Route {plan['random_guards'][-1]['gate_id']} の分岐がQueueで合流していません。")
+        raise ScenePlanError(f"Scene Prompt Random Route Input {plan['random_guards'][-1]['gate_id']} の分岐がOutputまたはQueueで合流していません。")
     if type(index) is not int or not 0 <= index < plan["stats"]["total_batches"]:
         raise IndexError("Generation index is outside the plan.")
     item = _select_plan(plan, index, seed)
@@ -882,7 +882,7 @@ def legacy_rows(plan):
     alternating plan would change its grouping and make large Counts costly.
     """
     if plan["random_guards"]:
-        raise ScenePlanError(f"Scene Prompt Random Route {plan['random_guards'][-1]['gate_id']} の分岐がQueueで合流していません。")
+        raise ScenePlanError(f"Scene Prompt Random Route Input {plan['random_guards'][-1]['gate_id']} の分岐がOutputまたはQueueで合流していません。")
     if plan["stats"]["row_count"] > 100_000:
         raise ScenePlanError("This schedule has too many logical rows to list.")
     rows = []

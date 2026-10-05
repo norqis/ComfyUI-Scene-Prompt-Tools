@@ -145,7 +145,7 @@ Repeated tags keep the spelling with the highest explicit `(tag:weight)` value; 
 
 ## Queue order and counts
 
-**Scene Prompt Random Route** draws one of up to ten `scene_prompt` outputs on each Expand execution. Images within the same latent batch share that draw. Use **確率設定** to enter percentages in 0.01% steps; the ten values must total exactly 100%. A 0% output may remain unconnected. Every positive-probability output must be connected. For two or more positive outputs, connect each output through its own Scene path and bring those paths together at one **Scene Prompt Queue** before Expand. That Queue joins the alternatives into one planned batch per incoming batch; its order, repeat, and fixed-count settings are disabled for this join. A downstream Count 10 makes ten independent draws, rather than repeating one winner ten times. The starting seed and generation index determine each draw, so replay is reproducible. A single 100% output can connect directly without a join.
+**Scene Prompt Random Route Input** draws one of up to ten `scene_prompt` outputs on each Expand execution. Images within the same latent batch share that draw. Use **確率を設定** to enter percentages in 0.01% steps; the ten values must total exactly 100%. A 0% output may remain unconnected. Connect every positive-probability output through its own Scene path, then bring those paths together at **Scene Prompt Random Route Output** before Count or Expand. Output has ten inputs and no settings; it keeps only the selected path. Input/Output pairs can be nested, including an inner 100% path. A downstream Count 10 makes ten independent draws. The starting seed and generation index determine each draw, so replay is reproducible. Existing Random Route workflows and joins through **Scene Prompt Queue** remain supported.
 
 Within a branch, Prompt, Path, Delete, Reverse, Apply Model/LoRA, and Callback preserve the one-image choice. Join the branches before using Count, Matrix, Empty Latent, or Merge. The same rule applies inside Presets. Execution-path PNG metadata fixes a gate to 100% when all consumers selected the same arm. If Expand and To Text used different arms, it retains the original probabilities and their individual seeds to reproduce both results. Full-workflow metadata retains the original probabilities.
 
@@ -155,7 +155,7 @@ Within a branch, Prompt, Path, Delete, Reverse, Apply Model/LoRA, and Callback p
 
 For example, connect one-row inputs A and B and set **1行の回数** to 2. A later Count 10 leaves `A,A,B,B` unchanged with **固定**. With **乗算**, it produces `(A,A,B,B) × 10`.
 
-If any connected input has already passed through a Queue, the receiving Queue becomes an ordered join: its settings are greyed out and it preserves the incoming sequences and their Count behavior. This also applies when Scene Prompt, Reroute, or Preset Reference nodes sit between the two Queues. Disconnecting the upstream Queue makes the settings available again.
+If any connected input has already passed through a Queue, the receiving Queue becomes an ordered join: its settings are greyed out and it preserves the incoming sequences and their Count behavior. This also applies when Scene Prompt, Reroute, or Preset Reference nodes sit between the two Queues. Bypassing or disconnecting the upstream Queue makes the settings available again, provided no other active Queue or Random join remains upstream. Each Queue keeps its own settings while they are greyed out and restores their use when the controls become available.
 
 ## Text Output and Tag Deletion
 

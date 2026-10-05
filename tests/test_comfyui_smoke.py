@@ -67,6 +67,13 @@ class RealComfyUISmokeTests(unittest.TestCase):
         spec.loader.exec_module(cls.package)
 
     def test_registers_current_nodes_and_web_directory(self):
+        input_node = self.package.NODE_CLASS_MAPPINGS["ScenePromptRandomRoute"]
+        output_node = self.package.NODE_CLASS_MAPPINGS["ScenePromptRandomRouteOutput"]
+        self.assertEqual(self.package.NODE_DISPLAY_NAME_MAPPINGS["ScenePromptRandomRoute"], "Scene Prompt Random Route Input")
+        self.assertEqual(self.package.NODE_DISPLAY_NAME_MAPPINGS["ScenePromptRandomRouteOutput"], "Scene Prompt Random Route Output")
+        self.assertTrue(input_node.INPUT_TYPES()["optional"]["preserve_join"][1]["default"])
+        self.assertEqual(output_node.INPUT_TYPES()["required"], {})
+        self.assertEqual(len(output_node.INPUT_TYPES()["optional"]), 10)
         self.assertIn("ScenePrompter", self.package.NODE_CLASS_MAPPINGS)
         self.assertIn("ScenePromptDelete", self.package.NODE_CLASS_MAPPINGS)
         self.assertIn("ScenePromptToText", self.package.NODE_CLASS_MAPPINGS)

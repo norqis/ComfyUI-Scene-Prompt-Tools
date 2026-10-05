@@ -2000,25 +2000,40 @@ NODE_CLASS_MAPPINGS = {
             self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_http_random_route_redraws_each_count_event_and_replays_selected_png(self):
+        self._assert_random_route_count_and_png("ScenePrompterQueue")
+
+    def test_http_random_output_nested_hundred_percent_count_and_png_replay(self):
+        self._assert_random_route_count_and_png("ScenePromptRandomRouteOutput")
+
+    def _assert_random_route_count_and_png(self, join_type):
         from PIL import Image
         import hashlib
-        marker = self.base / "random-route-result.json"
+        image_path = "random-output" if join_type == "ScenePromptRandomRouteOutput" else "random-route"
+        marker = self.base / (image_path + "-result.json")
         graph = {
             "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "base"}},
             "2": {"class_type": "ScenePromptRandomRoute", "inputs": {"scene_prompt": ["1", 0], "weights_json": json.dumps([5000, 5000] + [0] * 8)}},
             "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 0], "positive_base": "route_A"}},
             "4": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 1], "positive_base": "route_B"}},
             "11": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 2], "positive_base": "never_route"}},
-            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0], "scene_prompt3": ["11", 0],
+            "5": {"class_type": join_type, "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0], "scene_prompt3": ["11", 0],
                 "order_mode": "alternate", "alternate_block_size": 9, "downstream_count_mode": "fixed"}},
             "6": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["5", 0], "count": 10}},
             "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["6", 0], "current_index": 0, "seed_base": 123, "run_id": "random-route", "timestamp_dir": False}},
             "8": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
             "9": {"class_type": "TestSceneTextImage", "inputs": {"image": ["8", 0], "positive": ["7", 0], "negative": ["7", 1], "log_path": str(marker)}},
-            "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["9", 0], "scene_info": ["7", 2], "path": "random-route", "metadata_mode": "生成経路ノードのみ"}},
+            "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["9", 0], "scene_info": ["7", 2], "path": image_path, "metadata_mode": "生成経路ノードのみ"}},
         }
+        if join_type == "ScenePromptRandomRouteOutput":
+            for name in ("order_mode", "alternate_block_size", "downstream_count_mode"):
+                graph["5"]["inputs"].pop(name)
+            graph["2"]["inputs"]["preserve_join"] = True
+            graph["12"] = {"class_type": "ScenePromptRandomRoute", "inputs": {
+                "scene_prompt": ["2", 0], "weights_json": json.dumps([10000] + [0] * 9), "preserve_join": True}}
+            graph["13"] = {"class_type": "ScenePromptRandomRouteOutput", "inputs": {"scene_prompt1": ["12", 0]}}
+            graph["3"]["inputs"]["scene_prompt"] = ["13", 0]
         workflow = _workflow_for_graph(graph)
-        next(node for node in workflow["nodes"] if node["id"] == 2)["widgets_values"] = [graph["2"]["inputs"]["weights_json"]]
+        next(node for node in workflow["nodes"] if node["id"] == 2)["widgets_values"] = [graph["2"]["inputs"]["weights_json"]] + ([True] if join_type == "ScenePromptRandomRouteOutput" else [])
         handle, workflow = self._prepare_callback_run(graph, "7", workflow)
         labels = []
         try:
@@ -2035,7 +2050,7 @@ NODE_CLASS_MAPPINGS = {
                 labels.append(expected)
             self.assertIn("route_A", labels)
             self.assertIn("route_B", labels)
-            files = sorted((self.base / "output" / "random-route").glob("*.png"))
+            files = sorted((self.base / "output" / image_path).glob("*.png"))
             self.assertEqual(len(files), 10)
             with Image.open(files[-1]) as image:
                 replay = json.loads(image.text["prompt"])
@@ -2044,9 +2059,12 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(weights.count(10000), 1)
             self.assertEqual(sum(weights), 10000)
             self.assertTrue(replay["2"]["inputs"]["preserve_join"])
+            self.assertEqual(replay["5"]["class_type"], join_type)
+            if join_type == "ScenePromptRandomRouteOutput":
+                self.assertEqual("13" in replay, labels[-1] == "route_A", "Only the selected inner Output remains in the PNG route")
             route_visual = next(node for node in replay_workflow["nodes"] if node["id"] == 2)
             self.assertEqual(route_visual["widgets_values"], [replay["2"]["inputs"]["weights_json"], True])
-            replay["10"]["inputs"]["path"] = "random-route-replay"
+            replay["10"]["inputs"]["path"] = image_path + "-replay"
             replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
             try:
                 self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
@@ -2065,13 +2083,20 @@ NODE_CLASS_MAPPINGS = {
         self.assertIn("出力2", json.dumps(error, ensure_ascii=False))
 
     def test_http_random_route_inside_preset_expands_dynamic_edges(self):
+        self._assert_random_route_preset("ScenePrompterQueue")
+
+    def test_http_random_output_inside_preset_expands_dynamic_edges(self):
+        self._assert_random_route_preset("ScenePromptRandomRouteOutput")
+
+    def _assert_random_route_preset(self, join_type):
         from PIL import Image
         import hashlib
         def chosen(seed):
             payload = json.dumps([seed, "1/2"], ensure_ascii=False, separators=(",", ":"))
             return int.from_bytes(hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest(), "big") % 10000 < 5000
         text_seed = next(seed for seed in range(124, 1000) if chosen(seed) != chosen(123))
-        marker = self.base / "random-preset-result.json"
+        image_path = "random-output-preset" if join_type == "ScenePromptRandomRouteOutput" else "random-preset"
+        marker = self.base / (image_path + "-result.json")
         preset_graph = {"output": {
             "1": {"class_type": "ScenePresetInput", "inputs": {}},
             "2": {"class_type": "ScenePromptRandomRoute", "inputs": {
@@ -2079,7 +2104,7 @@ NODE_CLASS_MAPPINGS = {
             }},
             "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 0], "positive_base": "route_A"}},
             "4": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["2", 1], "positive_base": "route_B"}},
-            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
+            "5": {"class_type": join_type, "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
             "6": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["5", 0]}},
         }}
         self._request("/scene_presets/save", {
@@ -2100,7 +2125,7 @@ NODE_CLASS_MAPPINGS = {
                 key = f"{expand_contents}-{with_text}"
                 graph["9"]["inputs"]["negative"] = ["12", 0] if with_text else ["7", 1]
                 graph["10"]["inputs"]["expand_preset_contents"] = expand_contents
-                graph["10"]["inputs"]["path"] = f"random-preset-{key}"
+                graph["10"]["inputs"]["path"] = f"{image_path}-{key}"
                 graph["7"]["inputs"]["current_index"] = 0
                 handle, workflow = self._prepare_callback_run(graph, "7")
                 try:
@@ -2111,12 +2136,13 @@ NODE_CLASS_MAPPINGS = {
                     if with_text:
                         self.assertEqual(sum(label in text_value for label in ("route_A", "route_B")), 1)
                         self.assertNotEqual("route_A" in positive, "route_A" in text_value)
-                    files = list((self.base / "output" / f"random-preset-{key}").glob("*.png"))
+                    files = list((self.base / "output" / f"{image_path}-{key}").glob("*.png"))
                     self.assertEqual(len(files), 1)
                     with Image.open(files[0]) as image:
                         replay = json.loads(image.text["prompt"])
                         replay_workflow = json.loads(image.text["workflow"])
                     self.assertNotIn("ScenePresetReference", {node["class_type"] for node in replay.values()})
+                    self.assertIn(join_type, {node["class_type"] for node in replay.values()})
                     routes = [node for node in replay.values() if node["class_type"] == "ScenePromptRandomRoute"]
                     self.assertEqual(len(routes), 1)
                     weights = json.loads(routes[0]["inputs"]["weights_json"])
@@ -2125,7 +2151,7 @@ NODE_CLASS_MAPPINGS = {
                     else:
                         self.assertEqual(weights.count(10000), 1)
                         self.assertTrue(routes[0]["inputs"]["preserve_join"])
-                    replay["10"]["inputs"]["path"] = f"random-preset-replay-{key}"
+                    replay["10"]["inputs"]["path"] = f"{image_path}-replay-{key}"
                     replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
                     try:
                         self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
