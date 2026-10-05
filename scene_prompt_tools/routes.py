@@ -6,7 +6,6 @@ import re
 import tempfile
 import threading
 import time
-from collections import OrderedDict
 from pathlib import Path
 
 from aiohttp import web
@@ -51,9 +50,8 @@ DATA_WRITE_LOCK = threading.Lock()
 DATA_CACHE_LOCK = threading.RLock()
 _ROUTES_DEFINED = False
 _CACHE_TTL_SECONDS = 2.0
-_CACHE_MAX_USERS = 64
-_ITEMS_CACHE = OrderedDict()
-_SAVED_PROMPTS_CACHE = OrderedDict()
+_ITEMS_CACHE = {}
+_SAVED_PROMPTS_CACHE = {}
 _CACHE_GENERATION = 0
 
 
@@ -107,15 +105,11 @@ def _saved_prompts_dir(user_id="default"):
 
 def _cache_for(caches, user_id):
     user_key = str(user_id or "default")
-    cache = caches.get(user_key)
-    if cache is None:
-        cache = {"expires": 0.0, "signature": None, "content_hash": None, "value": None}
-        caches[user_key] = cache
-        if len(caches) > _CACHE_MAX_USERS:
-            caches.popitem(last=False)
-    else:
-        caches.move_to_end(user_key)
-    return cache
+    now = time.monotonic()
+    for key, entry in list(caches.items()):
+        if key != user_key and entry["expires"] <= now:
+            caches.pop(key)
+    return caches.get(user_key)
 
 
 def _cache_generation(user_id):
@@ -151,28 +145,29 @@ def _prompt_file_content_hash(root):
     return digest.hexdigest()
 
 
-def _cache_get(cache, signature, content_hash):
-    if cache.get("signature") == signature and cache.get("content_hash") == content_hash:
+def _cache_get(caches, user_id, signature, content_hash):
+    user_key = str(user_id or "default")
+    cache = _cache_for(caches, user_id)
+    if cache is not None and cache.get("signature") == signature and cache.get("content_hash") == content_hash:
         value = cache.get("value")
         if value is not None:
-            cache["expires"] = time.monotonic() + _CACHE_TTL_SECONDS
+            refreshed = {**cache, "expires": time.monotonic() + _CACHE_TTL_SECONDS}
+            caches[user_key] = refreshed
             return value
     return None
 
 
 def _cache_get_unexpired(cache):
-    if cache.get("expires", 0.0) <= time.monotonic():
+    if cache is None or cache.get("expires", 0.0) <= time.monotonic():
         return None
     value = cache.get("value")
     return value if value is not None else None
 
 
-def _cache_set(cache, signature, content_hash, value):
-    cache["signature"] = signature
-    cache["content_hash"] = content_hash
-    cache["value"] = value
-    cache["expires"] = time.monotonic() + _CACHE_TTL_SECONDS
-    return value
+def _cache_entry(user_id, signature, content_hash, value):
+    entry = {"signature": signature, "content_hash": content_hash, "value": value,
+             "expires": time.monotonic() + _CACHE_TTL_SECONDS}
+    return entry
 
 
 def _clear_prompt_caches(user_id="default"):
@@ -246,7 +241,7 @@ def _load_items(user_id="default", force=False, with_errors=False):
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            cached = None if force else _cache_get(cache, signature, content_hash)
+            cached = None if force else _cache_get(_ITEMS_CACHE, user_id, signature, content_hash)
             if cached is not None:
                 return _cache_value(cached, "items", with_errors)
 
@@ -263,13 +258,15 @@ def _load_items(user_id="default", force=False, with_errors=False):
 
         refreshed_signature = _prompt_file_signature(data_dir)
         refreshed_content_hash = _prompt_file_content_hash(data_dir)
+        value = {"items": items, "errors": errors}
+        entry = _cache_entry(user_id, refreshed_signature, refreshed_content_hash, value)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
             if signature != refreshed_signature or content_hash != refreshed_content_hash:
                 continue
-            value = {"items": items, "errors": errors}
-            return _cache_value(_cache_set(cache, refreshed_signature, refreshed_content_hash, value), "items", with_errors)
+            _ITEMS_CACHE[str(user_id or "default")] = entry
+        return _cache_value(value, "items", with_errors)
 
 
 def _folder_component(value, field):
@@ -559,7 +556,7 @@ def _load_saved_prompts(user_id="default", force=False, with_errors=False):
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
-            cached = None if force else _cache_get(cache, signature, content_hash)
+            cached = None if force else _cache_get(_SAVED_PROMPTS_CACHE, user_id, signature, content_hash)
             if cached is not None:
                 return _cache_value(cached, "saved_prompts", with_errors)
 
@@ -574,13 +571,15 @@ def _load_saved_prompts(user_id="default", force=False, with_errors=False):
 
         refreshed_signature = _prompt_file_signature(saved_prompts_dir)
         refreshed_content_hash = _prompt_file_content_hash(saved_prompts_dir)
+        value = {"saved_prompts": saved, "errors": errors}
+        entry = _cache_entry(user_id, refreshed_signature, refreshed_content_hash, value)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
             if signature != refreshed_signature or content_hash != refreshed_content_hash:
                 continue
-            value = {"saved_prompts": saved, "errors": errors}
-            return _cache_value(_cache_set(cache, refreshed_signature, refreshed_content_hash, value), "saved_prompts", with_errors)
+            _SAVED_PROMPTS_CACHE[str(user_id or "default")] = entry
+        return _cache_value(value, "saved_prompts", with_errors)
 
 
 def _save_prompt_payload(payload, user_id="default"):

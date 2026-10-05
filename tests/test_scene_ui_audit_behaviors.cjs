@@ -262,4 +262,31 @@ assert.deepEqual(
     "Scene Apply Model updates existing link slots after reordering inputs",
 );
 
+const layoutContext = vm.createContext({ Map, Set, Math, Number, String, JSON,
+    DEFAULT_SELECTED_JSON: "{}", sceneWorkflowLoadDepth: 0, activePopupContext: null,
+    sceneTitleSyncNodes: new Set(), sceneLoadedRefreshNodes: new Set(), sceneDownstreamRefreshSources: new Set(),
+    findWidget: (node, name) => node.widgets.find((widget) => widget.name === name),
+    activeStateWidgetName: () => "role0", readStateFromWidget: (node, name) => node.widgets.find((widget) => widget.name === name).value,
+    selectedListLayout: (_node, width, _unused, options) => ({ width, state: options.state }),
+    clearSceneFitHeightTimer() {}, clearTimeout() {}, invalidatePopupRequests() {}, closeSceneLoraDetails() {},
+    closeSceneExpandResources() {}, closeSceneLoraPicker() {}, popupContextReferencesNode() { return false; },
+    isSceneExpandNodeName() { return false; },
+});
+for (const name of ["selectedListLayoutCacheKey", "cachedSelectedListLayout", "installSceneNodeRemovalCleanup"])
+    vm.runInContext(functionSource(name), layoutContext);
+const layoutNode = { widgets: Array.from({ length: 12 }, (_, index) => ({ name: `role${index}`, value: `state${index}` })) };
+for (let index = 0; index < 12; index++) layoutContext.cachedSelectedListLayout(layoutNode, 300, { stateWidgetName: `role${index}` });
+assert.equal(layoutNode.sceneSelectedListLayoutCache.size, 12, "all actual widget roles retain their current layouts without a count cap");
+for (let revision = 0; revision < 1000; revision++) {
+    layoutNode.widgets[0].value = `revision${revision}`;
+    layoutContext.cachedSelectedListLayout(layoutNode, 300 + revision, { stateWidgetName: "role0" });
+}
+assert.equal(layoutNode.sceneSelectedListLayoutCache.size, 12, "state and resize changes replace their obsolete layout");
+const latestLayout = layoutContext.cachedSelectedListLayout(layoutNode, 1299, { stateWidgetName: "role0" });
+assert.equal(latestLayout.state, "revision999");
+assert.strictEqual(layoutContext.cachedSelectedListLayout(layoutNode, 1299, { stateWidgetName: "role0" }), latestLayout);
+layoutContext.installSceneNodeRemovalCleanup(layoutNode, "ScenePrompter");
+layoutNode.onRemoved();
+assert.equal(layoutNode.sceneSelectedListLayoutCache, null, "node removal releases its widget layouts");
+
 console.log("Scene Prompt UI audit behavior tests passed.");

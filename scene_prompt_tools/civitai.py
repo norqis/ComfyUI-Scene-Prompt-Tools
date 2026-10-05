@@ -6,7 +6,6 @@ import os
 import re
 import tempfile
 import threading
-from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,11 +13,14 @@ import aiohttp
 import folder_paths
 
 from .llm_service import ServiceError, candidate_identity, MODES
+from .lora_metadata import file_identity, file_signature
 
 SORTS = ("Most Downloaded", "Most Liked", "Most Collected", "Highest Rated")
 _DOWNLOAD_LOCK = None
-_HASH_CACHE = OrderedDict()
+_HASH_CACHE = {}
 _HASH_LOCK = threading.Lock()
+_HASH_CATALOG = {}
+_HASH_CATALOG_GENERATION = 0
 
 
 def compatible(base_model, mode):
@@ -93,22 +95,50 @@ def _filename(candidate):
 
 
 def _sha256(path):
-    stat = path.stat()
-    signature = (str(path), stat.st_size, stat.st_mtime_ns)
+    key = file_identity(path)
+    while True:
+        try:
+            signature = file_signature(path)
+        except OSError:
+            with _HASH_LOCK:
+                _HASH_CACHE.pop(key, None)
+            raise
+        with _HASH_LOCK:
+            generation = _HASH_CATALOG_GENERATION
+            cached = _HASH_CACHE.get(key)
+            if cached is not None and cached[0] != signature:
+                _HASH_CACHE.pop(key)
+                cached = None
+        if cached is not None:
+            value = cached[1]
+        else:
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            value = digest.hexdigest()
+        with _HASH_LOCK:
+            try:
+                current_signature = file_signature(path)
+            except OSError:
+                _HASH_CACHE.pop(key, None)
+                raise
+            if current_signature != signature:
+                continue
+            if generation == _HASH_CATALOG_GENERATION or _HASH_CATALOG.get(key) == signature:
+                _HASH_CACHE[key] = (signature, value)
+        return value
+
+
+def reconcile_lora_hashes(identities):
+    """Drop removed/replaced files using an inventory the picker already read."""
+    global _HASH_CATALOG, _HASH_CATALOG_GENERATION
     with _HASH_LOCK:
-        if signature in _HASH_CACHE:
-            _HASH_CACHE.move_to_end(signature)
-            return _HASH_CACHE[signature]
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    value = digest.hexdigest()
-    with _HASH_LOCK:
-        _HASH_CACHE[signature] = value
-        while len(_HASH_CACHE) > 128:
-            _HASH_CACHE.popitem(last=False)
-    return value
+        _HASH_CATALOG = identities
+        _HASH_CATALOG_GENERATION += 1
+        for key, entry in list(_HASH_CACHE.items()):
+            if identities.get(key) != entry[0]:
+                _HASH_CACHE.pop(key)
 
 
 def _manifest(root):

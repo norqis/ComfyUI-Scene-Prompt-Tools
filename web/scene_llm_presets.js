@@ -1,13 +1,53 @@
 // Instance-local Preset definitions. Preparation happens on load/change, never in draw.
 const cache = new WeakMap();
 const contexts = new WeakMap();
-const fullSources = new Map();
+const operations = new WeakMap();
 const EMPTY = '{"version":1,"presets":{}}';
 const field = (node, name) => node?.widgets?.find((widget) => widget.name === name);
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const pathJoin = (path, id) => path === "." ? String(id) : `${path}/${id}`;
 const sharedEntriesCurrent = (prepared, definitions) => [...prepared.sharedEntries]
     .every(([id, definition]) => definitions.get(id) === definition);
+
+// Full bodies belong to one explicit action. The long-lived source list stays
+// compact, and a live Reference never retains this operation's detached graphs.
+export function createPresetOperation(sources, currentSources = () => sources) {
+    const initialSources = new Map(sources), definitions = new Map(sources), preparedEntries = new Set();
+    let disposed = false;
+    const operation = {
+        definitions,
+        track(prepared) { preparedEntries.add(prepared); },
+        current(prepared) {
+            return !disposed && currentSources() === sources && [...prepared.sharedEntries.keys()]
+                .every((id) => sources.get(id) === initialSources.get(id));
+        },
+        dispose() {
+            if (disposed) return;
+            disposed = true;
+            const restore = new Set();
+            for (const prepared of preparedEntries) {
+                if (cache.get(prepared.reference) === prepared) {
+                    cache.delete(prepared.reference);
+                    restore.add(prepared.reference);
+                }
+                prepared.targets = null;
+                prepared.root = null;
+                prepared.occurrences.clear();
+                prepared.localPaths.clear();
+                prepared.embeddedPaths.clear();
+                prepared.sharedEntries.clear();
+                prepared.overrides = null;
+            }
+            preparedEntries.clear();
+            definitions.clear();
+            initialSources.clear();
+            operations.delete(definitions);
+            for (const reference of restore) preparePresetReference(reference, currentSources());
+        },
+    };
+    operations.set(definitions, operation);
+    return operation;
+}
 
 export function parsePresetOverrides(serialized) {
     if (!serialized) return {};
@@ -32,8 +72,9 @@ export function preparePresetReference(reference, definitions) {
         return previous;
     let overrides, error = null;
     try { overrides = parsePresetOverrides(serialized); } catch (failure) { overrides = {}; error = failure; }
-    const prepared = { serialized, presetId, definitions, overrides, occurrences: new Map(), localPaths: new Set(), embeddedPaths: new Set(), sharedEntries: new Map(), error,
+    const prepared = { reference, operation: operations.get(definitions), serialized, presetId, definitions, overrides, occurrences: new Map(), localPaths: new Set(), embeddedPaths: new Set(), sharedEntries: new Map(), error,
         revision: (previous?.revision || 0) + 1 };
+    prepared.operation?.track(prepared);
     function prepare(id, path, inherited, stack) {
         if (stack.has(id)) return null;
         const definition = inherited["."] || definitions.get(id);
@@ -119,29 +160,24 @@ function reachablePresetOccurrences(prepared) {
 
 // Called only by explicit generation/editor actions. Fetch a full ancestor before
 // inspecting its children: its full local child definitions own their customization.
-export async function hydratePresetReference(reference, definitions, loadFull) {
+export async function hydratePresetReference(reference, operation, loadFull) {
+    const { definitions } = operation;
     const initialValue = String(field(reference, "llm_presets_json")?.value || "");
     const initialId = String(field(reference, "preset_id")?.value || "");
     for (;;) {
         const prepared = preparePresetReference(reference, definitions);
+        if (!operation.current(prepared)) throw new Error("Preset source changed while loading.");
         if (prepared.error) throw prepared.error;
         if (!prepared.root) throw new Error("Preset definition is unavailable.");
         const missing = reachablePresetOccurrences(prepared).find((preset) => !fullDefinition(preset));
         if (!missing) return prepared;
         const context = contexts.get(missing);
         if (prepared.localPaths.has(context.path)) throw new Error("Preset customization is incomplete. Reload its full source before generating.");
-        const id = String(missing.metadata.preset_id), hash = String(missing.metadata.sha256 || "");
-        const key = `${id}:${hash}`;
-        let full = fullSources.get(key);
-        if (!full) {
-            full = await loadFull(id);
-            if (!fullDefinition(full) || String(full.metadata?.preset_id) !== id) throw new Error("Full Preset response is invalid.");
-            const actualKey = `${id}:${String(full.metadata.sha256 || "")}`;
-            fullSources.set(actualKey, full);
-            while (fullSources.size > 32) fullSources.delete(fullSources.keys().next().value);
-        }
+        const id = String(missing.metadata.preset_id);
+        const full = await loadFull(id);
+        if (!fullDefinition(full) || String(full.metadata?.preset_id) !== id) throw new Error("Full Preset response is invalid.");
         if (String(field(reference, "llm_presets_json")?.value || "") !== initialValue
-            || String(field(reference, "preset_id")?.value || "") !== initialId)
+            || String(field(reference, "preset_id")?.value || "") !== initialId || !operation.current(prepared))
             throw new Error("Preset changed while loading its source.");
         definitions.set(id, full);
     }
@@ -361,6 +397,7 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
                 current: () => reference.graph === ownerGraph && ownerGraph?.getNodeById?.(reference.id) === reference
                     && String(field(reference, "preset_id")?.value || "") === prepared.presetId
                     && String(field(reference, "llm_presets_json")?.value || "") === expected
+                    && (!prepared.operation || prepared.operation.current(prepared))
                     && sharedEntriesCurrent(prepared, definitions),
                 commit() {
                     const widget = field(reference, "llm_presets_json");

@@ -45,18 +45,12 @@ SAVE_METADATA_WORKFLOW = "ワークフロー全体"
 PRESET_ID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
 _PRESET_LOCK = threading.RLock()
 _PRESET_LIST_CACHE_LOCK = threading.RLock()
-_PRESET_LIST_CACHE = OrderedDict()
-_PRESET_LIST_CACHE_MAX_USERS = 64
+_PRESET_LIST_CACHE = {}
+_PRESET_LIST_CACHE_GENERATION = 0
 _PRESET_LIST_CACHE_TTL_SECONDS = 2.0
-_PRESET_FILE_CACHE_LOCK = threading.RLock()
-_PRESET_FILE_CACHE = OrderedDict()
-_PRESET_FILE_CACHE_MAX_ITEMS = 512
-_PRESET_FILE_CACHE_TTL_SECONDS = 2.0
 _RUN_SNAPSHOTS = OrderedDict()
 _CANCELLED_RUNS = OrderedDict()
 _RESOLVING_RUNS = {}
-_LOCAL_PRESET_CACHE = OrderedDict()
-_LOCAL_PRESET_CACHE_MAX_ITEMS = 64
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
 
 SAFE_NODE_CLASSES = {
@@ -193,32 +187,10 @@ def _preset_directory_signature(directory):
 
 
 def _invalidate_preset_list_cache(user_id="default"):
+    global _PRESET_LIST_CACHE_GENERATION
     with _PRESET_LIST_CACHE_LOCK:
+        _PRESET_LIST_CACHE_GENERATION += 1
         _PRESET_LIST_CACHE.pop(str(user_id or "default"), None)
-
-
-def _preset_file_signature(path):
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        raise ScenePresetNotFoundError(f"Presetが見つかりません: {path.stem}") from None
-    except OSError as exc:
-        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
-    return stat.st_mtime_ns, stat.st_size, getattr(stat, "st_ino", 0)
-
-
-def _preset_file_content_hash(path):
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except FileNotFoundError:
-        raise ScenePresetNotFoundError(f"Presetが見つかりません: {path.stem}") from None
-    except OSError as exc:
-        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
-
-
-def _invalidate_preset_file_cache(preset_id, user_id="default"):
-    with _PRESET_FILE_CACHE_LOCK:
-        _PRESET_FILE_CACHE.pop((str(user_id or "default"), str(preset_id)), None)
 
 
 def _compact_matrix_json(value):
@@ -245,9 +217,9 @@ def _compact_matrix_json(value):
     return json.dumps({"version": 1, "sets": compact}, ensure_ascii=False, separators=(",", ":"))
 
 
-def _compact_local_preset_json(serialized):
+def _compact_local_preset_json(serialized, local_memo=None):
     """Keep local occurrence schedules without transferring saved prompt text."""
-    definitions = parse_llm_preset_overrides(serialized)
+    definitions = parse_llm_preset_overrides(serialized, local_memo)
     if not definitions:
         return "{}"
     compact = {}
@@ -257,7 +229,7 @@ def _compact_local_preset_json(serialized):
             "schema_version": definition.get("schema_version"),
             "scene_compact": True,
             "metadata": copy.deepcopy(definition["metadata"]),
-            "api_graph": _compact_preset_list_graph(definition["api_graph"]),
+            "api_graph": _compact_preset_list_graph(definition["api_graph"], local_memo),
             "workflow": {"nodes": [
                 {key: node[key] for key in ("id", "mode") if key in node}
                 for node in workflow.get("nodes", []) if isinstance(node, dict)
@@ -266,7 +238,8 @@ def _compact_local_preset_json(serialized):
     return _canonical_json({"version": 1, "presets": compact})
 
 
-def _compact_preset_list_graph(api_graph):
+def _compact_preset_list_graph(api_graph, local_memo=None):
+    local_memo = {} if local_memo is None else local_memo
     nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
     if not isinstance(nodes, dict):
         return copy.deepcopy(api_graph)
@@ -287,7 +260,7 @@ def _compact_preset_list_graph(api_graph):
                 if name == "matrix_json":
                     inputs[name] = _compact_matrix_json(value)
                 elif name == "llm_presets_json":
-                    inputs[name] = _compact_local_preset_json(value)
+                    inputs[name] = _compact_local_preset_json(value, local_memo)
                 else:
                     inputs[name] = copy.deepcopy(value)
         compact_nodes[str(node_id)] = {"class_type": node.get("class_type"), "inputs": inputs}
@@ -638,6 +611,7 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
             "api_graph": {"output": nodes},
         }
     occurrences = {}
+    local_memo = {}
     for reference_node_id, preset_id, _node in _find_references(nodes):
         if not preset_id:
             label = _node_label(reference_node_id, _node)
@@ -648,7 +622,7 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
                 reference_node_id,
             )
         try:
-            occurrences.update(prepare_preset_occurrences({reference_node_id: _node}, resolved, user_id))
+            occurrences.update(prepare_preset_occurrences({reference_node_id: _node}, resolved, user_id, local_memo))
         except ScenePresetError as exc:
             raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
     resolved = {**resolved, "__occurrences__": occurrences}
@@ -707,34 +681,9 @@ def _validate_preset_payload(preset):
 
 
 def load_preset(preset_id, user_id="default"):
-    path = _preset_path(preset_id, user_id)
-    cache_key = (str(user_id or "default"), str(preset_id))
-    signature = _preset_file_signature(path)
-    with _PRESET_FILE_CACHE_LOCK:
-        cached = _PRESET_FILE_CACHE.get(cache_key)
-        if cached is not None and cached[0] == signature and cached[2] > time.monotonic():
-            _PRESET_FILE_CACHE.move_to_end(cache_key)
-            return copy.deepcopy(cached[3])
-    content_hash = _preset_file_content_hash(path)
-    with _PRESET_FILE_CACHE_LOCK:
-        cached = _PRESET_FILE_CACHE.get(cache_key)
-        if cached is not None and cached[0] == signature and cached[1] == content_hash:
-            cached = (cached[0], cached[1], time.monotonic() + _PRESET_FILE_CACHE_TTL_SECONDS, cached[3])
-            _PRESET_FILE_CACHE[cache_key] = cached
-            _PRESET_FILE_CACHE.move_to_end(cache_key)
-            return copy.deepcopy(cached[3])
-    preset = _read_json(path)
+    """Return an owned definition; callers share it only within their operation."""
+    preset = _read_json(_preset_path(preset_id, user_id))
     _validate_preset_payload(preset)
-    with _PRESET_FILE_CACHE_LOCK:
-        _PRESET_FILE_CACHE[cache_key] = (
-            signature,
-            content_hash,
-            time.monotonic() + _PRESET_FILE_CACHE_TTL_SECONDS,
-            copy.deepcopy(preset),
-        )
-        _PRESET_FILE_CACHE.move_to_end(cache_key)
-        while len(_PRESET_FILE_CACHE) > _PRESET_FILE_CACHE_MAX_ITEMS:
-            _PRESET_FILE_CACHE.popitem(last=False)
     return preset
 
 
@@ -756,54 +705,51 @@ def save_preset(payload, user_id="default"):
     if isinstance(extra, dict):
         extra.pop("scene_preset_editor", None)
     api_graph = _api_graph_with_titles({"output": connected_nodes}, workflow)
-    with _PRESET_LOCK:
-        try:
-            _validate_workflow_nodes(workflow, api_graph["output"])
-            _validate_preset_graph(api_graph["output"])
-            _validate_preset_runtime(api_graph["output"], user_id, preset_id)
-        except ScenePresetResolutionError as exc:
-            raise ScenePresetResolutionError(f"Preset「{name}」: {exc}", exc.node_id) from exc
-        except ScenePresetError as exc:
-            raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
-
-        path = _preset_path(preset_id, user_id)
-        digest = _content_hash(api_graph, workflow)
-        saved = {
-            "schema_version": PRESET_SCHEMA_VERSION,
-            "metadata": {
-                "preset_id": preset_id,
-                "name": name,
-                "sha256": digest,
-            },
-            "workflow": copy.deepcopy(workflow),
-            "api_graph": copy.deepcopy(api_graph),
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix=f".{preset_id}.", suffix=".tmp", dir=path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(saved, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            _validate_preset_payload(_read_json(Path(temp_name)))
+    try:
+        _validate_workflow_nodes(workflow, api_graph["output"])
+        _validate_preset_graph(api_graph["output"])
+    except ScenePresetError as exc:
+        raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
+    path = _preset_path(preset_id, user_id)
+    # The connected workflow/API builders already own these objects. Keep the
+    # large hash, serialization and verification work outside the shared lock.
+    saved = {
+        "schema_version": PRESET_SCHEMA_VERSION,
+        "metadata": {"preset_id": preset_id, "name": name, "sha256": _content_hash(api_graph, workflow)},
+        "workflow": workflow,
+        "api_graph": api_graph,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{preset_id}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(saved, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _validate_preset_payload(_read_json(Path(temp_name)))
+        with _PRESET_LOCK:
+            try:
+                # Serialize the dependency check with publication, so two
+                # concurrent saves cannot create a reference cycle.
+                _validate_preset_runtime(api_graph["output"], user_id, preset_id)
+            except ScenePresetResolutionError as exc:
+                raise ScenePresetResolutionError(f"Preset「{name}」: {exc}", exc.node_id) from exc
+            except ScenePresetError as exc:
+                raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
             os.replace(temp_name, path)
             _invalidate_preset_list_cache(user_id)
-            _invalidate_preset_file_cache(preset_id, user_id)
-        finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
     return saved
 
 
-def parse_llm_preset_overrides(serialized="{}"):
-    """Prepare local definitions once per exact serialized widget value."""
+def parse_llm_preset_overrides(serialized="{}", local_memo=None):
+    """Parse once per operation-owned memo; retain no global JSON revisions."""
     serialized = str(serialized or "{}")
-    with _PRESET_LOCK:
-        cached = _LOCAL_PRESET_CACHE.get(serialized)
-        if cached is not None:
-            _LOCAL_PRESET_CACHE.move_to_end(serialized)
-            return cached
+    if local_memo is not None and serialized in local_memo:
+        return local_memo[serialized]
     try:
         payload = json.loads(serialized)
     except (ValueError, TypeError) as exc:
@@ -827,16 +773,15 @@ def parse_llm_preset_overrides(serialized="{}"):
         validation = _validate_preset_payload(preset)
         _validate_preset_input_values(_preset_nodes(preset))
         preset["_validation"] = validation
-    with _PRESET_LOCK:
-        _LOCAL_PRESET_CACHE[serialized] = definitions
-        while len(_LOCAL_PRESET_CACHE) > _LOCAL_PRESET_CACHE_MAX_ITEMS:
-            _LOCAL_PRESET_CACHE.popitem(last=False)
+    if local_memo is not None:
+        local_memo[serialized] = definitions
     return definitions
 
 
-def prepare_preset_occurrences(nodes, resolved=None, user_id="default"):
+def prepare_preset_occurrences(nodes, resolved=None, user_id="default", local_memo=None):
     """Resolve by reference path; inherited entries apply only to that subtree."""
     resolved = {} if resolved is None else resolved
+    local_memo = {} if local_memo is None else local_memo
     occurrences = {}
     pending = list(reversed([(node_id, preset_id, node, {}, ()) for node_id, preset_id, node in _find_references(nodes)]))
     while pending:
@@ -844,7 +789,7 @@ def prepare_preset_occurrences(nodes, resolved=None, user_id="default"):
         preset_id = _clean_preset_id(preset_id)
         if preset_id in ancestors:
             raise ScenePresetError(f"Preset参照が循環しています: {' -> '.join((*ancestors, preset_id))}")
-        overrides = {**inherited, **parse_llm_preset_overrides(_node_inputs(reference).get("llm_presets_json", "{}"))}
+        overrides = {**inherited, **parse_llm_preset_overrides(_node_inputs(reference).get("llm_presets_json", "{}"), local_memo)}
         preset = overrides.get(".")
         if preset is None:
             if preset_id not in resolved:
@@ -1294,8 +1239,10 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
         if existing:
             existing["last_access"] = time.monotonic()
             _RUN_SNAPSHOTS.move_to_end(cache_key)
-            return copy.deepcopy(existing["response"])
-        _RESOLVING_RUNS[cache_key] = _RESOLVING_RUNS.get(cache_key, 0) + 1
+        else:
+            _RESOLVING_RUNS[cache_key] = _RESOLVING_RUNS.get(cache_key, 0) + 1
+    if existing:
+        return copy.deepcopy(existing["response"])
 
     try:
         resolved = {}
@@ -1308,13 +1255,14 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
         api_reference_ids = {node_id for node_id, _preset_id, _node in references}
         references.extend(reference for reference in workflow_references if reference[0] not in api_reference_ids)
         occurrences = {}
+        local_memo = {}
         for reference_node_id, preset_id, node in references:
             if node.get("class_type") != "ScenePresetReference":
                 values = node.get("widgets_values", [])
                 node = {"class_type": "ScenePresetReference", "inputs": {"preset_id": preset_id,
                     "llm_presets_json": values[2] if len(values) > 2 else "{}"}}
             try:
-                occurrences.update(prepare_preset_occurrences({reference_node_id: node}, resolved, user_id))
+                occurrences.update(prepare_preset_occurrences({reference_node_id: node}, resolved, user_id, local_memo))
             except ScenePresetError as exc:
                 raise ScenePresetResolutionError(str(exc), reference_node_id) from exc
         evaluation_resolved = {**resolved, "__occurrences__": occurrences}
@@ -1345,22 +1293,23 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
              "sha256": preset["metadata"]["sha256"], "reference_path": path}
             for path, preset in occurrences.items() if preset is not resolved.get(preset["metadata"]["preset_id"])
         )
+        snapshot = copy.deepcopy({
+            "presets": resolved,
+            "occurrences": occurrences,
+            "has_local_overrides": any(preset is not resolved.get(preset["metadata"]["preset_id"]) for preset in occurrences.values()),
+            "response": response,
+        })
         with _PRESET_LOCK:
             _assert_run_not_cancelled(run_id, user_id)
             existing = _RUN_SNAPSHOTS.get(cache_key)
             if existing:
                 existing["last_access"] = time.monotonic()
                 _RUN_SNAPSHOTS.move_to_end(cache_key)
-                return copy.deepcopy(existing["response"])
-            _RUN_SNAPSHOTS[cache_key] = {
-                "presets": resolved,
-                "occurrences": copy.deepcopy(occurrences),
-                "has_local_overrides": any(preset is not resolved.get(preset["metadata"]["preset_id"]) for preset in occurrences.values()),
-                "response": copy.deepcopy(response),
-                "last_access": time.monotonic(),
-            }
+            else:
+                snapshot["last_access"] = time.monotonic()
+                _RUN_SNAPSHOTS[cache_key] = snapshot
             _purge_run_snapshots()
-            return response
+        return copy.deepcopy(existing["response"]) if existing else response
     finally:
         with _PRESET_LOCK:
             remaining = _RESOLVING_RUNS.get(cache_key, 0) - 1
@@ -1435,34 +1384,36 @@ def list_presets(user_id="default"):
     directory = preset_directory(user_id)
     user_key = str(user_id or "default")
     while True:
+        with _PRESET_LIST_CACHE_LOCK:
+            generation = _PRESET_LIST_CACHE_GENERATION
+            now = time.monotonic()
+            for key, entry in list(_PRESET_LIST_CACHE.items()):
+                if key != user_key and entry["expires"] <= now:
+                    _PRESET_LIST_CACHE.pop(key)
         signature = _preset_directory_signature(directory)
         with _PRESET_LIST_CACHE_LOCK:
+            if generation != _PRESET_LIST_CACHE_GENERATION:
+                continue
             cached = _PRESET_LIST_CACHE.get(user_key)
-            if cached and cached.get("signature") == signature and cached.get("expires", 0.0) > time.monotonic():
-                _PRESET_LIST_CACHE.move_to_end(user_key)
-                return copy.deepcopy(cached["value"])
+            valid = cached and cached.get("signature") == signature and cached.get("expires", 0.0) > time.monotonic()
+        if valid:
+            return copy.deepcopy(cached["value"])
 
         presets = []
         errors = []
-        next_files = {}
+        local_memo = {}
         for filename, mtime_ns, size in signature:
-            file_signature = (mtime_ns, size)
             path = directory / filename
             try:
                 preset = load_preset(path.stem, user_id)
                 entry = {
                     "metadata": copy.deepcopy(preset["metadata"]),
-                    "api_graph": _compact_preset_list_graph(preset["api_graph"]),
+                    "api_graph": _compact_preset_list_graph(preset["api_graph"], local_memo),
                 }
                 error = None
             except ScenePresetError as exc:
                 entry = None
                 error = {"preset_id": path.stem, "error": str(exc)}
-            next_files[filename] = {
-                "signature": file_signature,
-                "entry": copy.deepcopy(entry),
-                "error": copy.deepcopy(error),
-            }
             if entry is not None:
                 presets.append(entry)
             if error is not None:
@@ -1471,16 +1422,15 @@ def list_presets(user_id="default"):
         if signature != _preset_directory_signature(directory):
             continue
         value = {"presets": presets, "errors": errors}
+        entry = {
+            "signature": signature,
+            "expires": time.monotonic() + _PRESET_LIST_CACHE_TTL_SECONDS,
+            "value": copy.deepcopy(value),
+        }
         with _PRESET_LIST_CACHE_LOCK:
-            _PRESET_LIST_CACHE[user_key] = {
-                "signature": signature,
-                "expires": time.monotonic() + _PRESET_LIST_CACHE_TTL_SECONDS,
-                "files": next_files,
-                "value": copy.deepcopy(value),
-            }
-            _PRESET_LIST_CACHE.move_to_end(user_key)
-            while len(_PRESET_LIST_CACHE) > _PRESET_LIST_CACHE_MAX_USERS:
-                _PRESET_LIST_CACHE.popitem(last=False)
+            if generation != _PRESET_LIST_CACHE_GENERATION:
+                continue
+            _PRESET_LIST_CACHE[user_key] = entry
         return value
 
 

@@ -1,7 +1,6 @@
 """Read the resources connected to an Expand without evaluating its scene plan."""
 
 import hashlib
-import os
 import threading
 from collections import OrderedDict
 
@@ -9,6 +8,7 @@ import folder_paths
 from comfy_execution.graph_utils import is_link
 
 from .nodes import MODEL_MODE_ILLUSTRIOUS, _normalize_model_mode
+from .lora_metadata import file_identity, file_signature
 from .presets import (
     ScenePresetError,
     _node_inputs,
@@ -20,7 +20,8 @@ from .presets import (
 )
 
 
-_MODEL_HASH_CACHE = OrderedDict()
+_MODEL_HASH_CACHE = {}
+_MODEL_HASH_SELECTIONS = {}
 _MODEL_HASH_LOCK = threading.Lock()
 _MODEL_FOLDERS = {"checkpoint": "checkpoints", "diffusion_model": "diffusion_models"}
 _VALUE_TYPES = {"PrimitiveFloat": float, "PrimitiveInt": int, "PrimitiveString": str}
@@ -171,29 +172,69 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
 
 
 def read_model_hash(kind, name):
-    """Hash only an explicitly selected base model, with bounded memory use."""
+    """Stream an explicitly selected file; keep only its current revision."""
     folder = _MODEL_FOLDERS.get(kind)
-    if folder is None or not name or name not in folder_paths.get_filename_list(folder):
+    if folder is None or not name:
         raise ValueError("Select an available model.")
-    path = folder_paths.get_full_path(folder, name)
-    if not path:
-        raise FileNotFoundError("Selected model was not found.")
-    stat = os.stat(path)
-    key = (kind, name, path, stat.st_size, stat.st_mtime_ns)
-    with _MODEL_HASH_LOCK:
-        cached = _MODEL_HASH_CACHE.get(key)
+    while True:
+        names = set(folder_paths.get_filename_list(folder))
+        with _MODEL_HASH_LOCK:
+            for selection in list(_MODEL_HASH_SELECTIONS):
+                if selection[0] == folder and selection[1] not in names:
+                    _MODEL_HASH_SELECTIONS.pop(selection)
+            active = set(_MODEL_HASH_SELECTIONS.values())
+            for key in list(_MODEL_HASH_CACHE):
+                if key not in active:
+                    _MODEL_HASH_CACHE.pop(key)
+        if name not in names:
+            raise ValueError("Select an available model.")
+        path = folder_paths.get_full_path(folder, name)
+        if not path:
+            raise FileNotFoundError("Selected model was not found.")
+        key = file_identity(path)
+        selection = (folder, name)
+        try:
+            signature = file_signature(path)
+        except OSError:
+            with _MODEL_HASH_LOCK:
+                _MODEL_HASH_SELECTIONS.pop(selection, None)
+                _MODEL_HASH_CACHE.pop(key, None)
+            raise
+        with _MODEL_HASH_LOCK:
+            previous = _MODEL_HASH_SELECTIONS.get(selection)
+            _MODEL_HASH_SELECTIONS[selection] = key
+            if previous != key and previous not in _MODEL_HASH_SELECTIONS.values():
+                _MODEL_HASH_CACHE.pop(previous, None)
+            cached = _MODEL_HASH_CACHE.get(key)
+            if cached is not None and cached[0] != signature:
+                _MODEL_HASH_CACHE.pop(key)
+                cached = None
         if cached is not None:
-            _MODEL_HASH_CACHE.move_to_end(key)
-            return dict(cached)
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    result = {"kind": kind, "name": name, "sha256": digest.hexdigest(),
-              "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-    with _MODEL_HASH_LOCK:
-        _MODEL_HASH_CACHE[key] = result
-        _MODEL_HASH_CACHE.move_to_end(key)
-        while len(_MODEL_HASH_CACHE) > 32:
-            _MODEL_HASH_CACHE.popitem(last=False)
-    return dict(result)
+            result = cached[1]
+        else:
+            digest = hashlib.sha256()
+            with open(path, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            result = {"sha256": digest.hexdigest(),
+                      "size": signature[0], "mtime_ns": signature[1]}
+        current_names = folder_paths.get_filename_list(folder)
+        if name not in current_names:
+            with _MODEL_HASH_LOCK:
+                _MODEL_HASH_SELECTIONS.pop(selection, None)
+                if key not in _MODEL_HASH_SELECTIONS.values():
+                    _MODEL_HASH_CACHE.pop(key, None)
+            raise ValueError("Select an available model.")
+        current_path = folder_paths.get_full_path(folder, name)
+        if not current_path or file_identity(current_path) != key:
+            continue
+        with _MODEL_HASH_LOCK:
+            try:
+                current_signature = file_signature(current_path)
+            except OSError:
+                _MODEL_HASH_CACHE.pop(key, None)
+                raise
+            if current_signature != signature or _MODEL_HASH_SELECTIONS.get(selection) != key:
+                continue
+            _MODEL_HASH_CACHE[key] = (signature, result)
+        return {**result, "kind": kind, "name": name}

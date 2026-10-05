@@ -1812,16 +1812,13 @@ def _cached_run_parts(base_dir, run_dir, prompt=None, unique_id=None):
         prompt_key = hashlib.sha256(
             json.dumps(prompt, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
         ).hexdigest()
-    key = (str(unique_id or ""), prompt_key, os.path.abspath(base_dir))
+    key = (str(unique_id or ""), os.path.abspath(base_dir))
     cached = _RUN_DIR_CACHE.get(key)
-    if cached:
-        return cached
+    if cached and cached[0] == prompt_key:
+        return cached[1]
 
     parts = _resolve_run_dir("auto")
-    _RUN_DIR_CACHE[key] = parts
-    if len(_RUN_DIR_CACHE) > 256:
-        for expired_key in list(_RUN_DIR_CACHE)[:128]:
-            _RUN_DIR_CACHE.pop(expired_key, None)
+    _RUN_DIR_CACHE[key] = (prompt_key, parts)
     return parts
 
 
@@ -3053,7 +3050,8 @@ class SceneSaveImage:
         try:
             for image in images:
                 image_array = 255.0 * image.cpu().numpy()
-                img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
+                np.clip(image_array, 0, 255, out=image_array)
+                img = Image.fromarray(image_array.astype(np.uint8))
                 while True:
                     counter = _allocate_output_index(
                         run_root, extension, padding, filename_prefix, requested_index, counter_position,

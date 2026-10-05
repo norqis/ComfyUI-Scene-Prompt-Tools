@@ -4,15 +4,25 @@ import hashlib
 import json
 import os
 import struct
+import sys
 import threading
-from collections import OrderedDict
 
 import folder_paths
 
 
 MAX_HEADER_BYTES = 8 * 1024 * 1024
-_CACHE = OrderedDict()
+_CACHE = {}
 _CACHE_LOCK = threading.Lock()
+_CATALOG_GENERATION = 0
+
+
+def file_identity(path):
+    return os.path.normcase(os.path.realpath(path))
+
+
+def file_signature(path):
+    stat = os.stat(path)
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino
 
 
 def _trigger_phrases(metadata):
@@ -50,37 +60,62 @@ def _read_metadata(stream):
 
 def read_lora_info(name):
     """Resolve an actual ComfyUI LoRA selection, then read its header and hash."""
-    if not name or name not in folder_paths.get_filename_list("loras"):
-        raise ValueError("Select an available LoRA.")
-    path = folder_paths.get_full_path("loras", name)
-    if not path:
-        raise FileNotFoundError("Selected LoRA was not found.")
-    stat = os.stat(path)
-    key = (path, stat.st_size, stat.st_mtime_ns)
-    with _CACHE_LOCK:
-        cached = _CACHE.get(key)
+    while True:
+        if not name or name not in folder_paths.get_filename_list("loras"):
+            raise ValueError("Select an available LoRA.")
+        path = folder_paths.get_full_path("loras", name)
+        if not path:
+            raise FileNotFoundError("Selected LoRA was not found.")
+        key = file_identity(path)
+        try:
+            signature = file_signature(path)
+        except OSError:
+            with _CACHE_LOCK:
+                _CACHE.pop(key, None)
+            raise
+        with _CACHE_LOCK:
+            generation = _CATALOG_GENERATION
+            cached = _CACHE.get(key)
+            if cached is not None and cached[0] != signature:
+                _CACHE.pop(key)
+                cached = None
         if cached is not None:
-            _CACHE.move_to_end(key)
-            return dict(cached)
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        phrases = _trigger_phrases(_read_metadata(stream)) if name.lower().endswith(".safetensors") else []
-        stream.seek(0)
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    result = {"name": name, "sha256": digest.hexdigest(), "trigger_phrases": phrases,
-              "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-    with _CACHE_LOCK:
-        _CACHE[key] = result
-        _CACHE.move_to_end(key)
-        while len(_CACHE) > 32:
-            _CACHE.popitem(last=False)
-    return dict(result)
+            result = cached[1]
+        else:
+            digest = hashlib.sha256()
+            with open(path, "rb") as stream:
+                phrases = _trigger_phrases(_read_metadata(stream)) if name.lower().endswith(".safetensors") else []
+                stream.seek(0)
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            result = {"sha256": digest.hexdigest(), "trigger_phrases": phrases,
+                      "size": signature[0], "mtime_ns": signature[1]}
+        # A catalog refresh or file replacement during hashing cannot publish
+        # an obsolete result, including the cached-result presentation path.
+        if name not in folder_paths.get_filename_list("loras"):
+            with _CACHE_LOCK:
+                _CACHE.pop(key, None)
+            raise ValueError("Select an available LoRA.")
+        current_path = folder_paths.get_full_path("loras", name)
+        if not current_path or file_identity(current_path) != key:
+            continue
+        with _CACHE_LOCK:
+            try:
+                current_signature = file_signature(current_path)
+            except OSError:
+                _CACHE.pop(key, None)
+                raise
+            if generation != _CATALOG_GENERATION or current_signature != signature:
+                continue
+            _CACHE[key] = (signature, result)
+        return {**result, "name": name, "trigger_phrases": list(result["trigger_phrases"])}
 
 
 def list_loras():
     """List selectable LoRA paths and file identity without opening model files."""
+    global _CATALOG_GENERATION
     result = []
+    identities = {}
     for name in folder_paths.get_filename_list("loras"):
         item = {"path": name, "size": None, "mtime_ns": None}
         path = folder_paths.get_full_path("loras", name)
@@ -88,7 +123,19 @@ def list_loras():
             try:
                 stat = os.stat(path)
                 item["size"], item["mtime_ns"] = stat.st_size, stat.st_mtime_ns
+                identities[file_identity(path)] = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino)
             except OSError:
                 pass
         result.append(item)
+    with _CACHE_LOCK:
+        _CATALOG_GENERATION += 1
+        for key, entry in list(_CACHE.items()):
+            if identities.get(key) != entry[0]:
+                _CACHE.pop(key)
+    # Reuse the already-read inventory; do not import the acquisition service
+    # solely for a local picker or scan the catalog during individual hashes.
+    acquisition = sys.modules.get(__package__ + ".civitai")
+    if acquisition is not None:
+        from .civitai import reconcile_lora_hashes
+        reconcile_lora_hashes(identities)
     return result

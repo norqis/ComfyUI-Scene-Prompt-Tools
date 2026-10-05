@@ -119,12 +119,13 @@ class LLMNodePresetTests(unittest.TestCase):
             plan = self.presets._scene_node_value(outer, node_id, evaluation, set())
             self.assertEqual(plan['stats']['total_images'], expected_count)
 
-    def test_local_cache_reuses_validation_rejects_unsafe_graph_and_identity(self):
+    def test_operation_memo_reuses_validation_rejects_unsafe_graph_and_identity(self):
         shared = self.save('shared', basic_nodes())
         serialized = json.dumps({'version': 1, 'presets': {'.': self.definition(shared, 'local')}})
-        first = self.presets.parse_llm_preset_overrides(serialized)
+        local_memo = {}
+        first = self.presets.parse_llm_preset_overrides(serialized, local_memo)
         with mock.patch.object(self.presets, '_validate_preset_payload', side_effect=AssertionError('revalidated')):
-            self.assertIs(self.presets.parse_llm_preset_overrides(serialized), first)
+            self.assertIs(self.presets.parse_llm_preset_overrides(serialized, local_memo), first)
         unsafe = copy.deepcopy(shared)
         unsafe['api_graph']['output']['2']['class_type'] = 'KSampler'
         with self.assertRaises(self.presets.ScenePresetError):

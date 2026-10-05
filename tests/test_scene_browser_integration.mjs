@@ -53,6 +53,7 @@ window.__sceneDesktopNotificationMock = {
 };
 const graph = {
   _nodes: [],
+  getNodeById(id) { return this._nodes.find((node) => String(node.id) === String(id)); },
   extra: { original_tab: true },
   serialize() { return { version: 1, nodes: [], extra: structuredClone(this.extra) }; },
 };
@@ -1858,9 +1859,11 @@ try {
         loads: window.__scenePromptLoadedGraphs,
         originalGraph: window.app.graph.extra,
         loadsRequested: window.__scenePromptCalls.filter((call) => call.url.includes("/scene_presets/load")).length,
+        error: document.querySelector(".pc-popup")?.textContent,
+        liveNodes: window.app.graph._nodes.map((node) => ({ id: node.id, type: node.type })),
     }));
     assert.equal(editor.loadsRequested, 1);
-    assert.equal(editor.loads.length, 1);
+    assert.equal(editor.loads.length, 1, JSON.stringify(editor));
     assert.deepEqual(editor.loads[0].args, [true, true, "Preset - Browser Preset"]);
     assert.notEqual(editor.loads[0].workflow.id, "stored-workflow");
     assert.match(editor.loads[0].workflow.id, /^[0-9a-f-]{36}$/i);

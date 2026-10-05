@@ -3,7 +3,7 @@ import { api } from "../../scripts/api.js";
 import { ChangeTracker } from "../../scripts/changeTracker.js";
 import { createLLMController, LLM_TYPE } from "./scene_prompt_llm.js";
 import { openCivitaiSearch, openLLMSettings, showAPIError } from "./scene_prompt_civitai.js";
-import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference } from "./scene_llm_presets.js";
+import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference, createPresetOperation } from "./scene_llm_presets.js";
 import {
     DEFAULT_SELECTED_JSON,
     MATRIX_DEFAULT_JSON,
@@ -4478,21 +4478,18 @@ function cachedSelectedListLayout(node, width, options = {}) {
         return selectedListLayout(node, width, null, options);
     }
     const cacheKey = selectedListLayoutCacheKey(node, width, options);
-    const cache = node.sceneSelectedListLayoutCache;
-    if (cache?.has(cacheKey)) {
-        return cache.get(cacheKey);
-    }
     const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
+    const cache = node.sceneSelectedListLayoutCache;
+    if (cache?.get(stateWidgetName)?.cacheKey === cacheKey) {
+        return cache.get(stateWidgetName).layout;
+    }
     const layout = selectedListLayout(node, width, null, {
         ...options,
         stateWidgetName,
         state: readStateFromWidget(node, stateWidgetName),
     });
     const nextCache = cache || new Map();
-    nextCache.set(cacheKey, layout);
-    while (nextCache.size > 8) {
-        nextCache.delete(nextCache.keys().next().value);
-    }
+    nextCache.set(stateWidgetName, { cacheKey, layout });
     node.sceneSelectedListLayoutCache = nextCache;
     return layout;
 }
@@ -4888,8 +4885,11 @@ const sceneLLMController = createLLMController({
     app, api,
     beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
     createNode: (type) => globalThis.LiteGraph.createNode(type),
-    refresh: (node) => refreshDownstreamSceneNodes(node),
-    presetTargets: (node) => collectPresetLLMTargets(node, scenePresetDisplayGraphs),
+    refresh: (node) => {
+        if (isScenePresetReferenceNode(node)) refreshScenePresetReference(node);
+        refreshDownstreamSceneNodes(node);
+    },
+    presetTargets: (node, operation) => collectPresetLLMTargets(node, operation?.definitions || scenePresetDisplayGraphs),
     presetHasTargets: (node) => presetReferenceHasLLM(node),
     prepareTargets: prepareSceneLLMPresetSources,
     onError: showAPIError,
@@ -5092,10 +5092,12 @@ function injectSceneLoraWord(node, value) {
 }
 
 const SCENE_LORA_CACHE_KEY = "scene_prompt_lora_names_v1";
-const SCENE_LORA_CACHE_LIMIT = 120;
 let sceneLoraCatalog = [];
 let sceneLoraCatalogRequest = null;
+let sceneLoraCatalogLoaded = false;
+let sceneLoraTitlesLoaded = false;
 const sceneLoraSessionCache = new Map();
+const sceneLoraFileIdentities = new Map();
 const sceneLoraResolutions = new Map();
 
 function loadSceneLoraCatalog() {
@@ -5105,6 +5107,7 @@ function loadSceneLoraCatalog() {
         const data = await readApiJson(response, "LoRA一覧を取得できませんでした");
         if (!response.ok) throw new Error(data.error || "LoRA一覧を取得できませんでした。");
         sceneLoraCatalog = Array.isArray(data) ? data : [];
+        reconcileSceneLoraTitles(sceneLoraCatalog);
         return sceneLoraCatalog;
     })();
     sceneLoraCatalogRequest = request;
@@ -5113,7 +5116,7 @@ function loadSceneLoraCatalog() {
 }
 
 function sceneLoraCacheKey(item) {
-    return `${item.path || item.name || ""}\u0000${item.size ?? ""}\u0000${item.mtime_ns ?? ""}`;
+    return `${sceneLoraPathIdentity(item.path || item.name)}\u0000${item.size ?? ""}\u0000${item.mtime_ns ?? ""}`;
 }
 
 function readSceneLoraCache() {
@@ -5127,28 +5130,73 @@ function readSceneLoraCache() {
 
 function cachedSceneLora(item) {
     if (item.size == null || item.mtime_ns == null) return null;
+    loadSceneLoraTitles();
+    const path = sceneLoraPathIdentity(item.path || item.name);
     const key = sceneLoraCacheKey(item);
-    if (sceneLoraSessionCache.has(key)) return sceneLoraSessionCache.get(key);
-    const cached = readSceneLoraCache().find((entry) => entry.key === key) || null;
-    if (cached?.title || cached?.status === "not_found") sceneLoraSessionCache.set(key, cached);
-    return cached?.title || cached?.status === "not_found" ? cached : null;
+    const cached = sceneLoraSessionCache.get(path);
+    const current = sceneLoraFileIdentities.get(path);
+    return cached?.key === key && (!current || current.key === key) ? cached : null;
+}
+
+function loadSceneLoraTitles() {
+    if (sceneLoraTitlesLoaded) return;
+    sceneLoraTitlesLoaded = true;
+    for (const entry of readSceneLoraCache()) {
+        const path = sceneLoraPathIdentity(entry.path || String(entry.key || "").split("\u0000")[0]);
+        const key = [path, ...String(entry.key || "").split("\u0000").slice(1)].join("\u0000");
+        if (path && !sceneLoraSessionCache.has(path)) sceneLoraSessionCache.set(path, { ...entry, path, key });
+    }
+}
+
+function persistSceneLoraTitles() {
+    try { localStorage.setItem(SCENE_LORA_CACHE_KEY, JSON.stringify([...sceneLoraSessionCache.values()])); } catch (_error) {}
+}
+
+function reconcileSceneLoraTitles(catalog) {
+    loadSceneLoraTitles();
+    const identities = new Map(catalog.map((item) => {
+        const path = sceneLoraPathIdentity(item.path), key = sceneLoraCacheKey(item), previous = sceneLoraFileIdentities.get(path);
+        return [path, previous?.key === key ? previous : { key }];
+    }));
+    sceneLoraCatalogLoaded = true;
+    sceneLoraFileIdentities.clear();
+    for (const [path, identity] of identities) sceneLoraFileIdentities.set(path, identity);
+    for (const [path, entry] of sceneLoraSessionCache) {
+        if (identities.get(path)?.key !== entry.key) sceneLoraSessionCache.delete(path);
+    }
+    for (const key of sceneLoraResolutions.keys()) {
+        if (identities.get(key.split("\u0000")[0])?.key !== key) sceneLoraResolutions.delete(key);
+    }
+    persistSceneLoraTitles();
+}
+
+function observeSceneLoraFile(item) {
+    const path = sceneLoraPathIdentity(item.path), key = sceneLoraCacheKey(item);
+    const previous = sceneLoraFileIdentities.get(path);
+    if (previous?.key === key) return previous;
+    const identity = { key };
+    sceneLoraFileIdentities.set(path, identity);
+    if (sceneLoraSessionCache.has(path) && sceneLoraSessionCache.get(path).key !== key) {
+        sceneLoraSessionCache.delete(path);
+        persistSceneLoraTitles();
+    }
+    const catalogItem = sceneLoraCatalog.find((entry) => sceneLoraPathIdentity(entry.path) === path);
+    if (catalogItem) Object.assign(catalogItem, { size: item.size, mtime_ns: item.mtime_ns });
+    return identity;
 }
 
 function saveSceneLoraCache(item, local, version, status) {
     const key = sceneLoraCacheKey(item);
+    loadSceneLoraTitles();
     const title = String(version?.model?.name || "").trim();
     const entry = {
-        key, title, status, versionName: String(version?.name || "").trim(),
+        key, path: sceneLoraPathIdentity(item.path || item.name), title, status, versionName: String(version?.name || "").trim(),
         modelId: version?.modelId, versionId: version?.id,
         trainedWords: Array.isArray(version?.trainedWords) ? version.trainedWords : [],
         localWords: Array.isArray(local?.trigger_phrases) ? local.trigger_phrases : [],
     };
-    sceneLoraSessionCache.set(key, entry);
-    if (item.size != null && item.mtime_ns != null) {
-        const entries = readSceneLoraCache().filter((existing) => existing.key !== key);
-        entries.unshift(entry);
-        try { localStorage.setItem(SCENE_LORA_CACHE_KEY, JSON.stringify(entries.slice(0, SCENE_LORA_CACHE_LIMIT))); } catch (_error) {}
-    }
+    sceneLoraSessionCache.set(entry.path, entry);
+    persistSceneLoraTitles();
     return entry;
 }
 
@@ -5165,22 +5213,44 @@ function sceneLoraDisplay(item) {
     return { title: cached?.title || (cached?.status === "not_found" ? "Civitaiに登録なし" : "Civitai名を確認中…") };
 }
 
+function currentSceneLoraResult(item, result) {
+    const identity = sceneLoraFileIdentities.get(sceneLoraPathIdentity(item.path));
+    return identity ? identity.key === result.key : !sceneLoraCatalogLoaded;
+}
+
 async function resolveSceneLora(item) {
     const cached = cachedSceneLora(item);
     if (cached) return cached;
     const key = sceneLoraCacheKey(item);
     if (sceneLoraResolutions.has(key)) return sceneLoraResolutions.get(key);
     const resolution = resolveSceneLoraUncached(item);
+    const path = sceneLoraPathIdentity(item.path), requestedIdentity = sceneLoraFileIdentities.get(path);
     sceneLoraResolutions.set(key, resolution);
     try { return await resolution; }
-    finally { if (sceneLoraResolutions.get(key) === resolution) sceneLoraResolutions.delete(key); }
+    finally {
+        if (sceneLoraResolutions.get(key) === resolution) sceneLoraResolutions.delete(key);
+        if ((item.size == null || item.mtime_ns == null) && requestedIdentity?.key === key
+            && sceneLoraFileIdentities.get(path) === requestedIdentity && !sceneLoraSessionCache.has(path))
+            sceneLoraFileIdentities.delete(path);
+    }
 }
 
 async function resolveSceneLoraUncached(item) {
+    const path = sceneLoraPathIdentity(item.path);
+    let expected = sceneLoraFileIdentities.get(path);
+    if (!expected) {
+        if (sceneLoraCatalogLoaded && item.size != null && item.mtime_ns != null)
+            throw new Error("LoRAファイルが更新されました。再表示してください。");
+        expected = { key: sceneLoraCacheKey(item) };
+        sceneLoraFileIdentities.set(path, expected);
+    }
     const response = await api.fetchApi(`/scene_prompt/loras/info?name=${encodeURIComponent(item.path)}`);
     const local = await readApiJson(response, "LoRA情報を取得できませんでした");
     if (!response.ok) throw new Error(local.error || "LoRA情報を取得できませんでした。");
+    if (sceneLoraFileIdentities.get(path) !== expected)
+        throw new Error("LoRAファイルが更新されました。再表示してください。");
     const actual = { ...item, size: local.size ?? item.size, mtime_ns: local.mtime_ns ?? item.mtime_ns };
+    const identity = observeSceneLoraFile(actual);
     const current = cachedSceneLora(actual);
     if (current) return current;
     let version = null;
@@ -5194,6 +5264,7 @@ async function resolveSceneLoraUncached(item) {
         } else throw new Error(`Civitai HTTP ${civitai.status}`);
     }
     if (status === "unavailable") throw new Error("Civitai名を取得できませんでした。");
+    if (sceneLoraFileIdentities.get(path) !== identity) throw new Error("LoRAファイルが更新されました。再表示してください。");
     return saveSceneLoraCache(actual, local, version, status);
 }
 
@@ -5266,7 +5337,7 @@ async function openSceneLoraPicker(node) {
             try {
                 const result = await resolveSceneLora(item);
                 if (revision === generation && row.isConnected) {
-                    if (result.key !== sceneLoraCacheKey(item)) title.textContent = "ファイルが更新されました。再表示してください";
+                    if (result.key !== sceneLoraCacheKey(item) || !currentSceneLoraResult(item, result)) title.textContent = "ファイルが更新されました。再表示してください";
                     else {
                         title.textContent = result.title || "Civitaiに登録なし";
                     }
@@ -5412,12 +5483,16 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
     const selectedName = String(findWidget(node, "lora_name")?.value || "").trim();
     const selectedAtOpen = sceneLoraPathIdentity(selectedName);
     const item = previewItem || sceneLoraCatalogItem(selectedName);
+    let resultIdentity;
     const canInject = () => sceneLoraPathIdentity(item.path) === selectedAtOpen
-        && sceneLoraPathIdentity(findWidget(node, "lora_name")?.value) === selectedAtOpen;
+        && sceneLoraPathIdentity(findWidget(node, "lora_name")?.value) === selectedAtOpen
+        && (!resultIdentity || sceneLoraFileIdentities.get(sceneLoraPathIdentity(item.path)) === resultIdentity);
     try {
         if (!item.path) throw new Error("LoRAを選択してください。");
         const result = await resolveSceneLora(item);
         if (node.sceneLoraDetailsCleanup !== cleanup) return;
+        if (!currentSceneLoraResult(item, result)) throw new Error("LoRAファイルが更新されました。再表示してください。");
+        resultIdentity = sceneLoraFileIdentities.get(sceneLoraPathIdentity(item.path));
         if (!previewItem && !canInject()) {
             closeSceneLoraDetails(node);
             return;
@@ -5477,7 +5552,10 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
             content.append(row);
         }
     } catch (error) {
-        if (node.sceneLoraDetailsCleanup === cleanup) content.textContent = error.message;
+        if (node.sceneLoraDetailsCleanup === cleanup) {
+            if (!previewItem && !canInject()) closeSceneLoraDetails(node);
+            else content.textContent = error.message;
+        }
     }
 }
 
@@ -9592,6 +9670,7 @@ function acceptSceneBatchPrompt(run, result) {
             console.warn("[Scene Prompt] 実行コンテキストの開始に失敗しました。", error);
         });
     }
+    pruneSceneBatchTerminalEvents();
     const terminal = sceneBatchTerminalEvents.get(promptId);
     if (terminal) {
         sceneBatchTerminalEvents.delete(promptId);
@@ -9623,9 +9702,13 @@ function rememberSceneBatchTerminalEvent(type, detail) {
     if (!promptId) {
         return;
     }
-    sceneBatchTerminalEvents.set(promptId, { type, detail });
-    while (sceneBatchTerminalEvents.size > 32) {
-        sceneBatchTerminalEvents.delete(sceneBatchTerminalEvents.keys().next().value);
+    pruneSceneBatchTerminalEvents();
+    sceneBatchTerminalEvents.set(promptId, { type, detail, completedAt: Date.now() });
+}
+
+function pruneSceneBatchTerminalEvents(now = Date.now()) {
+    for (const [promptId, event] of sceneBatchTerminalEvents) {
+        if (now - event.completedAt >= SCENE_RUN_TERMINAL_RETENTION_MS) sceneBatchTerminalEvents.delete(promptId);
     }
 }
 
@@ -11702,7 +11785,8 @@ async function loadFullSceneLLMPreset(presetId) {
 }
 
 async function prepareSceneLLMPresetSources(root) {
-    const graph = root.graph || app.graph, definitions = scenePresetDisplayGraphs;
+    const graph = root.graph || app.graph, sources = scenePresetDisplayGraphs;
+    const operation = createPresetOperation(sources, () => scenePresetDisplayGraphs);
     const seen = new Set(), references = [];
     function visit(node) {
         if (!node || seen.has(node) || Number(node.mode) === 2) return;
@@ -11715,10 +11799,12 @@ async function prepareSceneLLMPresetSources(root) {
         if (isScenePresetReferenceNode(node) && Number(node.mode) !== 4 && presetReferenceHasLLM(node)) references.push(node);
     }
     visit(root);
-    for (const reference of references) {
-        await hydratePresetReference(reference, definitions, loadFullSceneLLMPreset);
-        if (scenePresetDisplayGraphs !== definitions) throw new Error("Preset一覧が更新されたため、もう一度生成してください。");
-        refreshScenePresetReference(reference, scenePresetList || []);
+    try {
+        for (const reference of references) await hydratePresetReference(reference, operation, loadFullSceneLLMPreset);
+        return operation;
+    } catch (error) {
+        operation.dispose();
+        throw error;
     }
 }
 
@@ -11734,22 +11820,35 @@ async function openScenePresetEditor(node) {
     node.scenePresetEditorLoading = true;
     const button = findSceneWidget(node, "scene_preset_edit");
     if (button) button.disabled = true;
+    let operation;
+    const initialState = String(findWidget(node, "llm_presets_json")?.value || "");
+    const ownerGraph = node.graph;
+    const editorCurrent = () => app.graph === ownerGraph && ownerGraph?.getNodeById(node.id) === node
+        && String(findWidget(node, "preset_id")?.value || "").trim() === presetId
+        && String(findWidget(node, "llm_presets_json")?.value || "") === initialState;
     try {
         if (typeof app.loadGraphData !== "function") {
             throw new Error("Preset編集に必要なComfyUI APIが見つかりません。");
         }
+        await loadScenePresetList(false);
+        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        operation = createPresetOperation(scenePresetDisplayGraphs, () => scenePresetDisplayGraphs);
         const preset = await loadFullSceneLLMPreset(presetId);
         if (!preset?.metadata?.preset_id || !preset?.workflow) {
             throw new Error("Presetの応答形式が不正です。");
         }
-        scenePresetDisplayGraphs.set(presetId, preset);
-        await hydratePresetReference(node, scenePresetDisplayGraphs, loadFullSceneLLMPreset);
-        const localPreset = presetEditorDefinition(node, scenePresetDisplayGraphs);
+        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        operation.definitions.set(presetId, preset);
+        await hydratePresetReference(node, operation, loadFullSceneLLMPreset);
+        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        const localPreset = presetEditorDefinition(node, operation.definitions);
         const workflow = presetEditorWorkflow(localPreset || preset);
+        operation.dispose();
         await app.loadGraphData(workflow, true, true, `Preset - ${preset.metadata.name || preset.metadata.preset_id}`);
     } catch (error) {
         showSceneBatchError("Presetを編集用ワークフローとして開けませんでした。", error);
     } finally {
+        operation?.dispose();
         node.scenePresetEditorLoading = false;
         if (button) button.disabled = false;
         node.setDirtyCanvas?.(true, true);
@@ -12315,6 +12414,7 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         clearTimeout(this.sceneRefreshTimer);
         this.sceneRefreshTimer = null;
         this.scenePendingRefreshOptions = null;
+        this.sceneSelectedListLayoutCache = null;
         invalidatePopupRequests(this);
         closeSceneLoraDetails(this);
         closeSceneExpandResources(this);

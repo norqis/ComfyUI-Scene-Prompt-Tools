@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity, hasLLMTargets } from "../web/scene_prompt_llm.js";
+import { createPresetOperation, preparePresetReference, hydratePresetReference, collectPresetLLMTargets, presetReferenceHasLLM } from "../web/scene_llm_presets.js";
 
 function fixture() {
     let next = 1, linkID = 1;
@@ -85,6 +86,85 @@ for (const change of ["output", "description", "tab", "delete", "connection"]) {
     assert.equal(graph.before, 0, "stale graph never enters transaction");
 }
 assert.equal(identity(candidate(1)), "1/11/21");
+for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"]) {
+    const { graph, node, create } = fixture(), app = { graph };
+    const target = node("ScenePromptLLM", "operation target"), expand = node("ScenePrompterExpand");
+    target.connect(0, expand, 0);
+    const contexts = [], calls = [];
+    let finish, retry;
+    const controller = createLLMController({ app, createNode: create,
+        prepareTargets: async () => { const context = { disposed: false, dispose() { this.disposed = true; } }; contexts.push(context); return context; },
+        presetTargets: () => [],
+        api: { async fetchApi(path) {
+            calls.push(path);
+            if (calls.length === 1 && ["stale-root", "stale-target"].includes(outcome)) await new Promise((done) => { finish = done; });
+            const failing = calls.length === 1 && ["error", "retry"].includes(outcome);
+            return { ok: !failing, json: async () => failing ? { error: "test failure" }
+                : { positive: "generated", negative: "", lora_queries: [], template_version: "scene-llm-v1" } };
+        } },
+        onError: (_error, _query, callback) => { retry = callback; },
+    });
+    const pending = controller.generate(expand);
+    if (["stale-root", "stale-target"].includes(outcome)) {
+        while (!finish) await new Promise((done) => setImmediate(done));
+        if (outcome === "stale-root") app.graph = {};
+        else field(target, "positive").value = "manual";
+        finish();
+    }
+    await pending;
+    assert.equal(contexts[0].disposed, true, `${outcome} always disposes prepared data`);
+    if (outcome === "retry") {
+        await retry();
+        assert.equal(contexts.length, 2);
+        assert.notStrictEqual(contexts[0], contexts[1], "retry never reuses disposed preparation");
+        assert(contexts.every((context) => context.disposed));
+        assert.equal(field(target, "positive").value, "generated");
+    }
+    assert.equal(controller.busy.has(expand), false);
+}
+{
+    const { graph, node, create } = fixture(), app = { graph };
+    const reference = node("ScenePresetReference"), expand = node("ScenePrompterExpand");
+    reference.widgets.push({ name: "preset_id", value: "retry-preset" }, { name: "llm_presets_json", value: "{}" });
+    reference.connect(0, expand, 0);
+    const output = {
+        1: { class_type: "ScenePromptLLM", inputs: { description: "room", positive: "", negative: "", model_mode: "Illustrious", generation_state_json: "{}" } },
+        2: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["1", 0] } },
+    };
+    const full = { metadata: { preset_id: "retry-preset", sha256: "retry" }, api_graph: { output }, workflow: { nodes: [
+        { id: 1, type: "ScenePromptLLM", inputs: [], outputs: [{ name: "scene_prompt", type: "SCENE_PROMPT" }] },
+        { id: 2, type: "ScenePresetOutput", inputs: [{ name: "scene_prompt", type: "SCENE_PROMPT" }], outputs: [] },
+    ], links: [] } };
+    const compact = { metadata: full.metadata, api_graph: { output: {
+        1: { class_type: "ScenePromptLLM", inputs: {}, has_llm_input: true }, 2: output[2],
+    } } };
+    const sources = new Map([["retry-preset", compact]]), preparations = [];
+    preparePresetReference(reference, sources);
+    let retry, calls = 0, settledAvailable = false;
+    const controller = createLLMController({ app, createNode: create,
+        presetHasTargets: presetReferenceHasLLM,
+        presetTargets: (reference, operation) => collectPresetLLMTargets(reference, operation.definitions),
+        prepareTargets: async () => {
+            const operation = createPresetOperation(sources); preparations.push(operation);
+            try { await hydratePresetReference(reference, operation, async () => full); return operation; }
+            catch (error) { operation.dispose(); throw error; }
+        },
+        api: { async fetchApi() { calls++; return { ok: calls !== 1, json: async () => calls === 1 ? { error: "service failure" }
+            : { positive: "new room", negative: "", lora_queries: [], template_version: "scene-llm-v1" } }; } },
+        onError: (_error, _query, callback) => { retry = callback; },
+        onBusy: (_node, busy) => { if (!busy) settledAvailable = presetReferenceHasLLM(reference); },
+    });
+    await controller.generate(expand);
+    assert.equal(controller.canGenerate(expand), true, "failed generation restores compact availability without an unrelated UI refresh");
+    assert.equal(settledAvailable, true, "disposal restores availability before settled button callbacks");
+    assert.equal(preparations[0].definitions.size, 0);
+    await retry();
+    assert.equal(calls, 2, "retry still discovers and generates the Reference target");
+    assert.equal(preparations.length, 2);
+    assert(preparations.every((operation) => operation.definitions.size === 0));
+    assert.equal(JSON.parse(field(reference, "llm_presets_json").value).presets["."].api_graph.output[1].inputs.positive, "new room");
+    assert.strictEqual(sources.get("retry-preset"), compact);
+}
 {
     const { graph, node, create } = fixture(), app = { graph };
     const first = node("ScenePromptLLM", "first"), second = node("ScenePromptLLM", "second"), middle = node("ScenePrompt"), expand = node("ScenePrompterExpand");
