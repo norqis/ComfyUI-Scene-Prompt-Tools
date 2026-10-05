@@ -1648,7 +1648,6 @@ def _find_next_index(run_root, extension, padding, filename_prefix="", counter_p
     return highest + 1
 
 
-_RUN_DIR_CACHE = {}
 _FILENAME_RESERVATION_LOCK = threading.Lock()
 
 
@@ -1800,26 +1799,6 @@ def _seed_change_key(seed_base):
     if seed > 0:
         return str(seed)
     return str(time.time_ns())
-
-
-def _cached_run_parts(base_dir, run_dir, prompt=None, unique_id=None):
-    value = str(run_dir or "").strip().strip('"')
-    if value and value.lower() != "auto":
-        return _resolve_run_dir(value)
-
-    prompt_key = ""
-    if isinstance(prompt, dict):
-        prompt_key = hashlib.sha256(
-            json.dumps(prompt, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-        ).hexdigest()
-    key = (str(unique_id or ""), os.path.abspath(base_dir))
-    cached = _RUN_DIR_CACHE.get(key)
-    if cached and cached[0] == prompt_key:
-        return cached[1]
-
-    parts = _resolve_run_dir("auto")
-    _RUN_DIR_CACHE[key] = (prompt_key, parts)
-    return parts
 
 
 def _normalize_scene_save_info(value):
@@ -2951,6 +2930,28 @@ class SceneSaveImage:
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
         self.compress_level = 4
+        self._automatic_run_state = None
+
+    def _run_parts(self, base_dir, info, prompt):
+        if not info.get("use_run_dir", True):
+            self._automatic_run_state = None
+            return []
+        parts = _safe_relative_parts(info.get("run_dir"))
+        if parts:
+            self._automatic_run_state = None
+            return parts
+        fingerprint = ""
+        if isinstance(prompt, dict):
+            fingerprint = hashlib.sha256(
+                json.dumps(prompt, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            ).hexdigest()
+        key = (os.path.abspath(base_dir), fingerprint)
+        cached = self._automatic_run_state
+        if cached is not None and cached[:2] == key:
+            return cached[2]
+        parts = _resolve_run_dir("auto")
+        self._automatic_run_state = (*key, parts)
+        return parts
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -3010,12 +3011,7 @@ class SceneSaveImage:
         base_path_parts = _safe_relative_parts(path)
         scene_path_parts = _safe_relative_parts(info.get("path"))
         run_base_root = os.path.join(base_root, *base_path_parts)
-        if info and not info.get("use_run_dir", True):
-            run_parts = []
-        else:
-            run_parts = _safe_relative_parts(info.get("run_dir")) or _cached_run_parts(
-                run_base_root, "auto", prompt, unique_id
-            )
+        run_parts = self._run_parts(run_base_root, info, prompt)
         run_root = os.path.join(run_base_root, *run_parts)
         output_dir = os.path.join(run_root, *scene_path_parts)
         os.makedirs(output_dir, exist_ok=True)

@@ -323,7 +323,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings_module.endpoint(settings_module.load_settings("alice")), "https://host/v1")
         self.assertEqual(settings_module.endpoint({**settings_module.DEFAULTS, "base_url": "http://[::1]/proxy/v1", "port": 9090}), "http://[::1]:9090/proxy/v1")
 
-    def test_llm_secrets_per_user_blank_retention_clear_and_cache_invalidation(self):
+    def test_llm_secrets_per_user_blank_retention_and_cache_invalidation(self):
         public = settings_module.save_settings("alice", {"api_key": "secret", "model": "alice-model"})
         self.assertEqual(set(public), {"base_url", "port", "model", "api_key_set", "template_version"})
         self.assertNotIn("secret", str(public))
@@ -337,21 +337,22 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings_module.load_settings("alice")["model"], "updated")
         self.assertFalse(settings_module.public_settings(settings_module.load_settings("new"))["api_key_set"])
         settings_module.save_settings("alice", {"clear_api_key": True})
-        self.assertEqual(settings_module.load_settings("alice")["api_key"], "")
+        self.assertEqual(settings_module.load_settings("alice")["api_key"], "secret")
         self.assertEqual(settings_module.load_settings("bob")["api_key"], "bob-secret")
 
     def test_retired_civitai_fields_are_ignored_and_removed_only_on_an_ordinary_save(self):
         for obsolete in ("retired-secret", 123, None, {"malformed": True}, []):
             with self.subTest(obsolete=obsolete):
                 path = self.legacy({**settings_module.DEFAULTS, "api_key": "llm-secret", "model": "original",
-                    "civitai_api_key": obsolete, "clear_civitai_api_key": {"ignored": True}, "civitai_host": "invalid"})
+                    "civitai_api_key": obsolete, "clear_civitai_api_key": {"ignored": True}, "civitai_host": "invalid",
+                    "clear_api_key": obsolete})
                 original = path.read_bytes()
                 loaded = settings_module.load_settings("alice")
                 self.assertEqual(set(loaded), set(settings_module.DEFAULTS))
                 self.assertEqual(loaded["api_key"], "llm-secret")
                 self.assertEqual(path.read_bytes(), original, "reading legacy settings must not rewrite private files")
                 settings_module.save_settings("alice", {"model": "updated", "api_key": "", "civitai_api_key": obsolete,
-                    "clear_civitai_api_key": True, "civitai_host": "evil"})
+                    "clear_civitai_api_key": True, "civitai_host": "evil", "clear_api_key": True})
                 saved = json.loads(path.read_text(encoding="utf-8"))
                 self.assertEqual(saved, {**settings_module.DEFAULTS, "api_key": "llm-secret", "model": "updated"})
 
@@ -365,6 +366,18 @@ class SettingsTest(unittest.TestCase):
                 saved = settings_module.load_settings("alice")
                 self.assertEqual((saved["model"], saved["api_key"]), (str(index), "llm" + str(index)))
                 self.assertNotIn("civitai_api_key", saved)
+        self.assertFalse(list(self.root.rglob(".settings-*")))
+
+    def test_failed_atomic_replacement_preserves_saved_private_settings_and_negotiation(self):
+        settings_module.save_settings("alice", {"api_key": "secret", "model": "saved"})
+        path = self.root / "alice" / "llm_settings.json"
+        original = path.read_bytes()
+        _, state = settings_module.request_settings("alice")
+        with mock.patch.object(settings_module.os, "replace", side_effect=OSError("replace failed")):
+            with self.assertRaisesRegex(OSError, "replace failed"):
+                settings_module.save_settings("alice", {"model": "unsaved", "api_key": "other"})
+        self.assertEqual(path.read_bytes(), original)
+        self.assertIs(service._CAPABILITIES["alice"], state)
         self.assertFalse(list(self.root.rglob(".settings-*")))
 
     def test_protocol_validation_and_obsolete_values_ignored(self):

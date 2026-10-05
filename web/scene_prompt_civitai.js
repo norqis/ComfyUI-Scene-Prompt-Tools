@@ -155,11 +155,8 @@ export async function openLLMSettings(api) {
         field("api_key", "LLM API Key（任意）", "", "接続先LLMサーバーの認証キーです。Codexのキーではありません。空欄で保存済みのキーを保持します。");
         const key = fields.api_key;
         key.placeholder = settings.api_key_set ? "保存済み（空欄で保持）" : "未設定";
-        let clearKey = false, keyDraft = 0, clearDraft = 0;
-        const clear = element("button", "API Keyを削除", "pc-button"); clear.type = "button"; clear.setAttribute("aria-pressed", "false");
-        function renderClear() { clear.setAttribute("aria-pressed", String(clearKey)); clear.textContent = clearKey ? "API Key削除を取り消す" : "API Keyを削除"; }
-        clear.onclick = () => { clearKey = !clearKey; clearDraft++; renderClear(); };
-        key.addEventListener("input", () => keyDraft++); form.append(clear);
+        let keyDraft = 0;
+        key.addEventListener("input", () => keyDraft++);
         const actions = element("div", undefined, "pc-connection-actions"), save = element("button", "保存", "pc-button"), test = element("button", "接続テスト・モデル取得", "pc-button");
         test.type = "button"; actions.append(save, test); form.append(actions);
         let portEdited = false;
@@ -180,7 +177,7 @@ export async function openLLMSettings(api) {
             if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) throw new Error("API URLには認証情報・クエリ・フラグメントを含まないHTTP(S) URLを入力してください。");
             const port = fields.port.value;
             if (port !== "" && (!/^[0-9]+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) throw new Error("ポートは1〜65535の整数、または空欄にしてください。");
-            return { ...Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value])), clear_api_key: clearKey };
+            return Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value]));
         }
         const datalist = element("datalist");
         datalist.id = `pc-llm-models-${++settingsModalID}`; fields.model.setAttribute("list", datalist.id); form.append(datalist);
@@ -189,14 +186,13 @@ export async function openLLMSettings(api) {
             if (busy || !form.reportValidity()) return;
             let submitted;
             try { submitted = body(); } catch (error) { status.textContent = error.message; return; }
-            const submittedKeyDraft = keyDraft, submittedClearDraft = clearDraft;
+            const submittedKeyDraft = keyDraft;
             busy = true; save.disabled = true; test.disabled = true;
             try {
                 const result = await requestJSON(api, `/scene_prompt/llm/${saving ? "settings" : "test"}`, submitted);
                 if (!modal.overlay.isConnected) return;
                 if (saving) {
                     if (keyDraft === submittedKeyDraft && key.value === submitted.api_key) key.value = "";
-                    if (submitted.clear_api_key && clearDraft === submittedClearDraft) { clearKey = false; renderClear(); }
                     key.placeholder = result.api_key_set ? "保存済み（空欄で保持）" : "未設定";
                     status.textContent = "保存しました";
                 } else {

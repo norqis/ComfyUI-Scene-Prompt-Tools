@@ -14,6 +14,61 @@ aiohttp = llm_fixture.aiohttp
 service, settings_module = llm_fixture.service, llm_fixture.settings_module
 
 class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
+    async def test_real_http_settings_save_reopen_and_user_isolation_without_secret_prefill(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_modules = dict(sys.modules)
+            runner = None
+            try:
+                routes = load_routes(Path(temporary))
+                sys.modules["aiohttp"] = aiohttp
+                package = routes.__package__
+                with mock.patch.dict(sys.modules, {
+                    package + ".llm_settings": settings_module,
+                    package + ".llm_service": service,
+                }), mock.patch.object(settings_module, "storage_directory", side_effect=lambda user: Path(temporary) / user), \
+                        mock.patch.object(routes, "web", llm_fixture.web), \
+                        mock.patch.object(routes, "_request_user_id", side_effect=lambda request: request.headers["X-Test-User"]):
+                    app = llm_fixture.web.Application()
+                    for method in ("GET", "POST"):
+                        app.router.add_route(method, "/scene_prompt/llm/settings", routes._test_routes[(method, "/scene_prompt/llm/settings")])
+                    runner = llm_fixture.web.AppRunner(app)
+                    await runner.setup()
+                    site = llm_fixture.web.TCPSite(runner, "127.0.0.1", 0)
+                    await site.start()
+                    url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/scene_prompt/llm/settings"
+                    async with aiohttp.ClientSession() as session:
+                        async def request(method, user, payload=None):
+                            async with session.request(method, url, headers={"X-Test-User": user}, json=payload) as response:
+                                result = await response.json()
+                                self.assertEqual(response.status, 200, result)
+                                self.assertNotIn("api_key", result)
+                                self.assertNotIn("private-secret", str(result))
+                                return result
+                        with mock.patch.object(settings_module, "load_settings", wraps=settings_module.load_settings) as load:
+                            saved = await request("POST", "alice", {"base_url": "https://llm.example:9443/proxy/v1",
+                                "model": "configured", "api_key": "private-secret"})
+                            load.assert_called_once_with("alice")
+                        self.assertEqual((saved["base_url"], saved["port"], saved["model"], saved["api_key_set"]),
+                                         ("https://llm.example/proxy/v1", 9443, "configured", True))
+                        self.assertEqual(await request("GET", "alice"), saved)
+                        bob = await request("POST", "bob", {"base_url": "http://localhost/v1", "port": "18080", "model": "bob"})
+                        self.assertEqual((bob["port"], bob["model"], bob["api_key_set"]), (18080, "bob", False))
+                        updated = await request("POST", "alice", {"base_url": "https://llm.example/proxy/v1", "port": "",
+                            "model": "updated", "api_key": "", "clear_api_key": True})
+                        self.assertEqual((updated["port"], updated["model"], updated["api_key_set"]), (None, "updated", True))
+                        self.assertEqual(await request("GET", "alice"), updated)
+                        self.assertEqual(await request("GET", "bob"), bob)
+                    self.assertEqual(settings_module.load_settings("alice")["api_key"], "private-secret")
+                    private = Path(temporary) / "alice" / "llm_settings.json"
+                    self.assertNotIn("clear_api_key", private.read_text(encoding="utf-8"))
+            finally:
+                if runner is not None:
+                    await runner.cleanup()
+                for name in list(sys.modules):
+                    if name not in original_modules:
+                        del sys.modules[name]
+                sys.modules.update(original_modules)
+
     async def test_routes_settings_generate_error_and_user_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             # Existing route fixture intentionally replaces aiohttp with a tiny mock.
@@ -32,13 +87,18 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         user_id = "alice"
                         query = {}
                         payload = {}
+                        reads = 0
 
                         async def json(self):
+                            self.reads += 1
                             return self.payload
 
                     request = Request()
                     request.payload = {"api_key": "route-secret", "model": "configured"}
-                    result = await registered[("POST", "/scene_prompt/llm/settings")](request)
+                    with mock.patch.object(settings_module, "load_settings", wraps=settings_module.load_settings) as load:
+                        result = await registered[("POST", "/scene_prompt/llm/settings")](request)
+                        load.assert_called_once_with("alice")
+                    self.assertEqual(request.reads, 1)
                     self.assertEqual(result["status"], 200)
                     self.assertNotIn("route-secret", str(result))
                     result = await registered[("GET", "/scene_prompt/llm/settings")](request)

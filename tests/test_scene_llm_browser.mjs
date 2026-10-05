@@ -29,7 +29,7 @@ const server = http.createServer(async (request, response) => {
         if(path.includes('search?'))data={items:[candidate(1),candidate(2)].map(item=>({...item,name:item.name+' '+searchHost+(window.queryLabels?' '+searchQuery:'')}))};
         else if(path.endsWith('/download'))data={candidate:candidate(1),lora_name:'llm/1.safetensors'};
         else if(path.endsWith('/test'))data={ok:true,models:[{id:'model-a'},{id:'model-b'}]};
-        else if(path==='/scene_prompt/llm/settings'){if(submitted){if(submitted.clear_api_key)window.savedSettings.api_key_set=false;else if(submitted.api_key)window.savedSettings.api_key_set=true;for(const field of ['base_url','port','model'])window.savedSettings[field]=submitted[field];}data={...window.savedSettings,template_version:'scene-llm-v1'};}
+        else if(path==='/scene_prompt/llm/settings'){if(submitted){if(submitted.api_key)window.savedSettings.api_key_set=true;for(const field of ['base_url','model'])window.savedSettings[field]=submitted[field];window.savedSettings.port=submitted.port===''?null:Number(submitted.port);}data={...window.savedSettings,template_version:'scene-llm-v1'};}
         else throw new Error('Unexpected service route: '+path);
         return {ok:true,json:async()=>data};}};
         window.search=()=>openCivitaiSearch({node:window.node,api:window.api});window.settings=()=>openLLMSettings(window.api);
@@ -75,6 +75,7 @@ try {
     await page.keyboard.press("Escape"); await modal.waitFor({ state: "detached" }); assert.equal(await page.locator("#launch").evaluate((node)=>node===document.activeElement), true);
     await page.evaluate(() => window.settings());
     const settings = page.getByRole("dialog", { name: "LLM接続設定" }); await settings.getByRole("button", { name: "保存", exact: true }).waitFor();
+    assert.equal(await settings.getByRole("button", { name: /API Key.*削除/u }).count(), 0);
     assert.equal(await settings.locator('input[name="api_key"]').inputValue(), "");
     assert.deepEqual(await settings.locator('input').evaluateAll(inputs=>inputs.map(input=>input.name)), ['base_url','port','model','api_key']);
     assert.equal(await settings.locator('input[name="base_url"]').getAttribute('aria-required'), 'true');
@@ -97,13 +98,12 @@ try {
     await settings.getByRole("button", { name: "接続テスト・モデル取得" }).click(); await settings.getByText("接続成功:", { exact: false }).waitFor();
     await settings.getByRole("button", { name: "保存", exact: true }).click(); await settings.getByText("保存しました", { exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.calls.at(-1).body.api_key), "");
-    const key = settings.locator('input[name="api_key"]'), clearKey = settings.locator('button[aria-pressed]');
+    const key = settings.locator('input[name="api_key"]');
     await settings.getByRole("button", { name: "接続テスト・モデル取得" }).click();
     await page.waitForFunction(() => window.calls.filter(call=>call.path.endsWith('/test')).length===3);
     assert.equal(await settings.locator("datalist").count(), 1, "connection tests reuse one datalist");
-    await clearKey.click(); assert.equal(await clearKey.textContent(),'API Key削除を取り消す'); await settings.getByRole("button", { name: "保存", exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('button[aria-pressed]').getAttribute('aria-pressed')==='false');
-    assert.equal(await key.getAttribute("placeholder"), "未設定");
+    assert.equal(await key.getAttribute("placeholder"), "保存済み（空欄で保持）");
+    assert.equal(await page.evaluate(() => window.savedSettings.api_key_set), true, "blank saves retain the saved key flag");
     await key.fill("replacement"); await settings.getByRole("button", { name: "保存", exact: true }).click();
     await page.waitForFunction(() => document.querySelector('input[name="api_key"]').value==='');
     assert.equal(await key.getAttribute("placeholder"), "保存済み（空欄で保持）");
@@ -118,12 +118,23 @@ try {
     await page.evaluate(() => window.finishSettings());
     await page.waitForFunction(() => !document.querySelector('form button').disabled);
     assert.equal(await key.inputValue(), "newer draft", "delayed save preserves newer key draft");
-    await clearKey.click(); await page.evaluate(() => {window.deferSettings=true;window.finishSettings=null;});
-    await settings.getByRole("button", { name: "保存", exact: true }).click(); await page.waitForFunction(()=>window.finishSettings);
-    await clearKey.click(); await clearKey.click(); await page.evaluate(()=>window.finishSettings());
-    await page.waitForFunction(() => !document.querySelector('form button').disabled);
-    assert.equal(await clearKey.getAttribute('aria-pressed'), "true", "real clear-action edits during save remain a newer draft");
-    await clearKey.click();
+    await settings.getByRole("button", { name: "保存", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('input[name="api_key"]').value === '');
+    assert.equal(await page.evaluate(() => window.calls.filter(call => call.path.endsWith('/settings') && call.body).at(-1).body.api_key), "newer draft",
+        "a newer key draft can be saved after the earlier request settles");
+    await settings.locator('input[name="base_url"]').fill('http://127.0.0.1/proxy/v1');
+    await settings.locator('input[name="port"]').fill('9417');
+    await settings.locator('input[name="model"]').fill('saved-model');
+    await settings.getByRole("button", { name: "保存", exact: true }).click();
+    await page.waitForFunction(() => window.savedSettings.base_url === 'http://127.0.0.1/proxy/v1' && window.savedSettings.port === 9417 && window.savedSettings.model === 'saved-model');
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.settings());
+    await settings.getByRole("button", { name: "保存", exact: true }).waitFor();
+    assert.deepEqual(await settings.locator('input').evaluateAll(inputs => inputs.map(input => input.value)),
+        ['http://127.0.0.1/proxy/v1', '9417', 'saved-model', ''], "URL, nondefault port and model survive save and reopen");
+    assert.equal(await key.getAttribute("placeholder"), "保存済み（空欄で保持）");
+    assert(await page.evaluate(() => window.calls.filter(call => call.body && /\/(settings|test)$/u.test(call.path))
+        .every(call => Object.keys(call.body).sort().join(',') === 'api_key,base_url,model,port')), "save and test send only the four declared fields");
     await page.screenshot({ path: resolve(reviewDirectory, "llm-settings.png") });
     await page.setViewportSize({width:360,height:740});
     assert.equal(await settings.evaluate(node=>node.scrollWidth<=node.clientWidth),true);
@@ -148,10 +159,24 @@ try {
     assert.equal(await settings.locator('input[name="port"]').inputValue(),'9443');
     await settings.locator('input[name="port"]').fill('');
     await settings.getByRole('button',{name:'保存',exact:true}).click();
-    await settings.getByText('保存しました',{exact:true}).waitFor();
+    await page.waitForFunction(() => window.savedSettings.port === null);
     await page.keyboard.press('Escape'); await page.evaluate(()=>{void window.settings();});
     await settings.getByRole('button',{name:'保存',exact:true}).waitFor();
     assert.equal(await settings.locator('input[name="port"]').inputValue(),'','a saved protocol-default port stays blank');
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { window.settings(); });
+    await settings.getByRole('button', { name: '保存', exact: true }).waitFor();
+    await page.evaluate(() => { window.deferSettings = true; window.finishSettings = null; });
+    await settings.getByRole('button', { name: '保存', exact: true }).click();
+    await page.waitForFunction(() => window.finishSettings);
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { window.settings(); });
+    await settings.getByRole('button', { name: '保存', exact: true }).waitFor();
+    await key.fill('reopened draft');
+    await page.evaluate(() => window.finishSettings());
+    await page.waitForTimeout(30);
+    assert.equal(await key.inputValue(), 'reopened draft', 'a dismissed save cannot clear input in a newer settings modal');
+    assert.equal(await settings.getByText('保存しました', { exact: true }).count(), 0, 'a dismissed save cannot publish status into the new modal');
     await page.keyboard.press('Escape');
     await page.evaluate(()=>{window.deferSettingsGet=true;window.finishSettingsGet=null;window.pendingSettings=window.settings();});
     await page.waitForFunction(()=>window.finishSettingsGet); await page.keyboard.press('Escape');

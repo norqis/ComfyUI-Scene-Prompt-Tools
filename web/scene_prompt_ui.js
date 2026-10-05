@@ -4923,7 +4923,9 @@ function attachSceneLLM(node) {
     generate.disabled = sceneLLMController.busy.has(node) || !String(findWidget(node, "description")?.value || "").trim();
     node.widgets.splice(node.widgets.indexOf(generate), 1);
     node.widgets.splice(node.widgets.indexOf(findWidget(node, "description")) + 1, 0, generate);
-    addSceneButton(node, "llm_settings", "LLM接続設定", () => openLLMSettings(api));
+    const settings = addSceneButton(node, "llm_settings", "LLM接続設定", () => openLLMSettings(api));
+    node.widgets.splice(node.widgets.indexOf(settings), 1);
+    node.widgets.unshift(settings);
     if (!findSceneWidget(node, "llm_status")) {
         const status = node.addCustomWidget({ name: "LLM status", sceneRole: "llm_status", serialize: false,
             computeSize: () => [node.size?.[0] || 300, 24],
