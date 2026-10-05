@@ -403,9 +403,9 @@ const titleContext = vm.createContext({ Map, Set, Array, String, JSON, Object,
         return { ok: true, json: async () => ({ size: 1, mtime_ns: 1, sha256: "hash", trigger_phrases: [] }) };
     } },
     readApiJson: (response) => response.json(),
-    fetch: async () => {
+    lookupCivitaiByHash: async () => {
         if (pauseTitleVersion) { pauseTitleVersion = false; await new Promise((done) => { finishTitleVersion = done; }); }
-        return { ok: true, status: 200, json: async () => ({ id: 1, model: { name: "Resolved again" } }) };
+        return { id: 1, model: { name: "Resolved again" } };
     },
 });
 vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.titles = { cachedSceneLora, saveSceneLoraCache, resolveSceneLora, reconcileSceneLoraTitles, sceneLoraSessionCache, sceneLoraFileIdentities, sceneLoraResolutions, sceneLoraCacheKey };`, titleContext);

@@ -16,6 +16,7 @@ from .llm_service import ServiceError, candidate_identity, MODES
 from .lora_metadata import file_identity, file_signature
 
 SORTS = ("Most Downloaded", "Most Liked", "Most Collected", "Highest Rated")
+_NOT_FOUND = object()
 _DOWNLOAD_LOCK = None
 _HASH_CACHE = {}
 _HASH_LOCK = threading.Lock()
@@ -41,16 +42,36 @@ def _headers(settings, url):
     return {"Authorization": "Bearer " + settings["civitai_api_key"]} if settings["civitai_api_key"] and origin(url) == origin(api_origin(settings)) else {}
 
 
-async def api_get(settings, path, params=None):
+async def api_get(settings, path, params=None, *, missing_ok=False):
     url = api_origin(settings) + path
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             async with session.get(url, params=params, headers=_headers(settings, url), allow_redirects=False) as response:
+                if missing_ok and response.status == 404:
+                    return _NOT_FOUND
                 if response.status != 200:
                     raise ServiceError(f"Civitai API returned HTTP {response.status}.")
                 return await response.json()
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
         raise ServiceError("Civitai connection failed, timed out, or returned invalid JSON.") from exc
+
+
+async def by_hash(settings, sha256):
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+        raise ValueError("SHA256 must contain exactly 64 hexadecimal digits.")
+    version = await api_get(settings, "/api/v1/model-versions/by-hash/" + sha256.lower(), missing_ok=True)
+    if version is _NOT_FOUND:
+        return {"found": False, "version": None}
+    if (not isinstance(version, dict)
+            or type(version.get("id")) is not int or version["id"] <= 0
+            or type(version.get("modelId")) is not int or version["modelId"] <= 0
+            or not isinstance(version.get("name"), str)
+            or not isinstance(version.get("model"), dict) or not isinstance(version["model"].get("name"), str)
+            or not isinstance(version.get("trainedWords", []), list)
+            or any(not isinstance(word, str) for word in version.get("trainedWords", []))):
+        raise ServiceError("Civitai returned an invalid version response.")
+    return {"found": True, "version": {"id": version["id"], "modelId": version["modelId"],
+        "name": version["name"], "model": {"name": version["model"]["name"]}, "trainedWords": version.get("trainedWords", [])}}
 
 
 def normalize(model, mode):
@@ -177,6 +198,45 @@ def _record(root, candidate, name):
             os.unlink(temporary)
 
 
+async def _file_io(function, *args, cancel_cleanup=None, **kwargs):
+    """Settle the worker before cancellation can release its file ownership."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    cancellation = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+        except Exception:
+            if cancellation is None:
+                raise
+            break
+    if cancellation is not None:
+        if not task.cancelled() and task.exception() is None and cancel_cleanup is not None:
+            await _file_io(cancel_cleanup, task.result())
+        raise cancellation
+    return task.result()
+
+
+def _create_download(folder):
+    descriptor, temporary = tempfile.mkstemp(dir=folder, prefix=".download-", suffix=".part")
+    try:
+        return os.fdopen(descriptor, "wb"), temporary
+    except Exception:
+        os.close(descriptor)
+        os.unlink(temporary)
+        raise
+
+
+def _discard_download(download):
+    stream, temporary = download
+    try:
+        stream.close()
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 async def search(settings, query, model_mode, sort="Most Downloaded"):
     if sort not in SORTS:
         raise ValueError("Unsupported Civitai sort.")
@@ -215,7 +275,7 @@ async def download(settings, identity, model_mode):
         if candidate is None:
             raise ValueError("Selected LoRA is unavailable or incompatible with this model mode.")
         root = lora_root()
-        name = await asyncio.to_thread(_existing, candidate, root)
+        name = await _file_io(_existing, candidate, root)
         if not name:
             version = next(item for item in model["modelVersions"] if item["id"] == ids[1])
             file = next(item for item in version["files"] if item["id"] == ids[2])
@@ -223,9 +283,8 @@ async def download(settings, identity, model_mode):
             if not url.startswith(api_origin(settings) + "/api/download/"):
                 raise ValueError("Civitai did not provide a trusted API download URL.")
             folder = root / "llm"
-            await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True)
-            descriptor, temporary = await asyncio.to_thread(tempfile.mkstemp, dir=folder, prefix=".download-", suffix=".part")
-            stream = os.fdopen(descriptor, "wb")
+            await _file_io(folder.mkdir, parents=True, exist_ok=True)
+            stream, temporary = await _file_io(_create_download, folder, cancel_cleanup=_discard_download)
             digest = hashlib.sha256()
             def write_chunk(chunk):
                 stream.write(chunk)
@@ -248,20 +307,18 @@ async def download(settings, identity, model_mode):
                         if response.status != 200:
                             raise ServiceError(f"Civitai download returned HTTP {response.status}.")
                         async for chunk in response.content.iter_chunked(1024 * 1024):
-                            await asyncio.to_thread(write_chunk, chunk)
-                await asyncio.to_thread(stream.close)
+                            await _file_io(write_chunk, chunk)
+                await _file_io(stream.close)
                 if digest.hexdigest() != candidate["sha256"]:
                     raise ServiceError("Downloaded LoRA SHA256 does not match the published file.")
                 destination = folder / _filename(candidate)
-                await asyncio.to_thread(os.replace, temporary, destination)
+                await _file_io(os.replace, temporary, destination)
                 name = destination.relative_to(root).as_posix()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 raise ServiceError("Civitai download failed or timed out.") from exc
             finally:
-                await asyncio.to_thread(stream.close)
-                if os.path.exists(temporary):
-                    await asyncio.to_thread(os.unlink, temporary)
-        await asyncio.to_thread(_record, root, candidate, name)
+                await _file_io(_discard_download, (stream, temporary))
+        await _file_io(_record, root, candidate, name)
         cache = getattr(folder_paths, "filename_list_cache", None)
         if isinstance(cache, dict):
             cache.pop("loras", None)

@@ -1,5 +1,6 @@
 import copy
 import importlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +46,38 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         self.assertFalse(hasattr(self.nodes.ScenePromptToText, 'OUTPUT_IS_LIST'))
         self.assertNotIn('ScenePromptToText', self.nodes.SCENE_NODE_TYPES)
         self.assertNotIn('ScenePromptToText', self.presets.SAFE_NODE_CLASSES)
+
+    def test_nested_emphasis_agrees_across_matrix_preset_to_text_expand_reverse_and_delete(self):
+        from test_scene_presets import basic_nodes
+        positive, negative = 'before, ((test:4):.5), (blocked:5)', '((blocked:.1):5)'
+        matrix_json = json.dumps({'version': 1, 'sets': [{
+            'row_id': 'nested', 'name': 'Nested', 'path_label': 'Nested',
+            'positive_parts': ['(test:1.2)', 'between', '((weak:.1):4)', '(weak:1.2)',
+                               '{((choice:3):.1)|((choice:3):.1)}', '(choice:1.2)', '((test:4):3)'],
+            'negative_parts': [],
+        }]})
+        source = self.build(positive, negative)
+        original = copy.deepcopy(source)
+        plan = self.nodes.SceneMatrix().build(matrix_json, scene_prompt=source)[0]
+        expected = ('before, ((test:4):.5), between, (weak:1.2), ((choice:3):.1)', negative)
+        self.assertEqual(self.text(plan), expected)
+        self.assertEqual(self.nodes.ScenePromptExpand().expand(scene_prompt=plan, seed_base=123)[:2], expected)
+        self.assertEqual(source, original)
+        graph = basic_nodes(positive)
+        graph['2']['inputs']['negative_base'] = negative
+        graph['4'] = {'class_type': 'SceneMatrix', 'inputs': {'scene_prompt': ['2', 0], 'matrix_json': matrix_json}}
+        graph['3']['inputs']['scene_prompt'] = ['4', 0]
+        saved = self.presets.save_preset({'preset_id': 'nested', 'name': 'Nested', 'output_node_id': '3',
+            'api_graph': {'output': graph}, 'workflow': self.workflow(graph)})
+        self.assertEqual(saved['api_graph']['output']['2']['inputs']['positive_base'], positive)
+        self.assertEqual(saved['api_graph']['output']['4']['inputs']['matrix_json'], matrix_json)
+        restored = self.presets._evaluate_preset_scene(saved, {}, None)
+        self.assertEqual(self.text(restored), expected)
+        self.assertEqual(self.nodes.ScenePromptExpand().expand(scene_prompt=restored, seed_base=123)[:2], expected)
+        reversed_plan = self.nodes.ScenePromptReverse().reverse(restored)[0]
+        self.assertEqual(self.text(reversed_plan), expected[::-1])
+        deleted = self.nodes.ScenePromptDelete().delete('(test:.1)', '', restored)[0]
+        self.assertEqual(self.text(deleted), (expected[0].replace('((test:4):.5), ', ''), expected[1]))
 
     def test_previous_scope_delta_whole_passthrough_and_legacy(self):
         previous = self.nodes.TEXT_SCOPE_PREVIOUS

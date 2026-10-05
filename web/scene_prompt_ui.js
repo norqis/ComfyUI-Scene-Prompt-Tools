@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ChangeTracker } from "../../scripts/changeTracker.js";
 import { createLLMController, LLM_TYPE } from "./scene_prompt_llm.js";
-import { openCivitaiSearch, openLLMSettings, showAPIError } from "./scene_prompt_civitai.js";
+import { openCivitaiSearch, openLLMSettings, showAPIError, lookupCivitaiByHash } from "./scene_prompt_civitai.js";
 import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference, createPresetOperation } from "./scene_llm_presets.js";
 import {
     DEFAULT_SELECTED_JSON,
@@ -1016,30 +1016,45 @@ function splitPromptParts(text) {
     return parts.map((part, index) => ({ index, text: part }));
 }
 
-function promptOverrideKey(part) {
-    let text = String(part ?? "").trim();
-    while (true) {
-        const match = text.match(/^\((.*):\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\)$/u);
-        if (!match) {
-            break;
-        }
-        text = match[1].trim();
+function promptIdentity(part) {
+    const text = String(part ?? "").trim();
+    let start = 0, end = text.length, weight = 1;
+    while (text[start] === "(" && text[end - 1] === ")") {
+        const colon = text.lastIndexOf(":", end - 2);
+        if (colon < start + 1) break;
+        const raw = text.slice(colon + 1, end - 1).trim();
+        if (!/^[+-]?(?:[0-9](?:_?[0-9])*(?:\.(?:[0-9](?:_?[0-9])*)?)?|\.[0-9](?:_?[0-9])*)(?:[eE][+-]?[0-9](?:_?[0-9])*)?$/u.test(raw)) break;
+        const number = Number(raw.replaceAll("_", ""));
+        if (!Number.isFinite(number)) break;
+        // ComfyUI replaces an outer explicit weight with the innermost one.
+        weight = number;
+        start++;
+        end = colon;
+        while (start < end && /\s/u.test(text[start])) start++;
+        while (end > start && /\s/u.test(text[end - 1])) end--;
     }
-    return text.replace(/\s+/gu, " ").toLowerCase();
+    return { key: text.slice(start, end).replace(/\s+/gu, " ").toLowerCase(), weight };
+}
+
+function promptOverrideKey(part) {
+    return promptIdentity(part).key;
 }
 
 function uniquePromptParts(parts, blockedOverrideKeys = new Set()) {
-    const seen = new Set();
+    const winners = new Map();
     const out = [];
     for (const part of parts || []) {
         const text = String(part ?? "").trim();
-        const key = text.replace(/\s+/gu, " ").toLowerCase();
-        const overrideKey = promptOverrideKey(text);
-        if (!key || seen.has(key) || blockedOverrideKeys.has(overrideKey)) {
-            continue;
+        const { key, weight } = promptIdentity(text);
+        if (!key || blockedOverrideKeys.has(key)) continue;
+        const previous = winners.get(key);
+        if (!previous) {
+            winners.set(key, { index: out.length, weight });
+            out.push(text);
+        } else if (weight > previous.weight) {
+            previous.weight = weight;
+            out[previous.index] = text;
         }
-        seen.add(key);
-        out.push(text);
     }
     return out;
 }
@@ -5256,12 +5271,8 @@ async function resolveSceneLoraUncached(item) {
     let version = null;
     let status = "unavailable";
     if (local.sha256) {
-        const civitai = await fetch(`https://civitai.com/api/v1/model-versions/by-hash/${encodeURIComponent(local.sha256)}`);
-        if (civitai.status === 404) status = "not_found";
-        else if (civitai.ok) {
-            version = await civitai.json();
-            if (String(version?.model?.name || "").trim()) status = "found";
-        } else throw new Error(`Civitai HTTP ${civitai.status}`);
+        version = await lookupCivitaiByHash(api, local.sha256);
+        status = version ? "found" : "not_found";
     }
     if (status === "unavailable") throw new Error("Civitai名を取得できませんでした。");
     if (sceneLoraFileIdentities.get(path) !== identity) throw new Error("LoRAファイルが更新されました。再表示してください。");
@@ -5509,7 +5520,7 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
         if (Number.isSafeInteger(Number(result.modelId)) && Number(result.modelId) > 0
             && Number.isSafeInteger(Number(result.versionId)) && Number(result.versionId) > 0) {
             const link = document.createElement("a");
-            link.href = `https://civitai.com/models/${result.modelId}?modelVersionId=${result.versionId}`;
+            link.href = `https://civitai.red/models/${result.modelId}?modelVersionId=${result.versionId}`;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
             link.textContent = "Civitaiで見る";
@@ -11459,7 +11470,7 @@ function sceneResourceLink(version) {
     const versionId = Number(version?.versionId ?? version?.id);
     if (!Number.isSafeInteger(modelId) || modelId <= 0 || !Number.isSafeInteger(versionId) || versionId <= 0) return null;
     const link = document.createElement("a");
-    link.href = `https://civitai.com/models/${modelId}?modelVersionId=${versionId}`;
+    link.href = `https://civitai.red/models/${modelId}?modelVersionId=${versionId}`;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.textContent = "Civitaiで見る";
@@ -11568,11 +11579,8 @@ async function openSceneExpandResources(node) {
                     const hashResponse = await api.fetchApi(`/scene_prompt/models/hash?kind=${encodeURIComponent(model.kind)}&name=${encodeURIComponent(model.name)}`);
                     const hashData = await readApiJson(hashResponse, "モデルを照合できませんでした");
                     if (!hashResponse.ok) throw new Error(hashData.error || "モデルを照合できませんでした。");
-                    const civitai = await fetch(`https://civitai.com/api/v1/model-versions/by-hash/${encodeURIComponent(hashData.sha256)}`);
-                    if (civitai.status === 404) return null;
-                    if (!civitai.ok) throw new Error(`Civitai HTTP ${civitai.status}`);
-                    const version = await civitai.json();
-                    return { ...version, title: version.model?.name };
+                    const version = await lookupCivitaiByHash(api, hashData.sha256);
+                    return version ? { ...version, title: version.model?.name } : null;
                 });
             }
             modelSection.append(card);
