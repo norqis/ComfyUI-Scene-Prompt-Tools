@@ -1,9 +1,13 @@
+import concurrent.futures
 import copy
+import gc
 import hashlib
 import importlib
 import json
 import struct
 import tempfile
+import threading
+from contextlib import contextmanager
 import tracemalloc
 import unittest
 import weakref
@@ -304,6 +308,233 @@ class FileMetadataMemoryTests(unittest.TestCase):
         self.catalogs["loras"][name] = str(path)
         return path
 
+    def hash_reader(self, kind, path, alias=False):
+        name = "alias.safetensors" if alias else path.name
+        if kind == "metadata":
+            self.catalogs["loras"][name] = str(path)
+            return lambda: self.metadata.read_lora_info(name)
+        if kind == "model":
+            folder, mode = ("diffusion_models", "diffusion_model") if alias else ("checkpoints", "checkpoint")
+            self.catalogs[folder][name] = str(path)
+            return lambda: self.info.read_model_hash(mode, name)
+        selected = self.root / "alias-dir" / ".." / path.name if alias else path
+        (self.root / "alias-dir").mkdir(exist_ok=True)
+        return lambda: self.acquisition._sha256(selected)
+
+    def assert_operations_released(self):
+        gc.collect()
+        with self.metadata._FILE_OPERATIONS_LOCK:
+            self.assertEqual(dict(self.metadata._FILE_OPERATIONS), {})
+
+    def parallel_hashes(self, kind, readers, action=None):
+        """Hold only the first digest; other workers announce before acquiring."""
+        service = {"metadata": self.metadata, "model": self.info, "acquired": self.acquisition}[kind]
+        original_operation, original_hash = service.file_operation, hashlib.sha256
+        entered, queued, release = threading.Event(), threading.Event(), threading.Event()
+        guard = threading.Lock()
+        attempts, hashes, bytes_hashed = 0, 0, 0
+
+        @contextmanager
+        def operation(key):
+            nonlocal attempts
+            with guard:
+                attempts += 1
+                if attempts >= len(readers):
+                    queued.set()
+            with original_operation(key):
+                yield
+
+        class Digest:
+            def __init__(self):
+                nonlocal hashes
+                self.digest = original_hash()
+                with guard:
+                    hashes += 1
+                    self.first = hashes == 1
+            def update(self, chunk):
+                nonlocal bytes_hashed
+                with guard:
+                    bytes_hashed += len(chunk)
+                self.digest.update(chunk)
+            def hexdigest(self):
+                if self.first:
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError("first reader was not released")
+                return self.digest.hexdigest()
+
+        with mock.patch.object(service, "file_operation", side_effect=operation), \
+                mock.patch.object(service.hashlib, "sha256", side_effect=Digest), \
+                concurrent.futures.ThreadPoolExecutor(max_workers=len(readers)) as executor:
+            futures = [executor.submit(reader) for reader in readers]
+            try:
+                self.assertTrue(entered.wait(5), "first hash did not finish reading")
+                self.assertTrue(queued.wait(5), "other readers did not queue")
+                if action is not None:
+                    action()
+            finally:
+                release.set()
+            results = []
+            for future in futures:
+                try:
+                    results.append(future.result(timeout=5))
+                except (OSError, ValueError) as error:
+                    results.append(error.with_traceback(None))
+        self.assert_operations_released()
+        return results, hashes, bytes_hashed
+
+    def test_concurrent_same_file_and_alias_misses_hash_once_per_service(self):
+        for kind in ("metadata", "model", "acquired"):
+            with self.subTest(kind=kind):
+                path = self.write_lora(kind + ".safetensors")
+                readers = [self.hash_reader(kind, path, alias=index % 2 == 1) for index in range(4)]
+                results, hashes, bytes_hashed = self.parallel_hashes(kind, readers)
+                expected = hashlib.sha256(path.read_bytes()).hexdigest()
+                self.assertEqual(hashes, 1)
+                self.assertEqual(bytes_hashed, path.stat().st_size)
+                for index, result in enumerate(results):
+                    self.assertEqual(result if kind == "acquired" else result["sha256"], expected)
+                    if kind != "acquired":
+                        self.assertEqual(result["name"], "alias.safetensors" if index % 2 else path.name)
+                    if kind == "model":
+                        self.assertEqual(result["kind"], "diffusion_model" if index % 2 else "checkpoint")
+
+    def test_distinct_files_can_hash_in_parallel(self):
+        for kind in ("metadata", "model", "acquired"):
+            with self.subTest(kind=kind):
+                paths = [self.write_lora(kind + str(index) + ".safetensors") for index in range(2)]
+                readers = [self.hash_reader(kind, path) for path in paths]
+                entered, release = threading.Event(), threading.Event()
+                guard, count = threading.Lock(), 0
+                original_hash = hashlib.sha256
+                class Digest:
+                    def __init__(self):
+                        self.digest = original_hash()
+                    def update(self, chunk):
+                        self.digest.update(chunk)
+                    def hexdigest(self):
+                        nonlocal count
+                        with guard:
+                            count += 1
+                            if count == 2:
+                                entered.set()
+                        if not release.wait(5):
+                            raise AssertionError("unrelated files were serialized")
+                        return self.digest.hexdigest()
+                with mock.patch.object(self.metadata.hashlib, "sha256", side_effect=Digest), \
+                        concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(reader) for reader in readers]
+                    try:
+                        self.assertTrue(entered.wait(5), "both files must read before either is released")
+                    finally:
+                        release.set()
+                    for path, future in zip(paths, futures):
+                        result = future.result(timeout=5)
+                        self.assertEqual(result if kind == "acquired" else result["sha256"], original_hash(path.read_bytes()).hexdigest())
+                self.assert_operations_released()
+
+    def test_first_open_failure_releases_same_file_waiters(self):
+        for kind in ("metadata", "model", "acquired"):
+            with self.subTest(kind=kind):
+                path = self.write_lora(kind + ".safetensors")
+                readers = [self.hash_reader(kind, path) for _ in range(4)]
+                service = {"metadata": self.metadata, "model": self.info, "acquired": self.acquisition}[kind]
+                original_operation = service.file_operation
+                entered, queued, release = threading.Event(), threading.Event(), threading.Event()
+                guard, attempts = threading.Lock(), 0
+
+                @contextmanager
+                def operation(key):
+                    nonlocal attempts
+                    with guard:
+                        attempts += 1
+                        if attempts == len(readers):
+                            queued.set()
+                    with original_operation(key):
+                        yield
+
+                owner = Path if kind == "acquired" else __import__("builtins")
+                original_open, count = owner.open, 0
+                def fail_first(*args, **kwargs):
+                    nonlocal count
+                    count += 1
+                    if count == 1:
+                        entered.set()
+                        if not release.wait(5):
+                            raise AssertionError("failed reader was not released")
+                        raise OSError("first open failed")
+                    return original_open(*args, **kwargs)
+                with mock.patch.object(owner, "open", side_effect=fail_first, autospec=kind == "acquired"), \
+                        mock.patch.object(service, "file_operation", side_effect=operation), \
+                        concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = [executor.submit(reader) for reader in readers]
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        self.assertTrue(queued.wait(5), "waiters must queue before the first read fails")
+                    finally:
+                        release.set()
+                    results = []
+                    for future in futures:
+                        try:
+                            results.append(future.result(timeout=5))
+                        except OSError as error:
+                            results.append(error.with_traceback(None))
+                self.assertEqual(sum(isinstance(result, OSError) for result in results), 1)
+                self.assertEqual(count, 2, "one failed open followed by one complete retry")
+                self.assert_operations_released()
+
+    def test_queued_file_revision_returns_only_current_hash(self):
+        for kind in ("metadata", "model", "acquired"):
+            with self.subTest(kind=kind):
+                path = self.write_lora(kind + ".safetensors", "old")
+                readers = [self.hash_reader(kind, path) for _ in range(4)]
+                results, hashes, _bytes = self.parallel_hashes(kind, readers, lambda: self.write_lora(path.name, "new"))
+                expected = hashlib.sha256(path.read_bytes()).hexdigest()
+                self.assertEqual(hashes, 2)
+                for result in results:
+                    self.assertEqual(result if kind == "acquired" else result["sha256"], expected)
+                    if kind == "metadata":
+                        self.assertEqual(result["trigger_phrases"], ["new"])
+
+    def test_queued_selection_remap_uses_new_physical_file_even_if_old_is_deleted(self):
+        for kind in ("metadata", "model"):
+            with self.subTest(kind=kind):
+                old = self.write_lora(kind + "-old.safetensors", "old")
+                current = self.write_lora(kind + "-new.safetensors", "new")
+                readers = [self.hash_reader(kind, old, alias=True) for _ in range(4)]
+                folder = "loras" if kind == "metadata" else "diffusion_models"
+                def remap():
+                    self.catalogs[folder]["alias.safetensors"] = str(current)
+                    old.unlink()
+                results, hashes, _bytes = self.parallel_hashes(kind, readers, remap)
+                self.assertEqual(hashes, 2)
+                for result in results:
+                    self.assertEqual(result["sha256"], hashlib.sha256(current.read_bytes()).hexdigest())
+                    self.assertEqual(result["name"], "alias.safetensors")
+                    if kind == "metadata":
+                        self.assertEqual(result["trigger_phrases"], ["new"])
+
+    def test_queued_removed_selection_cannot_publish_old_hash(self):
+        for kind in ("metadata", "model", "acquired"):
+            with self.subTest(kind=kind):
+                path = self.write_lora(kind + ".safetensors")
+                readers = [self.hash_reader(kind, path) for _ in range(4)]
+                def remove():
+                    path.unlink()
+                    for catalog in self.catalogs.values():
+                        catalog.pop(path.name, None)
+                results, _hashes, _bytes = self.parallel_hashes(kind, readers, remove)
+                self.assertTrue(all(isinstance(result, (OSError, ValueError)) for result in results))
+
+    def test_operation_registry_does_not_retain_completed_files(self):
+        for index in range(150):
+            path = self.write_lora("retired-" + str(index) + ".safetensors")
+            self.catalogs["checkpoints"][path.name] = str(path)
+            self.metadata.read_lora_info(path.name)
+            self.info.read_model_hash("checkpoint", path.name)
+            self.acquisition._sha256(path)
+        self.assert_operations_released()
+
     def test_all_current_metadata_and_model_hashes_survive_previous_count_thresholds(self):
         for index in range(40):
             name = "file-" + str(index) + ".safetensors"
@@ -530,23 +761,76 @@ class SaveDirectoryMemoryTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_revisions_replace_current_prompt_and_keep_batch_directory_stable(self):
-        with mock.patch.object(self.nodes, "_resolve_run_dir", side_effect=lambda _value: ["run-" + str(len(self.nodes._RUN_DIR_CACHE))]) as resolve:
+    def test_latest_prompt_and_base_replace_state_while_same_batch_reuses_parts(self):
+        node = self.nodes.SceneSaveImage()
+        with mock.patch.object(self.nodes, "_resolve_run_dir", side_effect=lambda _value: ["run-" + str(resolve.call_count)]) as resolve:
             for index in range(70):
                 prompt = {"prompt": index}
-                first = self.nodes._cached_run_parts(self.temp.name, "auto", prompt, "save")
-                self.assertIs(self.nodes._cached_run_parts(self.temp.name, "auto", prompt, "save"), first)
+                first = node._run_parts(self.temp.name, {}, prompt)
+                self.assertIs(node._run_parts(self.temp.name, {}, copy.deepcopy(prompt)), first)
             self.assertEqual(resolve.call_count, 70)
-        self.assertEqual(len(self.nodes._RUN_DIR_CACHE), 1)
+            self.assertIs(node._automatic_run_state[2], first)
+            changed_base = str(Path(self.temp.name) / "other")
+            self.assertIsNot(node._run_parts(changed_base, {}, prompt), first)
+            self.assertEqual(resolve.call_count, 71)
+            self.assertEqual(node._automatic_run_state[0], changed_base)
+            self.assertEqual(len(node._automatic_run_state), 3)
 
-    def test_independent_current_nodes_and_roots_are_not_count_evicted(self):
-        with mock.patch.object(self.nodes, "_resolve_run_dir", return_value=["current"]) as resolve:
-            for index in range(300):
-                self.nodes._cached_run_parts(self.temp.name, "auto", {}, "save-" + str(index))
-            self.nodes._cached_run_parts(str(Path(self.temp.name) / "other"), "auto", {}, "save-0")
-            self.nodes._cached_run_parts(self.temp.name, "auto", {}, "save-0")
-        self.assertEqual(resolve.call_count, 301)
-        self.assertEqual(len(self.nodes._RUN_DIR_CACHE), 301)
+    def test_explicit_run_dir_and_disabled_directory_clear_automatic_state(self):
+        node = self.nodes.SceneSaveImage()
+        with mock.patch.object(self.nodes, "_resolve_run_dir", return_value=["automatic"]) as resolve:
+            node._run_parts(self.temp.name, {}, {})
+            self.assertEqual(node._run_parts(self.temp.name, {"run_dir": "explicit/sub"}, {}), ["explicit", "sub"])
+            self.assertIsNone(node._automatic_run_state)
+            node._run_parts(self.temp.name, {}, {})
+            self.assertEqual(node._run_parts(self.temp.name, {"use_run_dir": False}, {}), [])
+            self.assertIsNone(node._automatic_run_state)
+            node._run_parts(self.temp.name, {}, {})
+            self.assertEqual(resolve.call_count, 3)
+
+    def test_three_hundred_live_nodes_keep_state_and_release_it_with_their_owner(self):
+        class Parts(list):
+            pass
+        with mock.patch.object(self.nodes, "_resolve_run_dir", side_effect=lambda _value: Parts(["current"])) as resolve:
+            owners = [self.nodes.SceneSaveImage() for _ in range(300)]
+            references = [weakref.ref(owner) for owner in owners]
+            parts = [weakref.ref(owner._run_parts(self.temp.name, {}, {})) for owner in owners]
+            for owner in owners:
+                self.assertIs(owner._run_parts(self.temp.name, {}, {}), owner._automatic_run_state[2])
+            self.assertEqual(resolve.call_count, 300)
+            self.assertTrue(all(reference() is not None for reference in parts))
+            del owner, owners
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
+        self.assertTrue(all(reference() is None for reference in parts))
+        self.assertFalse(hasattr(self.nodes, "_RUN_DIR_CACHE"))
+
+    def test_real_batch_save_groups_images_and_preserves_final_metadata(self):
+        node = self.nodes.SceneSaveImage()
+        source = FakeTensor((1, 1, 3))
+        source._array = np.ones((1, 1, 3), dtype=np.float32) * 0.5
+        images = [source, source]
+        info = {"path": "scene", "filename_prefix": "batch_", "positive": "test", "seed": 19}
+        prompt = {"1": {"class_type": "Saved", "inputs": {"value": 1}}}
+        with mock.patch.object(self.nodes, "_resolve_run_dir", side_effect=(["first"], ["revised"])) as resolve:
+            first = node.save_images(images, "base", scene_info=info, prompt=prompt)
+            second = node.save_images([source], "base", scene_info=info, prompt=copy.deepcopy(prompt))
+            revised_prompt = copy.deepcopy(prompt)
+            revised_prompt["1"]["inputs"]["value"] = 2
+            revised = node.save_images([source], "base", scene_info=info, prompt=revised_prompt)
+        self.assertEqual(resolve.call_count, 2)
+        first_files = sorted((Path(self.temp.name) / "base" / "first" / "scene").glob("*.png"))
+        self.assertEqual(len(first_files), 3)
+        self.assertIs(first["result"][0], images)
+        self.assertEqual([Path(path) for path in first["result"][1].splitlines()], first_files[:2])
+        self.assertEqual(Path(second["result"][1]), first_files[2])
+        self.assertEqual(Path(revised["result"][1]).parent, Path(self.temp.name) / "base" / "revised" / "scene")
+        for index, path in enumerate(first_files, 1):
+            with Image.open(path) as image:
+                metadata = json.loads(image.info["scene_info"])
+                self.assertEqual((metadata["run_dir"], metadata["run_relative_path"], metadata["file_index"], metadata["seed"]),
+                                 ("first", "base/first/scene", index, 19))
+                self.assertEqual(json.loads(image.info["prompt"]), prompt)
 
 
 class ImageMemoryTests(unittest.TestCase):

@@ -13,7 +13,7 @@ import aiohttp
 import folder_paths
 
 from .llm_service import ServiceError, candidate_identity, MODES
-from .lora_metadata import file_identity, file_signature
+from .lora_metadata import file_identity, file_signature, file_operation
 
 SORTS = ("Most Downloaded", "Most Liked", "Most Collected", "Highest Rated")
 _NOT_FOUND = object()
@@ -109,39 +109,42 @@ def _filename(candidate):
 
 
 def _sha256(path):
-    key = file_identity(path)
     while True:
-        try:
-            signature = file_signature(path)
-        except OSError:
-            with _HASH_LOCK:
-                _HASH_CACHE.pop(key, None)
-            raise
-        with _HASH_LOCK:
-            generation = _HASH_CATALOG_GENERATION
-            cached = _HASH_CACHE.get(key)
-            if cached is not None and cached[0] != signature:
-                _HASH_CACHE.pop(key)
-                cached = None
-        if cached is not None:
-            value = cached[1]
-        else:
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            value = digest.hexdigest()
-        with _HASH_LOCK:
-            try:
-                current_signature = file_signature(path)
-            except OSError:
-                _HASH_CACHE.pop(key, None)
-                raise
-            if current_signature != signature:
+        key = file_identity(path)
+        with file_operation(key):
+            if file_identity(path) != key:
                 continue
-            if generation == _HASH_CATALOG_GENERATION or _HASH_CATALOG.get(key) == signature:
-                _HASH_CACHE[key] = (signature, value)
-        return value
+            try:
+                signature = file_signature(path)
+            except OSError:
+                with _HASH_LOCK:
+                    _HASH_CACHE.pop(key, None)
+                raise
+            with _HASH_LOCK:
+                generation = _HASH_CATALOG_GENERATION
+                cached = _HASH_CACHE.get(key)
+                if cached is not None and cached[0] != signature:
+                    _HASH_CACHE.pop(key)
+                    cached = None
+            if cached is not None:
+                value = cached[1]
+            else:
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                value = digest.hexdigest()
+            with _HASH_LOCK:
+                try:
+                    current_signature = file_signature(path)
+                except OSError:
+                    _HASH_CACHE.pop(key, None)
+                    raise
+                if current_signature != signature:
+                    continue
+                if generation == _HASH_CATALOG_GENERATION or _HASH_CATALOG.get(key) == signature:
+                    _HASH_CACHE[key] = (signature, value)
+            return value
 
 
 def reconcile_lora_hashes(identities):

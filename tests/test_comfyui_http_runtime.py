@@ -595,7 +595,7 @@ class RealComfyUIHttpRuntimeTests(unittest.TestCase):
         cls.lazy_test_node_dir = cls.base / "custom_nodes" / "scene-prompt-lazy-test"
         (cls.base / "custom_nodes").mkdir()
         shutil.rmtree(cls.node_dir, ignore_errors=True)
-        shutil.copytree(ROOT, cls.node_dir, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc", ".venv", "node_modules"))
+        shutil.copytree(ROOT, cls.node_dir, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc", ".venv*", "node_modules"))
         cls.lazy_test_node_dir.mkdir()
         (cls.lazy_test_node_dir / "__init__.py").write_text(
             '''from pathlib import Path

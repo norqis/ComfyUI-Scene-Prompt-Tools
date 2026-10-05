@@ -39,8 +39,6 @@ def merge_settings(saved, changes):
     for key in DEFAULTS:
         if key in changes and not (key == "api_key" and changes[key] == ""):
             settings[key] = changes[key]
-    if changes.get("clear_api_key") is True:
-        settings["api_key"] = ""
     for key in ("model", "api_key"):
         if not isinstance(settings[key], str):
             raise ValueError(f"{key} must be text.")

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import importlib.util
 import json
 import os
 import sys
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -71,6 +73,43 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertEqual(self.package.NODE_CLASS_MAPPINGS["SceneSaveImage"].CATEGORY, "Scene/output")
         self.assertEqual(self.package.WEB_DIRECTORY, "./web")
         self.assertTrue((ROOT / self.package.WEB_DIRECTORY).is_dir())
+
+    def test_real_object_caches_reuse_save_owner_and_release_unused_fallback(self):
+        import execution
+        from comfy_execution.graph import DynamicPrompt
+
+        nodes = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.nodes"]
+        for mode in (execution.CacheType.CLASSIC, execution.CacheType.LRU, execution.CacheType.RAM_PRESSURE):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(nodes, "_resolve_run_dir", side_effect=(["first"], ["changed"])) as resolve:
+                objects = execution.CacheSet(mode).objects
+                first_prompt = {"save": {"class_type": "SceneSaveImage", "inputs": {"path": "first"}}}
+                asyncio.run(objects.set_prompt(DynamicPrompt(first_prompt), ["save"], None))
+                owner = nodes.SceneSaveImage()
+                original_parts = owner._run_parts(directory, {}, first_prompt)
+                reference = weakref.ref(owner)
+                objects.set_local("save", owner)
+                del owner
+
+                asyncio.run(objects.set_prompt(DynamicPrompt(copy.deepcopy(first_prompt)), ["save"], None))
+                objects.clean_unused()
+                reused = objects.get_local("save")
+                self.assertIs(reused, reference())
+                self.assertIs(reused._run_parts(directory, {}, first_prompt), original_parts)
+
+                changed_prompt = copy.deepcopy(first_prompt)
+                changed_prompt["save"]["inputs"]["path"] = "changed"
+                asyncio.run(objects.set_prompt(DynamicPrompt(changed_prompt), ["save"], None))
+                objects.clean_unused()
+                self.assertIs(objects.get_local("save"), reused)
+                self.assertEqual(reused._run_parts(directory, {}, changed_prompt), ["changed"])
+                self.assertEqual(resolve.call_count, 2)
+                del reused
+
+                asyncio.run(objects.set_prompt(DynamicPrompt({}), [], None))
+                objects.clean_unused()
+                gc.collect()
+                self.assertIsNone(reference(), "ComfyUI's unused object cleanup must release the owner")
 
     def test_callback_node_contract_uses_real_comfyui_type_registration(self):
         callback = self.package.NODE_CLASS_MAPPINGS["ScenePromptCallback"].INPUT_TYPES()

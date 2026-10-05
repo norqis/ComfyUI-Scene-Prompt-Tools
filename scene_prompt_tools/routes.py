@@ -625,7 +625,7 @@ def define_routes():
             user_id = _request_user_id(request)
             if operation in ("generate", "select"):
                 settings, state = await asyncio.to_thread(request_settings, user_id)
-            else:
+            elif operation != "settings_post":
                 settings = await asyncio.to_thread(load_settings, user_id)
             if operation == "settings_get":
                 result = public_settings(settings)
