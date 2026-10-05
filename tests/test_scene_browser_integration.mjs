@@ -2685,9 +2685,10 @@ try {
         llm.mode=4;expand.onNodeCreated();const bypassDisabled=generate.disabled;
         return {emptyDisabled,reachableDisabled,bypassDisabled,order:expand.widgets.indexOf(generate)+1===expand.widgets.indexOf(run),
             noCalls:calls===window.__scenePromptCalls.length,hidden:llm.widgets.find((widget)=>widget.name==="generation_state_json").hidden,
+            settingsFirst:llm.widgets[0].sceneRole==="llm_settings" && llm.widgets[0].serialize===false,
             own:llm.widgets.filter((widget)=>widget.sceneRole?.startsWith("llm_")).map((widget)=>widget.sceneRole)};
     });
-    assert.deepEqual(llmControls,{emptyDisabled:true,reachableDisabled:false,bypassDisabled:true,order:true,noCalls:true,hidden:true,own:["llm_generate","llm_settings","llm_status"]});
+    assert.deepEqual(llmControls,{emptyDisabled:true,reachableDisabled:false,bypassDisabled:true,order:true,noCalls:true,hidden:true,settingsFirst:true,own:["llm_settings","llm_generate","llm_status"]});
     console.log("Scene Prompt browser integration tests passed.");
 } finally {
     await browser.close();

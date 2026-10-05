@@ -917,6 +917,31 @@ async function testPopupRequestsUseOneIntentAcrossNodes() {
     assert.equal(await closed, null, "closing a popup invalidates its pending open");
 }
 
+function testLLMSettingsAlwaysLeadWithoutChangingStoredWidgets() {
+    const context = vm.createContext({ String,
+        injectStyle() {}, installSceneConnectionWatcher() {}, hideWidget(widget) { widget.hidden = true; }, showWidget() {},
+        findWidget: (node, name) => node.widgets.find(widget => widget.name === name),
+        findSceneWidget: (node, role) => node.widgets.find(widget => widget.sceneRole === role),
+        sceneLLMController: { busy: new Set() },
+    });
+    for (const name of ["addSceneButton", "attachSceneLLM"]) vm.runInContext(functionSource(name), context);
+    const names = ["model_mode", "description", "positive", "negative", "generation_state_json"];
+    const values = ["Anima", "saved description", "saved positive", "saved negative", '{"saved":true}'];
+    const node = { widgets: names.map((name, index) => ({ name, value: values[index] })),
+        addWidget(type, name, value, callback, options) { const widget = { type, name, value, callback, options }; this.widgets.push(widget); return widget; },
+        addCustomWidget(widget) { this.widgets.push(widget); return widget; },
+    };
+    context.attachSceneLLM(node);
+    const settings = node.widgets[0];
+    assert.equal(settings.sceneRole, "llm_settings");
+    assert.equal(settings.serialize, false);
+    context.attachSceneLLM(node);
+    assert.strictEqual(node.widgets[0], settings, "repeated attach reuses the first settings button");
+    assert.equal(node.widgets.filter(widget => widget.sceneRole === "llm_settings").length, 1);
+    assert.deepEqual(node.widgets.filter(widget => widget.serialize !== false).map(widget => [widget.name, widget.value]),
+        names.map((name, index) => [name, values[index]]), "moving controls preserves the declared serialized widget order and values");
+}
+
 function testPromptSummariesUseComfyWeights() {
     const context = vm.createContext({ String, Number, Set, Map });
     for (const name of ["promptIdentity", "promptOverrideKey", "uniquePromptParts", "promptOverrideKeys", "mergePositiveNegativeParts"]) {
@@ -943,6 +968,7 @@ function testPromptSummariesUseComfyWeights() {
 }
 
 Promise.resolve()
+    .then(testLLMSettingsAlwaysLeadWithoutChangingStoredWidgets)
     .then(testPromptSummariesUseComfyWeights)
     .then(testPresetReferenceCandidatesAreSortedByDisplayName)
     .then(testPresetListRaceInNormalResponseOrder)

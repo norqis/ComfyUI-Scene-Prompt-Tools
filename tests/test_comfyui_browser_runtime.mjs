@@ -178,6 +178,12 @@ NODE_CLASS_MAPPINGS = {}
         const sourceUI = (await response.text()).replace("onError: showAPIError,", "onError: (error, query, retry) => { window.__sceneLLMRuntimeError = error.stack; showAPIError(error, query, retry); },");
         await route.fulfill({ response, body: `${sourceUI}
 window.__sceneSeedRuntimeTest = {
+    llmWidgets(node) {
+        const names = ["model_mode", "description", "positive", "negative", "generation_state_json"];
+        return { firstRole: node.widgets[0]?.sceneRole, settingsCount: node.widgets.filter(widget => widget.sceneRole === "llm_settings").length,
+            settingsSerialize: node.widgets.find(widget => widget.sceneRole === "llm_settings")?.serialize,
+            names: node.widgets.filter(widget => names.includes(widget.name)).map(widget => widget.name), values: node.serialize().widgets_values };
+    },
     updateLLMExpand(node) { updateSceneExpandButton(node); },
     presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
@@ -1012,7 +1018,7 @@ window.__sceneSeedRuntimeTest = {
         const managed = app.graph._nodes.find((node) => node.comfyClass === "SceneApplyLora" && node.properties?.scene_civitai?.origin === String(llm.id));
         if (!managed) throw new Error(`Generated native ApplyLoRA missing; status=${llm.sceneLLMStatus}`);
         const prompt = await app.graphToPrompt();
-        const beforeReload = { llm: prompt.output[String(llm.id)]?.inputs, lora: prompt.output[String(managed.id)]?.inputs,
+        const beforeReload = { llm: prompt.output[String(llm.id)]?.inputs, widgets: window.__sceneSeedRuntimeTest.llmWidgets(llm), lora: prompt.output[String(managed.id)]?.inputs,
             queueInput: prompt.output[String(branch.id)]?.inputs.scene_prompt2, managed: managed.properties.scene_civitai,
             serial: app.graph.serialize(), ids: { llm: llm.id, lora: managed.id, expand: expand.id, branch: branch.id } };
         const ids = beforeReload.ids;
@@ -1028,10 +1034,11 @@ window.__sceneSeedRuntimeTest = {
         await app.loadGraphData(beforeReload.serial, true, true);
         const restored = app.graph.getNodeById(ids.llm), restoredLora = app.graph.getNodeById(ids.lora), restoredExpand = app.graph.getNodeById(ids.expand);
         const after = await app.graphToPrompt();
+        const restoredWidgets = window.__sceneSeedRuntimeTest.llmWidgets(restored);
         field(restored, "positive").value = "user edited prompt";
         await role(restoredExpand, "expand_llm_generate").callback();
         return { empty, order, enabled, bypassDisabled, description: description.value, undone, redone,
-            beforeReload, restored: { llm: after.output[String(ids.llm)]?.inputs, lora: after.output[String(ids.lora)]?.inputs,
+            beforeReload, restored: { llm: after.output[String(ids.llm)]?.inputs, widgets: restoredWidgets, lora: after.output[String(ids.lora)]?.inputs,
                 queueInput: after.output[String(ids.branch)]?.inputs.scene_prompt2, provenance: restoredLora.properties.scene_civitai },
             reusedPositive: field(restored, "positive").value,
             nodeCount: app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora").length,
@@ -1039,6 +1046,16 @@ window.__sceneSeedRuntimeTest = {
     });
     assert.deepEqual(llmRuntime.empty, { own: true, expand: true });
     assert.equal(llmRuntime.order, true);
+    const llmStoredNames = ["model_mode", "description", "positive", "negative", "generation_state_json"];
+    function assertLLMWidgetContract(snapshot, inputs) {
+        assert.equal(snapshot.firstRole, "llm_settings");
+        assert.equal(snapshot.settingsCount, 1);
+        assert.equal(snapshot.settingsSerialize, false);
+        assert.deepEqual(snapshot.names, llmStoredNames);
+        assert.deepEqual(snapshot.values, llmStoredNames.map(name => inputs[name]));
+    }
+    assertLLMWidgetContract(llmRuntime.beforeReload.widgets, llmRuntime.beforeReload.llm);
+    assertLLMWidgetContract(llmRuntime.restored.widgets, llmRuntime.restored.llm);
     assert.deepEqual(llmRuntime.enabled, { own: true, expand: true });
     assert.equal(llmRuntime.bypassDisabled, true);
     assert.equal(llmRuntime.description, "a girl wearing a hat");
@@ -1117,7 +1134,8 @@ window.__sceneSeedRuntimeTest = {
         const api = await app.graphToPrompt();
         const nativeLoras = app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora");
         const prompts = app.graph._nodes.filter((node) => node.comfyClass === "ScenePromptLLM");
-        const editor = { loras: nativeLoras.map((node) => api.output[String(node.id)]?.inputs), prompts: prompts.map((node) => api.output[String(node.id)]?.inputs) };
+        const editor = { loras: nativeLoras.map((node) => api.output[String(node.id)]?.inputs), prompts: prompts.map((node) => api.output[String(node.id)]?.inputs),
+            widgets: prompts.map(node => window.__sceneSeedRuntimeTest.llmWidgets(node)) };
         const editorOutput = app.graph._nodes.find((node) => node.comfyClass === "ScenePresetOutput");
         const saveReply = new Promise((resolve) => {
             const originalFetch = window.fetch;
@@ -1139,7 +1157,8 @@ window.__sceneSeedRuntimeTest = {
         const loadedAPI = await app.graphToPrompt();
         return { untouched, retained: retained === JSON.stringify(local), retryEnabled, compactUnchanged, editor,
             loadedLoras: app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora").map((node) => loadedAPI.output[String(node.id)]?.inputs),
-            loadedPrompts: app.graph._nodes.filter((node) => node.comfyClass === "ScenePromptLLM").map((node) => loadedAPI.output[String(node.id)]?.inputs) };
+            loadedPrompts: app.graph._nodes.filter((node) => node.comfyClass === "ScenePromptLLM").map((node) => loadedAPI.output[String(node.id)]?.inputs),
+            loadedWidgets: app.graph._nodes.filter(node => node.comfyClass === "ScenePromptLLM").map(node => window.__sceneSeedRuntimeTest.llmWidgets(node)) };
     });
     assert.equal(presetLLMRuntime.untouched, true, "Reference generation never writes the shared Preset file");
     assert.equal(presetLLMRuntime.retryEnabled, true, "failed native Reference generation restores the Generate button");
@@ -1147,6 +1166,8 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(presetLLMRuntime.retained, true, "Reference customization survives native owning-workflow reload");
     assert.equal(presetLLMRuntime.editor.loras.length, 2);
     assert.equal(presetLLMRuntime.loadedLoras.length, 2);
+    presetLLMRuntime.editor.widgets.forEach((snapshot, index) => assertLLMWidgetContract(snapshot, presetLLMRuntime.editor.prompts[index]));
+    presetLLMRuntime.loadedWidgets.forEach((snapshot, index) => assertLLMWidgetContract(snapshot, presetLLMRuntime.loadedPrompts[index]));
     for (const lora of [...presetLLMRuntime.editor.loras, ...presetLLMRuntime.loadedLoras]) {
         assert.equal(lora.lora_name, runtimeCandidate.lora_name); assert.equal(lora.positive, "runtime_hat"); assert.equal(lora.model_mode, "Illustrious");
     }
@@ -1265,28 +1286,76 @@ window.__sceneSeedRuntimeTest = {
 
     const servicesBeforeSettings = llmRequests.length;
     const generationsBeforeSettings = llmRequests.filter(request=>request.path.endsWith('/generate')).length;
-    await page.evaluate(async () => {
+    const initialLLMSettings = await page.evaluate(async () => await (await fetch('/scene_prompt/llm/settings')).json());
+    const nativeSettingsNode = await page.evaluate(async () => {
         const { app } = await import("/scripts/app.js"); app.graph.clear();
         const llm = window.LiteGraph.createNode("ScenePromptLLM"); app.graph.add(llm);
-        await llm.widgets.find(widget=>widget.sceneRole==='llm_settings').callback();
+        const names = ["model_mode", "description", "positive", "negative", "generation_state_json"];
+        const values = ["Anima", "saved description", "saved positive", "saved negative", '{"fixture":true}'];
+        names.forEach((name, index) => { llm.widgets.find(widget => widget.name === name).value = values[index]; });
+        const before = window.__sceneSeedRuntimeTest.llmWidgets(llm), id = llm.id;
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        const restored = app.graph.getNodeById(id);
+        await restored.widgets.find(widget=>widget.sceneRole==='llm_settings').callback();
+        return { id, inputs: Object.fromEntries(names.map((name, index) => [name, values[index]])), before,
+            after: window.__sceneSeedRuntimeTest.llmWidgets(restored) };
     });
+    assertLLMWidgetContract(nativeSettingsNode.before, nativeSettingsNode.inputs);
+    assertLLMWidgetContract(nativeSettingsNode.after, nativeSettingsNode.inputs);
     const llmSettings = page.getByRole('dialog',{name:'LLM接続設定',exact:true});
     await llmSettings.getByRole('button',{name:'保存',exact:true}).waitFor();
+    assert.equal(await llmSettings.getByRole('button', { name: /API Key.*削除/u }).count(), 0);
     assert.deepEqual(await llmSettings.locator('input').evaluateAll(inputs=>inputs.map(input=>input.name)), ['base_url','port','model','api_key']);
     assert.equal(await llmSettings.locator('input[name="base_url"]').evaluate(input=>input.required),true);
     assert.equal(await llmSettings.locator('.pc-required-star').evaluate(star=>getComputedStyle(star).color),'rgb(255, 91, 91)');
     assert(await llmSettings.locator('form').evaluate(form=>parseFloat(getComputedStyle(form).paddingTop))>=20);
+    async function saveNativeLLMSettings() {
+        const completed = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/scene_prompt/llm/settings') && response.request().method() === 'POST');
+        await llmSettings.getByRole('button', { name: '保存', exact: true }).click();
+        const response = await completed;
+        assert.equal(response.ok(), true);
+        assert.deepEqual(Object.keys(response.request().postDataJSON()).sort(), ['api_key', 'base_url', 'model', 'port']);
+        await llmSettings.getByText('保存しました', { exact: true }).waitFor();
+        return response.json();
+    }
+    const persistedConnection = { base_url: 'http://127.0.0.1/proxy/v1', port: 9417, model: 'native-persisted-model' };
+    await llmSettings.locator('input[name="base_url"]').fill(persistedConnection.base_url);
+    await llmSettings.locator('input[name="port"]').fill(String(persistedConnection.port));
+    await llmSettings.locator('input[name="model"]').fill(persistedConnection.model);
+    const savedConnection = await saveNativeLLMSettings();
+    assert.deepEqual(Object.fromEntries(Object.keys(persistedConnection).map(name => [name, savedConnection[name]])), persistedConnection);
+    assert.equal(savedConnection.api_key_set, initialLLMSettings.api_key_set, 'blank key preserves the backend key flag');
+    const privateConnection = JSON.parse(await readFile(resolve(directory, 'user', 'default', 'scene_prompt_tools', 'llm_settings.json'), 'utf8'));
+    assert.deepEqual(Object.fromEntries(Object.keys(persistedConnection).map(name => [name, privateConnection[name]])), persistedConnection,
+        'the real backend atomically persisted URL, nondefault port and model to its private fixture file');
+    await page.keyboard.press('Escape');
+    await page.evaluate(id => window.app.graph.getNodeById(id).widgets[0].callback(), nativeSettingsNode.id);
+    await llmSettings.getByRole('button', { name: '保存', exact: true }).waitFor();
+    assert.deepEqual(await llmSettings.locator('input').evaluateAll(inputs => inputs.map(input => input.value)),
+        [persistedConnection.base_url, String(persistedConnection.port), persistedConnection.model, ''], 'native settings close and reopen retain the real saved connection');
+    const reopenedConnection = await page.evaluate(async () => await (await fetch('/scene_prompt/llm/settings')).json());
+    assert.deepEqual(Object.fromEntries(Object.keys(persistedConnection).map(name => [name, reopenedConnection[name]])), persistedConnection);
+    assert.equal(Object.hasOwn(reopenedConnection, 'api_key'), false, 'settings GET exposes only the saved-key flag');
     await llmSettings.locator('input[name="model"]').fill('');
     await llmSettings.locator('input[name="port"]').fill('');
-    await llmSettings.getByRole('button',{name:'保存',exact:true}).click();
-    await llmSettings.getByText('保存しました',{exact:true}).waitFor();
-    const savedLLMSettings = await page.evaluate(async()=>await (await fetch('/scene_prompt/llm/settings')).json());
+    const savedLLMSettings = await saveNativeLLMSettings();
     assert.equal(savedLLMSettings.model,''); assert.equal(savedLLMSettings.port,null);
     assert.equal(savedLLMSettings.civitai_api_key_set,undefined);
+    await page.keyboard.press('Escape');
+    await page.evaluate(id => window.app.graph.getNodeById(id).widgets[0].callback(), nativeSettingsNode.id);
+    await llmSettings.getByRole('button', { name: '保存', exact: true }).waitFor();
+    assert.equal(await llmSettings.locator('input[name="port"]').inputValue(), '', 'the native saved protocol-default port stays blank on reopen');
+    assert.equal(await llmSettings.locator('input[name="model"]').inputValue(), '');
     await llmSettings.getByRole('button',{name:'接続テスト・モデル取得'}).click();
     await llmSettings.getByText('接続成功: settings-fixture',{exact:true}).waitFor();
     await page.setViewportSize({width:360,height:740});
     assert.equal(await llmSettings.evaluate(dialog=>dialog.scrollWidth<=dialog.clientWidth),true);
+    await llmSettings.locator('input[name="base_url"]').fill(initialLLMSettings.base_url);
+    await llmSettings.locator('input[name="port"]').fill(initialLLMSettings.port == null ? '' : String(initialLLMSettings.port));
+    await llmSettings.locator('input[name="model"]').fill(initialLLMSettings.model);
+    const restoredConnection = await saveNativeLLMSettings();
+    assert.deepEqual(Object.fromEntries(['base_url', 'port', 'model'].map(name => [name, restoredConnection[name]])),
+        Object.fromEntries(['base_url', 'port', 'model'].map(name => [name, initialLLMSettings[name]])), 'native tests restore their original endpoint and model before subsequent cases');
     await page.keyboard.press('Escape');
     await page.setViewportSize({width:1280,height:720});
     await page.evaluate(async()=>{
