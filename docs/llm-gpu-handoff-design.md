@@ -18,11 +18,15 @@ Prompt generation remains OpenAI-compatible. A separate module exposes provider 
 
 Provider state is keyed by endpoint, port, model and authentication identity and becomes unused when settings change. Never retain credentials in workflow, prompt history, PNG metadata or browser-facing responses. No new model/cache capacity limits.
 
-ComfyUI's `/free` acknowledges flags rather than completed work. Controlled prompt generation must wait for running image execution, reset inactive executor caches and invoke model unload, garbage collection and soft-empty-cache under the same coordination lease before starting the LLM. Do not patch the installed ComfyUI source.
+ComfyUI's `/free` acknowledges flags rather than completed work. Controlled prompt generation queues a worker command and wakes the worker with a queue flag. Wrap `PromptQueue.get` once: process pending controls on the worker thread, reset inactive executor caches, unload models, collect garbage and soft-empty-cache, then acknowledge actual completion before starting the LLM. Register executors weakly at construction. Never reset an executor from an HTTP thread: the worker still reads its success/status/history after execute returns. Do not patch the installed ComfyUI source.
 
 One prompt-generation operation includes all target LLM nodes and LoRA selection requests. The operation retains its lease until the entire operation finishes or is cancelled/disconnected. Already completed node edits retain existing behavior on partial failure. Fully cached operations do not acquire a resource lease.
 
-The image execution hook retains the same lease from provider unload confirmation through workflow execution. Continuous runs avoid repeated release calls while no intervening LLM request has loaded the provider again. If another prompt operation runs between images, the next image must ensure release again.
+The queue hook admits images and confirms provider release on the worker before returning the item. Retain the image lease through `task_done`, not just through `execute`, and handle already-popped items without blocking worker control acknowledgement. All ordinary image/LLM requests register as shared readers; pending exclusive operations prevent reader starvation using writer priority. Session-owned HTTP requests reuse their exclusive lease. Continuous runs avoid repeated release calls while no intervening LLM request has loaded the provider again. If another prompt operation runs between images, the next image must ensure release again.
+
+Release failures must not escape the executor hook and kill ComfyUI's worker. Produce the failed job's normal status/history and release ownership after task completion. Queue delete/wipe release unused policy references. Bind a session to one user/client lifetime, rejecting duplicate active begins; closed websocket ownership retires abandoned state without arbitrary capacity limits or execution deadlines.
+
+The native frontend `api.queuePrompt` ignores additional prompt properties and builds its own extra_data. Use a per-call API receiver whose fetchApi inserts the opaque token into the actual POST body. Preserve receiver propagation through this package's wrappers; never temporarily replace the global fetchApi. An incompatible pre-bound foreign queue wrapper must not silently claim resource control succeeded.
 
 ## Frontend/backend integration contract
 
