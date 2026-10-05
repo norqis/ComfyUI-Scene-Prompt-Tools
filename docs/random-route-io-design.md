@@ -28,3 +28,11 @@ Coordinate frontend changes after the Civitai UI commit so the same shared file 
 - Preset save/load/reference and nested Presets contain Output, retain namespaced random IDs and produce matching preview/actual counts and selected prompts.
 - Only the winning Model/LoRA/Callback/Prompt/Delete values are present; source_node_names describe the selected generation route, not the whole graph.
 - Actual isolated ComfyUI CPU HTTP and browser tests cover fresh Input/Output registration/UI, old PNG/JSON, ordinary generation and continuous preparation/planning. Existing Python/frontend/ComfyUI/GPU tests remain passing. Production generation is untouched.
+
+## Queue controls when upstream is bypassed
+
+Keep each Queue's own order_mode, alternate_block_size and downstream_count_mode widget values even while upstream Queue or Random joins make them disabled. The existing backend and frontend shared queue planners already ignore these controls when an effective upstream queue boundary is present; do not reset values or add a second property snapshot. Normal widget serialization supplies persistence through JSON/PNG/Preset and undo/redo.
+
+When an upstream Queue is bypassed, evaluate its effective upstream input rather than treating its class as an active queue boundary. Enable downstream Queue controls only if no effective active Queue boundary or Random join remains. When bypass is removed, disable the controls again while preserving their values. Muted nodes, intervening Prompt/reroute nodes and multiple upstream Queue sources must follow the same effective-path rule.
+
+Verify the actual mode-change event updates downstream controls and invalidates cached schedules, including the native ComfyUI bypass action, instead of only invoking the synchronization helper in a unit test. Reuse the existing event-driven mode/connection watchers and downstream refresh batching; do not add polling or graph-wide repeated scans. Tests cover active -> bypass -> active transitions, settings surviving each transition and graph serialization/reload, accurate locked/unlocked schedule counts, nested/preset paths, and a second still-active Queue continuing to lock the receiver.
