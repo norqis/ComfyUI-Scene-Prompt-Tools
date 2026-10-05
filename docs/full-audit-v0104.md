@@ -11,6 +11,7 @@ Only read-only inspection of production is allowed. Reproduction and runtime ver
 1. LoRA metadata/title resolution and model Civitai lookup still fetch civitai.com directly from the browser; their detail/resource links also use .com. Search/download settings now specify civitai.red. These remaining paths ignore that choice and cannot use the private configured Civitai key. Confirmed by four source sites in scene_prompt_ui.js. The public .red search API returns valid JSON and .red download URLs; Highest Rated is accepted. No production token or weight download was used.
 2. An unchanged LoRA inventory refresh changes lora_metadata._CATALOG_GENERATION and makes an in-progress read_lora_info restart its complete SHA256 read. A deterministic probe refreshed the same inventory during three hash passes: four complete hashes of the same unchanged file. Repeated picker openings can prolong disk work without any changed file.
 3. Cancellation while awaiting to_thread(tempfile.mkstemp) loses ownership of its eventual descriptor/path before the download's finally block exists. A delayed-worker probe cancelled this stage and observed one leftover .download-*.part and one open descriptor. Cancellation also needs to settle file-writing/close/promotion workers before cleanup; cancelling an await does not stop its worker.
+4. Strongest-emphasis deduplication compares the outer explicit weight in nested wrappers, although ComfyUI's token_weights replaces it with the innermost explicit weight. The installed parser, executed as two pure extracted functions without importing tensors/models, reports ((test:4):0.5) as weight 4 and (test:1.2) as 1.2; current dedup keeps the weaker second item. The existing nested test codifies the incorrect implementation assumption. Browser summaries also deduplicate only exact strings and can disagree with the final prompt.
 
 ## Design
 
@@ -28,6 +29,10 @@ Retain only the latest inventory of physical identities and signatures, reusing 
 
 Resource creation must hand off descriptor/path exactly once or clean up the eventual result if cancellation wins. Use a small task-owned I/O helper or equivalent: shield the worker from cancellation of its await and settle it before releasing/cleaning its file resource. The owner must also settle in-flight writes before close/unlink. Preserve streaming incremental SHA256 and atomic verified promotion; never reread a fresh temporary download or buffer the whole model. Existing final verified files survive cancellation after promotion and can be reused on retry; temporary files and descriptors must not survive an unsuccessful acquisition. Keep cancellation propagation and the download serialization lock; do not add timeouts, retries, capacities, background download managers or a complex resource framework.
 
+### Actual explicit emphasis and summary parity
+
+For already-supported nested explicit numeric wrappers, use the innermost finite explicit weight, matching ComfyUI's tokenizer. Preserve the original winning text, first position, first equal-strength spelling, negative precedence and choices. Do not flatten/rewrite saved user input or introduce interpretation of previously distinct implicit parentheses, square brackets, LoRA syntax or nonfinite/invalid weights. Browser prompt summaries must select winners by the same explicit identity/effective strength; retain supported finite number spellings including exponents, trailing dots and digit separators. These helpers are linear in input text and keep only one winner per current identity. To Text/Delete/Reverse/Matrix/Preset/Expand continue using their shared prompt logic.
+
 ## Regression and release gates
 
 | Area | Required evidence |
@@ -36,6 +41,7 @@ Resource creation must hand off descriptor/path exactly once or clean up the eve
 | Frontend | Local endpoint for both LoRA and model lookup, red links, trigger injection/title/selection retained, no premature negative cache, stale file/modal results ignored; actual Chromium/native Comfy browser interactions |
 | Hash I/O | Same inventory and unrelated-file refresh during hash cause one full read; selected replacement/removal/remap cannot publish stale metadata; current caches remain reusable with no count cap |
 | Cancellation | Deterministic cancel during temporary creation and write, worker settlement before cleanup, no partial/descriptor leak, lock reusable for following acquisition; network/hash mismatch cleanup and cancellation after atomic promotion remain correct |
+| Emphasis | Nested stronger/weaker/equal winners agree with the real pure Comfy tokenizer; ordinary, scientific and digit-separated finite numbers, negative precedence, choice expansion and invalid syntax preserved; Matrix/Preset/To Text/Expand and browser summaries agree without editing saved input |
 | Whole repository | Full Python/frontend suites, public package/history and whitespace checks, native CPU ComfyUI browser harness, legacy 175-node PNG load, ordinary/continuous seeds and Preset/Queue/Random/To Text/Delete contracts |
 | Publication | Root final diff and regression review, gpt-5.6-sol medium APPROVE, required PR/main CI, squash merge and stable v0.10.4 release, exact installed tracked-file hashes, production process/queue/private settings preserved |
 
