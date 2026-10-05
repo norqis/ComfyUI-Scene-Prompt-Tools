@@ -241,11 +241,17 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         request.query = {"query": "hat", "model_mode": "Anima", "sort": "Highest Rated"}
                         with mock.patch.object(civitai, "search", return_value={"items": []}) as search:
                             self.assertEqual((await registered[("GET", "/scene_prompt/civitai/search")](request))["payload"], {"items": []})
-                            search.assert_awaited_once_with("hat", "Anima", "Highest Rated")
+                            search.assert_awaited_once_with("hat", "Anima", "Highest Rated", host="civitai.red")
+                            request.query["host"] = "civitai.com"
+                            await registered[("GET", "/scene_prompt/civitai/search")](request)
+                            self.assertEqual(search.await_args.kwargs["host"], "civitai.com")
                         request.payload = {"model_id": 1, "version_id": 2, "file_id": 3, "model_mode": "Anima"}
                         with mock.patch.object(civitai, "download", return_value={"lora_name": "llm/public.safetensors"}) as download:
                             self.assertEqual((await registered[("POST", "/scene_prompt/civitai/download")](request))["status"], 200)
-                            download.assert_awaited_once_with(request.payload, "Anima")
+                            download.assert_awaited_once_with(request.payload, "Anima", host="civitai.red")
+                            request.payload["host"] = "civitai.com"
+                            await registered[("POST", "/scene_prompt/civitai/download")](request)
+                            self.assertEqual(download.await_args.kwargs["host"], "civitai.com")
                         request.query = {"sha256": "a" * 64}
                         with mock.patch.object(civitai, "api_get", return_value=civitai._NOT_FOUND):
                             self.assertEqual((await by_hash(request))["payload"], {"found": False, "version": None})

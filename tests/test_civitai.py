@@ -41,6 +41,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.download_calls = 0
         self.storage_headers = []
         self.api_status = 200
+        self.api_raw = None
         self.hash_status = 200
         self.hash_raw = False
         self.hash_requests = []
@@ -66,6 +67,8 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         if request.path.startswith("/api/v1/models"):
             self.model_requests.append((dict(request.query), request.headers.get("Authorization")))
             self.base_model_parameters.append(request.query.getall("baseModels", []))
+            if self.api_raw is not None:
+                return web.Response(text=self.api_raw, content_type="application/json", status=self.api_status)
             return web.json_response({"items": [self.model]} if request.path == "/api/v1/models" else self.model, status=self.api_status)
         if request.path.startswith("/api/download"):
             self.download_calls += 1
@@ -115,6 +118,15 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             with self.subTest(value=value), self.assertRaisesRegex(civitai.ServiceError, "invalid version"):
                 await civitai.by_hash(self.sha)
 
+    async def test_empty_truncated_and_html_upstream_responses_recover(self):
+        for raw in ("", '{"items":[', "<html>provider error</html>"):
+            self.api_raw = raw
+            with self.subTest(raw=raw), self.assertRaisesRegex(civitai.ServiceError, "invalid JSON.*HTTP 200") as failure:
+                await civitai.search("cat", "Illustrious")
+            self.assertNotIn("provider error", str(failure.exception))
+        self.api_raw = None
+        self.assertEqual(len((await civitai.search("cat", "Illustrious"))["items"]), 1)
+
     async def test_search_sorts_version_file_image_alignment(self):
         self.model["modelVersions"].insert(0, {"id": 99, "baseModel": "Anima", "images": [{"url": "wrong-image"}], "files": []})
         for sort in civitai.SORTS:
@@ -131,9 +143,72 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertEqual(self.base_model_parameters[-1], ["Illustrious", "NoobAI"])
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])
 
+    async def test_metadata_gallery_and_host_are_bound_to_selected_version(self):
+        self.model.update(description="Model description", stats={"downloadCount": 90})
+        self.version.update(description="Version description", publishedAt="2026-08-02", createdAt="2026-07-01", stats={"downloadCount": 12})
+        self.version["images"] = [{"url": "first", "width": 600, "height": 800}, {"url": "hidden", "nsfwLevel": 2}, {"url": "video", "type": "video"},
+                                  {"url": "second", "width": 900, "height": 600}, {"url": "hidden2", "nsfw": True}]
+        result = await civitai.search("cat", "Illustrious", host="civitai.com")
+        item = result["items"][0]
+        self.assertEqual(item["description"], "Model description")
+        self.assertEqual(item["version_description"], "Version description")
+        self.assertEqual(item["published_at"], "2026-08-02")
+        self.assertEqual(item["model_stats"], {"downloadCount": 90})
+        self.assertEqual(item["version_stats"], {"downloadCount": 12})
+        self.assertEqual(item["gallery"], [{"url": "first", "width": 600, "height": 800}, {"url": "second", "width": 900, "height": 600}])
+        self.assertEqual(item["image_url"], "first")
+        self.model["stats"]["unusedFutureField"] = "ignored"
+        self.assertEqual(civitai.normalize(self.model, "Illustrious")[0]["model_stats"]["unusedFutureField"], "ignored")
+        self.assertTrue(item["model_url"].startswith("https://civitai.com/"))
+        del self.version["publishedAt"]
+        self.assertEqual(civitai.normalize(self.model, "Illustrious")[0]["published_at"], "2026-07-01")
+
+    async def test_host_allowlist_and_canonical_download_origin(self):
+        with mock.patch.object(civitai, "api_get", return_value=self.model) as get:
+            for host in ("evil.example", "https://civitai.com", "civitai.com.evil", None):
+                with self.subTest(host=host), self.assertRaises(ValueError):
+                    await civitai.search("cat", "Illustrious", host=host)
+                with self.assertRaises(ValueError):
+                    await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious", host=host)
+            get.assert_not_called()
+        self.version["files"][0]["downloadUrl"] = "https://civitai.com/api/download/models/2?type=Model"
+        result = await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3, "downloadUrl": "https://evil.example/file"}, "Illustrious", host="civitai.red")
+        self.assertEqual((self.root / result["lora_name"]).read_bytes(), self.content)
+        self.assertEqual(self.download_calls, 1, "canonical com authority is rewritten through selected red origin")
+
+    async def test_upstream_used_schema_errors_are_service_errors(self):
+        import copy
+        for target, key, invalid in [("version", "images", {}), ("version", "images", [None]), ("version", "images", [{"url": 1}]),
+                                     ("version", "images", [{"url": "x", "nsfwLevel": "safe"}]), ("version", "files", {}),
+                                     ("version", "trainedWords", [1]), ("version", "description", []), ("version", "stats", []),
+                                     ("model", "stats", {"downloadCount": "many"}), ("file", "hashes", []), ("model", "id", None)]:
+            model = copy.deepcopy(self.model)
+            obj = model if target == "model" else model["modelVersions"][0] if target == "version" else model["modelVersions"][0]["files"][0]
+            obj[key] = invalid
+            with self.subTest(target=target, key=key), self.assertRaises(civitai.ServiceError) as failure:
+                civitai.normalize(model, "Illustrious")
+            self.assertEqual(failure.exception.status, 502)
+
+    async def test_hash_fallback_only_caches_two_confirmed_missing_results(self):
+        valid = self.hash_result
+        cases = [(valid, None, True, 1), (civitai._NOT_FOUND, valid, True, 2), (civitai.ServiceError("red failure"), valid, True, 2),
+                 (civitai._NOT_FOUND, civitai._NOT_FOUND, False, 2)]
+        for red, com, found, count in cases:
+            with self.subTest(red=red, com=com), mock.patch.object(civitai, "api_get", side_effect=[red, com]) as lookup:
+                self.assertEqual((await civitai.by_hash(self.sha))["found"], found)
+                self.assertEqual(lookup.await_count, count)
+                self.assertEqual([call.kwargs["host"] for call in lookup.await_args_list], list(civitai.HOSTS[:count]))
+        for red, com in [(civitai.ServiceError("red failure"), civitai._NOT_FOUND), (civitai._NOT_FOUND, civitai.ServiceError("com failure")),
+                         (civitai.ServiceError("red failure"), civitai.ServiceError("com failure")), ({}, {}), ({}, civitai._NOT_FOUND)]:
+            with self.subTest(red=red, com=com), mock.patch.object(civitai, "api_get", side_effect=[red, com]), self.assertRaises(civitai.ServiceError):
+                await civitai.by_hash(self.sha)
+        with mock.patch.object(civitai, "api_get", side_effect=[{}, valid]):
+            self.assertTrue((await civitai.by_hash(self.sha))["found"], "malformed red response still falls back to com")
+
     async def test_fixed_red_origin_and_no_time_budget(self):
         self.origin_patch.stop()
         self.assertEqual(civitai.api_origin(), "https://civitai.red")
+        self.assertEqual(civitai.api_origin("civitai.com"), "https://civitai.com")
         self.origin_patch.start()
         with mock.patch.object(llm_fixture.aiohttp, "ClientTimeout", wraps=llm_fixture.aiohttp.ClientTimeout) as timeout:
             await civitai.search("cat", "Illustrious")

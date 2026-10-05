@@ -711,14 +711,14 @@ def define_routes():
         from .civitai import ServiceError, search, download, by_hash
         try:
             if operation == "search":
-                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"))
+                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"))
             elif operation == "by_hash":
                 result = await by_hash(request.query.get("sha256", ""))
             else:
                 payload = await request.json()
                 if not isinstance(payload, dict):
                     raise ValueError("Request body must be a JSON object.")
-                result = await download(payload, payload.get("model_mode"))
+                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"))
             return web.json_response(result)
         except ServiceError as exc:
             return web.json_response({"error": str(exc)}, status=exc.status)

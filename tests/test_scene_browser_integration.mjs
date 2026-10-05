@@ -346,7 +346,7 @@ const server = http.createServer(async (request, response) => {
         let source = await readFile(resolve(root, asset), "utf8");
         if (asset === "web/scene_prompt_ui.js") {
             source += `\nwindow.__scenePromptPopupTestHooks = {\n`
-                + `  openSavePromptPopup,\n`
+                + `  openSavePromptPopup, openSceneLoraDetails,\n`
                 + `  openCreatePromptPopup,\n`
                 + `  openSearchPopup, openPromptCandidatePopup, loadFavorites, setMatrixLineDraftContext,\n`
                 + `  attachMatrixTextAreaAutocomplete,\n`
@@ -1078,7 +1078,7 @@ try {
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback());
     const offlineLookup = page.waitForResponse((response) => response.url().includes("/civitai/by-hash?") && response.status() === 503);
     await offlineLookup;
-    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-title").getByText("Civitai名を取得できませんでした").waitFor();
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source").getByText("再確認").waitFor();
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]")
         .some((entry) => entry.key === "folder/other.safetensors\u0000200\u00004")), false,
     "transient Civitai failures are not cached as missing models");
@@ -1107,8 +1107,8 @@ try {
             window.__sceneLoraCatalog[1].mtime_ns = revision;
             window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback();
         }, revision);
-        await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-title")
-            .getByText("Civitai名を取得できませんでした").waitFor();
+        await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source")
+            .getByText("再確認").waitFor();
         assert.equal(await page.evaluate((revision) => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]")
             .some((entry) => entry.key === `folder/other.safetensors\u0000200\u0000${revision}`), revision), false,
         "authentication, rate limits, malformed JSON, malformed metadata and network failures cannot become negative caches");
@@ -1123,13 +1123,17 @@ try {
         && (!call.options.method || call.options.method === "GET")), "LoRA metadata uses only the local hash GET endpoint");
     await page.route("**/scene_prompt/civitai/by-hash?*", (route) => route.fulfill({ json: { found: false, version: null } }), { times: 1 });
     await page.evaluate(() => { window.__sceneLoraCatalog[1].mtime_ns = 5; window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback(); });
-    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-title").getByText("Civitaiに登録なし").waitFor();
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source").getByText("Local").waitFor();
     assert.equal(await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-path").textContent(), "folder/other.safetensors", "reopening moves the current selection first");
     assert.ok(await page.evaluate(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]")
         .some((entry) => entry.key === "folder/other.safetensors\u0000200\u00005" && entry.status === "not_found")),
     "confirmed 404 is cached as not registered");
     const beforeMissingDetails = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
-    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source").click();
+    assert.equal(await loraPicker.locator(".pc-lora-row").filter({hasText:"folder/other.safetensors"}).locator(".pc-lora-title").textContent(), "other.safetensors");
+    assert.equal(await loraPicker.locator(".pc-lora-local").getAttribute("role"), "status");
+    if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR) await page.screenshot({ path: resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, "lora-local-fallback.png") });
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find(widget => widget.sceneRole === "lora_details").callback(); });
     const missingDetails = page.getByRole("dialog", { name: "LoRA 詳細確認" });
     await missingDetails.locator(".pc-lora-word").filter({ hasText: "Local Tag" }).getByRole("button", { name: "注入" }).waitFor();
     assert.equal(await missingDetails.locator(".pc-lora-word button:disabled").count(), 0, "a normal missing Civitai record retains local trigger injection");
@@ -1143,8 +1147,8 @@ try {
         window.__sceneLoraInfoVersionOverride = 7;
         window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback();
     });
-    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-title")
-        .getByText("ファイルが更新されました。再表示してください").waitFor();
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source")
+        .getByText("再表示").waitFor();
     await page.keyboard.press("Escape");
     await page.evaluate(() => { window.__sceneLoraInfoVersionOverride = null; });
     const infoBeforeConcurrentDetails = await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?") && call.url.includes("other.safetensors")).length);
@@ -1155,7 +1159,8 @@ try {
     });
     const lookupsBeforeConcurrentDetails = civitaiLookupCount;
     const delayedPreviewBefore = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
-    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source").click();
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).waitFor();
+    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find(widget => widget.sceneRole === "lora_details").callback(); });
     await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?") && call.url.includes("other.safetensors")).length), infoBeforeConcurrentDetails + 1,
         "selection and details share the in-flight metadata and hash lookup");
@@ -1225,7 +1230,8 @@ try {
         node.widgets.find((entry) => entry.sceneRole === "lora_select").callback();
         return node.widgets.find((entry) => entry.name === "positive").value;
     });
-    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).locator(".pc-lora-source").click();
+    await loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" }).waitFor();
+    await page.evaluate(() => { void window.__scenePromptPopupTestHooks.openSceneLoraDetails(window.__sceneLoraTestNode, { ...window.__sceneLoraCatalog.find(item => item.path === "folder/other.safetensors") }); });
     await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
     await page.evaluate(() => {
         const widget = window.__sceneLoraTestNode.widgets.find((entry) => entry.name === "lora_name");

@@ -100,9 +100,23 @@ function captureRoute(graph, root, anchor) {
 }
 export async function requestJSON(api, path, body) {
     const response = await api.fetchApi(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || data.message || `HTTP ${response.status}`);
+    const context = `API ${path.split("?")[0]} · HTTP ${response.status ?? (response.ok ? 200 : "不明")}`;
+    let data;
+    try {
+        // Read once so an empty/HTML response has the same recoverable error as truncated JSON.
+        const text = await response.text();
+        if (!text?.trim()) throw new Error("empty");
+        data = JSON.parse(text);
+    } catch {
+        const restart = response.status === 404 ? " ComfyUIを更新した場合は再起動してAPIを反映してください。" : "";
+        throw new Error(`${context}: JSON応答を取得できませんでした。${restart}`);
+    }
+    if (!response.ok) throw new Error(`${context}: ${data?.error || data?.message || "取得に失敗しました。"}`);
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error(`${context}: 無効なAPI応答です。`);
     return data;
+}
+export function compactCandidates(items) {
+    return items.map((candidate) => Object.fromEntries(["model_id", "version_id", "file_id", "name", "version_name", "base_model", "triggers"].map((key) => [key, candidate[key]])));
 }
 export function identity(candidate) { return `${candidate.model_id}/${candidate.version_id}/${candidate.file_id}`; }
 function triggerIdentity(token) {
@@ -110,7 +124,7 @@ function triggerIdentity(token) {
     while (word.startsWith("(") && word.endsWith(")")) word = word.slice(1, -1).replace(/:\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/u, "").trim();
     return word.toLocaleLowerCase();
 }
-export function applyCandidate(node, candidate, { query = "", sort = "Most Downloaded", model_mode = value(node, "model_mode"), origin } = {}) {
+export function applyCandidate(node, candidate, { query = "", sort = "Most Downloaded", host = "civitai.red", model_mode = value(node, "model_mode"), origin } = {}) {
     const previous = node.properties?.scene_civitai || {};
     const managed = new Set(previous.managed_triggers || []);
     const manual = String(value(node, "positive")).split(",").map((token) => token.trim()).filter((token) => token && !managed.has(token));
@@ -120,7 +134,7 @@ export function applyCandidate(node, candidate, { query = "", sort = "Most Downl
         if (widget(node, name)) widget(node, name).value = next;
     }
     node.properties ||= {};
-    node.properties.scene_civitai = { query, sort, model_mode, model_id: candidate.model_id, version_id: candidate.version_id,
+    node.properties.scene_civitai = { query, sort, host, model_mode, model_id: candidate.model_id, version_id: candidate.version_id,
         file_id: candidate.file_id, lora_name: candidate.lora_name, name: candidate.name, version_name: candidate.version_name,
         managed_triggers: triggers, origin: origin === undefined ? previous.origin ?? null : origin };
 }
@@ -220,14 +234,14 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                     errorQuery = query;
                     const result = await requestJSON(api, `/scene_prompt/civitai/search?${new URLSearchParams({ query, model_mode, sort: "Most Downloaded" })}`);
                     if (!current()) break;
-                    const selection = await requestJSON(api, "/scene_prompt/llm/select_loras", { description, model_mode, query, candidates: result.items, ...session });
+                    const selection = await requestJSON(api, "/scene_prompt/llm/select_loras", { description, model_mode, query, candidates: compactCandidates(result.items), ...session });
                     if (!current()) break;
                     for (const selected of selection.selected || []) {
                         if (!current()) break;
                         if (!result.items.some((candidate) => identity(candidate) === identity(selected))) throw new Error("LLM selected an unknown LoRA.");
                         const acquired = await requestJSON(api, "/scene_prompt/civitai/download", { ...selected, model_mode });
                         if (!current()) break;
-                        downloaded.push({ ...acquired.candidate, lora_name: acquired.lora_name, search_state: { query, sort: "Most Downloaded", model_mode } });
+                        downloaded.push({ ...acquired.candidate, lora_name: acquired.lora_name, search_state: { query, sort: "Most Downloaded", host: "civitai.red", model_mode } });
                     }
                 }
                 if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; break; }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,6 +86,12 @@ try {
     const header = Buffer.from('{"__metadata__":{}}'.padEnd(24, " "));
     const headerLength = Buffer.alloc(8); headerLength.writeBigUInt64LE(BigInt(header.length));
     await writeFile(resolve(fixtureLoras, "runtime-hat.safetensors"), Buffer.concat([headerLength, header]));
+    const localBytes = Buffer.concat([headerLength, header, Buffer.from('local')]);
+    const unknownBytes = Buffer.concat([headerLength, header, Buffer.from('unknown')]);
+    const localHash = createHash('sha256').update(localBytes).digest('hex');
+    const unknownHash = createHash('sha256').update(unknownBytes).digest('hex');
+    await writeFile(resolve(fixtureLoras, "runtime-local.safetensors"), localBytes);
+    await writeFile(resolve(fixtureLoras, "runtime-unknown.safetensors"), unknownBytes);
     for (const [folder, name] of [["checkpoints", "runtime-checkpoint"], ["diffusion_models", "runtime-diffusion"], ["text_encoders", "runtime-clip"], ["vae", "runtime-vae"]]) {
         const path = resolve(directory, "models", folder);
         await mkdir(path, { recursive: true });
@@ -134,8 +141,15 @@ async def civitai_lookup(request):
     fixture = await request.json()
     package = nodes.NODE_CLASS_MAPPINGS["SceneApplyLora"].__module__.rsplit(".", 1)[0]
     civitai = importlib.import_module(package + ".civitai")
-    async def api_get(path, params=None, *, missing_ok=False):
-        lookup_calls.append({"path": path, "missing_ok": missing_ok})
+    async def api_get(path, params=None, *, missing_ok=False, host="civitai.red"):
+        lookup_calls.append({"path": path, "missing_ok": missing_ok, "host": host})
+        if fixture.get("mode") == "picker":
+            if path.endswith("${localHash}"):
+                return civitai._NOT_FOUND
+            if path.endswith("${unknownHash}"):
+                raise civitai.ServiceError("Metadata fixture offline")
+        if fixture.get("mode") == "fallback" and host == "civitai.red":
+            raise civitai.ServiceError("Red fixture offline")
         if fixture.get("mode") == "error":
             raise civitai.ServiceError("Metadata fixture offline")
         if fixture.get("mode") == "missing":
@@ -203,12 +217,19 @@ NODE_CLASS_MAPPINGS = {}
         if (path.endsWith("/select_loras")) return route.fulfill({ json: { selected: [{ model_id: 100, version_id: 200, file_id: 300 }] } });
         throw new Error(`Unexpected LLM runtime request ${path}`);
     });
+    let nativeCivitaiGallery = false;
     await page.route("**/scene_prompt/civitai/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
         if (path.endsWith("/by-hash")) return route.continue();
         llmRequests.push({ path, body: route.request().method() === "POST" ? route.request().postDataJSON() : null });
-        if (path.endsWith("/search")) return route.fulfill({ json: { items: [runtimeCandidate], query: "hat", sort: "Most Downloaded" } });
+        if (path.endsWith("/search")) {
+            const preview = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="300" height="400"%3E%3Crect width="300" height="400" fill="%23366387"/%3E%3Ccircle cx="150" cy="160" r="80" fill="%23b3d9c4"/%3E%3C/svg%3E';
+            const items = nativeCivitaiGallery ? Array.from({length:12}, (_, index) => ({ ...runtimeCandidate, model_id:100+index, name:'Native LoRA '+(index+1), image_url:preview,
+                gallery:[{url:preview,width:300,height:400},{url:preview,width:300,height:400},{url:preview,width:300,height:400}], description:'<p>Native model description</p>',
+                version_description:'Native version notes', published_at:'2026-08-02', model_stats:{downloadCount:90}, version_stats:{downloadCount:12} })) : [runtimeCandidate];
+            return route.fulfill({ json: { items, query: "hat", sort: "Most Downloaded" } });
+        }
         if (path.endsWith("/download")) return route.fulfill({ json: { candidate: runtimeCandidate, lora_name: runtimeCandidate.lora_name } });
         throw new Error(`Unexpected Civitai runtime request ${path}`);
     });
@@ -1519,6 +1540,7 @@ window.__sceneSeedRuntimeTest = {
         Object.fromEntries(['base_url', 'port', 'model'].map(name => [name, initialLLMSettings[name]])), 'native tests restore their original endpoint and model before subsequent cases');
     await page.keyboard.press('Escape');
     await page.setViewportSize({width:1280,height:720});
+    nativeCivitaiGallery = true;
     await page.evaluate(async()=>{
         const { app }=await import('/scripts/app.js');
         const lora=window.LiteGraph.createNode('SceneApplyLora'); app.graph.add(lora);
@@ -1527,10 +1549,35 @@ window.__sceneSeedRuntimeTest = {
     });
     const nativeSearch=page.getByRole('dialog',{name:'Civitai Search',exact:true});
     await nativeSearch.locator('.pc-civitai-card').first().waitFor();
+    assert.equal(await nativeSearch.locator('.pc-civitai-status').textContent(), '', 'query-only search state is not a selected LoRA');
+    assert.doesNotMatch(await nativeSearch.textContent(), /undefined/);
+    const screenshotDirectory = process.env.SCENE_BROWSER_SCREENSHOTS_DIR || resolve(tmpdir(), 'scene-prompt-civitai-review');
+    await mkdir(screenshotDirectory, {recursive:true});
+    await page.setViewportSize({width:1600,height:950});
+    assert.equal(await nativeSearch.locator('.pc-civitai-card').count(),12);
+    const nativeCardRows=await nativeSearch.locator('.pc-civitai-card').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().top));
+    assert(nativeCardRows.slice(0,10).every(top=>top===nativeCardRows[0])); assert(nativeCardRows[10]>nativeCardRows[0]);
+    await page.screenshot({path:resolve(screenshotDirectory,'native-ten-columns.png')});
+    const nativeSearchRequests=llmRequests.length;
+    await nativeSearch.locator('.pc-civitai-card').first().focus(); await page.keyboard.press('Enter');
+    assert.equal(await nativeSearch.locator('.pc-civitai-gallery img').count(),2);
+    assert.match(await nativeSearch.locator('.pc-civitai-metadata').textContent(),/Native model description.*2026-08-02.*Model Stats.*90.*Version Stats.*12/s);
+    await page.screenshot({path:resolve(screenshotDirectory,'native-details.png')});
+    await nativeSearch.getByRole('button',{name:'Next',exact:true}).click();
+    assert.equal(await nativeSearch.locator('.pc-civitai-gallery img').count(),1);
+    await nativeSearch.getByRole('button',{name:'戻る',exact:true}).click();
+    assert.equal(llmRequests.length,nativeSearchRequests,'native Back makes no request');
+    await page.setViewportSize({width:360,height:740});
+    assert.equal(await nativeSearch.evaluate(dialog=>dialog.scrollWidth<=dialog.clientWidth),true);
+    assert.equal(await nativeSearch.locator('.pc-civitai-results').evaluate(list=>list.scrollWidth>list.clientWidth),true);
+    await page.screenshot({path:resolve(screenshotDirectory,'native-narrow.png')});
+    await page.setViewportSize({width:1280,height:720});
+
     assert.equal(await nativeSearch.getByRole('button',{name:'Civitai設定',exact:true}).count(),0);
     assert.equal(await page.getByRole('dialog',{name:'Civitai設定',exact:true}).count(),0);
     assert.equal(await page.evaluate(async()=> 'openCivitaiSettings' in await import('/extensions/scene-prompt-tools-browser-smoke/scene_prompt_civitai.js')),false);
     await page.keyboard.press('Escape');
+    nativeCivitaiGallery = false;
     assert.equal(llmRequests.length-servicesBeforeSettings,1,'opening the search requests only public Civitai results');
     assert.equal(llmRequests.filter(request=>request.path.endsWith('/generate')).length,generationsBeforeSettings,'settings never request inference');
     assert(settingsRequests.includes('/scene_prompt/llm/settings'));
@@ -1583,12 +1630,31 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(metadataRequests.length, lookupsBeforeResources, "opening resource information does not start a hash metadata lookup");
     await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "error" }), headers: { "Content-Type": "application/json" } });
     await nativeModelCard.getByRole("button", { name: "Civitaiを確認" }).click();
-    await nativeModelCard.getByText("Metadata fixture offline", { exact: true }).waitFor();
+    await nativeModelCard.getByText("Metadata fixture offline", { exact: false }).waitFor();
     await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "found" }), headers: { "Content-Type": "application/json" } });
     await nativeModelCard.getByRole("button", { name: "Civitaiを確認" }).click();
     await nativeModelCard.getByRole("link", { name: "Civitaiで見る" }).waitFor();
     assert.equal(await nativeModelCard.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"), "https://civitai.red/models/12?modelVersionId=23");
     await page.keyboard.press("Escape");
+    await fetch(`${url}/scene_test/civitai_lookup`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode:"fallback"}) });
+    const fallbackResult = await (await fetch(`${url}/scene_prompt/civitai/by-hash?sha256=${"a".repeat(64)}`)).json();
+    assert.equal(fallbackResult.found,true,'fresh native by-hash route falls back to com after red fails');
+    await fetch(`${url}/scene_test/civitai_lookup`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode:"picker"}) });
+    await page.evaluate(id=>window.app.graph.getNodeById(id).widgets.find(widget=>widget.sceneRole==='lora_select').callback(),metadataNodes.lora);
+    const nativePicker=page.getByRole('dialog',{name:'LoRAを選択',exact:true});
+    await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-local.safetensors'}).locator('.pc-lora-source').getByText('Local',{exact:true}).waitFor();
+    await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-unknown.safetensors'}).locator('.pc-lora-source').getByText('再確認',{exact:true}).waitFor();
+    assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-local.safetensors'}).locator('.pc-lora-title').textContent(),'runtime-local.safetensors');
+    assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-unknown.safetensors'}).locator('.pc-lora-title').textContent(),'runtime-unknown.safetensors');
+    assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-hat.safetensors'}).locator('.pc-lora-title').textContent(),'Native metadata');
+    assert.deepEqual(await nativePicker.locator('.pc-lora-head-actions button').allTextContents(),['Civitai Search','閉じる']);
+    await page.screenshot({path:resolve(screenshotDirectory,'native-local-fallback.png')});
+    await page.setViewportSize({width:360,height:740});
+    assert.equal(await nativePicker.getByRole('button',{name:'閉じる',exact:true}).evaluate(button=>button.getBoundingClientRect().right<=innerWidth),true);
+    await page.screenshot({path:resolve(screenshotDirectory,'native-local-narrow.png')});
+    await page.setViewportSize({width:1280,height:720});
+    await page.keyboard.press('Escape');
+    await fetch(`${url}/scene_test/civitai_lookup`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode:"found"}) });
     const directResult = await (await fetch(`${url}/scene_prompt/civitai/by-hash?sha256=${"a".repeat(64)}`)).json();
     assert.deepEqual(directResult, { found: true, version: { id: 23, modelId: 12, name: "Fixture v1", model: { name: "Native metadata" }, trainedWords: ["native_metadata_trigger"] } });
     await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "missing" }), headers: { "Content-Type": "application/json" } });

@@ -408,13 +408,24 @@ const titleContext = vm.createContext({ Map, Set, Array, String, JSON, Object,
         return { id: 1, model: { name: "Resolved again" } };
     },
 });
-vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.titles = { cachedSceneLora, saveSceneLoraCache, resolveSceneLora, reconcileSceneLoraTitles, sceneLoraSessionCache, sceneLoraFileIdentities, sceneLoraResolutions, sceneLoraCacheKey };`, titleContext);
+vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.titles = { sceneLoraDisplay, cachedSceneLora, saveSceneLoraCache, resolveSceneLora, reconcileSceneLoraTitles, sceneLoraSessionCache, sceneLoraFileIdentities, sceneLoraResolutions, sceneLoraCacheKey };`, titleContext);
 const legacyTitleContext = vm.createContext({ Map, Array, String, JSON,
     localStorage: { getItem: () => JSON.stringify([{ key: "folder\\legacy.safetensors\u00001\u00001", title: "Legacy cached title", status: "found" }]) },
 });
 vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.legacyTitle = cachedSceneLora({path:'folder/legacy.safetensors',size:1,mtime_ns:1});`, legacyTitleContext);
 assert.equal(legacyTitleContext.legacyTitle.title, "Legacy cached title", "legacy persisted Windows separators migrate to the current normalized identity");
 const titles = titleContext.titles, titleItem = (index, revision = 1) => ({ path: `lora-${index}`, size: 1, mtime_ns: revision });
+const displayItem = {path:'folder/local.safetensors',size:1,mtime_ns:1};
+assert.equal(titles.sceneLoraDisplay(displayItem).title,'local.safetensors');
+assert.equal(titles.sceneLoraDisplay(displayItem).status,'unknown');
+titles.saveSceneLoraCache(displayItem, {}, null, 'not_found');
+assert.equal(titles.sceneLoraDisplay(displayItem).title,'local.safetensors');
+assert.equal(titles.sceneLoraDisplay(displayItem).status,'not_found');
+titles.saveSceneLoraCache(displayItem, {}, {model:{name:'Civitai name'}}, 'found');
+assert.equal(titles.sceneLoraDisplay(displayItem).title,'Civitai name');
+assert.equal(titles.sceneLoraDisplay(displayItem).status,'found');
+titles.reconcileSceneLoraTitles([]);
+
 for (let index = 0; index < 300; index++) titles.saveSceneLoraCache(titleItem(index), {}, { model: { name: `Title ${index}` } }, "found");
 assert.equal(titles.sceneLoraSessionCache.size, 300, "all current file titles remain usable beyond former count thresholds");
 assert.equal(JSON.parse(titleDisk).length, 300);

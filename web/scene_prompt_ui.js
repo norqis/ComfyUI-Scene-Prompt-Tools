@@ -5229,7 +5229,7 @@ function sceneLoraCatalogItem(path) {
 
 function sceneLoraDisplay(item) {
     const cached = cachedSceneLora(item);
-    return { title: cached?.title || (cached?.status === "not_found" ? "Civitaiに登録なし" : "Civitai名を確認中…") };
+    return { title: cached?.title || item.path.split(/[\\/]/u).at(-1) || item.path, status: cached?.status || "unknown" };
 }
 
 function currentSceneLoraResult(item, result) {
@@ -5312,7 +5312,10 @@ async function openSceneLoraPicker(node) {
     civitaiSearch.className = "pc-button";
     civitaiSearch.textContent = "Civitai Search";
     civitaiSearch.onclick = () => { closeSceneLoraPicker(node); openSceneCivitaiSearch(node); };
-    head.append(heading, civitaiSearch, close);
+    const headActions = document.createElement("div");
+    headActions.className = "pc-lora-head-actions";
+    headActions.append(civitaiSearch, close);
+    head.append(heading, headActions);
     const search = document.createElement("input");
     search.type = "search";
     search.className = "pc-lora-search";
@@ -5347,22 +5350,31 @@ async function openSceneLoraPicker(node) {
         if (busy) return;
         busy = true;
         while (pending.length && node.sceneLoraPickerCleanup === cleanup) {
-            const { item, row, title, revision } = pending.shift();
+            const { item, row, title, source, revision } = pending.shift();
             if (revision !== generation || !row.isConnected) continue;
             try {
                 const result = await resolveSceneLora(item);
                 if (revision === generation && row.isConnected) {
-                    if (result.key !== sceneLoraCacheKey(item) || !currentSceneLoraResult(item, result)) title.textContent = "ファイルが更新されました。再表示してください";
+                    if (result.key !== sceneLoraCacheKey(item) || !currentSceneLoraResult(item, result)) source.textContent = "再表示";
                     else {
-                        title.textContent = result.title || "Civitaiに登録なし";
+                        title.textContent = result.title || item.path.split(/[\\/]/u).at(-1) || item.path;
+                        updateSource(source, result.status);
                     }
                 }
             } catch (_error) {
-                if (revision === generation && row.isConnected) title.textContent = "Civitai名を取得できませんでした";
+                if (revision === generation && row.isConnected) { source.textContent = "再確認"; source.disabled = false; source.title = _error.message; }
             }
         }
         busy = false;
     };
+    function updateSource(source, status) {
+        source.removeAttribute("title");
+        source.classList.toggle("pc-lora-local", status === "not_found");
+        source.textContent = status === "found" ? "Civitai" : status === "not_found" ? "Local" : "確認中…";
+        source.disabled = status !== "found";
+        if (status === "not_found") { source.setAttribute("role", "status"); source.setAttribute("aria-label", "Local: Civitaiに登録なし"); }
+        else source.removeAttribute("role");
+    }
     const render = () => {
         generation += 1;
         pending = [];
@@ -5411,12 +5423,15 @@ async function openSceneLoraPicker(node) {
             const source = document.createElement("button");
             source.type = "button";
             source.className = "pc-lora-source";
-            source.textContent = "Civitai";
             source.setAttribute("aria-label", `${item.path} の詳細確認`);
-            source.onclick = () => openSceneLoraDetails(node, item, source);
+            updateSource(source, display.status);
+            source.onclick = () => {
+                if (cachedSceneLora(item)?.status === "found") { openSceneLoraDetails(node, item, source); return; }
+                updateSource(source, "unknown"); pending.push(row.sceneLoraJob); void work();
+            };
             row.append(select, source);
             if (!cachedSceneLora(item)) {
-                row.sceneLoraJob = { item, row, title, revision };
+                row.sceneLoraJob = { item, row, title, source, revision };
                 observer.observe(row);
             }
             select.onclick = async () => {
