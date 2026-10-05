@@ -20,7 +20,10 @@ sys.modules[package.__name__] = package
 folder_paths = types.ModuleType("folder_paths")
 with mock.patch.dict(sys.modules, {"folder_paths": folder_paths}):
     settings_module = importlib.import_module(package.__name__ + ".llm_settings")
-service = importlib.import_module(package.__name__ + ".llm_service")
+    service = importlib.import_module(package.__name__ + ".llm_service")
+# Keep this isolated package's shared dependencies after patch.dict restores modules.
+sys.modules[package.__name__ + ".llm_settings"] = settings_module
+sys.modules[package.__name__ + ".llm_service"] = service
 
 
 class HttpFixture(unittest.IsolatedAsyncioTestCase):
