@@ -1,6 +1,6 @@
 # v0.10.2 memory and prompt-generation audit
 
-Status: root investigation/design; implementation waits for gpt-5.6-sol medium approval.
+Status: root design approved by gpt-5.6-sol medium. Backend implementation and isolated Python verification complete; final frontend/native review and release gates remain.
 
 ## Scope and observed evidence
 
@@ -52,3 +52,13 @@ Keep the owned scaled array (multiplication already separates it from the input 
 - Full frontend/Python/public package and real Comfy CI. Root final diff/runtime review plus gpt-5.6-sol medium final approval, patch PR/release/local hash sync; no production restart.
 
 Retain the user's requested undo-history count. Existing run cleanup, bounded preview count, sequential service operations and lazy schedule representation are part of the audit; do not replace them speculatively when no failing case is demonstrated.
+
+## Backend implementation and measured verification
+
+- `PayloadCache` now accounts retained key/value objects at insertion and applies the existing entry limits together with the specified byte budgets to all five payload caches. Unchanged TTL refreshes reuse the original weight and payload. Cache invalidation generations prevent an older in-flight file/list/prompt read from restoring invalidated data. Oversized data is valid and is returned uncached.
+- File/list copy-on-return, insertion copies/size accounting, run snapshot construction and repeated snapshot response copies happen outside their shared/cache locks. Local customization hits keep the existing read-only shared return. The list cache no longer stores its unused second copy of each entry in a `files` map.
+- Preset Save builds its already-owned workflow/API payload, computes the hash, writes and verifies the staging file outside `_PRESET_LOCK`. Dependency validation and atomic publication retain that lock to preserve concurrent reference-cycle prevention. Nested dependency validation can still copy another Preset while holding this outer lock; this existing correctness boundary is deliberately retained rather than claiming all save validation is lock-free.
+- Run snapshots use one combined deep copy, preserving identity between shared definitions and uncustomized occurrences, keeping customized occurrences distinct, and remaining independent of source/cache objects and returned response edits.
+- Root's synthetic 70-revision fixture with a 256 KiB generated output in both API and workflow retained 64 entries and 64.94 MiB with only the previous count limit (67.23 MiB peak). With the 16 MiB payload budget it retained 15 entries and 15.22 MiB (17.51 MiB peak; 15.23 MiB conservative accounting). This is Python `tracemalloc` data for the synthetic fixture, not whole ComfyUI/GPU memory.
+- The actual isolated 2048x2048 RGB float32 PNG Save path reached 60.015 MiB at pixel conversion, versus the original conversion probe's 108 MiB. Pixel checksum remained 1,599,078,426 and the input array was unchanged. Float32/float64 actual PNG pixels, metadata, returned image identity, filenames and staging cleanup are covered.
+- Added 18 focused audit tests for object alias/cycle accounting, LRU/count/byte limits, replacement/removal/clear, valid oversize responses, TTL cost, lock placement, invalidation during reads/measurement, snapshot ownership and actual PNG output/peak. The full isolated Python suite passed 499 tests in 39.142 seconds, with 2 existing optional runtime skips. Production ComfyUI, LLM and GPU were untouched.

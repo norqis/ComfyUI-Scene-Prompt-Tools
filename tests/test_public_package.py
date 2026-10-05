@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicPackageTests(unittest.TestCase):
     def test_runtime_modules_are_in_one_internal_package(self):
-        expected = {"__init__.py", "callbacks.py", "lora_metadata.py", "llm_node.py", "llm_service.py", "llm_settings.py", "civitai.py", "nodes.py", "plan.py", "preset_metadata.py", "prompt.py", "presets.py", "resource_info.py", "routes.py", "runs.py", "schedule.py", "storage.py"}
+        expected = {"__init__.py", "callbacks.py", "lora_metadata.py", "llm_node.py", "llm_service.py", "llm_settings.py", "civitai.py", "nodes.py", "payload_cache.py", "plan.py", "preset_metadata.py", "prompt.py", "presets.py", "resource_info.py", "routes.py", "runs.py", "schedule.py", "storage.py"}
         self.assertSetEqual({path.name for path in (ROOT / "scene_prompt_tools").glob("*.py")}, expected)
         for filename in expected - {"__init__.py"}:
             self.assertFalse((ROOT / filename).exists())
@@ -40,7 +40,7 @@ class PublicPackageTests(unittest.TestCase):
     def test_registry_metadata_declares_the_mit_license(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "scene-prompt-tools"', pyproject)
-        self.assertIn('version = "0.10.1"', pyproject)
+        self.assertIn('version = "0.10.2"', pyproject)
         self.assertIn('PublisherId = "norqis"', pyproject)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)

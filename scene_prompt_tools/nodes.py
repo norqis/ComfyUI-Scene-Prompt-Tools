@@ -3053,7 +3053,8 @@ class SceneSaveImage:
         try:
             for image in images:
                 image_array = 255.0 * image.cpu().numpy()
-                img = Image.fromarray(np.clip(image_array, 0, 255).astype(np.uint8))
+                np.clip(image_array, 0, 255, out=image_array)
+                img = Image.fromarray(image_array.astype(np.uint8))
                 while True:
                     counter = _allocate_output_index(
                         run_root, extension, padding, filename_prefix, requested_index, counter_position,
