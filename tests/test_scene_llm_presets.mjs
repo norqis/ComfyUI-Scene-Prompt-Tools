@@ -301,3 +301,98 @@ const firstMs = performance.now() - started;
 const cachedStarted = performance.now();
 for (let index = 0; index < 10000; index++) preparePresetReference(largeReference, largeDefinitions);
 console.log(`Preset local regression passed; 1501-node prepare ${firstMs.toFixed(1)} ms, 10000 cache hits ${(performance.now() - cachedStarted).toFixed(1)} ms.`);
+
+// A generated leaf is stored once even through eight nested References. Source
+// definitions and intermediate run-handle positions must remain untouched.
+const nestedSizes = [];
+for (let depth = 0; depth <= 8; depth++) {
+    const nestedDefinitions = new Map([["depth0", definition("depth0", {
+        1: { class_type: "ScenePromptLLM", inputs: { description: "room", positive: "", negative: "", model_mode: "Illustrious" } },
+        8: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["1", 0] } },
+    })]]);
+    for (let index = 1; index <= depth; index++) nestedDefinitions.set(`depth${index}`, definition(`depth${index}`, {
+        5: { class_type: "ScenePresetReference", inputs: { preset_id: `depth${index - 1}`, run_handle: "keep-handle" } },
+        8: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["5", 0] } },
+    }));
+    const sources = JSON.stringify([...nestedDefinitions]);
+    const source = reference(100 + depth); source.widgets[0].value = `depth${depth}`;
+    const [target] = collectPresetLLMTargets(source, nestedDefinitions);
+    widget(target.node, "positive").value = "x".repeat(1024);
+    target.commit();
+    const serialized = source.widgets[1].value;
+    nestedSizes.push(Buffer.byteLength(serialized));
+    assert(nestedSizes.at(-1) < 250 * 1024, `depth ${depth} exceeds compact storage budget`);
+    assert.equal(Object.keys(parsePresetOverrides(serialized)).length, 1, "unchanged shared ancestors need no local copy");
+    assert.equal(widget(collectPresetLLMTargets(source, nestedDefinitions)[0].node, "positive").value, "x".repeat(1024));
+    assert.equal(JSON.stringify([...nestedDefinitions]), sources);
+    const rootEditor = presetEditorDefinition(source, nestedDefinitions);
+    const saved = new Map(nestedDefinitions).set(`depth${depth}`, rootEditor);
+    const reloaded = reference(200 + depth); reloaded.widgets[0].value = `depth${depth}`;
+    assert.equal(widget(collectPresetLLMTargets(reloaded, saved)[0].node, "positive").value, "x".repeat(1024),
+        "explicit editor root Save retains deeply nested generated output");
+}
+assert(nestedSizes.at(-1) < nestedSizes[0] + 100, "flat path length is the only growth for a shared ancestor chain");
+
+// Legacy sources can own child overrides at every level. Resolve that ownership
+// first, including unrelated siblings, then clear all embedded representations.
+const legacyDefinitions = new Map([["inner", inner]]);
+let legacyChild = structuredClone(inner);
+legacyChild.api_graph.output[1].inputs.positive = "legacy leaf";
+for (let index = 1; index <= 8; index++) {
+    const id = `legacy${index}`, childId = index === 1 ? "inner" : `legacy${index - 1}`;
+    const state = JSON.stringify({ version: 1, presets: { ".": legacyChild } });
+    const parent = definition(id, {
+        5: { class_type: "ScenePresetReference", inputs: { preset_id: childId, run_handle: "keep-handle", llm_presets_json: state } },
+        8: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["5", 0] } },
+    });
+    parent.workflow.nodes[0].widgets_values_named = { preset_id: childId, run_handle: "keep-handle", llm_presets_json: state };
+    legacyDefinitions.set(id, parent);
+    legacyChild = parent;
+}
+const legacySource = reference(300); legacySource.widgets[0].value = "legacy8";
+const legacyTargets = collectPresetLLMTargets(legacySource, legacyDefinitions);
+assert.equal(widget(legacyTargets[0].node, "positive").value, "legacy leaf");
+widget(legacyTargets[0].node, "positive").value = "updated legacy leaf";
+legacyTargets[0].commit();
+assert(Buffer.byteLength(legacySource.widgets[1].value) < 250 * 1024);
+for (const local of Object.values(parsePresetOverrides(legacySource.widgets[1].value))) {
+    for (const entry of Object.values(local.api_graph.output))
+        if (entry.class_type === "ScenePresetReference") assert.equal(entry.inputs.llm_presets_json, "");
+    for (const node of local.workflow.nodes) if (node.type === "ScenePresetReference") {
+        assert.equal(node.widgets_values[1], "keep-handle");
+        assert.equal(node.widgets_values[2], "");
+        assert.equal(node.widgets_values_named.llm_presets_json, "");
+    }
+}
+assert.equal(widget(collectPresetLLMTargets(legacySource, legacyDefinitions)[0].node, "positive").value, "updated legacy leaf");
+const legacyEditor = presetEditorDefinition(legacySource, legacyDefinitions);
+const legacyReload = reference(301); legacyReload.widgets[0].value = "legacy8";
+assert.equal(widget(collectPresetLLMTargets(legacyReload, new Map(legacyDefinitions).set("legacy8", legacyEditor))[0].node, "positive").value,
+    "updated legacy leaf", "editor flat child projection overrides stale shared ancestor ownership");
+console.log(`Compact nested Preset bytes at depths 0..8: ${nestedSizes.join(", ")}.`);
+
+// Both commit orders keep edited ancestor output and generated child output.
+const ancestor = structuredClone(ownOuter);
+ancestor.api_graph.output[9] = { class_type: "ScenePromptLLM", inputs: { scene_prompt: ["7", 0],
+    description: "ancestor", positive: "ancestor shared", negative: "", model_mode: "Illustrious" } };
+ancestor.api_graph.output[8].inputs.scene_prompt = ["9", 0];
+ancestor.workflow = definition("outer", ancestor.api_graph.output).workflow;
+for (const order of [[0, 2], [2, 0]]) {
+    const instance = reference(400 + order[0], JSON.stringify({ version: 1, presets: { ".": ancestor } }));
+    const ordered = collectPresetLLMTargets(instance, definitions);
+    assert.equal(ordered.length, 3);
+    for (const index of order) {
+        widget(ordered[index].node, "positive").value = index === 0 ? "descendant edited" : "ancestor edited";
+        ordered[index].commit();
+        assert(ordered.every((target) => target.current()));
+    }
+    const resolved = preparePresetReference(instance, definitions);
+    assert.equal(resolved.root.api_graph.output[9].inputs.positive, "ancestor edited");
+    assert.equal(presetOccurrenceChild(resolved.root, 5).api_graph.output[1].inputs.positive, "descendant edited");
+    const editedRoot = presetEditorDefinition(instance, definitions);
+    const restored = reference(410 + order[0]);
+    const restoredPrepared = preparePresetReference(restored, new Map(definitions).set("outer", editedRoot));
+    assert.equal(restoredPrepared.root.api_graph.output[9].inputs.positive, "ancestor edited");
+    assert.equal(presetOccurrenceChild(restoredPrepared.root, 5).api_graph.output[1].inputs.positive, "descendant edited");
+    assert.equal(presetOccurrenceChild(restoredPrepared.root, 6).api_graph.output[1].inputs.positive, "shared");
+}

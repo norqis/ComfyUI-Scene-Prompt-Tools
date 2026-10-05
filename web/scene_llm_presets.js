@@ -32,7 +32,7 @@ export function preparePresetReference(reference, definitions) {
         return previous;
     let overrides, error = null;
     try { overrides = parsePresetOverrides(serialized); } catch (failure) { overrides = {}; error = failure; }
-    const prepared = { serialized, presetId, definitions, overrides, occurrences: new Map(), localPaths: new Set(), sharedEntries: new Map(), error,
+    const prepared = { serialized, presetId, definitions, overrides, occurrences: new Map(), localPaths: new Set(), embeddedPaths: new Set(), sharedEntries: new Map(), error,
         revision: (previous?.revision || 0) + 1 };
     function prepare(id, path, inherited, stack) {
         if (stack.has(id)) return null;
@@ -55,6 +55,7 @@ export function preparePresetReference(reference, definitions) {
             }
             // A nested Reference owns its subtree and wins over inherited outer entries.
             const own = parsePresetOverrides(entry.inputs?.llm_presets_json || "");
+            if (Object.keys(own).length) prepared.embeddedPaths.add(path);
             Object.assign(childOverrides, own);
             children.set(String(nodeId), prepare(String(entry.inputs?.preset_id || ""), pathJoin(path, nodeId), childOverrides, nextStack));
         }
@@ -153,19 +154,47 @@ function writeWorkflowWidget(node, name, value, inputNames) {
     if (index >= 0) node.widgets_values[index] = value;
 }
 
+// Resolve occurrence ownership before removing its nested transport. The outer
+// Reference holds each effective customization once, keyed by occurrence path.
+function compactDefinition(definition) {
+    const result = { ...definition, api_graph: { ...definition.api_graph, output: { ...definition.api_graph.output } },
+        workflow: { ...definition.workflow, nodes: [...definition.workflow.nodes] } };
+    for (const [id, entry] of Object.entries(result.api_graph.output)) {
+        if (entry.class_type !== "ScenePresetReference") continue;
+        if (entry.inputs?.llm_presets_json)
+            result.api_graph.output[id] = { ...entry, inputs: { ...entry.inputs, llm_presets_json: "" } };
+    }
+    result.workflow.nodes = result.workflow.nodes.map((node) => {
+        if (node.type !== "ScenePresetReference" || !(node.widgets_values_named?.llm_presets_json || node.widgets_values?.[2])) return node;
+        const stripped = { ...node, widgets_values: [...(node.widgets_values || [])] };
+        writeWorkflowWidget(stripped, "llm_presets_json", "", ["preset_id", "run_handle", "llm_presets_json"]);
+        return stripped;
+    });
+    // Strip before deep-copying so legacy nested JSON is never duplicated here.
+    return copy(result);
+}
+
+function effectiveFlatOverrides(prepared) {
+    const overrides = {};
+    for (const [path, definition] of prepared.occurrences) {
+        if (prepared.localPaths.has(path) || prepared.embeddedPaths.has(path)) overrides[path] = compactDefinition(definition);
+    }
+    return overrides;
+}
+
 export function presetEditorDefinition(reference, definitions) {
     const prepared = preparePresetReference(reference, definitions);
     if (!fullDefinition(prepared.root) || !prepared.localPaths.size) return null;
-    const root = copy(prepared.root);
+    const root = compactDefinition(prepared.root);
+    const overrides = effectiveFlatOverrides(prepared);
     // Put each descendant occurrence onto its direct Reference, so explicit root Save
     // retains children locally without writing any child shared file.
     for (const [nodeId, entry] of Object.entries(root.api_graph.output)) {
         if (entry.class_type !== "ScenePresetReference") continue;
         const presets = {};
-        for (const [path, definition] of prepared.occurrences) {
-            if (!prepared.localPaths.has(path)) continue;
-            if (path === nodeId) presets["."] = copy(definition);
-            else if (path.startsWith(`${nodeId}/`)) presets[path.slice(nodeId.length + 1)] = copy(definition);
+        for (const [path, definition] of Object.entries(overrides)) {
+            if (path === nodeId) presets["."] = definition;
+            else if (path.startsWith(`${nodeId}/`)) presets[path.slice(nodeId.length + 1)] = definition;
         }
         if (!Object.keys(presets).length) continue;
         const value = JSON.stringify({ version: 1, presets });
@@ -307,11 +336,12 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
     const ownerGraph = reference.graph;
     const targets = [], visited = new Set();
     const graphs = new Map();
+    let flatOverrides;
     function visitPreset(preset) {
         if (!preset?.scenePresetHasLLM) return;
         const context = contexts.get(preset), path = context.path;
         let graph = graphs.get(path);
-        if (!graph) { graph = createPresetGraph(preset, ownerGraph); graphs.set(path, graph); }
+        if (!graph) { graph = createPresetGraph(compactDefinition(preset), ownerGraph); graphs.set(path, graph); }
         const output = Object.entries(preset.api_graph.output).find(([, entry]) => entry.class_type === "ScenePresetOutput");
         function visit(id) {
             const key = `${path}:${id}`;
@@ -335,35 +365,9 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
                 commit() {
                     const widget = field(reference, "llm_presets_json");
                     if (!widget) throw new Error("Preset local state widget is missing.");
-                    prepared.overrides[path] = graph.definition();
-                    // Update owning nested References too: their own local state has
-                    // priority over outer inherited paths, including after root Save.
-                    const segments = path === "." ? [] : path.split("/");
-                    for (let depth = segments.length - 1; depth >= 0; depth--) {
-                        const parentPath = depth ? segments.slice(0, depth).join("/") : ".";
-                        const childPath = segments.slice(0, depth + 1).join("/");
-                        const childId = segments[depth];
-                        const parentGraph = graphs.get(parentPath);
-                        const parent = parentGraph ? parentGraph.definition() : copy(prepared.occurrences.get(parentPath));
-                        const childEntry = parent.api_graph.output[childId];
-                        const localOverrides = parsePresetOverrides(childEntry.inputs.llm_presets_json || "");
-                        for (const [overridePath, definition] of Object.entries(prepared.overrides)) {
-                            if (overridePath === childPath) localOverrides["."] = definition;
-                            else if (overridePath.startsWith(`${childPath}/`)) localOverrides[overridePath.slice(childPath.length + 1)] = definition;
-                        }
-                        const childValue = JSON.stringify({ version: 1, presets: localOverrides });
-                        childEntry.inputs.llm_presets_json = childValue;
-                        const savedChild = parent.workflow.nodes.find((entry) => String(entry.id) === childId);
-                        if (savedChild) writeWorkflowWidget(savedChild, "llm_presets_json", childValue, ["preset_id", "run_handle", "llm_presets_json"]);
-                        if (parentGraph) {
-                            const childNode = parentGraph.getNodeById(childId);
-                            const childWidget = field(childNode, "llm_presets_json");
-                            if (childWidget) childWidget.value = childValue;
-                            else childNode.widgets.push({ name: "llm_presets_json", value: childValue });
-                        }
-                        prepared.overrides[parentPath] = parent;
-                    }
-                    expected = JSON.stringify({ version: 1, presets: prepared.overrides });
+                    flatOverrides ||= effectiveFlatOverrides(prepared);
+                    flatOverrides[path] = compactDefinition(graph.definition());
+                    expected = JSON.stringify({ version: 1, presets: flatOverrides });
                     widget.value = expected;
                     refresh?.(reference);
                 } });

@@ -132,6 +132,46 @@ class LLMNodePresetTests(unittest.TestCase):
         with self.assertRaisesRegex(self.presets.ScenePresetError, 'identity mismatch'):
             self.presets.prepare_preset_occurrences({'10': self.reference('different', {'.': shared})})
 
+    def test_flat_nested_customizations_keep_count_resources_and_metadata(self):
+        child = self.save('flat-child', basic_nodes('shared'))
+        leaf = self.definition(child, 'generated leaf', 3)
+        leaf_nodes = leaf['api_graph']['output']
+        leaf_nodes['5'] = {'class_type': 'SceneApplyLora', 'inputs': {'scene_prompt': ['4', 0],
+            'lora_name': 'style/example.safetensors', 'model_mode': 'Illustrious',
+            'strength_model': 0.8, 'strength_clip': 0.6}}
+        leaf_nodes['3']['inputs']['scene_prompt'] = ['5', 0]
+        leaf['workflow'] = outer_workflow(leaf_nodes)
+        parent_nodes = basic_nodes('')
+        parent_nodes.pop('2')
+        parent_nodes['4'] = self.reference('flat-child', {'.': self.definition(child, 'obsolete', 9)})
+        parent_nodes['4']['inputs']['scene_prompt'] = ['1', 0]
+        parent_nodes['3']['inputs']['scene_prompt'] = ['4', 0]
+        parent = self.save('flat-parent', parent_nodes)
+        compact_parent = copy.deepcopy(parent)
+        compact_parent['api_graph']['output']['4']['inputs']['llm_presets_json'] = ''
+        compact_parent['workflow'] = outer_workflow(compact_parent['api_graph']['output'])
+        grand_nodes = basic_nodes('')
+        grand_nodes.pop('2')
+        grand_nodes['4'] = self.reference('flat-parent')
+        grand_nodes['4']['inputs']['scene_prompt'] = ['1', 0]
+        grand_nodes['3']['inputs']['scene_prompt'] = ['4', 0]
+        grand = self.save('flat-grand', grand_nodes)
+        grand['workflow'] = outer_workflow(grand['api_graph']['output'])
+        api_nodes = {'10': self.reference('flat-grand', {'.': grand, '4': compact_parent, '4/4': leaf}),
+            '40': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['10', 0], 'model_mode': 'Illustrious'}}}
+        response = self.presets.snapshot_presets_for_run('flat-local', graph(api_nodes), '40')
+        self.assertEqual(response['total_images'], 3)
+        snapshot = self.presets.snapshot_presets_for_metadata('flat-local')
+        self.assertEqual(snapshot['__occurrences__']['10/4/4']['api_graph']['output']['2']['inputs']['positive'], 'generated leaf')
+        resources = importlib.import_module(self.presets.__package__ + '.resource_info').connected_resources(graph(api_nodes), '40')
+        self.assertEqual(resources['loras'][0]['name'], 'style/example.safetensors')
+        metadata = importlib.import_module(self.presets.__package__ + '.preset_metadata')
+        replay, _, sources = metadata.expand_preset_references({'10': api_nodes['10']},
+            {'nodes': [{'id': 10, 'type': 'ScenePresetReference', 'pos': [0, 0]}], 'links': []}, snapshot)
+        generated = [(sources[node_id], node['inputs']['positive']) for node_id, node in replay.items() if node['class_type'] == 'ScenePromptLLM']
+        self.assertEqual(generated, [('10/4/4/2', 'generated leaf')])
+        self.assertIn('obsolete', self.presets.load_preset('flat-parent')['api_graph']['output']['4']['inputs']['llm_presets_json'])
+
     def test_resources_use_each_local_definition_and_lora_mode(self):
         shared = self.save('shared', basic_nodes())
         a, b = self.definition(shared, 'one'), self.definition(shared, 'two')

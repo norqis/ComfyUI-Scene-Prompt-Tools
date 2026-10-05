@@ -1,6 +1,6 @@
 # v0.10.1 audit: async ownership and compact Preset persistence
 
-Status: root investigation and design; implementation waits for gpt-5.6-sol medium approval.
+Status: root investigation and design approved by gpt-5.6-sol medium; implementation and regression validation completed. Final review and release verification remain root-owned.
 
 ## Confirmed findings
 
