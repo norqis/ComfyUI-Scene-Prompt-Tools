@@ -49,3 +49,12 @@ Civitai search gets a Civitai設定 button; its modal contains only an optional 
 | Release | Root diff review plus gpt-5.6-sol medium APPROVE, required CI, squash merge, v0.10.3 tag/release, installed tracked-file hashes; preserve running production process and private data |
 
 This correction supersedes the output-tuning/settings portions of docs/llm-civitai-v010-design.md and the explicit-settings exclusion in docs/memory-audit-v0102.md. Real local LLM inference quality is not claimed by isolated protocol tests.
+
+## Verification evidence
+
+- gpt-5.6-sol medium approved the complete design at 8847b3c before implementation.
+- Root independently ran all 523 Python tests in an isolated normal Python 3.12 environment: PASS, with only the two opt-in ComfyUI smoke tests skipped. Scoped migration, concurrent saves, explicit-error-only compatibility, cancellation, capability ownership and secret isolation are covered. The service test imports retain their private stub module identities, so they also work without an installed ComfyUI package.
+- All 22 frontend suites passed. Root inspected real Chromium screenshots at desktop and 360px: four LLM fields, red URL asterisk, top spacing, no horizontal overflow, and a separate Civitai key form with no host selector.
+- Root ran the isolated CPU/native ComfyUI browser harness: native settings buttons, real settings HTTP GET/POST and scoped saves, empty protocol-default port, Preset generation/editor/save/reload, stale routing, sampler seeds and legacy node migrations all passed. Its connection-test response is a protocol fixture, not real LLM inference.
+- Prompt generation executed zero connected checkpoint/diffusion/CLIP/VAE/LoRA loaders, posted no image prompt/run or resource inspection, and left the isolated queue empty. The legacy 175-node PNG loaded in 1643.1ms with zero LLM/Civitai calls.
+- Public package and whitespace checks passed. Production generation and private settings were not used by these tests; new backend behavior requires the user's normal ComfyUI restart after installation.
