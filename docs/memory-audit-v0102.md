@@ -1,10 +1,10 @@
 # v0.10.2 memory and prompt-generation audit
 
-Status: root design approved by gpt-5.6-sol medium. Backend implementation and isolated Python verification complete; final frontend/native review and release gates remain.
+Status: root design approved by gpt-5.6-sol medium. Backend/frontend implementation and isolated Python/native browser verification complete; final review and public CI/release gates remain.
 
 ## Scope and observed evidence
 
-The prompt-generation controller never queues a Comfy prompt or executes connected model loaders. Its LLM request contains description/model_mode only. Existing Civitai search/download/insertion was explicitly requested earlier; a clarification about removing that feature is pending. This audit must guarantee that prompt generation cannot load connected Checkpoint, diffusion, CLIP, VAE or LoRA weights. Do not silently remove previously requested search features before that clarification.
+The prompt-generation controller never queues a Comfy prompt or executes connected model loaders. Its LLM request contains description/model_mode only. Previously requested Civitai search/download/editor insertion is retained; these editor/service actions do not execute model weights. This audit guarantees that prompt generation cannot load connected Checkpoint, diffusion, CLIP, VAE or LoRA weights.
 
 The root traced LLM HTTP/controller actions, Scene raw/lazy model links and deferred LoRA graph expansion, run prepare/claim/release/expiry, Preset ownership/metadata/snapshots/caches, schedule lazy representation, popup/removal/timer cleanup, LoRA/catalog/gallery caches, save conversion and image previews, and native undo retention. Keep production inference/queue/browser/server untouched.
 
@@ -62,3 +62,11 @@ Retain the user's requested undo-history count. Existing run cleanup, bounded pr
 - Root's synthetic 70-revision fixture with a 256 KiB generated output in both API and workflow retained 64 entries and 64.94 MiB with only the previous count limit (67.23 MiB peak). With the 16 MiB payload budget it retained 15 entries and 15.22 MiB (17.51 MiB peak; 15.23 MiB conservative accounting). This is Python `tracemalloc` data for the synthetic fixture, not whole ComfyUI/GPU memory.
 - The actual isolated 2048x2048 RGB float32 PNG Save path reached 60.015 MiB at pixel conversion, versus the original conversion probe's 108 MiB. Pixel checksum remained 1,599,078,426 and the input array was unchanged. Float32/float64 actual PNG pixels, metadata, returned image identity, filenames and staging cleanup are covered.
 - Added 18 focused audit tests for object alias/cycle accounting, LRU/count/byte limits, replacement/removal/clear, valid oversize responses, TTL cost, lock placement, invalidation during reads/measurement, snapshot ownership and actual PNG output/peak. The full isolated Python suite passed 499 tests in 39.142 seconds, with 2 existing optional runtime skips. Production ComfyUI, LLM and GPU were untouched.
+
+## Frontend implementation and root verification
+
+- Full definitions are held in an explicit operation context. Generation and Editor dispose that context on all exit paths; compare-and-dispose preserves newer operations and restores compact availability, so a failed service request can be retried. Editor verifies tab/node/widget identity through asynchronous source loading and copies the workflow before disposal.
+- Full-source LRU is bounded by 32 entries and a 16 MiB serialized UTF-16 estimate; an oversized response is still valid for its active operation. Session LoRA titles now use the existing 120-entry limit, including revisions and cache hits. In-flight request deduplication is retained.
+- Root loaded 20 full sources with 1 MiB outputs. The compact global Map remained at 5,151 serialized bytes before and after all operations, with zero promoted full entries and zero entries in disposed operation maps. This measures serialized source ownership, not whole browser memory.
+- Full frontend tests and the isolated native CPU browser passed. With actual registered CheckpointLoaderSimple, LoraLoader, UNETLoader, CLIPLoader and VAELoader connected through Scene Apply Model, prompt generation recorded zero loader executions, zero Comfy prompt/run/resource inspection requests, and an empty image queue. The LLM request contained only description/model_mode.
+- Native verification also covered failed Preset generation followed by the actual Retry button, unchanged global compact sources, two-LLM generation/insertion, Undo/Redo, workflow reload, Editor HTTP Save/reload and zero delayed page errors. The historical 175-node PNG loaded in 1,520.2 ms. LLM and acquisition responses were fixtures; live inference quality and GPU sampling speed are not claimed.
