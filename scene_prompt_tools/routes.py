@@ -619,9 +619,8 @@ def define_routes():
 
     async def llm_operation(request, operation):
         # Lazy imports retain compatibility with lightweight Comfy/aiohttp route loaders.
-        from .llm_settings import load_settings, request_settings, merge_settings, public_settings, public_civitai_settings, save_settings, LLM_FIELDS
+        from .llm_settings import load_settings, request_settings, merge_settings, public_settings, save_settings
         from .llm_service import ServiceError, generate, select_loras, test_connection
-        from .civitai import search, download, by_hash
         try:
             user_id = _request_user_id(request)
             if operation in ("generate", "select"):
@@ -630,35 +629,45 @@ def define_routes():
                 settings = await asyncio.to_thread(load_settings, user_id)
             if operation == "settings_get":
                 result = public_settings(settings)
-            elif operation == "civitai_settings_get":
-                result = public_civitai_settings(settings)
-            elif operation == "search":
-                result = await search(settings, request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"))
-            elif operation == "by_hash":
-                result = await by_hash(settings, request.query.get("sha256", ""))
             else:
                 payload = await request.json()
                 if not isinstance(payload, dict):
                     raise ValueError("Request body must be a JSON object.")
                 if operation == "settings_post":
-                    result = await asyncio.to_thread(save_settings, user_id, payload, service="llm")
-                elif operation == "civitai_settings_post":
-                    result = await asyncio.to_thread(save_settings, user_id, payload, service="civitai")
+                    result = await asyncio.to_thread(save_settings, user_id, payload)
                 elif operation == "test":
-                    result = await test_connection(merge_settings(settings, payload, LLM_FIELDS))
+                    result = await test_connection(merge_settings(settings, payload))
                 elif operation == "generate":
                     result = await generate(settings, payload.get("description"), payload.get("model_mode"), state)
-                elif operation == "select":
-                    result = await select_loras(settings, payload.get("description"), payload.get("model_mode"), payload.get("query", ""), payload.get("candidates"), state)
                 else:
-                    result = await download(settings, payload, payload.get("model_mode"))
+                    result = await select_loras(settings, payload.get("description"), payload.get("model_mode"), payload.get("query", ""), payload.get("candidates"), state)
             return web.json_response(result)
         except ServiceError as exc:
             return web.json_response({"error": str(exc)}, status=exc.status)
         except (ValueError, TypeError, KeyError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except OSError:
-            return web.json_response({"error": "Unable to access Scene Prompt settings or the configured LoRA folder."}, status=500)
+            return web.json_response({"error": "Unable to access Scene Prompt LLM settings."}, status=500)
+
+    async def civitai_operation(request, operation):
+        from .civitai import ServiceError, search, download, by_hash
+        try:
+            if operation == "search":
+                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"))
+            elif operation == "by_hash":
+                result = await by_hash(request.query.get("sha256", ""))
+            else:
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Request body must be a JSON object.")
+                result = await download(payload, payload.get("model_mode"))
+            return web.json_response(result)
+        except ServiceError as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status)
+        except (ValueError, TypeError, KeyError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except OSError:
+            return web.json_response({"error": "Unable to access the configured LoRA folder."}, status=500)
 
     @PromptServer.instance.routes.get("/scene_prompt/llm/settings")
     async def scene_llm_settings_get(request):
@@ -682,23 +691,15 @@ def define_routes():
 
     @PromptServer.instance.routes.get("/scene_prompt/civitai/search")
     async def scene_civitai_search(request):
-        return await llm_operation(request, "search")
+        return await civitai_operation(request, "search")
 
     @PromptServer.instance.routes.get("/scene_prompt/civitai/by-hash")
     async def scene_civitai_by_hash(request):
-        return await llm_operation(request, "by_hash")
-
-    @PromptServer.instance.routes.get("/scene_prompt/civitai/settings")
-    async def scene_civitai_settings_get(request):
-        return await llm_operation(request, "civitai_settings_get")
-
-    @PromptServer.instance.routes.post("/scene_prompt/civitai/settings")
-    async def scene_civitai_settings_post(request):
-        return await llm_operation(request, "civitai_settings_post")
+        return await civitai_operation(request, "by_hash")
 
     @PromptServer.instance.routes.post("/scene_prompt/civitai/download")
     async def scene_civitai_download(request):
-        return await llm_operation(request, "download")
+        return await civitai_operation(request, "download")
 
     @PromptServer.instance.routes.get("/scene_prompt/loras/list")
     async def scene_prompt_lora_list(request):
