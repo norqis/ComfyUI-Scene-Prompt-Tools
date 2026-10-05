@@ -15,6 +15,7 @@ import weakref
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from itertools import chain
 
 
 RELEASE_COMFY = "ScenePrompt.ReleaseComfyBeforeLLM"
@@ -378,13 +379,14 @@ class Coordinator:
                 raise HandoffError("The prompt-generation operation belongs to another user.", 403)
             if client_id is not None and session.client_id != client_id:
                 raise HandoffError("The prompt-generation operation belongs to another client.", 403)
-            session.closing = True
-            tasks = set(session.requests)
-            if session.begin_task is not None:
-                tasks.add(session.begin_task)
-            for task in tasks:
-                if task is not current_task:
-                    task.cancel()
+            if not session.closing:
+                session.closing = True
+                tasks = set(session.requests)
+                if session.begin_task is not None:
+                    tasks.add(session.begin_task)
+                for task in tasks:
+                    if task is not current_task:
+                        task.cancel()
             if session.active and not session.requests:
                 self.sessions.pop(session_id, None)
                 session.active = False
@@ -564,11 +566,12 @@ def _install_execution_hooks():
         admission = _ADMISSION.get()
         with queue.mutex:
             if coordinator is not None:
-                live_items = [*queue.queue, *getattr(queue, "currently_running", {}).values()]
                 with coordinator.lock:
                     bound = item[1] in coordinator.prompt_policies
-                if (policy_id is not None or bound) and any(queued[1] == item[1] for queued in live_items):
-                    raise HandoffError("This prompt ID already belongs to a queued or running GPU policy.")
+                if policy_id is not None or bound:
+                    live_items = chain(queue.queue, getattr(queue, "currently_running", {}).values())
+                    if any(queued[1] == item[1] for queued in live_items):
+                        raise HandoffError("This prompt ID already belongs to a queued or running GPU policy.")
             if policy_id is not None:
                 if coordinator is None or admission is None or admission[0] != policy_id:
                     raise HandoffError("A GPU policy requires authenticated prompt admission.", 403)

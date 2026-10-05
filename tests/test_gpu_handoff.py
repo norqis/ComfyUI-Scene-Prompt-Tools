@@ -149,7 +149,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         gc.collect()
         self.assertIsNone(reference())
 
-    async def test_cancel_during_worker_release_keeps_exclusive_until_real_completion(self):
+    async def test_repeated_end_and_disconnect_during_worker_release_keep_exclusive_until_real_completion(self):
         owner = coordinator()
         owner.server.prompt_queue = types.SimpleNamespace(set_flag=lambda *_args: None)
         started, finish = threading.Event(), threading.Event()
@@ -167,8 +167,13 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             await until(lambda: bool(owner.controls))
             worker = asyncio.create_task(asyncio.to_thread(owner.service_controls))
             await until(started.is_set)
-            begin.cancel()
+            session_id = next(iter(owner.sessions))
+            owner.end_session(session_id, "alice", client_id="a")
             await asyncio.sleep(0)
+            owner.end_session(session_id, "alice", client_id="a")
+            owner.server.sockets.pop("a")
+            await asyncio.sleep(0)
+            self.assertEqual(begin.cancelling(), 1)
             self.assertTrue(owner.gate.exclusive)
             off = asyncio.create_task(owner.gate.acquire_async())
             await asyncio.sleep(0)
@@ -370,6 +375,19 @@ class WorkerHookTests(unittest.TestCase):
         gc.collect()
         self.assertIsNone(reference())
         self.assertFalse(self.owner.executors)
+
+    def test_unbound_off_submission_does_not_iterate_existing_queue_or_running_items(self):
+        class QueueWithoutIteration(list):
+            def __iter__(self):
+                raise AssertionError("An unbound OFF submission must not scan the pending queue")
+        class RunningWithoutIteration(dict):
+            def values(self):
+                raise AssertionError("An unbound OFF submission must not scan running items")
+        self.queue.queue = QueueWithoutIteration([(0, "existing", {}, {}, [])])
+        self.queue.currently_running = RunningWithoutIteration()
+        self.queue.put((1, "off", {}, {}, []))
+        self.assertEqual(len(self.queue.queue), 2)
+        self.assertFalse(self.owner.prompt_policies)
 
     def test_pending_control_is_serviced_even_after_native_flags_consumed_its_wake(self):
         loop = asyncio.new_event_loop()
