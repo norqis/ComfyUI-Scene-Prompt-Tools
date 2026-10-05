@@ -3,7 +3,7 @@ import { api } from "../../scripts/api.js";
 import { ChangeTracker } from "../../scripts/changeTracker.js";
 import { createLLMController, LLM_TYPE } from "./scene_prompt_llm.js";
 import { openCivitaiSearch, openLLMSettings, showAPIError } from "./scene_prompt_civitai.js";
-import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference } from "./scene_llm_presets.js";
+import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference, createPresetOperation } from "./scene_llm_presets.js";
 import {
     DEFAULT_SELECTED_JSON,
     MATRIX_DEFAULT_JSON,
@@ -4888,8 +4888,11 @@ const sceneLLMController = createLLMController({
     app, api,
     beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
     createNode: (type) => globalThis.LiteGraph.createNode(type),
-    refresh: (node) => refreshDownstreamSceneNodes(node),
-    presetTargets: (node) => collectPresetLLMTargets(node, scenePresetDisplayGraphs),
+    refresh: (node) => {
+        if (isScenePresetReferenceNode(node)) refreshScenePresetReference(node);
+        refreshDownstreamSceneNodes(node);
+    },
+    presetTargets: (node, operation) => collectPresetLLMTargets(node, operation?.definitions || scenePresetDisplayGraphs),
     presetHasTargets: (node) => presetReferenceHasLLM(node),
     prepareTargets: prepareSceneLLMPresetSources,
     onError: showAPIError,
@@ -5128,10 +5131,17 @@ function readSceneLoraCache() {
 function cachedSceneLora(item) {
     if (item.size == null || item.mtime_ns == null) return null;
     const key = sceneLoraCacheKey(item);
-    if (sceneLoraSessionCache.has(key)) return sceneLoraSessionCache.get(key);
+    if (sceneLoraSessionCache.has(key)) return rememberSceneLora(key, sceneLoraSessionCache.get(key));
     const cached = readSceneLoraCache().find((entry) => entry.key === key) || null;
-    if (cached?.title || cached?.status === "not_found") sceneLoraSessionCache.set(key, cached);
+    if (cached?.title || cached?.status === "not_found") rememberSceneLora(key, cached);
     return cached?.title || cached?.status === "not_found" ? cached : null;
+}
+
+function rememberSceneLora(key, entry) {
+    sceneLoraSessionCache.delete(key);
+    sceneLoraSessionCache.set(key, entry);
+    while (sceneLoraSessionCache.size > SCENE_LORA_CACHE_LIMIT) sceneLoraSessionCache.delete(sceneLoraSessionCache.keys().next().value);
+    return entry;
 }
 
 function saveSceneLoraCache(item, local, version, status) {
@@ -5143,7 +5153,7 @@ function saveSceneLoraCache(item, local, version, status) {
         trainedWords: Array.isArray(version?.trainedWords) ? version.trainedWords : [],
         localWords: Array.isArray(local?.trigger_phrases) ? local.trigger_phrases : [],
     };
-    sceneLoraSessionCache.set(key, entry);
+    rememberSceneLora(key, entry);
     if (item.size != null && item.mtime_ns != null) {
         const entries = readSceneLoraCache().filter((existing) => existing.key !== key);
         entries.unshift(entry);
@@ -11702,7 +11712,8 @@ async function loadFullSceneLLMPreset(presetId) {
 }
 
 async function prepareSceneLLMPresetSources(root) {
-    const graph = root.graph || app.graph, definitions = scenePresetDisplayGraphs;
+    const graph = root.graph || app.graph, sources = scenePresetDisplayGraphs;
+    const operation = createPresetOperation(sources, () => scenePresetDisplayGraphs);
     const seen = new Set(), references = [];
     function visit(node) {
         if (!node || seen.has(node) || Number(node.mode) === 2) return;
@@ -11715,10 +11726,12 @@ async function prepareSceneLLMPresetSources(root) {
         if (isScenePresetReferenceNode(node) && Number(node.mode) !== 4 && presetReferenceHasLLM(node)) references.push(node);
     }
     visit(root);
-    for (const reference of references) {
-        await hydratePresetReference(reference, definitions, loadFullSceneLLMPreset);
-        if (scenePresetDisplayGraphs !== definitions) throw new Error("Preset一覧が更新されたため、もう一度生成してください。");
-        refreshScenePresetReference(reference, scenePresetList || []);
+    try {
+        for (const reference of references) await hydratePresetReference(reference, operation, loadFullSceneLLMPreset);
+        return operation;
+    } catch (error) {
+        operation.dispose();
+        throw error;
     }
 }
 
@@ -11734,22 +11747,35 @@ async function openScenePresetEditor(node) {
     node.scenePresetEditorLoading = true;
     const button = findSceneWidget(node, "scene_preset_edit");
     if (button) button.disabled = true;
+    let operation;
+    const initialState = String(findWidget(node, "llm_presets_json")?.value || "");
+    const ownerGraph = node.graph;
+    const editorCurrent = () => app.graph === ownerGraph && ownerGraph?.getNodeById(node.id) === node
+        && String(findWidget(node, "preset_id")?.value || "").trim() === presetId
+        && String(findWidget(node, "llm_presets_json")?.value || "") === initialState;
     try {
         if (typeof app.loadGraphData !== "function") {
             throw new Error("Preset編集に必要なComfyUI APIが見つかりません。");
         }
+        await loadScenePresetList(false);
+        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        operation = createPresetOperation(scenePresetDisplayGraphs, () => scenePresetDisplayGraphs);
         const preset = await loadFullSceneLLMPreset(presetId);
         if (!preset?.metadata?.preset_id || !preset?.workflow) {
             throw new Error("Presetの応答形式が不正です。");
         }
-        scenePresetDisplayGraphs.set(presetId, preset);
-        await hydratePresetReference(node, scenePresetDisplayGraphs, loadFullSceneLLMPreset);
-        const localPreset = presetEditorDefinition(node, scenePresetDisplayGraphs);
+        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        operation.definitions.set(presetId, preset);
+        await hydratePresetReference(node, operation, loadFullSceneLLMPreset);
+        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        const localPreset = presetEditorDefinition(node, operation.definitions);
         const workflow = presetEditorWorkflow(localPreset || preset);
+        operation.dispose();
         await app.loadGraphData(workflow, true, true, `Preset - ${preset.metadata.name || preset.metadata.preset_id}`);
     } catch (error) {
         showSceneBatchError("Presetを編集用ワークフローとして開けませんでした。", error);
     } finally {
+        operation?.dispose();
         node.scenePresetEditorLoading = false;
         if (button) button.disabled = false;
         node.setDirtyCanvas?.(true, true);

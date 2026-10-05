@@ -66,6 +66,30 @@ try {
     const header = Buffer.from('{"__metadata__":{}}'.padEnd(24, " "));
     const headerLength = Buffer.alloc(8); headerLength.writeBigUInt64LE(BigInt(header.length));
     await writeFile(resolve(fixtureLoras, "runtime-hat.safetensors"), Buffer.concat([headerLength, header]));
+    for (const [folder, name] of [["checkpoints", "runtime-checkpoint"], ["diffusion_models", "runtime-diffusion"], ["text_encoders", "runtime-clip"], ["vae", "runtime-vae"]]) {
+        const path = resolve(directory, "models", folder);
+        await mkdir(path, { recursive: true });
+        await writeFile(resolve(path, `${name}.safetensors`), Buffer.concat([headerLength, header]));
+    }
+    // Keep actual standard node schemas and classes; mark their execution entry
+    // points before any file/tensor load. A regression can never load real weights.
+    const markerDirectory = resolve(directory, "custom_nodes", "scene-runtime-load-markers");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(resolve(markerDirectory, "__init__.py"), `import nodes
+from aiohttp import web
+from server import PromptServer
+executions = []
+for name in ("CheckpointLoaderSimple", "UNETLoader", "CLIPLoader", "VAELoader", "LoraLoader"):
+    node_type = nodes.NODE_CLASS_MAPPINGS[name]
+    def marked(self, *args, _name=name, **kwargs):
+        executions.append(_name)
+        raise RuntimeError("Prompt generation attempted model execution: " + _name)
+    setattr(node_type, node_type.FUNCTION, marked)
+@PromptServer.instance.routes.get("/scene_test/model_executions")
+async def model_executions(request):
+    return web.json_response(executions)
+NODE_CLASS_MAPPINGS = {}
+`);
     child = spawn(python, [
         "main.py",
         "--cpu",
@@ -85,7 +109,13 @@ try {
     page.on("pageerror", (error) => pageErrors.push(error.stack || error.message));
     const seedRequests = [];
     const llmRequests = [];
+    const runRequests = [], resourceRequests = [];
+    page.on("request", (request) => {
+        const path = new URL(request.url()).pathname;
+        if (/\/scene_prompt\/(?:expand\/resources|loras\/info|models\/)/u.test(path)) resourceRequests.push(path);
+    });
     let deferredGeneration;
+    let failNextGeneration = false;
     const runtimeCandidate = { model_id: 100, version_id: 200, file_id: 300, name: "Runtime Hat", version_name: "v1", base_model: "Illustrious",
         file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["runtime_hat"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "runtime-hat.safetensors" };
     await page.route("**/scene_prompt/llm/**", async (route) => {
@@ -93,6 +123,10 @@ try {
         const body = route.request().postDataJSON();
         llmRequests.push({ path, body });
         if (path.endsWith("/generate")) {
+            if (failNextGeneration) {
+                failNextGeneration = false;
+                return route.fulfill({ status: 503, json: { error: "Runtime retry fixture" } });
+            }
             if (deferredGeneration) { const gate = deferredGeneration; gate.started(); await gate.pending; }
             return route.fulfill({ json: { positive: "1girl, hat", negative: "blurry", lora_queries: ["hat"], template_version: "scene-llm-v1" } });
         }
@@ -111,15 +145,17 @@ try {
         seedRequests.push(route.request().postDataJSON());
         await route.fulfill({ json: { prompt_id: `seed-test-${seedRequests.length}`, number: 0, node_errors: {} } });
     });
-    await page.route("**/scene_prompt/runs/**", (route) => route.fulfill({
-        json: { run_handle: "seed-runtime-test", claimed: true, released: true },
-    }));
+    await page.route("**/scene_prompt/runs/**", (route) => {
+        runRequests.push(route.request().url());
+        return route.fulfill({ json: { run_handle: "seed-runtime-test", claimed: true, released: true } });
+    });
     await page.route("**/scene_prompt_ui.js", async (route) => {
         const response = await route.fetch();
         const sourceUI = (await response.text()).replace("onError: showAPIError,", "onError: (error, query, retry) => { window.__sceneLLMRuntimeError = error.stack; showAPIError(error, query, retry); },");
         await route.fulfill({ response, body: `${sourceUI}
 window.__sceneSeedRuntimeTest = {
     updateLLMExpand(node) { updateSceneExpandButton(node); },
+    presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
     async refreshPresetReference(node) { await loadScenePresetList(true); refreshScenePresetReference(node); },
     async openFavoritePicker(favorites = false) {
@@ -902,6 +938,7 @@ window.__sceneSeedRuntimeTest = {
         "frozen one-arm Random preserves a closing Queue and normalizes obsolete controls");
     assert.ok(randomWorkflowRoundTrip.queueControls.every((entry) => entry.disabled));
     console.log("real ComfyUI Random legacy and frozen workflow widget round trips passed");
+    const executionRequestsBefore = { prompts: seedRequests.length, runs: runRequests.length, resources: resourceRequests.length };
     const llmRuntime = await page.evaluate(async () => {
         const app = window.app;
         app.graph.clear();
@@ -912,6 +949,21 @@ window.__sceneSeedRuntimeTest = {
         for (const node of [llm, expand, branch]) app.graph.add(node);
         const field = (node, name) => node.widgets.find((widget) => widget.name === name);
         const role = (node, name) => node.widgets.find((widget) => widget.sceneRole === name);
+        const add = (type) => { const node = window.LiteGraph.createNode(type); if (!node) throw new Error(`Standard loader ${type} missing`); app.graph.add(node); return node; };
+        const checkpoint = add("CheckpointLoaderSimple"), nativeLora = add("LoraLoader"), checkpointApply = add("SceneApplyModel");
+        const diffusion = add("UNETLoader"), clip = add("CLIPLoader"), vae = add("VAELoader"), diffusionApply = add("SceneApplyModel");
+        const port = (node, name) => node.inputs.findIndex((input) => input.name === name);
+        field(checkpoint, "ckpt_name").value = "runtime-checkpoint.safetensors";
+        field(nativeLora, "lora_name").value = "runtime-hat.safetensors";
+        field(diffusion, "unet_name").value = "runtime-diffusion.safetensors";
+        field(clip, "clip_name").value = "runtime-clip.safetensors";
+        field(vae, "vae_name").value = "runtime-vae.safetensors";
+        checkpoint.connect(0, nativeLora, port(nativeLora, "model")); checkpoint.connect(1, nativeLora, port(nativeLora, "clip"));
+        nativeLora.connect(0, checkpointApply, port(checkpointApply, "model")); nativeLora.connect(1, checkpointApply, port(checkpointApply, "clip"));
+        checkpoint.connect(2, checkpointApply, port(checkpointApply, "vae"));
+        checkpointApply.connect(0, diffusionApply, port(diffusionApply, "scene_prompt"));
+        diffusion.connect(0, diffusionApply, port(diffusionApply, "model")); clip.connect(0, diffusionApply, port(diffusionApply, "clip"));
+        vae.connect(0, diffusionApply, port(diffusionApply, "vae")); diffusionApply.connect(0, llm, port(llm, "scene_prompt"));
         const own = role(llm, "llm_generate"), description = field(llm, "description"), generate = role(expand, "expand_llm_generate");
         if (!own || !generate || !description?.inputEl) throw new Error("Native LLM widgets / description textarea unavailable");
         const empty = { own: own.disabled, expand: generate.disabled };
@@ -986,9 +1038,19 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(llmRuntime.stateHidden, true);
     assert.deepEqual(llmRequests.map((request) => request.path), ["/scene_prompt/llm/generate", "/scene_prompt/civitai/search", "/scene_prompt/llm/select_loras", "/scene_prompt/civitai/download"], "workflow load and converted Expand never invoke any service");
     assert.deepEqual(llmRequests[0].body, { description: "a girl wearing a hat", model_mode: "Illustrious" });
+    assert.equal(seedRequests.length, executionRequestsBefore.prompts, "prompt generation never posts a Comfy prompt");
+    assert.equal(runRequests.length, executionRequestsBefore.runs, "prompt generation never prepares or claims an image run");
+    assert.equal(resourceRequests.length, executionRequestsBefore.resources, "prompt generation never inspects or hashes connected resource files");
+    const loaderExecutions = await (await fetch(`${url}/scene_test/model_executions`)).json();
+    assert.deepEqual(loaderExecutions, [], "connected standard checkpoint/diffusion/CLIP/VAE/LoRA loaders never execute");
+    const isolatedQueue = await (await fetch(`${url}/queue`)).json();
+    assert.equal(isolatedQueue.queue_running.length, 0);
+    assert.equal(isolatedQueue.queue_pending.length, 0);
+    console.log("real ComfyUI prompt generation leaves connected checkpoint/diffusion/CLIP/VAE/LoRA loaders unexecuted, queue empty and resource inspection untouched");
     assert.doesNotMatch(JSON.stringify(llmRuntime.beforeReload.serial), /image_url|api_key|conversation_history/);
     console.log("real ComfyUI LLM widget controls, explicit generation, native LoRA insertion and workflow/API reload passed");
 
+    failNextGeneration = true;
     const presetLLMRuntime = await page.evaluate(async () => {
         const app = window.app, field = (node, name) => node.widgets.find((widget) => widget.name === name), role = (node, name) => node.widgets.find((widget) => widget.sceneRole === name);
         app.graph.clear();
@@ -1007,7 +1069,18 @@ window.__sceneSeedRuntimeTest = {
         await window.__sceneSeedRuntimeTest.refreshPresetReference(reference);
         window.__sceneSeedRuntimeTest.updateLLMExpand(expand);
         if (role(expand, "expand_llm_generate").disabled) throw new Error("Native Reference LLM discovery disabled");
+        const compactBefore = window.__sceneSeedRuntimeTest.presetSourceSnapshot();
         await role(expand, "expand_llm_generate").callback();
+        const retryEnabled = !role(expand, "expand_llm_generate").disabled;
+        const retry = [...document.querySelectorAll("button")].find((button) => button.textContent === "再試行");
+        if (!retry || !retryEnabled) throw new Error("Failed Preset operation lost generation availability");
+        retry.click();
+        const retryDeadline = Date.now() + 10_000;
+        while (role(expand, "expand_llm_generate").disabled) {
+            if (Date.now() > retryDeadline) throw new Error("Native Preset retry did not settle");
+            await new Promise((done) => setTimeout(done, 10));
+        }
+        const compactUnchanged = compactBefore === window.__sceneSeedRuntimeTest.presetSourceSnapshot();
         const local = JSON.parse(field(reference, "llm_presets_json").value);
         if (!local.presets?.["."]) throw new Error(`Reference commit missing: ${window.__sceneLLMRuntimeError || expand.sceneLLMStatus}`);
         const originalResponse = await fetch(`/scene_presets/load?preset_id=${presetId}`), original = await originalResponse.json();
@@ -1040,11 +1113,13 @@ window.__sceneSeedRuntimeTest = {
         if (!loadedResponse.ok) throw new Error(loaded.error);
         await app.loadGraphData(loaded.workflow, true, true);
         const loadedAPI = await app.graphToPrompt();
-        return { untouched, retained: retained === JSON.stringify(local), editor,
+        return { untouched, retained: retained === JSON.stringify(local), retryEnabled, compactUnchanged, editor,
             loadedLoras: app.graph._nodes.filter((node) => node.comfyClass === "SceneApplyLora").map((node) => loadedAPI.output[String(node.id)]?.inputs),
             loadedPrompts: app.graph._nodes.filter((node) => node.comfyClass === "ScenePromptLLM").map((node) => loadedAPI.output[String(node.id)]?.inputs) };
     });
     assert.equal(presetLLMRuntime.untouched, true, "Reference generation never writes the shared Preset file");
+    assert.equal(presetLLMRuntime.retryEnabled, true, "failed native Reference generation restores the Generate button");
+    assert.equal(presetLLMRuntime.compactUnchanged, true, "failed/retried generation never promotes full bodies into the global source list");
     assert.equal(presetLLMRuntime.retained, true, "Reference customization survives native owning-workflow reload");
     assert.equal(presetLLMRuntime.editor.loras.length, 2);
     assert.equal(presetLLMRuntime.loadedLoras.length, 2);
@@ -1055,7 +1130,7 @@ window.__sceneSeedRuntimeTest = {
         assert.equal(prompt.positive, "1girl, hat"); assert.equal(prompt.negative, "blurry"); assert.equal(prompt.model_mode, "Illustrious");
         assert.ok(prompt.description.includes("girl")); assert.equal(JSON.parse(prompt.generation_state_json).template_version, "scene-llm-v1");
     }
-    assert.equal(llmRequests.filter((request) => request.path.endsWith("/generate")).length, 3, "only the explicit standalone and two Preset LLMs generate");
+    assert.equal(llmRequests.filter((request) => request.path.endsWith("/generate")).length, 4, "only standalone, failed explicit attempt, and two retried Preset LLMs generate");
     await page.waitForTimeout(300);
     assert.deepEqual(pageErrors, [], `native LLM/Preset lifecycle raised browser errors:\n${pageErrors.join("\n")}`);
     console.log("real ComfyUI instance-local Preset LLM generation, native LoRA editor widgets and explicit Save/reload passed");

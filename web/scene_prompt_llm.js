@@ -168,7 +168,9 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
     beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const busy = new WeakSet();
     let operationBusy = false;
-    function targets(root) { return collectLLMTargets(root.graph || app.graph, root, { presetTargets }); }
+    function targets(root, operation) { return collectLLMTargets(root.graph || app.graph, root, {
+        presetTargets: (reference) => presetTargets?.(reference, operation),
+    }); }
     function canGenerate(root) { return hasLLMTargets(root.graph || app.graph, root, presetHasTargets); }
     async function generate(root, explicit = false) {
         if (operationBusy) return;
@@ -178,12 +180,13 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
         const ownerGraph = app.graph;
         const initialRoot = captureTarget({ node: root, graph: ownerGraph, ownerGraph }, () => app.graph);
         let list = [];
+        let preparation;
         let errorQuery = "";
         let currentNode = root;
         try {
-            if (!explicit) await prepareTargets?.(root);
+            if (!explicit) preparation = await prepareTargets?.(root);
             if (!initialRoot()) return;
-            list = explicit ? [{ node: root, graph: root.graph || ownerGraph }] : targets(root);
+            list = explicit ? [{ node: root, graph: root.graph || ownerGraph }] : targets(root, preparation);
             let routes = list.map((target) => captureRoute(ownerGraph, root, target.reference || target.node));
             for (const { node } of list) { busy.add(node); onBusy?.(node, true); }
             if (!list.length) root.sceneLLMStatus = "生成対象がありません";
@@ -242,8 +245,10 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
             currentNode.sceneLLMStatus = error.message;
             onError?.(error, errorQuery, () => generate(root, explicit));
         } finally {
+            preparation?.dispose();
             operationBusy = false;
             for (const node of new Set([root, ...list.map((target) => target.node)])) { busy.delete(node); onBusy?.(node, false); }
+            list = [];
             app.graph?.setDirtyCanvas?.(true, true);
         }
     }
