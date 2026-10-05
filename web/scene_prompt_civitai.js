@@ -1,6 +1,8 @@
 import { requestJSON, identity, value, applyCandidate, captureTarget } from "./scene_prompt_llm.js";
 
 const cache = new Map();
+let cacheEpoch = 0;
+let settingsModalID = 0;
 const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated"];
 const modals = [];
 function element(tag, text, className) {
@@ -85,12 +87,12 @@ export function openCivitaiSearch({ node, api, refresh, details, activeGraph = (
             row.append(detailButton);
             const choose = element("button", item.acquired ? "取得済み・選択" : "取得して選択", "pc-button");
             choose.onclick = async () => {
-                const serial = revision, graph = node.graph, lora = value(node, "lora_name");
+                const serial = revision, epoch = cacheEpoch, graph = node.graph, lora = value(node, "lora_name");
                 const current = captureTarget({ node, graph, ownerGraph: graph }, activeGraph);
                 choose.disabled = true;
                 try {
                     const downloaded = await requestJSON(api, "/scene_prompt/civitai/download", { model_id: item.model_id, version_id: item.version_id, file_id: item.file_id, model_mode: value(node, "model_mode") });
-                    if (!modal.overlay.isConnected || revision !== serial || !current() || value(node, "lora_name") !== lora) return;
+                    if (!modal.overlay.isConnected || revision !== serial || epoch !== cacheEpoch || !current() || value(node, "lora_name") !== lora) return;
                     beginChange(graph);
                     try { applyCandidate(node, { ...downloaded.candidate, lora_name: downloaded.lora_name }, { query: query.value.trim(), sort: sort.value }); }
                     finally { endChange(graph); }
@@ -103,19 +105,20 @@ export function openCivitaiSearch({ node, api, refresh, details, activeGraph = (
         }
     }
     async function load(force = false) {
-        const serial = ++revision;
+        const serial = ++revision, epoch = cacheEpoch;
         const key = new URLSearchParams({ query: query.value.trim(), model_mode: value(node, "model_mode"), sort: sort.value }).toString();
         list.textContent = "検索中…";
         try {
             let result = force ? null : cache.get(key);
             if (!result) {
                 result = await requestJSON(api, `/scene_prompt/civitai/search?${key}`);
+                if (epoch !== cacheEpoch) return;
                 cache.delete(key); cache.set(key, result);
                 while (cache.size > 20) cache.delete(cache.keys().next().value);
             }
-            if (modal.overlay.isConnected && serial === revision) render(result.items);
+            if (modal.overlay.isConnected && serial === revision && epoch === cacheEpoch) render(result.items);
         } catch (error) {
-            if (modal.overlay.isConnected && serial === revision) { list.textContent = "検索できませんでした。"; showAPIError(error, query.value, () => load(true)); }
+            if (modal.overlay.isConnected && serial === revision && epoch === cacheEpoch) { list.textContent = "検索できませんでした。"; showAPIError(error, query.value, () => load(true)); }
         }
     }
     search.onclick = () => void load(true); sort.onchange = () => void load(true); query.onkeydown = (event) => { if (event.key === "Enter") void load(true); };
@@ -140,20 +143,45 @@ export async function openLLMSettings(api) {
         for (const name of Object.keys(labels)) field(name, settings[name]);
         for (const name of ["api_key", "civitai_api_key"]) {
             fields[name].placeholder = settings[`${name}_set`] ? "保存済み（空欄で保持）" : "未設定";
-            const label = element("label", `${labels[name]}を削除`), input = element("input"); input.type = "checkbox"; fields[`clear_${name}`] = input; label.append(input); form.append(label);
+            const label = element("label", `${labels[name]}を削除`), input = element("input"); input.type = "checkbox"; input.name = `clear_${name}`; fields[`clear_${name}`] = input; label.append(input); form.append(label);
         }
         const save = element("button", "保存", "pc-button"), test = element("button", "接続テスト・モデル取得", "pc-button"); test.type = "button";
         form.append(save, test);
+        const datalist = element("datalist"); datalist.id = `pc-llm-models-${++settingsModalID}`;
+        fields.model.setAttribute("list", datalist.id); form.append(datalist);
         const body = () => Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value]));
-        form.onsubmit = async (event) => { event.preventDefault(); try { await requestJSON(api, "/scene_prompt/llm/settings", body()); fields.api_key.value = ""; fields.civitai_api_key.value = ""; status.textContent = "保存しました"; } catch (error) { status.textContent = error.message; } };
+        const drafts = {};
+        for (const name of ["api_key", "civitai_api_key", "clear_api_key", "clear_civitai_api_key"]) {
+            drafts[name] = 0;
+            fields[name].addEventListener("input", () => drafts[name]++);
+        }
+        let saving = false;
+        form.onsubmit = async (event) => {
+            event.preventDefault();
+            if (saving) return;
+            const submitted = body();
+            const submittedDrafts = { ...drafts };
+            saving = true; save.disabled = true;
+            try {
+                const saved = await requestJSON(api, "/scene_prompt/llm/settings", submitted);
+                cacheEpoch++; cache.clear();
+                if (!modal.overlay.isConnected) return;
+                for (const name of ["api_key", "civitai_api_key"]) {
+                    if (drafts[name] === submittedDrafts[name] && fields[name].value === submitted[name]) fields[name].value = "";
+                    if (submitted[`clear_${name}`] && drafts[`clear_${name}`] === submittedDrafts[`clear_${name}`]) fields[`clear_${name}`].checked = false;
+                    fields[name].placeholder = saved[`${name}_set`] ? "保存済み（空欄で保持）" : "未設定";
+                }
+                status.textContent = "保存しました";
+            } catch (error) { status.textContent = error.message; }
+            finally { saving = false; save.disabled = false; }
+        };
         test.onclick = async () => {
             try {
                 const result = await requestJSON(api, "/scene_prompt/llm/test", body());
                 if (!modal.overlay.isConnected) return;
                 status.textContent = `接続成功: ${(result.models || []).map((model) => model.id).join(", ")}`;
-                const datalist = element("datalist"); datalist.id = "pc-llm-models";
+                datalist.replaceChildren();
                 for (const model of result.models || []) { const option = element("option"); option.value = model.id; datalist.append(option); }
-                fields.model.setAttribute("list", datalist.id); form.append(datalist);
             } catch (error) { status.textContent = error.message; }
         };
     } catch (error) { status.textContent = error.message; }
