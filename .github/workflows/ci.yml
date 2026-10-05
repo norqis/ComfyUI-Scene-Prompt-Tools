@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
   schedule:
     - cron: "17 3 * * 1"
 
@@ -62,7 +63,7 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
-          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+          elif [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             git diff-tree --check --no-commit-id -r HEAD
           else
             before="${{ github.event.before }}"
@@ -82,7 +83,7 @@ jobs:
       - name: Check public package
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             SCENE_PROMPT_HISTORY_BASE_SHA= SCENE_PROMPT_HISTORY_HEAD_SHA= python tests/check_public_package.py
           else
             SCENE_PROMPT_HISTORY_BASE_SHA="${{ github.event.pull_request.base.sha || github.event.before }}" SCENE_PROMPT_HISTORY_HEAD_SHA="${{ github.event.pull_request.head.sha || github.sha }}" python tests/check_public_package.py
@@ -109,7 +110,7 @@ jobs:
 
   latest-comfy-smoke:
     name: Latest ComfyUI compatibility
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
