@@ -619,14 +619,19 @@ def define_routes():
 
     async def llm_operation(request, operation):
         # Lazy imports retain compatibility with lightweight Comfy/aiohttp route loaders.
-        from .llm_settings import load_settings, merge_settings, public_settings, save_settings
+        from .llm_settings import load_settings, request_settings, merge_settings, public_settings, public_civitai_settings, save_settings, LLM_FIELDS
         from .llm_service import ServiceError, generate, select_loras, test_connection
         from .civitai import search, download
         try:
             user_id = _request_user_id(request)
-            settings = await asyncio.to_thread(load_settings, user_id)
+            if operation in ("generate", "select"):
+                settings, state = await asyncio.to_thread(request_settings, user_id)
+            else:
+                settings = await asyncio.to_thread(load_settings, user_id)
             if operation == "settings_get":
                 result = public_settings(settings)
+            elif operation == "civitai_settings_get":
+                result = public_civitai_settings(settings)
             elif operation == "search":
                 result = await search(settings, request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"))
             else:
@@ -634,13 +639,15 @@ def define_routes():
                 if not isinstance(payload, dict):
                     raise ValueError("Request body must be a JSON object.")
                 if operation == "settings_post":
-                    result = await asyncio.to_thread(save_settings, user_id, payload)
+                    result = await asyncio.to_thread(save_settings, user_id, payload, service="llm")
+                elif operation == "civitai_settings_post":
+                    result = await asyncio.to_thread(save_settings, user_id, payload, service="civitai")
                 elif operation == "test":
-                    result = await test_connection(merge_settings(settings, payload))
+                    result = await test_connection(merge_settings(settings, payload, LLM_FIELDS))
                 elif operation == "generate":
-                    result = await generate(settings, payload.get("description"), payload.get("model_mode"))
+                    result = await generate(settings, payload.get("description"), payload.get("model_mode"), state)
                 elif operation == "select":
-                    result = await select_loras(settings, payload.get("description"), payload.get("model_mode"), payload.get("query", ""), payload.get("candidates"))
+                    result = await select_loras(settings, payload.get("description"), payload.get("model_mode"), payload.get("query", ""), payload.get("candidates"), state)
                 else:
                     result = await download(settings, payload, payload.get("model_mode"))
             return web.json_response(result)
@@ -674,6 +681,14 @@ def define_routes():
     @PromptServer.instance.routes.get("/scene_prompt/civitai/search")
     async def scene_civitai_search(request):
         return await llm_operation(request, "search")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/settings")
+    async def scene_civitai_settings_get(request):
+        return await llm_operation(request, "civitai_settings_get")
+
+    @PromptServer.instance.routes.post("/scene_prompt/civitai/settings")
+    async def scene_civitai_settings_post(request):
+        return await llm_operation(request, "civitai_settings_post")
 
     @PromptServer.instance.routes.post("/scene_prompt/civitai/download")
     async def scene_civitai_download(request):

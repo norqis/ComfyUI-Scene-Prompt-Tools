@@ -15,6 +15,12 @@ export function injectStyle() {
         .pc-civitai-dialog form { display: flex; flex-direction: column; gap: 10px; }
         .pc-civitai-dialog label { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
         .pc-civitai-dialog label input:not([type=checkbox]), .pc-civitai-dialog label select { width: 65%; }
+        .pc-civitai-dialog .pc-connection-settings { padding-top: 20px; }
+        .pc-required-star { color: #ff5b5b; }
+        .pc-connection-help { color: #bbc4d2; line-height: 1.5; }
+        .pc-connection-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+        .pc-connection-settings button[aria-pressed=true] { color: #fff; background: #863b35; border-color: #ff8175; }
+        @media (max-width: 520px) { .pc-connection-settings label { align-items: stretch; flex-direction: column; gap: 5px; } .pc-civitai-dialog .pc-connection-settings label input { width: 100%; } }
         @media (max-width: 520px) { .pc-civitai-controls { flex-wrap: wrap; } .pc-civitai-controls input { flex-basis: 100%; } .pc-civitai-controls select { flex: 1; } .pc-civitai-results { grid-template-columns: minmax(0, 1fr); } }
         .pc-popup {
             position: fixed;

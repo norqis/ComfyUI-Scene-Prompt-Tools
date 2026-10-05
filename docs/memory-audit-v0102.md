@@ -1,5 +1,7 @@
 # v0.10.2 lifetime and prompt-generation audit
 
+Connection settings and transport tuning are superseded by [the v0.10.3 correction](llm-settings-v0103.md).
+
 Status: revised root design approved by gpt-5.6-sol medium at 92e0ee9. Backend and frontend ownership implementations, full unit suites and isolated native browser checks verified. Final combined review and public release gates remain.
 
 ## Required behavior
