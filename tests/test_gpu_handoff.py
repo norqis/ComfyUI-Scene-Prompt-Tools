@@ -146,10 +146,19 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(owner.sessions)
         self.assertNotIn("a", owner.socket_owners)
         del socket, begin
+        # Older asyncio retains the completed task until its wakeup callback retires.
+        await asyncio.sleep(0)
         gc.collect()
         self.assertIsNone(reference())
 
     async def test_repeated_end_and_disconnect_during_worker_release_keep_exclusive_until_real_completion(self):
+        class CountingTask(asyncio.Task):
+            cancel_requests = 0
+
+            def cancel(self, *args, **kwargs):
+                self.cancel_requests += 1
+                return super().cancel(*args, **kwargs)
+
         owner = coordinator()
         owner.server.prompt_queue = types.SimpleNamespace(set_flag=lambda *_args: None)
         started, finish = threading.Event(), threading.Event()
@@ -163,7 +172,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         comfy = types.ModuleType("comfy")
         comfy.model_management = management
         with mock.patch.dict(sys.modules, {"comfy": comfy, "comfy.model_management": management}):
-            begin = asyncio.create_task(owner.begin_session("alice", "a", {}, None))
+            begin = CountingTask(owner.begin_session("alice", "a", {}, None))
             await until(lambda: bool(owner.controls))
             worker = asyncio.create_task(asyncio.to_thread(owner.service_controls))
             await until(started.is_set)
@@ -173,7 +182,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             owner.end_session(session_id, "alice", client_id="a")
             owner.server.sockets.pop("a")
             await asyncio.sleep(0)
-            self.assertEqual(begin.cancelling(), 1)
+            self.assertEqual(begin.cancel_requests, 1)
             self.assertTrue(owner.gate.exclusive)
             off = asyncio.create_task(owner.gate.acquire_async())
             await asyncio.sleep(0)
