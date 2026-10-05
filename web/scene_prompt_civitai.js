@@ -163,7 +163,8 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
     }
     function render(view) {
         list.replaceChildren(); list.inert = false;
-        const selected = node.properties?.scene_civitai;
+        const saved = node.properties?.scene_civitai;
+        const selected = saved?.lora_name && saved.lora_name.replaceAll("\\", "/") === String(value(node, "lora_name")).replaceAll("\\", "/") ? saved : null;
         if (!view.items.length) { list.append(element("p", "該当するLoRAはありません。")); return; }
         const selectedLabel = selected?.name || selected?.lora_name;
         if (selectedLabel && [selected.model_id, selected.version_id, selected.file_id].every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0)

@@ -162,6 +162,27 @@ try {
         await page.evaluate(()=>window.node=window.staleNode);
         if(action==='delete') await page.keyboard.press('Escape');
     }
+    const savedSelection = await page.evaluate(() => window.node.properties.scene_civitai);
+    for (const modelID of [savedSelection.model_id, 999]) {
+        await page.evaluate(modelID => {
+            window.node.properties.scene_civitai.model_id = modelID;
+            window.node.widgets.find(widget => widget.name === 'lora_name').value = 'local/manual.safetensors';
+            window.search();
+        }, modelID);
+        await cards.first().waitFor();
+        assert.equal(await modal.locator('.pc-civitai-card.pc-lora-selected').count(), 0, 'a manual local selection invalidates the saved Civitai highlight');
+        assert.equal(await modal.locator('.pc-civitai-status').textContent(), '', 'stale Civitai identity is not shown as the current selection outside results');
+        assert.deepEqual(await page.evaluate(() => window.node.properties.scene_civitai), { ...savedSelection, model_id: modelID }, 'display validation preserves search and selection history');
+        await page.keyboard.press('Escape');
+    }
+    await page.evaluate(saved => {
+        window.node.properties.scene_civitai = saved;
+        window.node.widgets.find(widget => widget.name === 'lora_name').value = saved.lora_name.replaceAll('/', '\\');
+        window.search();
+    }, savedSelection);
+    await cards.first().waitFor();
+    assert.equal(await modal.locator('.pc-civitai-card.pc-lora-selected').count(), 1, 'slash-normalized paths retain a legitimate saved Civitai selection');
+    await page.keyboard.press('Escape');
 
     assert.equal(await page.locator('#launch').evaluate(node=>node===document.activeElement),true);
     await page.evaluate(() => window.settings());
