@@ -1,11 +1,12 @@
 import copy
+import hashlib
 import importlib
 import json
-import sys
+import struct
 import tempfile
-import threading
 import tracemalloc
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -18,77 +19,6 @@ from test_scene_filename_prefix import _load_nodes
 from test_scene_presets import basic_nodes, graph, load_presets_module
 
 
-class PayloadCacheTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        presets = load_presets_module(Path(self.temp.name))
-        self.cache_module = importlib.import_module(presets.__package__ + ".payload_cache")
-
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def test_size_counts_aliases_once_and_handles_deep_cycles_iteratively(self):
-        shared = ["payload" * 100]
-        aliased = [shared, shared]
-        self.assertEqual(self.cache_module.retained_size(aliased),
-                         sys.getsizeof(aliased) + sys.getsizeof(shared) + sys.getsizeof(shared[0]))
-        deep = []
-        current = deep
-        for _ in range(3000):
-            child = []
-            current.append(child)
-            current = child
-        current.append(deep)
-        self.assertGreater(self.cache_module.retained_size(deep), 3000 * sys.getsizeof([]))
-
-    def test_budget_lru_count_replacement_and_evicted_objects_remain_valid(self):
-        cache = self.cache_module.PayloadCache(3, 10)
-        active = {"value": "retained by caller"}
-        cache.put("a", active, 4)
-        cache.put("b", {}, 4)
-        cache.move_to_end("a")
-        cache.put("c", {}, 4)
-        self.assertEqual(list(cache), ["a", "c"])
-        self.assertEqual(cache.retained_bytes, 8)
-        cache.put("a", {}, 2)
-        self.assertEqual(list(cache), ["c", "a"])
-        self.assertEqual(cache.retained_bytes, 6)
-        cache.put("d", {}, 1)
-        cache.put("e", {}, 1)
-        self.assertEqual(list(cache), ["a", "d", "e"])
-        self.assertEqual(active["value"], "retained by caller")
-
-    def test_pop_delete_clear_and_oversize_replace_keep_accounting_correct(self):
-        cache = self.cache_module.PayloadCache(3, 10)
-        cache.put("a", [1], 3)
-        cache.put("b", [2], 4)
-        self.assertEqual(cache.pop("a"), [1])
-        self.assertEqual(cache.retained_bytes, 4)
-        self.assertEqual(cache.pop("missing", None), None)
-        with self.assertRaises(KeyError):
-            cache.pop("missing")
-        self.assertFalse(cache.put("b", [99], 11))
-        self.assertEqual(cache.retained_bytes, 0)
-        self.assertNotIn("b", cache)
-        cache.put("c", [], 3)
-        cache.put("d", [], 2)
-        self.assertEqual(cache.popitem(last=False), ("c", []))
-        del cache["d"]
-        self.assertEqual(cache.retained_bytes, 0)
-        cache.put("e", [], 2)
-        cache.clear()
-        self.assertEqual(cache.retained_bytes, 0)
-        self.assertEqual(cache._weights, {})
-
-    def test_standard_assignment_update_and_setdefault_are_accounted(self):
-        cache = self.cache_module.PayloadCache(3, 10000)
-        cache["a"] = {"v": "a"}
-        cache.update({"b": {"v": "b"}})
-        cache.setdefault("c", {"v": "c"})
-        self.assertEqual(cache.retained_bytes,
-                         sum(self.cache_module.retained_size((key, value)) for key, value in cache.items()))
-
-
 class PresetMemoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -97,167 +27,147 @@ class PresetMemoryTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def save(self, preset_id, positive="first", name=None):
-        return self.presets.save_preset({"preset_id": preset_id, "name": name or preset_id,
+    def save(self, preset_id, positive="first"):
+        return self.presets.save_preset({"preset_id": preset_id, "name": preset_id,
             "output_node_id": "3", "api_graph": graph(basic_nodes(positive)),
             "workflow": {"version": 1, "nodes": []}})
 
-    def assert_unlocked(self, *locks):
-        for lock in locks:
-            self.assertFalse(lock._is_owned(), "large payload work must happen outside cache/global locks")
-
-    def test_payload_size_and_copy_work_runs_outside_preset_locks(self):
-        locks = (self.presets._PRESET_LOCK, self.presets._PRESET_FILE_CACHE_LOCK,
-                 self.presets._PRESET_LIST_CACHE_LOCK)
-        original_copy, original_size = copy.deepcopy, self.presets.retained_size
-
+    def test_copy_work_runs_outside_cache_snapshot_and_own_save_locks(self):
+        original = copy.deepcopy
         def checked_copy(*args, **kwargs):
-            self.assert_unlocked(*locks)
-            return original_copy(*args, **kwargs)
-
-        def checked_size(value):
-            self.assert_unlocked(*locks)
-            return original_size(value)
-
-        with mock.patch.object(self.presets.copy, "deepcopy", side_effect=checked_copy), \
-                mock.patch.object(self.presets, "retained_size", side_effect=checked_size):
+            self.assertFalse(self.presets._PRESET_LOCK._is_owned())
+            self.assertFalse(self.presets._PRESET_LIST_CACHE_LOCK._is_owned())
+            return original(*args, **kwargs)
+        with mock.patch.object(self.presets.copy, "deepcopy", side_effect=checked_copy):
             saved = self.save("lockcost")
             self.presets.load_preset("lockcost")
-            self.presets.load_preset("lockcost")
             self.presets.list_presets()
             self.presets.list_presets()
+            memo = {}
             serialized = json.dumps({"version": 1, "presets": {".": saved}})
-            self.presets.parse_llm_preset_overrides(serialized)
-            self.presets.parse_llm_preset_overrides(serialized)
+            self.presets.parse_llm_preset_overrides(serialized, memo)
+            self.presets.parse_llm_preset_overrides(serialized, memo)
             nodes = {"10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "lockcost"}},
                      "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}}}
             self.presets.snapshot_presets_for_run("lockcost", graph(nodes), "11")
             self.presets.snapshot_presets_for_run("lockcost", graph(nodes), "11")
 
-    def test_file_ttl_refresh_reuses_weight_and_validated_payload(self):
-        self.save("ttl")
-        with mock.patch.object(self.presets.time, "monotonic", return_value=0):
-            first = self.presets.load_preset("ttl")
-        cache = self.presets._PRESET_FILE_CACHE
-        key = ("default", "ttl")
-        original_entry = cache[key]
-        weight = cache.weight(key)
-        with mock.patch.object(self.presets.time, "monotonic", return_value=3), \
-                mock.patch.object(self.presets, "retained_size", side_effect=AssertionError("TTL must not walk payload")), \
-                mock.patch.object(self.presets, "_read_json", side_effect=AssertionError("matching hash must not parse again")):
-            self.assertEqual(self.presets.load_preset("ttl"), first)
-        self.assertIs(cache[key][3], original_entry[3])
-        self.assertEqual(cache.weight(key), weight)
-        self.assertEqual(cache.retained_bytes, weight)
-        self.assertEqual(original_entry[2], 2)
-        self.assertEqual(cache[key][2], 5)
-
-    def test_file_and_list_oversize_remain_valid_uncached_and_copies_are_isolated(self):
-        self.presets._PRESET_FILE_CACHE.max_bytes = 1
-        self.presets._PRESET_LIST_CACHE.max_bytes = 1
-        self.save("oversize")
-        first = self.presets.load_preset("oversize")
-        first["metadata"]["name"] = "caller edit"
-        self.assertEqual(self.presets.load_preset("oversize")["metadata"]["name"], "oversize")
-        listed = self.presets.list_presets()
-        self.assertEqual(listed["presets"][0]["metadata"]["name"], "oversize")
-        self.assertEqual(len(self.presets._PRESET_FILE_CACHE), 0)
-        self.assertEqual(len(self.presets._PRESET_LIST_CACHE), 0)
-
-    def test_file_and_list_bytes_evict_lru_users_before_count_limit(self):
-        for preset_id in ("a", "b", "c"):
-            self.save(preset_id, "prompt" * 200)
-        self.presets.load_preset("a")
-        cache = self.presets._PRESET_FILE_CACHE
-        cache.max_bytes = cache.retained_bytes * 2 + 100
-        self.presets.load_preset("b")
-        self.presets.load_preset("a")
-        self.presets.load_preset("c")
-        self.assertEqual(list(cache), [("default", "a"), ("default", "c")])
-        self.assertLessEqual(cache.retained_bytes, cache.max_bytes)
-        self.presets.list_presets()
-        lists = self.presets._PRESET_LIST_CACHE
-        lists.max_bytes = lists.retained_bytes + 500
-        self.presets.list_presets("alice")
-        self.presets.list_presets("bob")
-        self.assertLessEqual(lists.retained_bytes, lists.max_bytes)
-        self.assertNotIn("default", lists)
-
-    def test_local_cache_budget_preserves_read_only_hit_and_oversize_validation(self):
-        saved = self.save("local")
-        cache = self.presets._LOCAL_PRESET_CACHE
-        cache.clear()
+    def test_local_memo_shares_only_the_current_operation(self):
+        saved = self.save("memo")
         serialized = json.dumps({"version": 1, "presets": {".": saved}})
-        first = self.presets.parse_llm_preset_overrides(serialized)
-        with mock.patch.object(self.presets, "retained_size", side_effect=AssertionError("hit must not walk payload")):
-            self.assertIs(self.presets.parse_llm_preset_overrides(serialized), first)
-        cache.max_bytes = cache.retained_bytes + 10
-        changed = copy.deepcopy(saved)
-        changed["metadata"]["name"] = "second"
-        newer = json.dumps({"version": 1, "presets": {".": changed}})
-        self.presets.parse_llm_preset_overrides(newer)
-        self.assertNotIn(serialized, cache)
-        self.assertEqual(first["."]["metadata"]["name"], "local")
-        cache.max_bytes = 1
-        self.assertEqual(self.presets.parse_llm_preset_overrides(serialized)["."]["metadata"]["name"], "local")
-        self.assertNotIn(serialized, cache)
-        with self.assertRaises(self.presets.ScenePresetError):
-            self.presets.parse_llm_preset_overrides('{"version":1,"presets":{".":{}}}')
+        memo = {}
+        with mock.patch.object(self.presets, "_validate_preset_payload", wraps=self.presets._validate_preset_payload) as validate:
+            first = self.presets.parse_llm_preset_overrides(serialized, memo)
+            self.assertIs(self.presets.parse_llm_preset_overrides(serialized, memo), first)
+            self.assertEqual(validate.call_count, 1)
+            separate = self.presets.parse_llm_preset_overrides(serialized)
+            self.assertIsNot(first, separate)
+            self.assertEqual(validate.call_count, 2)
+        first["."]["metadata"]["name"] = "local edit"
+        self.assertEqual(separate["."]["metadata"]["name"], "memo")
+        self.assertFalse(hasattr(self.presets, "_LOCAL_PRESET_CACHE"))
+        self.assertFalse(hasattr(self.presets, "_PRESET_FILE_CACHE"))
 
-    def test_file_read_invalidation_cannot_restore_old_payload(self):
-        self.save("race", "old")
-        started, resume = threading.Event(), threading.Event()
-        original = self.presets._read_json
-        reads = 0
-        result, errors = {}, []
+    def test_seventy_large_local_revisions_release_completed_operation_payloads(self):
+        saved = self.save("revisions", "x" * 65536)
+        serialized = None
+        tracemalloc.start()
+        try:
+            for index in range(70):
+                local = copy.deepcopy(saved)
+                local["metadata"]["name"] = "revision-" + str(index)
+                serialized = json.dumps({"version": 1, "presets": {".": local}})
+                self.presets.parse_llm_preset_overrides(serialized)
+            del local, serialized
+            import gc
+            gc.collect()
+            retained = tracemalloc.get_traced_memory()[0]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(retained, 1024 * 1024)
+        self.assertFalse(hasattr(self.presets, "_LOCAL_PRESET_CACHE"))
 
-        def delayed_read(path):
-            nonlocal reads
-            value = original(path)
-            if threading.current_thread().name == "cache-reader":
-                reads += 1
-                if reads == 1:
-                    started.set()
-                    if not resume.wait(5):
-                        raise AssertionError("reader was not resumed")
-            return value
+    def test_repeated_nested_references_read_and_validate_each_file_once_per_snapshot(self):
+        self.save("leaf")
+        parent = {"1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "leaf", "scene_prompt": ["1", 0]}},
+            "4": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "leaf", "scene_prompt": ["1", 0]}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["2", 0], "scene_prompt2": ["4", 0]}},
+            "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["5", 0]}}}
+        self.presets.save_preset({"preset_id": "parent", "name": "parent", "output_node_id": "3",
+            "api_graph": graph(parent), "workflow": {"nodes": []}})
+        nodes = {"10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "parent"}},
+            "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "parent"}},
+            "30": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["10", 0], "scene_prompt2": ["20", 0]}},
+            "40": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["30", 0]}}}
+        with mock.patch.object(self.presets, "_read_json", wraps=self.presets._read_json) as read, \
+                mock.patch.object(self.presets, "_validate_preset_payload", wraps=self.presets._validate_preset_payload) as validate:
+            result = self.presets.snapshot_presets_for_run("nested-memo", graph(nodes), "40")
+            self.assertEqual(read.call_count, 2)
+            self.assertEqual(validate.call_count, 2)
+        self.assertEqual(result["total_images"], 4)
+        snapshot = self.presets._RUN_SNAPSHOTS[("default", "nested-memo")]
+        self.assertIs(snapshot["occurrences"]["10/2"], snapshot["occurrences"]["20/4"])
+        self.save("leaf", "changed source")
+        self.assertEqual(snapshot["presets"]["leaf"]["api_graph"]["output"]["2"]["inputs"]["positive_base"], "first")
+        self.assertTrue(self.presets.release_scene_preset_snapshot("nested-memo"))
+        self.assertNotIn(("default", "nested-memo"), self.presets._RUN_SNAPSHOTS)
 
-        def worker():
-            try:
-                result["value"] = self.presets.load_preset("race")
-            except Exception as exc:
-                errors.append(exc)
+    def test_equal_local_json_across_references_validates_once_in_snapshot(self):
+        saved = self.save("shared")
+        serialized = json.dumps({"version": 1, "presets": {".": saved}})
+        reference = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "shared", "llm_presets_json": serialized}}
+        nodes = {"10": copy.deepcopy(reference), "20": copy.deepcopy(reference),
+            "30": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["10", 0], "scene_prompt2": ["20", 0]}},
+            "40": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["30", 0]}}}
+        with mock.patch.object(self.presets, "_validate_preset_payload", wraps=self.presets._validate_preset_payload) as validate:
+            self.presets.snapshot_presets_for_run("local-memo", graph(nodes), "40")
+            self.assertEqual(validate.call_count, 1)
+        self.assertIs(self.presets._RUN_SNAPSHOTS[("default", "local-memo")]["occurrences"]["10"],
+                      self.presets._RUN_SNAPSHOTS[("default", "local-memo")]["occurrences"]["20"])
 
-        with mock.patch.object(self.presets, "_read_json", side_effect=delayed_read):
-            thread = threading.Thread(target=worker, name="cache-reader")
-            thread.start()
-            self.assertTrue(started.wait(5))
-            self.save("race", "new")
-            resume.set()
-            thread.join(5)
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(errors, [])
-        self.assertEqual(result["value"]["api_graph"]["output"]["2"]["inputs"]["positive_base"], "new")
-        self.assertEqual(self.presets._PRESET_FILE_CACHE[("default", "race")][3], result["value"])
+    def test_current_operation_can_keep_more_than_previous_file_limit(self):
+        template = self.save("template")
+        def read_definition(path):
+            definition = copy.deepcopy(template)
+            definition["metadata"]["preset_id"] = path.stem
+            definition["metadata"]["name"] = path.stem
+            return definition
+        resolved = {}
+        with mock.patch.object(self.presets, "_read_json", side_effect=read_definition) as read:
+            references = {str(index): {"class_type": "ScenePresetReference", "inputs": {"preset_id": "p" + str(index)}}
+                          for index in range(520)}
+            occurrences = self.presets.prepare_preset_occurrences(references, resolved)
+            self.assertEqual(read.call_count, 520)
+        self.assertEqual(len(resolved), 520)
+        self.assertEqual(len(occurrences), 520)
+        self.assertIs(occurrences["0"], resolved["p0"])
 
-    def test_list_invalidation_after_weight_calculation_retries_publication(self):
+    def test_compact_response_users_have_no_count_limit_and_inactive_ttl_cleanup(self):
+        with mock.patch.object(self.presets.time, "monotonic", return_value=0):
+            for index in range(70):
+                self.presets.list_presets("user-" + str(index))
+        self.assertEqual(len(self.presets._PRESET_LIST_CACHE), 70)
+        self.assertIn("user-0", self.presets._PRESET_LIST_CACHE)
+        with mock.patch.object(self.presets.time, "monotonic", return_value=3):
+            self.presets.list_presets("user-0")
+        self.assertEqual(list(self.presets._PRESET_LIST_CACHE), ["user-0"])
+
+    def test_list_invalidation_during_compaction_cannot_publish_old_response(self):
         self.save("list-race", "old")
-        original = self.presets.retained_size
+        original = self.presets._compact_preset_list_graph
         changed = False
-
-        def invalidate_during_measure(value):
+        def invalidate_during_compaction(*args):
             nonlocal changed
-            if not changed and value[0] == "default":
+            value = original(*args)
+            if not changed:
                 changed = True
-                self.assert_unlocked(self.presets._PRESET_LIST_CACHE_LOCK)
+                self.assertFalse(self.presets._PRESET_LIST_CACHE_LOCK._is_owned())
                 self.save("list-race", "new")
-            return original(value)
-
-        with mock.patch.object(self.presets, "retained_size", side_effect=invalidate_during_measure):
+            return value
+        with mock.patch.object(self.presets, "_compact_preset_list_graph", side_effect=invalidate_during_compaction):
             listed = self.presets.list_presets()
-        latest = self.presets.load_preset("list-race")
-        self.assertTrue(changed)
-        self.assertEqual(listed["presets"][0]["metadata"]["sha256"], latest["metadata"]["sha256"])
+        self.assertEqual(listed["presets"][0]["metadata"]["sha256"], self.presets.load_preset("list-race")["metadata"]["sha256"])
         self.assertEqual(self.presets._PRESET_LIST_CACHE["default"]["value"], listed)
 
     def test_snapshot_copies_shared_and_customized_occurrences_once_with_aliases(self):
@@ -315,75 +225,266 @@ class RouteMemoryTests(unittest.TestCase):
         path.write_text(json.dumps({"name": "Saved", "description": "", "items": [
             {"label": "Saved", "prompt": prompt, "category_key": "Saved"}]}), encoding="utf-8")
 
-    def test_route_weights_are_measured_outside_lock_and_ttl_has_no_size_walk(self):
-        self.write_items()
-        self.write_saved()
-        original = self.routes.retained_size
+    def test_inactive_users_expire_but_requested_user_revalidates_without_parsing(self):
+        for user in ("a", "b"):
+            self.write_items(user)
+            self.write_saved(user)
+        with mock.patch.object(self.routes.time, "monotonic", return_value=0):
+            first_items = self.routes._load_items("a")
+            first_saved = self.routes._load_saved_prompts("a")
+            self.routes._load_items("b")
+            self.routes._load_saved_prompts("b")
+        with mock.patch.object(self.routes.time, "monotonic", return_value=3), \
+                mock.patch.object(self.routes, "_read_items", side_effect=AssertionError("unchanged revalidation must not parse")), \
+                mock.patch.object(self.routes, "_read_saved_prompt", side_effect=AssertionError("unchanged revalidation must not parse")):
+            self.assertIs(self.routes._load_items("a"), first_items)
+            self.assertIs(self.routes._load_saved_prompts("a"), first_saved)
+        self.assertEqual(list(self.routes._ITEMS_CACHE), ["a"])
+        self.assertEqual(list(self.routes._SAVED_PROMPTS_CACHE), ["a"])
 
-        def checked_size(value):
-            self.assertFalse(self.routes.DATA_CACHE_LOCK._is_owned())
-            return original(value)
+    def test_latest_response_replaces_previous_without_revision_history(self):
+        class TrackedDict(dict):
+            pass
+        references = []
+        original = self.routes._cache_entry
+        def track_response(*args):
+            entry = original(*args)
+            entry["value"] = TrackedDict(entry["value"])
+            references.append(weakref.ref(entry["value"]))
+            return entry
+        with mock.patch.object(self.routes, "_cache_entry", side_effect=track_response):
+            for index in range(70):
+                self.write_items(prompt=("x" * 65536) + str(index))
+                self.routes._load_items(force=True)
+        import gc
+        gc.collect()
+        self.assertEqual(sum(reference() is not None for reference in references), 1)
+        self.assertEqual(len(self.routes._ITEMS_CACHE), 1)
+        self.assertTrue(self.routes._ITEMS_CACHE["default"]["value"]["items"][0]["prompt"].endswith("69"))
 
-        with mock.patch.object(self.routes, "retained_size", side_effect=checked_size), \
-                mock.patch.object(self.routes.time, "monotonic", return_value=0):
-            first_items = self.routes._load_items()
-            first_saved = self.routes._load_saved_prompts()
-        item_entry = self.routes._ITEMS_CACHE["default"]
-        saved_entry = self.routes._SAVED_PROMPTS_CACHE["default"]
-        with mock.patch.object(self.routes, "retained_size", side_effect=AssertionError("TTL must not walk payload")), \
-                mock.patch.object(self.routes, "_read_items", side_effect=AssertionError("TTL must not parse payload")), \
-                mock.patch.object(self.routes, "_read_saved_prompt", side_effect=AssertionError("TTL must not parse payload")), \
-                mock.patch.object(self.routes.time, "monotonic", return_value=3):
-            self.assertIs(self.routes._load_items(), first_items)
-            self.assertIs(self.routes._load_saved_prompts(), first_saved)
-        self.assertEqual(item_entry["expires"], 2)
-        self.assertEqual(saved_entry["expires"], 2)
-        for cache in (self.routes._ITEMS_CACHE, self.routes._SAVED_PROMPTS_CACHE):
-            self.assertEqual(cache["default"]["expires"], 5)
-            self.assertEqual(cache.retained_bytes, original(("default", cache["default"])))
-
-    def test_route_oversize_payloads_are_valid_and_do_not_fill_empty_records(self):
-        self.write_items()
-        self.write_saved()
-        for cache in (self.routes._ITEMS_CACHE, self.routes._SAVED_PROMPTS_CACHE):
-            cache.max_bytes = 1
-        self.assertEqual(self.routes._load_items()[0]["prompt"], "cached")
-        self.assertEqual(self.routes._load_saved_prompts()[0]["items"][0]["prompt"], "cached")
-        self.assertEqual(len(self.routes._ITEMS_CACHE), 0)
-        self.assertEqual(len(self.routes._SAVED_PROMPTS_CACHE), 0)
-
-    def test_route_byte_eviction_preserves_user_isolation_and_live_values(self):
-        for user in ("a", "b", "c"):
-            self.write_items(user, user * 10000)
-        first = self.routes._load_items("a")
-        cache = self.routes._ITEMS_CACHE
-        cache.max_bytes = cache.retained_bytes * 2 + 100
-        self.routes._load_items("b")
-        self.routes._load_items("a")
-        self.routes._load_items("c")
-        self.assertEqual(list(cache), ["a", "c"])
-        self.assertLessEqual(cache.retained_bytes, cache.max_bytes)
-        self.assertEqual(first[0]["prompt"], "a" * 10000)
-        self.assertEqual(self.routes._load_items("b")[0]["prompt"], "b" * 10000)
-
-    def test_route_invalidation_during_weight_calculation_cannot_restore_old_record(self):
+    def test_invalidation_during_entry_construction_cannot_restore_old_response(self):
         self.write_items(prompt="old")
-        original = self.routes.retained_size
+        original = self.routes._cache_entry
         changed = False
-
-        def invalidate_during_measure(value):
+        def invalidate_during_entry(*args):
             nonlocal changed
+            entry = original(*args)
+            self.assertFalse(self.routes.DATA_CACHE_LOCK._is_owned())
             if not changed:
                 changed = True
-                self.assertFalse(self.routes.DATA_CACHE_LOCK._is_owned())
                 self.write_items(prompt="new")
                 self.routes._clear_prompt_caches()
-            return original(value)
-
-        with mock.patch.object(self.routes, "retained_size", side_effect=invalidate_during_measure):
+            return entry
+        with mock.patch.object(self.routes, "_cache_entry", side_effect=invalidate_during_entry):
             loaded = self.routes._load_items()
         self.assertEqual(loaded[0]["prompt"], "new")
         self.assertEqual(self.routes._ITEMS_CACHE["default"]["value"]["items"][0]["prompt"], "new")
+
+
+class FileMetadataMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.routes = load_routes(self.root)
+        package = self.routes.__package__
+        self.metadata = importlib.import_module(package + ".lora_metadata")
+        self.info = importlib.import_module(package + ".resource_info")
+        self.acquisition = importlib.import_module(package + ".civitai")
+        self.catalogs = {"loras": {}, "checkpoints": {}, "diffusion_models": {}}
+        self.metadata.folder_paths.get_filename_list = lambda kind: list(self.catalogs[kind])
+        self.metadata.folder_paths.get_full_path = lambda kind, name: self.catalogs[kind].get(name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_lora(self, name, trigger="trigger"):
+        path = self.root / name
+        header = json.dumps({"__metadata__": {"modelspec.trigger_phrase": trigger}}).encode()
+        path.write_bytes(struct.pack("<Q", len(header)) + header + b"weights")
+        self.catalogs["loras"][name] = str(path)
+        return path
+
+    def test_all_current_metadata_and_model_hashes_survive_previous_count_thresholds(self):
+        for index in range(40):
+            name = "file-" + str(index) + ".safetensors"
+            path = self.write_lora(name)
+            self.catalogs["checkpoints"][name] = str(path)
+            self.metadata.read_lora_info(name)
+            self.info.read_model_hash("checkpoint", name)
+        self.assertEqual(len(self.metadata._CACHE), 40)
+        self.assertEqual(len(self.info._MODEL_HASH_CACHE), 40)
+        with mock.patch.object(self.metadata.hashlib, "sha256", side_effect=AssertionError("current file was evicted")):
+            self.metadata.read_lora_info("file-0.safetensors")
+            self.info.read_model_hash("checkpoint", "file-0.safetensors")
+
+    def test_acquired_hashes_survive_previous_count_threshold(self):
+        first = None
+        for index in range(140):
+            path = self.root / ("acquired-" + str(index) + ".safetensors")
+            path.write_bytes(str(index).encode())
+            first = path if first is None else first
+            self.acquisition._sha256(path)
+        self.assertEqual(len(self.acquisition._HASH_CACHE), 140)
+        with mock.patch.object(self.acquisition.hashlib, "sha256", side_effect=AssertionError("current file was evicted")):
+            self.assertEqual(self.acquisition._sha256(first), hashlib.new("sha256", b"0").hexdigest())
+
+    def test_same_file_alias_hits_return_requested_names_and_model_kind(self):
+        path = self.write_lora("original.safetensors")
+        self.catalogs["loras"]["ALIAS.safetensors"] = str(path)
+        self.catalogs["checkpoints"]["base-A.safetensors"] = str(path)
+        self.catalogs["diffusion_models"]["base-B.safetensors"] = str(path)
+        self.metadata.read_lora_info("original.safetensors")
+        self.info.read_model_hash("checkpoint", "base-A.safetensors")
+        with mock.patch.object(self.metadata.hashlib, "sha256", side_effect=AssertionError("alias must reuse file data")):
+            self.assertEqual(self.metadata.read_lora_info("ALIAS.safetensors")["name"], "ALIAS.safetensors")
+            result = self.info.read_model_hash("diffusion_model", "base-B.safetensors")
+        self.assertEqual((result["kind"], result["name"]), ("diffusion_model", "base-B.safetensors"))
+        self.assertEqual(len(self.info._MODEL_HASH_CACHE), 1)
+        self.assertEqual(len(self.metadata._CACHE), 1)
+
+    def test_seventy_revisions_replace_same_path_without_history(self):
+        path = self.write_lora("revised.safetensors")
+        self.catalogs["checkpoints"][path.name] = str(path)
+        for index in range(70):
+            self.write_lora(path.name, "revision-" + str(index))
+            self.metadata.read_lora_info(path.name)
+            self.info.read_model_hash("checkpoint", path.name)
+            self.acquisition._sha256(path)
+        self.assertEqual(len(self.metadata._CACHE), 1)
+        self.assertEqual(len(self.info._MODEL_HASH_CACHE), 1)
+        self.assertEqual(len(self.acquisition._HASH_CACHE), 1)
+        self.assertEqual(self.metadata.read_lora_info(path.name)["trigger_phrases"], ["revision-69"])
+
+    def test_existing_catalog_inventory_retires_deleted_and_changed_lora_revisions(self):
+        removed = self.write_lora("removed.safetensors")
+        changed = self.write_lora("changed.safetensors")
+        retained = self.write_lora("retained.safetensors")
+        for path in (removed, changed, retained):
+            self.metadata.read_lora_info(path.name)
+            self.acquisition._sha256(path)
+        removed.unlink()
+        self.write_lora(changed.name, "new revision")
+        self.metadata.list_loras()
+        retained_key = self.metadata.file_identity(retained)
+        self.assertEqual(set(self.metadata._CACHE), {retained_key})
+        self.assertEqual(set(self.acquisition._HASH_CACHE), {retained_key})
+        self.assertEqual(set(self.acquisition._HASH_CATALOG), {
+            self.metadata.file_identity(changed), retained_key})
+
+    def test_model_catalog_removal_and_same_name_path_replacement_release_old_owners(self):
+        first = self.write_lora("first.safetensors")
+        second = self.write_lora("second.safetensors")
+        self.catalogs["checkpoints"]["selected"] = str(first)
+        self.info.read_model_hash("checkpoint", "selected")
+        self.catalogs["checkpoints"]["selected"] = str(second)
+        self.info.read_model_hash("checkpoint", "selected")
+        self.assertEqual(set(self.info._MODEL_HASH_CACHE), {self.metadata.file_identity(second)})
+        self.catalogs["checkpoints"].clear()
+        with self.assertRaises(ValueError):
+            self.info.read_model_hash("checkpoint", "selected")
+        self.assertEqual(self.info._MODEL_HASH_CACHE, {})
+        self.assertEqual(self.info._MODEL_HASH_SELECTIONS, {})
+
+    def test_hashing_revision_changed_before_publication_returns_only_current_file(self):
+        path = self.write_lora("during-hash.safetensors", "old")
+        self.catalogs["checkpoints"][path.name] = str(path)
+        real_hash = hashlib.sha256
+        for kind in ("metadata", "model", "acquired"):
+            with self.subTest(kind=kind):
+                self.write_lora(path.name, "old-" + kind)
+                changed = False
+                case = self
+                class ChangingDigest:
+                    def __init__(self):
+                        self.digest = real_hash()
+                    def update(self, chunk):
+                        self.digest.update(chunk)
+                    def hexdigest(self):
+                        nonlocal changed
+                        if not changed:
+                            changed = True
+                            case.write_lora(path.name, "new-" + kind)
+                            if kind == "metadata":
+                                case.metadata.list_loras()
+                        return self.digest.hexdigest()
+                with mock.patch.object(self.metadata.hashlib, "sha256", side_effect=ChangingDigest):
+                    if kind == "metadata":
+                        result = self.metadata.read_lora_info(path.name)
+                        value = result["sha256"]
+                        self.assertEqual(result["trigger_phrases"], ["new-metadata"])
+                    elif kind == "model":
+                        value = self.info.read_model_hash("checkpoint", path.name)["sha256"]
+                    else:
+                        value = self.acquisition._sha256(path)
+                self.assertTrue(changed)
+                self.assertEqual(value, real_hash(path.read_bytes()).hexdigest())
+
+    def test_late_hash_cannot_repopulate_a_removed_catalog_identity(self):
+        path = self.write_lora("catalog-race.safetensors")
+        real_hash = hashlib.sha256
+        case = self
+        class RemovingDigest:
+            def __init__(self):
+                self.digest = real_hash()
+            def update(self, chunk):
+                self.digest.update(chunk)
+            def hexdigest(self):
+                case.catalogs["loras"].clear()
+                case.metadata.list_loras()
+                return self.digest.hexdigest()
+        with mock.patch.object(self.metadata.hashlib, "sha256", side_effect=RemovingDigest):
+            with self.assertRaises(ValueError):
+                self.metadata.read_lora_info(path.name)
+        self.assertEqual(self.metadata._CACHE, {})
+        # A physical-file verification may still finish, but cannot restore a
+        # hash record discarded by the catalog while that verification ran.
+        with mock.patch.object(self.acquisition.hashlib, "sha256", side_effect=RemovingDigest):
+            self.assertEqual(self.acquisition._sha256(path), real_hash(path.read_bytes()).hexdigest())
+        self.assertEqual(self.acquisition._HASH_CACHE, {})
+
+    def test_cached_metadata_rechecks_revision_before_presenting(self):
+        path = self.write_lora("cached-race.safetensors", "old")
+        self.metadata.read_lora_info(path.name)
+        original = self.metadata.file_signature
+        calls = 0
+        def replace_after_acquiring_signature(selected):
+            nonlocal calls
+            calls += 1
+            signature = original(selected)
+            if calls == 1:
+                self.write_lora(path.name, "new")
+            return signature
+        with mock.patch.object(self.metadata, "file_signature", side_effect=replace_after_acquiring_signature):
+            result = self.metadata.read_lora_info(path.name)
+        self.assertEqual(result["trigger_phrases"], ["new"])
+        self.assertEqual(result["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+
+
+class SaveDirectoryMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.nodes = _load_nodes(Path(self.temp.name))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_revisions_replace_current_prompt_and_keep_batch_directory_stable(self):
+        with mock.patch.object(self.nodes, "_resolve_run_dir", side_effect=lambda _value: ["run-" + str(len(self.nodes._RUN_DIR_CACHE))]) as resolve:
+            for index in range(70):
+                prompt = {"prompt": index}
+                first = self.nodes._cached_run_parts(self.temp.name, "auto", prompt, "save")
+                self.assertIs(self.nodes._cached_run_parts(self.temp.name, "auto", prompt, "save"), first)
+            self.assertEqual(resolve.call_count, 70)
+        self.assertEqual(len(self.nodes._RUN_DIR_CACHE), 1)
+
+    def test_independent_current_nodes_and_roots_are_not_count_evicted(self):
+        with mock.patch.object(self.nodes, "_resolve_run_dir", return_value=["current"]) as resolve:
+            for index in range(300):
+                self.nodes._cached_run_parts(self.temp.name, "auto", {}, "save-" + str(index))
+            self.nodes._cached_run_parts(str(Path(self.temp.name) / "other"), "auto", {}, "save-0")
+            self.nodes._cached_run_parts(self.temp.name, "auto", {}, "save-0")
+        self.assertEqual(resolve.call_count, 301)
+        self.assertEqual(len(self.nodes._RUN_DIR_CACHE), 301)
 
 
 class ImageMemoryTests(unittest.TestCase):

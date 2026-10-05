@@ -1812,16 +1812,13 @@ def _cached_run_parts(base_dir, run_dir, prompt=None, unique_id=None):
         prompt_key = hashlib.sha256(
             json.dumps(prompt, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
         ).hexdigest()
-    key = (str(unique_id or ""), prompt_key, os.path.abspath(base_dir))
+    key = (str(unique_id or ""), os.path.abspath(base_dir))
     cached = _RUN_DIR_CACHE.get(key)
-    if cached:
-        return cached
+    if cached and cached[0] == prompt_key:
+        return cached[1]
 
     parts = _resolve_run_dir("auto")
-    _RUN_DIR_CACHE[key] = parts
-    if len(_RUN_DIR_CACHE) > 256:
-        for expired_key in list(_RUN_DIR_CACHE)[:128]:
-            _RUN_DIR_CACHE.pop(expired_key, None)
+    _RUN_DIR_CACHE[key] = (prompt_key, parts)
     return parts
 
 

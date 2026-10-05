@@ -798,15 +798,15 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertEqual([item["label"] for item in result["items"]], ["New"])
         self.assertEqual([item["label"] for item in self.routes._load_items("alice")], ["New"])
 
-    def test_ui_caches_evict_least_recently_used_users(self):
-        for index in range(self.routes._CACHE_MAX_USERS + 1):
-            self.routes._load_items(f"user-{index}")
-            self.routes._load_saved_prompts(f"user-{index}")
-
-        self.assertEqual(len(self.routes._ITEMS_CACHE), self.routes._CACHE_MAX_USERS)
-        self.assertEqual(len(self.routes._SAVED_PROMPTS_CACHE), self.routes._CACHE_MAX_USERS)
-        self.assertNotIn("user-0", self.routes._ITEMS_CACHE)
-        self.assertNotIn("user-0", self.routes._SAVED_PROMPTS_CACHE)
+    def test_ui_caches_keep_all_current_users_without_count_eviction(self):
+        with mock.patch.object(self.routes.time, "monotonic", return_value=0):
+            for index in range(70):
+                self.routes._load_items(f"user-{index}")
+                self.routes._load_saved_prompts(f"user-{index}")
+        self.assertEqual(len(self.routes._ITEMS_CACHE), 70)
+        self.assertEqual(len(self.routes._SAVED_PROMPTS_CACHE), 70)
+        self.assertIn("user-0", self.routes._ITEMS_CACHE)
+        self.assertIn("user-0", self.routes._SAVED_PROMPTS_CACHE)
 
     def test_expired_matching_signature_renews_cache_without_rereading(self):
         path = self.data_dir / "Category" / "prompt.json"

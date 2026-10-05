@@ -1,6 +1,6 @@
 # v0.10.2 lifetime and prompt-generation audit
 
-Status: revised root design after explicit user correction; implementation waits for gpt-5.6-sol medium review.
+Status: revised root design approved by gpt-5.6-sol medium at 92e0ee9. Backend lifetime implementation, 25 focused regressions and the full 506-test Python suite verified; combined native/final-review/release gates remain.
 
 ## Required behavior
 
@@ -55,3 +55,13 @@ Keep Save's owned payload/hash/staging write/verification outside the global loc
 - Root final diff/evidence review and gpt-5.6-sol medium APPROVE, public CI, v0.10.2 release and installed-source hash sync. No production restart.
 
 This revision concerns cache ownership. Integer precision/overflow checks, valid probability totals, parser/file-format integrity checks, explicit service output settings and user-requested Undo settings are not cache capacity controls and remain unchanged.
+
+## Backend lifetime implementation and evidence
+
+- Full-file and serialized-local-JSON global Preset caches and the payload-capacity helper are removed. Independently owned file definitions share through the existing operation's resolved map; explicit local-JSON memos pass through shared/nested reference preparation, Save validation, list compaction and run preparation, without becoming global history. A repeated nested-reference snapshot reads and validates each shared file once; equal customization JSON validates once within that operation.
+- Compact Preset lists and ordinary/saved prompt responses use stable user-keyed maps. Replacement/invalidation releases obsolete responses. Existing validity TTL removes inactive other users on the next access; the requested user's unchanged signature/hash can still reuse its current value. Copy-on-return and response construction remain outside cache locks, and generation checks prevent late invalidated reads from restoring old responses.
+- LoRA metadata, base-model hashes and acquired-file hashes retain the current signature per normalized actual file. Aliases return the requesting name/kind rather than the identity of the first cache hit. Explicit revision changes replace older records; existing catalog reads retire removed/changed LoRA records and model selections. Hashing remains streamed, with post-read file/catalog checks guarding both publication and presentation.
+- Fallback Save directory state keeps one current prompt identity per save-node/output-root identity. A changed prompt replaces that owner's previous entry, while repeated saves in the same batch and independent current nodes/roots keep their directory state.
+- Combined snapshot copies and in-place PNG clipping remain. Save's own payload/hash/staging work remains outside the global lock; dependency validation and atomic publication retain the existing serialization needed to prevent concurrent reference cycles.
+- The isolated LLM Preset fixture processed 70 revisions with a 256 KiB generated output represented in both API and editor workflow. After deleting operation inputs and collecting garbage, `tracemalloc` retained 0 bytes of those operations, with a 2,401,315-byte (2.2901 MiB) peak. Both removed global full-file/local-JSON caches were absent. This measures ownership cleanup in a synthetic CPU fixture, not whole ComfyUI or GPU memory.
+- The 25 focused tests cover current data beyond former thresholds, operation sharing/independence, completed-revision release, user TTL/revalidation, response replacement/invalidation, snapshot aliases, file aliases and changed/deleted revisions, late hash/catalog races, Save directory identity, and actual PNG pixels/metadata/input immutability/temporary peak. The full isolated Python suite passed 506 tests in 43.370 seconds, with 2 existing optional runtime skips; the public package checker also passed. Production ComfyUI, LLM and GPU were untouched.

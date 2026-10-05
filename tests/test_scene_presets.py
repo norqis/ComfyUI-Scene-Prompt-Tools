@@ -381,7 +381,6 @@ class ScenePresetTests(unittest.TestCase):
         corrupt = copy.deepcopy(legacy)
         corrupt["api_graph"]["workflow"]["nodes"][0]["payload"] = "tampered"
         path.write_text(json.dumps(corrupt, ensure_ascii=False), encoding="utf-8")
-        self.module._invalidate_preset_file_cache("legacy-heavy")
         with self.assertRaisesRegex(self.module.ScenePresetError, "hash"):
             self.module.load_preset("legacy-heavy")
 
@@ -394,14 +393,14 @@ class ScenePresetTests(unittest.TestCase):
         self.assertNotIn("revision", saved["metadata"])
         self.assertEqual(saved["api_graph"]["output"]["2"]["inputs"]["positive_base"], "final")
 
-    def test_load_reuses_validated_file_until_the_file_changes(self):
+    def test_load_returns_fresh_owned_definitions_and_reads_latest_file(self):
         self.save("cached", basic_nodes("first"))
         original_read = self.module._read_json
         with mock.patch.object(self.module, "_read_json", wraps=original_read) as read_json:
             first = self.module.load_preset("cached")
             first["metadata"]["name"] = "mutated-copy"
             second = self.module.load_preset("cached")
-        self.assertEqual(read_json.call_count, 1)
+        self.assertEqual(read_json.call_count, 2)
         self.assertEqual(second["metadata"]["name"], "cached")
 
         self.save("cached", basic_nodes("second"))
