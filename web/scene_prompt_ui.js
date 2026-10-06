@@ -270,6 +270,7 @@ const SCENE_NODE_DISPLAY_NAMES = {
 let promptItems = null;
 const promptCatalogIndexes = new WeakMap();
 let savedPrompts = null;
+let savedPromptsLayoutRevision = 0;
 let promptItemsPromise = null;
 let savedPromptsPromise = null;
 let promptItemsLatestPromise = null;
@@ -425,6 +426,7 @@ async function loadSavedPrompts(force = false) {
     }
 }
 function clearSceneSelectedListLayoutCaches() {
+    savedPromptsLayoutRevision++;
     for (const node of app.graph?._nodes || []) {
         if (node?.sceneSelectedListLayoutCache) {
             node.sceneSelectedListLayoutCache = null;
@@ -2477,6 +2479,7 @@ function openPopupShell(node, titleText, options = {}) {
             setActiveStateWidget(node, stateWidgetName);
             promptItems = null;
             savedPrompts = null;
+            clearSceneSelectedListLayoutCaches();
             const [items] = await Promise.all([loadPromptItems(true), loadSavedPrompts(true)]);
             if (matrixLineDraftContextFor(node, stateWidgetName)) {
                 pruneStateToData(node, readStateFromWidget(node, stateWidgetName), items, { stateWidgetName });
@@ -4611,20 +4614,29 @@ function selectedListLayoutWidth(node, width = null) {
 function selectedListLayoutCacheKey(node, width, options = {}) {
     const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
     const stateWidget = findWidget(node, stateWidgetName);
-    return JSON.stringify({
+    const key = {
         stateWidgetName,
+        role: options.role || (stateWidgetName === "negative_json" ? "negative_selected_list" : "positive_selected_list"),
         width: Math.ceil(width || 0),
         state: String(stateWidget?.value || DEFAULT_SELECTED_JSON),
-    });
+        savedPromptsRevision: savedPromptsLayoutRevision,
+    };
+    const cached = node.sceneSelectedListLayoutCache?.get(stateWidgetName)?.cacheKey;
+    return cached && Object.keys(key).every((name) => cached[name] === key[name]) ? cached : key;
 }
 
 function cachedSelectedListLayout(node, width, options = {}) {
+    const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
+    const role = options.role || (stateWidgetName === "negative_json" ? "negative_selected_list" : "positive_selected_list");
+    const cache = node.sceneSelectedListLayoutCache;
+    const previousRole = cache?.get(stateWidgetName)?.cacheKey.role;
     if (options.sections || options.state) {
+        cache?.delete(stateWidgetName);
+        if (previousRole && previousRole !== role) node[selectedListRenderCacheName(previousRole)] = null;
+        node[selectedListRenderCacheName(role)] = null;
         return selectedListLayout(node, width, null, options);
     }
     const cacheKey = selectedListLayoutCacheKey(node, width, options);
-    const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
-    const cache = node.sceneSelectedListLayoutCache;
     if (cache?.get(stateWidgetName)?.cacheKey === cacheKey) {
         return cache.get(stateWidgetName).layout;
     }
@@ -4634,8 +4646,10 @@ function cachedSelectedListLayout(node, width, options = {}) {
         state: readStateFromWidget(node, stateWidgetName),
     });
     const nextCache = cache || new Map();
+    if (previousRole && previousRole !== role) node[selectedListRenderCacheName(previousRole)] = null;
     nextCache.set(stateWidgetName, { cacheKey, layout });
     node.sceneSelectedListLayoutCache = nextCache;
+    node[selectedListRenderCacheName(role)] = null;
     return layout;
 }
 
@@ -4731,13 +4745,13 @@ function drawSelectedList(ctx, node, width, y, height, options = {}) {
         return;
     }
     const role = options.role || "positive_selected_list";
-    const layout = cachedSelectedListLayout(node, selectedListLayoutWidth(node, drawWidth), options);
+    const layout = cachedSelectedListLayout(node, selectedListLayoutWidth(node, drawWidth), { ...options, role });
     const drawHeight = sceneWidgetDrawHeight(
         node,
         role,
         y,
         height,
-        selectedListHeight(node, drawWidth, options),
+        layout.height + SELECTED_LIST_HEIGHT_GUARD,
         SELECTED_LIST_MIN_HEIGHT,
     );
     const canvas = cachedSceneWidgetCanvas(
@@ -4926,6 +4940,7 @@ function cachedSceneWidgetCanvas(node, cacheName, width, height, render) {
     const drawHeight = Math.max(1, Math.ceil(height || 1));
     const ratio = sceneWidgetCanvasRatio();
     if (drawWidth * drawHeight * ratio * ratio > SCENE_WIDGET_CANVAS_MAX_PIXELS) {
+        node[cacheName] = null;
         return null;
     }
     const cache = node?.[cacheName];
@@ -6364,25 +6379,19 @@ function matrixConfiguredLineCount(node) {
 
 function matrixDisplayCacheKey(node, width = null) {
     const inputSource = scenePromptInputSource(node);
-    return JSON.stringify({
+    const key = {
         width: Math.ceil(width || node?.size?.[0] || MATRIX_NODE_DEFAULT_WIDTH),
         mode: sceneNodeMode(node),
         input: linkedInputKey(node, "scene_prompt"),
+        input_source: inputSource,
         input_id: inputSource?.id ?? null,
         input_mode: sceneNodeMode(inputSource),
         input_revision: sceneNodeRevision(inputSource),
         matrix_json: String(ensureMatrixJsonWidget(node)?.value || MATRIX_DEFAULT_JSON),
         revision: sceneNodeRevision(node),
-    });
-}
-
-function matrixSourceCacheKey(node) {
-    return JSON.stringify({
-        mode: sceneNodeMode(node),
-        input: linkedInputKey(node, "scene_prompt"),
-        matrix_json: String(ensureMatrixJsonWidget(node)?.value || MATRIX_DEFAULT_JSON),
-        revision: sceneNodeRevision(node),
-    });
+    };
+    const cached = node.sceneMatrixDisplayCache?.cacheKey;
+    return cached && Object.keys(key).every((name) => cached[name] === key[name]) ? cached : key;
 }
 
 function compactMatrixLabels(labels, limit = MATRIX_SECTION_VISIBLE_ROWS) {

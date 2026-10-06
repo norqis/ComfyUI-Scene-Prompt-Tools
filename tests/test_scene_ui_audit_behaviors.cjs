@@ -274,7 +274,7 @@ assert.deepEqual(
 );
 
 const layoutContext = vm.createContext({ Map, Set, Math, Number, String, JSON,
-    DEFAULT_SELECTED_JSON: "{}", sceneWorkflowLoadDepth: 0, activePopupContext: null,
+    DEFAULT_SELECTED_JSON: "{}", savedPromptsLayoutRevision: 0, sceneWorkflowLoadDepth: 0, activePopupContext: null,
     sceneTitleSyncNodes: new Set(), sceneLoadedRefreshNodes: new Set(), sceneDownstreamRefreshSources: new Set(),
     findWidget: (node, name) => node.widgets.find((widget) => widget.name === name),
     activeStateWidgetName: () => "role0", readStateFromWidget: (node, name) => node.widgets.find((widget) => widget.name === name).value,
@@ -283,7 +283,7 @@ const layoutContext = vm.createContext({ Map, Set, Math, Number, String, JSON,
     closeSceneExpandResources() {}, closeSceneLoraPicker() {}, popupContextReferencesNode() { return false; },
     isSceneExpandNodeName() { return false; },
 });
-for (const name of ["selectedListLayoutCacheKey", "cachedSelectedListLayout", "clearSceneComputedCaches", "installSceneNodeRemovalCleanup"])
+for (const name of ["selectedListLayoutCacheKey", "cachedSelectedListLayout", "selectedListRenderCacheName", "clearSceneComputedCaches", "installSceneNodeRemovalCleanup"])
     vm.runInContext(functionSource(name), layoutContext);
 const layoutNode = { widgets: Array.from({ length: 12 }, (_, index) => ({ name: `role${index}`, value: `state${index}` })) };
 for (let index = 0; index < 12; index++) layoutContext.cachedSelectedListLayout(layoutNode, 300, { stateWidgetName: `role${index}` });
@@ -301,3 +301,140 @@ layoutNode.onRemoved();
 assert.equal(layoutNode.sceneSelectedListLayoutCache, null, "node removal releases its widget layouts");
 
 console.log("Scene Prompt UI audit behavior tests passed.");
+
+async function testCurrentDisplayAndRasterOwnership() {
+    const stateModule = await import("../web/scene_prompt_state.js");
+    const calls = { stringify: 0, selectionParse: 0, matrixParse: 0 };
+    const textContext = () => ({ texts: [], images: [], font: "",
+        measureText(value) { return { width: String(value).length * 7 }; },
+        fillText(value) { this.texts.push(value); }, drawImage(canvas) { this.images.push(canvas); },
+        save() {}, restore() {}, beginPath() {}, rect() {}, clip() {}, scale() {}, translate() {}, roundRect() {}, fill() {}, stroke() {},
+    });
+    const ctx = { Map, Set, Math, Number, String, Array, Object,
+        JSON: { parse: JSON.parse, stringify(value) { calls.stringify++; return JSON.stringify(value); } },
+        savedPrompts: [], savedPromptsLayoutRevision: 0, app: { graph: { _nodes: [] } },
+        DEFAULT_SELECTED_JSON: stateModule.DEFAULT_SELECTED_JSON, MATRIX_DEFAULT_JSON: stateModule.MATRIX_DEFAULT_JSON,
+        SELECTED_LIST_MIN_HEIGHT: 28, SELECTED_LIST_WIDTH_GUARD: 12, SELECTED_LIST_HEIGHT_GUARD: 6,
+        CHIP_HEIGHT: 19, CHIP_GAP: 4, CHIP_LINE_GAP: 4, CHIP_TEXT_PAD_X: 6,
+        MATRIX_NODE_DEFAULT_WIDTH: 340, MATRIX_SECTION_VISIBLE_ROWS: 12, SCENE_WIDGET_CANVAS_MAX_PIXELS: 2500000,
+        chipMeasureContext: textContext(), window: { devicePixelRatio: 1 },
+        document: { createElement(type) { assert.equal(type, "canvas"); const context = textContext(); return { getContext() { return context; }, context }; } },
+        findWidget: (node, name) => node.widgets.find(widget => widget.name === name),
+        findSceneWidget: () => null, activeStateWidgetName: () => "positive_json", sceneShouldDrawDetails: () => true,
+        readStateFromWidget(node, name) { calls.selectionParse++; return stateModule.parseSelectionState(ctx.findWidget(node, name).value); },
+        normalizedSelectedParts: () => null,
+        sceneNodeMode: node => node?.mode || 0, sceneNodeRevision: node => node?.scenePromptRevision || 0,
+        scenePromptInputSource: node => node.inputSource || null, linkedInputKey: node => node.inputLink || "",
+        ensureMatrixJsonWidget: node => ctx.findWidget(node, "matrix_json"),
+        matrixInputItems: node => node.inputSource ? [{ label: node.inputSource.title }] : [],
+        matrixOutputLabels(node) { calls.matrixParse++; return stateModule.parseMatrixState(ctx.findWidget(node, "matrix_json").value).sets.map(row => row.name); },
+        sceneWorkflowLoadDepth: 0, activePopupContext: null, sceneTitleSyncNodes: new Set(), sceneLoadedRefreshNodes: new Set(), sceneDownstreamRefreshSources: new Set(),
+        clearSceneFitHeightTimer() {}, clearTimeout() {}, invalidatePopupRequests() {}, closeSceneLoraDetails() {},
+        closeSceneExpandResources() {}, closeSceneLoraPicker() {}, popupContextReferencesNode: () => false, isSceneExpandNodeName: () => false,
+    };
+    vm.createContext(ctx);
+    for (const name of ["normalizeWeight", "weightForStorage", "itemWeight", "formatWeight", "itemHasPartSelection", "itemHasPartialSelection",
+        "itemWeightSuffix", "itemBaseLabel", "stripCountSuffix", "displayCategoryLabel", "itemCategoryKey", "itemKey", "selectedItems", "selectedItemMap",
+        "itemSelectionSignature", "savedPromptMatches", "matchedSavedPrompts", "itemsCoveredBySavedPrompts", "uncoveredCategories", "selectedListSections",
+        "estimateChipWidth", "estimateChipWidthWithContext", "selectedListLayout", "selectedListLayoutWidth", "selectedListLayoutCacheKey",
+        "cachedSelectedListLayout", "selectedListHeight", "selectedListRenderCacheName", "roundedRect", "fitCanvasText", "drawSelectedListContent", "drawSelectedList",
+        "sceneWidgetDrawHeight", "sceneWidgetDrawWidth", "sceneWidgetCanvasRatio", "cachedSceneWidgetCanvas",
+        "matrixDisplayCacheKey", "compactMatrixLabels", "matrixSectionHeight", "computeMatrixDisplayCache", "matrixDisplayCache", "drawMatrixSection", "drawMatrixList",
+        "clearSceneSelectedListLayoutCaches", "clearSceneComputedCaches", "installSceneNodeRemovalCleanup"]) vm.runInContext(functionSource(name), ctx);
+    const item = (label, weight = 1.1, id = "one") => ({ id, label, prompt: label, category_path: ["Canvas"], category_key: "Canvas", category_label: "Canvas", weight });
+    const selection = (label, weight = 1.1, id) => JSON.stringify({ version: 1, categories: { Canvas: [item(label, weight, id)] } });
+    const node = { size: [360, 900], widgets: [{ name: "positive_json", value: selection("alpha") }, { name: "negative_json", value: selection("omega", 1.2, "negative") }], properties: {} };
+    const outer = textContext();
+    const draw = (role = "positive_selected_list", options = {}) => {
+        ctx.drawSelectedList(outer, node, 360, 0, 80, { role, stateWidgetName: role === "negative_selected_list" ? "negative_json" : "positive_json", ...options });
+        return node[ctx.selectedListRenderCacheName(role)]?.canvas;
+    };
+    const first = draw(); assert(first.context.texts.includes("alpha:1.1"));
+    const negative = draw("negative_selected_list"); assert(negative.context.texts.includes("omega:1.2"));
+    const size = [first.width, first.height];
+    node.widgets[0].value = selection("bravo", 1.3);
+    const changed = draw(); assert.notStrictEqual(changed, first); assert.deepEqual([changed.width, changed.height], size);
+    assert(changed.context.texts.includes("bravo:1.3"), "same-size direct text/weight edits repaint the raster, not just the layout");
+    assert.strictEqual(node.sceneSelectedListNegativeRenderCache.canvas, negative, "positive changes preserve the negative raster");
+    node.widgets[1].value = selection("theta", 1.4, "negative");
+    assert(draw("negative_selected_list").context.texts.includes("theta:1.4"));
+    assert.strictEqual(node.sceneSelectedListPositiveRenderCache.canvas, changed, "negative changes preserve the positive raster");
+    ctx.savedPrompts = [{ id: "saved", name: "Saved First", items: [item("bravo", 1.3)] }];
+    ctx.clearSceneSelectedListLayoutCaches();
+    assert(draw().context.texts.includes("Saved First"));
+    const priorCatalog = ctx.savedPrompts;
+    ctx.savedPrompts = [{ id: "saved", name: "Saved Next", items: [item("bravo", 1.3)] }];
+    const inactiveLayout = node.sceneSelectedListLayoutCache;
+    ctx.clearSceneSelectedListLayoutCaches();
+    assert.strictEqual(node.sceneSelectedListLayoutCache, inactiveLayout, "the hidden graph is lazily invalidated by a scalar catalog revision");
+    assert(draw().context.texts.includes("Saved Next"), "replacement saved catalogs invalidate headings despite unchanged selection JSON");
+    assert(!Object.values(node.sceneSelectedListLayoutCache.get("positive_json").cacheKey).includes(priorCatalog), "descriptors retain no old whole-catalog array");
+    ctx.savedPrompts = null; ctx.clearSceneSelectedListLayoutCaches();
+    assert(!draw().context.texts.includes("Saved Next"), "catalog reset invalidates hidden layouts before a reload request succeeds");
+    ctx.savedPrompts = [];
+    ctx.clearSceneSelectedListLayoutCaches();
+    const external = stateModule.parseSelectionState(selection("cello", 1.3));
+    assert(draw("positive_selected_list", { state: external }).context.texts.includes("cello:1.3"));
+    external.categories.Canvas[0].label = "zebra";
+    assert(draw("positive_selected_list", { state: external }).context.texts.includes("zebra:1.3"), "mutable external state never reuses an obsolete raster");
+    const sections = [{ title: "Custom", type: "category", items: [item("delta", 1.5)] }];
+    assert(draw("positive_selected_list", { sections }).context.texts.includes("delta:1.5"));
+    sections[0].items[0].label = "other";
+    assert(draw("positive_selected_list", { sections }).context.texts.includes("other:1.5"));
+    assert(draw().context.texts.includes("bravo:1.3"), "returning from explicit sections/state restores the widget's own raster");
+    node.size[0] = 361; assert.notStrictEqual(draw(), changed, "width changes rebuild the corresponding layout and raster");
+    const largeSelection = JSON.stringify({ version: 1, categories: { Canvas: Array.from({ length: 500 }, (_, index) => item(`tag-${index}`, 1.1, `id-${index}`)) } });
+    node.widgets[0].value = largeSelection;
+    const warm = ctx.cachedSelectedListLayout(node, 349, { stateWidgetName: "positive_json" });
+    calls.stringify = calls.selectionParse = calls.matrixParse = 0;
+    const selectionStart = performance.now();
+    for (let index = 0; index < 1000; index++) assert.strictEqual(ctx.cachedSelectedListLayout(node, 349, { stateWidgetName: "positive_json" }), warm);
+    const selectionWarm1000ms = Number((performance.now() - selectionStart).toFixed(2));
+    assert.deepEqual(calls, { stringify: 0, selectionParse: 0, matrixParse: 0 }, "warm selected layouts perform no serialization or parsing");
+    assert.strictEqual(ctx.selectedListLayoutCacheKey(node, 349, { stateWidgetName: "positive_json" }), node.sceneSelectedListLayoutCache.get("positive_json").cacheKey);
+    const rawMatrix = label => stateModule.serializeMatrixState({ version: 1, sets: Array.from({ length: 30 }, (_, index) => ({
+        ...stateModule.createMatrixLine(`${label}-${index}`), positive_json: largeSelection,
+    })) });
+    const matrix = { size: [340, 900], mode: 0, scenePromptRevision: 0, inputLink: "link-a", inputSource: { id: 1, mode: 0, scenePromptRevision: 0, title: "Source A" },
+        widgets: [{ name: "matrix_json", value: rawMatrix("before") }], properties: {} };
+    ctx.drawMatrixList(outer, matrix, 340, 0, 200);
+    const matrixWarm = ctx.matrixDisplayCache(matrix, 340), matrixRaster = matrix.sceneMatrixRenderCache.canvas;
+    calls.stringify = calls.selectionParse = calls.matrixParse = 0;
+    const matrixStart = performance.now();
+    for (let index = 0; index < 1000; index++) assert.strictEqual(ctx.matrixDisplayCache(matrix, 340), matrixWarm);
+    const matrixWarm1000ms = Number((performance.now() - matrixStart).toFixed(2));
+    assert.deepEqual(calls, { stringify: 0, selectionParse: 0, matrixParse: 0 }, "warm Matrix display checks never copy or parse its large JSON");
+    assert.strictEqual(ctx.matrixDisplayCacheKey(matrix, 340), matrixWarm.cacheKey);
+    matrix.widgets[0].value = rawMatrix("after"); ctx.drawMatrixList(outer, matrix, 340, 0, 200);
+    assert.notStrictEqual(matrix.sceneMatrixRenderCache.canvas, matrixRaster);
+    assert(matrix.sceneMatrixRenderCache.canvas.context.texts.includes("after-0"));
+    const matrixChange = mutate => { const old = ctx.matrixDisplayCache(matrix, 340); mutate(); const next = ctx.matrixDisplayCache(matrix, 340);
+        assert.notStrictEqual(next, old); assert.equal(matrix.sceneMatrixRenderCache, null); };
+    matrixChange(() => { matrix.inputSource = { ...matrix.inputSource, title: "Same ID, new source" }; });
+    matrixChange(() => { matrix.inputSource.mode = 4; });
+    matrixChange(() => { matrix.inputSource.scenePromptRevision++; });
+    matrixChange(() => { matrix.mode = 2; });
+    matrixChange(() => { matrix.scenePromptRevision++; });
+    matrixChange(() => { matrix.inputLink = "link-b"; });
+    const beforeWidth = ctx.matrixDisplayCache(matrix, 340); assert.notStrictEqual(ctx.matrixDisplayCache(matrix, 341), beforeWidth);
+    assert.equal(matrix.sceneMatrixRenderCache, null);
+    const rasterNode = {}; let paints = 0;
+    const raster = ctx.cachedSceneWidgetCanvas(rasterNode, "raster", 30, 40, () => { paints++; });
+    assert.equal(ctx.cachedSceneWidgetCanvas(rasterNode, "raster", 2000, 2000, () => { paints++; }), null);
+    assert.equal(rasterNode.raster, null, "direct oversized drawing releases a previously retained raster");
+    assert.notStrictEqual(ctx.cachedSceneWidgetCanvas(rasterNode, "raster", 30, 40, () => { paints++; }), raster);
+    assert.equal(paints, 2, "returning below the threshold builds a fresh raster");
+    const saved = JSON.stringify({ widgets: node.widgets, properties: node.properties });
+    ctx.clearSceneComputedCaches(node);
+    assert.equal(node.sceneSelectedListLayoutCache, null); assert.equal(node.sceneSelectedListPositiveRenderCache, null); assert.equal(node.sceneSelectedListNegativeRenderCache, null);
+    assert.equal(JSON.stringify({ widgets: node.widgets, properties: node.properties }), saved);
+    draw(); ctx.installSceneNodeRemovalCleanup(node, "ScenePrompter"); node.onRemoved();
+    assert.equal(node.sceneSelectedListLayoutCache, null); assert.equal(node.sceneSelectedListPositiveRenderCache, null);
+    ctx.drawMatrixList(outer, matrix, 340, 0, 200); ctx.installSceneNodeRemovalCleanup(matrix, "SceneMatrix"); matrix.onRemoved();
+    assert.equal(matrix.sceneMatrixDisplayCache, null); assert.equal(matrix.sceneMatrixRenderCache, null);
+    assert(!source.includes("function matrixSourceCacheKey("), "the unused Matrix source-key builder is removed");
+    console.log("Selected/Matrix current descriptors, same-size raster repaint, role ownership, external state, lifecycle and oversized release passed",
+        JSON.stringify({ selectionBytes: largeSelection.length, matrixBytes: matrix.widgets[0].value.length, selectionWarm1000ms, matrixWarm1000ms, warmStringifies: 0 }));
+}
+
+testCurrentDisplayAndRasterOwnership().catch(error => { console.error(error); process.exitCode = 1; });
