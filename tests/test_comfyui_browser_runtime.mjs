@@ -2433,6 +2433,81 @@ window.__sceneSeedRuntimeTest = {
     await page.keyboard.press('Escape');
     await page.evaluate(async before => { for (const [id, value] of Object.entries(before)) await window.app.extensionManager.setting.set(id, value); }, settingsBeforeSwitchReload.before);
     assert.deepEqual(await (await fetch(`${url}/scene_test/model_executions`)).json(), []);
+
+    const primitiveQueueSwitch = await page.evaluate(async () => {
+        const app = window.app; app.graph.clear();
+        const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); node.pos = [1400 + app.graph._nodes.length * 250, 160]; return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const link = (from, to, name, type = 'SCENE_PROMPT') => {
+            if (!to.inputs.some(input => input.name === name)) to.addInput(name, type, { widget: { name } });
+            if (!from.connect(0, to, to.inputs.findIndex(input => input.name === name))) throw new Error(`Cannot connect native ${name}`);
+        };
+        const firstA = add('ScenePrompter'), secondA = add('ScenePrompter'), firstCount = add('ScenePromptCounter');
+        const queueA = add('ScenePrompterQueue'), promptB = add('ScenePrompter'), flag = add('PrimitiveBoolean');
+        const select = add('ComfySwitchNode'), queueC = add('ScenePrompterQueue'), count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+        for (const queue of [queueA, queueC]) {
+            field(queue, 'order_mode').value = 'input_order'; field(queue, 'alternate_block_size').value = 1;
+            field(queue, 'downstream_count_mode').value = 'multiply'; field(queue, 'input_repeats_json').value = '{}';
+        }
+        field(firstCount, 'count').value = 2; field(firstCount, 'enable_downstream_count').value = true;
+        field(count, 'count').value = 5; field(count, 'enable_downstream_count').value = true;
+        field(flag, 'value').value = false; flag.pos = [120, 160];
+        link(firstA, firstCount, 'scene_prompt'); link(firstCount, queueA, 'scene_prompt1'); link(secondA, queueA, 'scene_prompt2');
+        link(promptB, select, 'on_false'); link(queueA, select, 'on_true'); link(flag, select, 'switch', 'BOOLEAN');
+        link(select, queueC, 'scene_prompt1'); link(queueC, count, 'scene_prompt'); link(count, expand, 'scene_prompt');
+        field(queueC, 'order_mode').value = 'alternate'; field(queueC, 'alternate_block_size').value = 4;
+        field(queueC, 'downstream_count_mode').value = 'fixed';
+        const ids = Object.fromEntries(Object.entries({ flag, queueA, queueC, count, expand, select }).map(([name, node]) => [name, node.id]));
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0]; app.canvas.draw(true, true);
+        return ids;
+    });
+    const primitiveQueueSnapshot = () => page.evaluate(async ids => {
+        const app = window.app, { api } = await import('/scripts/api.js'), current = name => app.graph.getNodeById(ids[name]);
+        const names = ['order_mode', 'alternate_block_size', 'downstream_count_mode'];
+        // Read controls before planner/API access so those reads cannot repair stale controls.
+        const controls = names.map(name => current('queueC').widgets.find(widget => widget.name === name));
+        const values = controls.map(widget => widget.value), disabled = controls.map(widget => !!widget.disabled);
+        const locked = current('queueC').sceneQueueControlLock, total = window.__sceneSeedRuntimeTest.countStats(current('count')).total;
+        const prompt = await app.graphToPrompt();
+        const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST', body: JSON.stringify({
+            api_graph: prompt, workflow: prompt.workflow, expand_node_id: String(ids.expand),
+        }) });
+        const prepared = await response.json(); if (!response.ok) throw new Error(JSON.stringify(prepared));
+        await api.fetchApi('/scene_prompt/runs/release', { method: 'POST', body: JSON.stringify({ run_handle: prepared.run_handle }) });
+        return { values, disabled, locked, total, prepared: prepared.total_batches,
+            value: current('flag').widgets.find(widget => widget.name === 'value').value,
+            apiValue: prompt.output[String(ids.flag)].inputs.value,
+            serialized: current('queueC').serialize().widgets_values,
+            displayed: current('expand').widgets.find(widget => widget.sceneRole === 'expand_total_count')?.sceneTotalCount };
+    }, primitiveQueueSwitch);
+    const clickPrimitiveBoolean = async expected => {
+        const position = await page.evaluate(id => {
+            const node = window.app.graph.getNodeById(id), widget = node.widgets.find(widget => widget.name === 'value');
+            const canvas = window.app.canvas, rect = canvas.canvas.getBoundingClientRect();
+            if (!Number.isFinite(widget.last_y)) throw new Error('Native Boolean widget has not been drawn');
+            return { x: rect.left + (node.pos[0] + node.size[0] / 2 + canvas.ds.offset[0]) * canvas.ds.scale,
+                y: rect.top + (node.pos[1] + widget.last_y + window.LiteGraph.NODE_WIDGET_HEIGHT / 2 + canvas.ds.offset[1]) * canvas.ds.scale };
+        }, primitiveQueueSwitch.flag);
+        await page.mouse.click(position.x, position.y);
+        await page.waitForFunction(({ id, expected }) => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'value').value === expected,
+            { id: primitiveQueueSwitch.flag, expected });
+        await page.waitForTimeout(250);
+    };
+    await page.waitForTimeout(250);
+    const primitiveQueueOff = await primitiveQueueSnapshot();
+    await clickPrimitiveBoolean(true); const primitiveQueueOn = await primitiveQueueSnapshot();
+    await clickPrimitiveBoolean(false); const primitiveQueueOffAgain = await primitiveQueueSnapshot();
+    for (const [name, result, total, disabled] of [['off', primitiveQueueOff, 4, false], ['on', primitiveQueueOn, 15, true], ['off again', primitiveQueueOffAgain, 4, false]]) {
+        assert.deepEqual(result.values, ['alternate', 4, 'fixed'], `${name} retains the saved Queue settings`);
+        assert.deepEqual(result.disabled, Array(3).fill(disabled), `${name} native controls refresh after the actual Boolean pointer click`);
+        assert.equal(result.locked, disabled ? 'upstream' : '', name);
+        assert.equal(result.total, total, name); assert.equal(result.prepared, total, name); assert.equal(result.displayed, total, name);
+        assert.equal(result.value, disabled); assert.equal(result.apiValue, disabled);
+    }
+    assert.deepEqual(primitiveQueueOn.serialized, primitiveQueueOff.serialized);
+    assert.deepEqual(primitiveQueueOffAgain.serialized, primitiveQueueOff.serialized);
+    console.log('real ComfyUI PrimitiveBoolean canvas pointer toggle switches Queue boundary/controls/counts and preserves Queue settings');
     nativeRunChecks = false;
     console.log('real ComfyUI standard Switch MatchType, fixed slots, names/mapping DOM saves, siblings, count/selected preview, Undo/Redo, clone, legacy restore, reload and one settings category passed');
 
