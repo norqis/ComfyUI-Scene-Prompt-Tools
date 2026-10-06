@@ -6990,33 +6990,6 @@ function sceneExpandScenePromptSourceNode(node) {
     return source && isScenePromptSourceNode(source) ? source : null;
 }
 
-function scenePromptLocalCacheKey(node) {
-    return JSON.stringify({
-        type: "prompt",
-        id: node?.id ?? null,
-        mode: sceneNodeMode(node),
-        title: scenePromptTitle(node),
-        input: linkedInputKey(node, "scene_prompt"),
-        positive_base: String(findWidget(node, "positive_base")?.value || ""),
-        positive_json: String(findWidget(node, "positive_json")?.value || ""),
-        negative_base: String(findWidget(node, "negative_base")?.value || ""),
-        negative_json: String(findWidget(node, "negative_json")?.value || ""),
-        category_order: String(findWidget(node, "category_order")?.value || ""),
-        filename_enabled: Boolean(findWidget(node, "filename_enabled")?.value),
-    });
-}
-
-function scenePathLocalCacheKey(node) {
-    return JSON.stringify({
-        type: "path",
-        id: node?.id ?? null,
-        mode: sceneNodeMode(node),
-        title: scenePathTitle(node),
-        input: linkedInputKey(node, "scene_prompt"),
-        path_mode: normalizePathMode(findWidget(node, "path_mode")?.value),
-    });
-}
-
 function scenePromptSourceLocalCacheKey(node) {
     const common = { id: node?.id ?? null, mode: sceneNodeMode(node), revision: sceneNodeRevision(node) };
     const values = (names) => names.map((name) => findWidget(node, name)?.value ?? null);
