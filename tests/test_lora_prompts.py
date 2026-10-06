@@ -56,6 +56,107 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(self.expand(legacy)[:2], ("base", ""))
         self.assertEqual(self.plan.normalize_plan(json.loads(json.dumps(changed)))["rows"][0]["row"]["loras"][0]["positive_parts"], ["one", "two"])
 
+    def test_shared_lora_fork_loads_once_after_two_prompt_branches_in_both_modes(self):
+        for mode in ("Illustrious", "Anima"):
+            with self.subTest(mode=mode):
+                shared = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0])[0]
+                shared = self.nodes.SceneApplyLora().apply_lora(
+                    "shared", 0.8, 0.7, shared, unique_id="shared-node", model_mode=mode,
+                    positive="trigger", negative="bad",
+                )[0]
+                left = add_prompt(self.prompt, "Left", "left", "", node_id="left", upstream=shared)
+                right = add_prompt(self.prompt, "Right", "right", "", node_id="right", upstream=shared)
+                merged = self.nodes.ScenePromptMerge().merge(left, right)[0]
+                before = json.dumps(shared)
+                result = self.expand(merged, mode)
+                self.assertEqual(result["result"][:2], ("left, right, trigger", "bad"))
+                loaders = list(result["expand"].values())
+                self.assertEqual(len(loaders), 1)
+                self.assertEqual(loaders[0]["inputs"], {
+                    "model": ["model", 0], "clip": ["clip", 0], "lora_name": "shared",
+                    "strength_model": 0.8, "strength_clip": 0.7,
+                })
+                self.assertEqual(json.dumps(shared), before)
+                self.assertEqual(len(merged["rows"][0]["row"]["loras"]), 1)
+
+    def test_shared_and_branch_local_same_file_nodes_stack_in_first_occurrence_order(self):
+        shared = self.nodes.SceneApplyLora().apply_lora("same", 0.1, 0.2, source_node_id="shared", positive="shared")[0]
+        left = self.nodes.SceneApplyLora().apply_lora("same", 0.3, 0.4, shared, unique_id="left", positive="left")[0]
+        right = self.nodes.SceneApplyLora().apply_lora("same", 0.5, 0.6, shared, unique_id="ignored", source_node_id="right", positive="right")[0]
+        merged = self.nodes.ScenePromptMerge().merge(left, right)[0]
+        row = merged["rows"][0]["row"]
+        self.assertEqual([descriptor["source_node_id"] for descriptor in row["loras"]], ["shared", "left", "right"])
+        merged = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0], merged)[0]
+        result = self.expand(merged)
+        loaders = list(result["expand"].values())
+        self.assertEqual([(node["inputs"]["lora_name"], node["inputs"]["strength_model"]) for node in loaders],
+                         [("same", 0.1), ("same", 0.3), ("same", 0.5)])
+        loader_ids = list(result["expand"])
+        self.assertEqual([node["inputs"]["model"] for node in loaders], [["model", 0], [loader_ids[0], 0], [loader_ids[1], 0]])
+        self.assertEqual(result["result"][:2], ("shared, left, right", ""))
+
+    def test_branch_delete_reverse_union_does_not_rewrite_callback_snapshot(self):
+        for mode in ("Illustrious", "Anima"):
+            for operation in ("delete", "reverse"):
+                with self.subTest(mode=mode, operation=operation):
+                    shared = self.nodes.SceneApplyLora().apply_lora(
+                        "shared", unique_id="source", positive="trigger", negative="bad", model_mode=mode,
+                    )[0]
+                    shared = self.plan.append_callback(shared, "callback", {"type": "dummy"}, "every", 1, "continue")
+                    original = shared["rows"][0]["row"]
+                    if operation == "delete":
+                        changed = self.nodes.ScenePromptDelete().delete("trigger", "bad", shared)[0]
+                        expected = ("trigger", "bad")
+                    else:
+                        changed = self.nodes.ScenePromptReverse().reverse(shared)[0]
+                        expected = ("", "trigger, bad")
+                    merged = self.nodes.ScenePromptMerge().merge(changed, shared)[0]
+                    row = merged["rows"][0]["row"]
+                    self.assertEqual(len(row["loras"]), 1)
+                    self.assertEqual(row["prompt_trace"]["kind"], "whole")
+                    self.assertIsNone(row["prompt_trace"]["lora_index"])
+                    self.assertEqual(row["callbacks"][0], original["callbacks"][0])
+                    calls = []
+                    with patch.object(self.nodes, "dispatch_callback", side_effect=lambda _config, values, *_args, **_kwargs: calls.append(values)):
+                        result = self.expand(merged, mode)
+                    self.assertEqual(result[:2], expected)
+                    self.assertEqual(calls[0]["current_positive"], "trigger")
+                    self.assertEqual(calls[0]["current_negative"], "bad")
+                    self.assertEqual((calls[0]["all_positive"], calls[0]["all_negative"]), expected)
+                    self.assertEqual(shared["rows"][0]["row"], original)
+
+    def test_descriptor_identity_roundtrip_and_anonymous_legacy_stacking(self):
+        named = self.nodes.SceneApplyLora().apply_lora("same", unique_id=7)[0]
+        named = self.plan.normalize_plan(json.loads(json.dumps(named)))
+        self.assertEqual(named["rows"][0]["row"]["loras"][0]["source_node_id"], "7")
+        self.assertEqual(len(self.plan.merge(named, named)["rows"][0]["row"]["loras"]), 1)
+        anonymous = self.nodes.SceneApplyLora().apply_lora("same")[0]
+        anonymous = self.plan.normalize_plan(json.loads(json.dumps(anonymous)))
+        descriptor = anonymous["rows"][0]["row"]["loras"][0]
+        self.assertEqual(set(descriptor), self.plan.LORA_KEYS)
+        self.assertEqual(len(self.plan.merge(anonymous, anonymous)["rows"][0]["row"]["loras"]), 2)
+        legacy = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0],
+                                                        self.plan.merge(anonymous, anonymous))[0]
+        self.assertEqual(len(self.expand(legacy)["expand"]), 2)
+        explicit_empty = self.plan.make_plan([{"row": {**self.plan.empty_row(), "loras": [{**descriptor, "source_node_id": ""}]}, "count": 1}])
+        self.assertEqual(len(self.plan.merge(explicit_empty, explicit_empty)["rows"][0]["row"]["loras"]), 2)
+        for value in (None, 7, []):
+            with self.subTest(source_id=value), self.assertRaises(self.plan.ScenePlanError):
+                self.plan._clone_loras([{**descriptor, "source_node_id": value}])
+
+    def test_repeated_shared_convergence_does_not_multiply_descriptors(self):
+        plan = self.nodes.SceneApplyLora().apply_lora("shared", source_node_id="shared", positive="trigger")[0]
+        row = plan["rows"][0]["row"]
+        for _ in range(40):
+            row = self.plan.merge_rows(row, row)
+            self.assertEqual(len(row["loras"]), 1)
+            self.assertEqual(row["loras"][0]["positive_parts"], ["trigger"])
+        for _ in range(5):
+            plan = self.nodes.ScenePromptMerge().merge(plan, plan)[0]
+            self.assertEqual(len(plan["rows"][0]["row"]["loras"]), 1)
+        plan = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0], plan)[0]
+        self.assertEqual(len(self.expand(plan)["expand"]), 1)
+
     def test_selected_candidates_follow_model_and_existing_text(self):
         selected = lambda category, prompt: json.dumps({"version": 1, "categories": {
             category: [selection_item(prompt, category_key=category, category_label=category,

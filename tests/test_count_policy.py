@@ -1,6 +1,7 @@
 """Path-specific Count protection, compact selection and execution-path replay."""
 import copy
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -287,6 +288,88 @@ class CountNodeAndPresetTests(unittest.TestCase):
         legacy = save("count-legacy", child, "3")
         unprotected = self.presets._evaluate_preset_scene(legacy, {}, None)
         self.assertEqual(self.nodes.ScenePromptCounter().count(unprotected, 10)[0]["total_batches"], 30)
+
+    def test_real_compact_list_matches_full_execution_and_frontend_count_composition(self):
+        definitions = {}
+
+        def save(name, nodes, output="3"):
+            saved = self.presets.save_preset({"preset_id": name, "name": name, "output_node_id": output,
+                "api_graph": {"output": nodes}, "workflow": {"version": 1, "nodes": []}})
+            definitions[name] = saved
+            return saved
+
+        def count_nodes(count, enabled=None):
+            inputs = {"scene_prompt": ["1", 0], "count": count}
+            if enabled is not None:
+                inputs["enable_downstream_count"] = enabled
+            return {"1": {"class_type": "ScenePresetInput", "inputs": {}},
+                    "2": {"class_type": "ScenePromptCounter", "inputs": inputs},
+                    "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}}}
+
+        for name, count, enabled in (("held", 3, False), ("free", 3, True), ("legacy", 3, None),
+                                     ("zero-held", 0, False), ("zero-free", 0, True)):
+            save(name, count_nodes(count, enabled))
+        nested = {"1": {"class_type": "ScenePresetInput", "inputs": {}},
+                  "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "held", "scene_prompt": ["1", 0]}},
+                  "4": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 10}},
+                  "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["4", 0]}}}
+        save("nested", nested)
+        local_definition = copy.deepcopy(definitions["free"])
+        local_definition["api_graph"]["output"]["2"]["inputs"]["enable_downstream_count"] = False
+        local = copy.deepcopy(nested)
+        local["2"]["inputs"].update({"preset_id": "free", "llm_presets_json": json.dumps({
+            "version": 1, "presets": {".": local_definition},
+        })})
+        save("local", local)
+        nested_local = copy.deepcopy(nested)
+        nested_local["2"]["inputs"]["preset_id"] = "local"
+        save("nested-local", nested_local)
+        mixed = {"1": {"class_type": "ScenePresetInput", "inputs": {}},
+                 "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "held", "scene_prompt": ["1", 0]}},
+                 "4": {"class_type": "ScenePromptCounter", "inputs": {"count": 2, "scene_prompt": ["1", 0]}},
+                 "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["2", 0], "scene_prompt2": ["4", 0]}},
+                 "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["5", 0]}}}
+        save("mixed", mixed)
+        mixed_local = copy.deepcopy(mixed)
+        mixed_local["2"] = copy.deepcopy(local["2"])
+        save("mixed-local", mixed_local)
+        listed = self.presets.list_presets()
+        self.assertEqual(listed["errors"], [])
+        compact = {item["metadata"]["preset_id"]: item for item in listed["presets"]}
+        self.assertIs(compact["held"]["api_graph"]["output"]["2"]["inputs"]["enable_downstream_count"], False)
+        self.assertIs(compact["free"]["api_graph"]["output"]["2"]["inputs"]["enable_downstream_count"], True)
+        self.assertNotIn("enable_downstream_count", compact["legacy"]["api_graph"]["output"]["2"]["inputs"])
+        local_compact = json.loads(compact["local"]["api_graph"]["output"]["2"]["inputs"]["llm_presets_json"])["presets"]["."]
+        self.assertIs(local_compact["api_graph"]["output"]["2"]["inputs"]["enable_downstream_count"], False)
+        self.assertTrue(local_compact["scene_compact"])
+        self.assertEqual(local_compact["workflow"], {"nodes": []})
+        cases = []
+        for name, factor, expected in (("held", 10, 3), ("held", 0, 3), ("free", 10, 30),
+                                       ("legacy", 10, 30), ("legacy", 0, 0), ("zero-held", 10, 0),
+                                       ("zero-free", 10, 0), ("nested", 10, 3), ("local", 10, 3),
+                                       ("nested-local", 10, 3), ("mixed", 10, 23), ("mixed", 0, 3),
+                                       ("mixed-local", 10, 23), ("mixed-local", 0, 3)):
+            with self.subTest(name=name, factor=factor):
+                outer = {"reference": {"class_type": "ScenePresetReference", "inputs": {"preset_id": name}}}
+                resolved = {}
+                occurrences = self.presets.prepare_preset_occurrences(outer, resolved)
+                plan = self.presets._evaluate_preset_scene(definitions[name], {**resolved, "__occurrences__": occurrences},
+                                                         None, reference_node_id="reference")
+                plan = self.nodes.ScenePromptCounter().count(plan, factor)[0]
+                self.assertEqual(plan["total_batches"], expected)
+                with mock.patch.object(self.nodes, "dispatch_callback") as callback:
+                    for index in range(expected):
+                        expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=plan, current_index=index, timestamp_dir=False,
+                                                                       callback_each={"kind": "fixture"})
+                        self.assertEqual(expanded[2]["file_index"], index + 1)
+                        self.assertEqual(callback.call_args.args[1]["exec_total_count"], expected)
+                        self.assertEqual(callback.call_args.args[1]["exec_current_count"], index + 1)
+                cases.append({"preset_id": name, "factor": factor, "total": expected})
+        result = subprocess.run(["node", str(Path(__file__).with_name("test_scene_queue_schedule.cjs")), "--compact-count-response"],
+                                input=json.dumps({"response": listed, "cases": cases}), text=True, encoding="utf-8",
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Real compact Preset response Count parity passed", result.stdout)
 
 
 if __name__ == "__main__":

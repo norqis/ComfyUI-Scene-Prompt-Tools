@@ -248,7 +248,7 @@ def _compact_preset_list_graph(api_graph, local_memo=None):
         return copy.deepcopy(api_graph)
     compact_nodes = {}
     scalar_inputs = {
-        "matrix_json", "batch_size", "count", "preset_id", "reverse_scope",
+        "matrix_json", "batch_size", "count", "enable_downstream_count", "preset_id", "reverse_scope",
         "order_mode", "alternate_block_size", "downstream_count_mode",
         "weights_json", "preserve_join", "llm_presets_json",
     }
@@ -1105,6 +1105,8 @@ def _scene_node_value_impl(
     if class_type in SAFE_NODE_CLASSES and class_type not in {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop"}:
         path = "/".join(part.split("@", 1)[1] for part in preset_stack)
         kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
+        if class_type == "SceneApplyLora" and path:
+            kwargs["source_node_id"] = f"{path}/{node_id}"
         if class_type != "ScenePromptCallback":
             kwargs.setdefault("source_node_name", _source_node_name(node))
     if class_type == "ScenePromptRandomRoute":

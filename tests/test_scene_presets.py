@@ -151,7 +151,63 @@ class ScenePresetTests(unittest.TestCase):
             "strength_clip": 0.7,
             "model_mode": "Illustrious",
             "positive_parts": [], "negative_parts": [],
+            "source_node_id": "4",
         }])
+
+    def test_repeated_nested_preset_lora_identities_match_real_expansion(self):
+        for saved_identity in (None, "reused-source", ""):
+            with self.subTest(saved_identity=saved_identity):
+                child_nodes = basic_nodes("base")
+                child_nodes["4"] = {"class_type": "SceneApplyLora", "inputs": {
+                    "scene_prompt": ["2", 0], "lora_name": "style/example.safetensors",
+                    "strength_model": 0.8, "strength_clip": 0.7, "positive": "trigger",
+                }}
+                if saved_identity is not None:
+                    child_nodes["4"]["inputs"]["source_node_id"] = saved_identity
+                for node_id, text in (("5", "left"), ("6", "right")):
+                    child_nodes[node_id] = {"class_type": "ScenePrompter", "inputs": {
+                        **basic_nodes(text)["2"]["inputs"], "scene_prompt": ["4", 0],
+                    }}
+                child_nodes["7"] = {"class_type": "ScenePrompterMerge", "inputs": {
+                    "scene_prompt1": ["5", 0], "scene_prompt2": ["6", 0],
+                }}
+                child_nodes["3"]["inputs"]["scene_prompt"] = ["7", 0]
+                child = self.save("lora-child", child_nodes)
+                parent_nodes = {
+                    "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                    "4": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "lora-child", "scene_prompt": ["1", 0]}},
+                    "5": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "lora-child", "scene_prompt": ["1", 0]}},
+                    "6": {"class_type": "ScenePrompterMerge", "inputs": {"scene_prompt1": ["4", 0], "scene_prompt2": ["5", 0]}},
+                    "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["6", 0]}},
+                }
+                parent = self.save("lora-parent", parent_nodes)
+                upstream = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0])[0]
+                plan = self.module._evaluate_preset_scene(parent, {"lora-child": child}, upstream, reference_node_id="outer")
+                descriptors = plan["rows"][0]["row"]["loras"]
+                self.assertEqual([descriptor["source_node_id"] for descriptor in descriptors], ["outer/4/4", "outer/5/4"])
+                result = self.nodes.ScenePromptExpand().expand(scene_prompt=plan, timestamp_dir=False)
+                self.assertEqual(len(result["expand"]), 2)
+                self.assertEqual(result["result"][0], "base, left, right, trigger")
+                parent_expansion = self.module.expand_preset_reference("lora-parent", source_node_id="outer")
+                reference_sources = [node["inputs"]["source_node_id"] for node in parent_expansion["expand"].values()
+                                     if node["class_type"] == "ScenePresetReference"]
+                actual_sources = []
+                for reference_source in reference_sources:
+                    expansion = self.module.expand_preset_reference("lora-child", source_node_id=reference_source)
+                    actual_sources.extend(node["inputs"]["source_node_id"] for node in expansion["expand"].values()
+                                          if node["class_type"] == "SceneApplyLora")
+                self.assertEqual(actual_sources, [descriptor["source_node_id"] for descriptor in descriptors])
+                shared = self.module._evaluate_preset_scene(child, {}, upstream, reference_node_id="shared")
+                reconverged = self.nodes.ScenePromptMerge().merge(shared, shared)[0]
+                self.assertEqual([descriptor["source_node_id"] for descriptor in reconverged["rows"][0]["row"]["loras"]], ["shared/4"])
+                self.assertEqual(len(self.nodes.ScenePromptExpand().expand(scene_prompt=reconverged, timestamp_dir=False)["expand"]), 1)
+
+    def test_top_level_lora_evaluation_preserves_supplied_replay_identity(self):
+        nodes = {"4": {"class_type": "SceneApplyLora", "inputs": {
+            "lora_name": "style/example.safetensors", "source_node_id": "outer/replay/4",
+        }}}
+        plan = self.module._scene_node_value(nodes, "4", {}, set())
+        self.assertEqual(plan["rows"][0]["row"]["loras"][0]["source_node_id"], "outer/replay/4")
 
     def test_preset_scene_prompt_preserves_outer_model_and_lora_route(self):
         saved = self.save("outer-model", basic_nodes())
