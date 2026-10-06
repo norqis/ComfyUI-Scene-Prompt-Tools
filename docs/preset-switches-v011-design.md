@@ -34,6 +34,7 @@ Unify all ComfyUI settings under category `Scene Prompt Tools`, including Undo h
 6. Compact Preset list payload retains switch fields and literal control values needed by frontend counts, including PrimitiveBoolean.value, without restoring heavyweight prompt content. Exact slots/types remain validated. Preflight should support Preset editor defaults with no live Reference.
 7. Resource information traverses the selected Scene branch using the same Boolean semantics without evaluating model/LoRA nodes. Continue displaying model-mode-inapplicable resources according to existing rules within that branch. Keep unrelated top-level standard Switch uses untouched.
 8. Execution-path-only PNGs contract selected Scene switches to their chosen input: retaining the Switch while removing its unselected required input would produce an invalid replay. Full-workflow PNGs retain both branches, Boolean/bundle ports and physical bypassed/muted wiring. Preserve nonzero Input ports even when they appear only in physical workflow links. Resolve consecutive Switch contractions once per operation rather than walking each suffix repeatedly.
+   With `expand_preset_contents`, a Reference and its incoming bundle edge are consumed by inlining; the child Input stores that occurrence's effective vector. Its fixed bundle output remains available, while a link to a deleted Reference does not. Ordinary saved Presets and runtime GraphBuilder expansion retain their bundle links.
 
 ## Frontend implementation boundaries
 
