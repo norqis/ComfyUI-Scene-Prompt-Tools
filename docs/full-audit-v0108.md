@@ -28,6 +28,8 @@ Replace recursive embedding with a flat lineage description built by an operatio
 
 Regression probes compare key size/traversal work across shared Merge depths and warm redraws, shared refresh sources, unchanged cache reuse, edits/topology/bypass/toggle/Undo/reload, separate graphs with reused node IDs and cycle termination. Test real UI loading/redrawing using the existing isolated native ComfyUI browser harness; do not claim GPU speed gains from these measurements.
 
+Further measurement isolated the three existence queries sceneRandomRouteInNode, sceneQueueBoundaryInNode and sceneQueuePendingInNode. Their per-branch copies of seen revisit a shared ancestor exponentially: a 13-node Merge chain caused 8,191 visits in each query. These Boolean existence queries have no path-dependent evaluation state. Share an operation-local seen set keyed by actual node objects across their branch traversal, including the inherited upstream check of a Preset reference. Keep true/false, mute/bypass, Preset schedule and pending semantics unchanged; do not share this visited set with row/count evaluation, where each branch contributes its own result. Regression tests cover a late matching branch, no matching branch, shared ancestors, repeated numeric IDs in distinct node objects, cycles and bypass. This is part of the same shared-graph bottleneck correction and requires medium design approval before implementation.
+
 Removed nodes must clear all computed/render/lineage caches through the existing cleanup helper, including any new cache. Keep only saved widgets/state needed by Undo; reconstruction is lazy after restoration. Do not retain removed nodes through a global traversal memo.
 
 ### Primitive settings do not agree with visible plan counts
