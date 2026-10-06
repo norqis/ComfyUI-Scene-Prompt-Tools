@@ -72,6 +72,7 @@ const applyContext = {
     scenePromptLineageKey(node) { return node.lineage || node.id; },
     isSceneNodeMuted() { return false; }, isSceneNodeBypassed() { return false; },
     sceneBypassInputSource() { return null; },
+    scenePromptSettingsError() { return ""; },
     emptyScenePromptStats() { return { rows: 0, total: 0, totalImages: 0, unsetBatches: 0 }; },
     sceneStatsSeed() { return { rows: 1, total: 1, totalImages: 1, unsetBatches: 1 }; },
     sceneStatsResult(value) { return value; },

@@ -881,6 +881,11 @@ def define_routes():
                 snapshot_presets_for_run, handle, api_graph, expand_node_id, user_id, workflow
             )
             return web.json_response({"run_handle": handle, **snapshot})
+        except asyncio.CancelledError:
+            if handle:
+                release_run_context(handle, user_id)
+                release_scene_preset_snapshot(handle, user_id)
+            raise
         except ScenePresetResolutionError as exc:
             if handle:
                 release_run_context(handle, user_id)
@@ -944,22 +949,42 @@ def define_routes():
                 return web.json_response({"state": state})
             if state == "failed":
                 return web.json_response({"state": "error"}, status=502)
-            try:
-                await asyncio.to_thread(
-                    dispatch_callback,
-                    callback["config"],
-                    callback["values"],
-                    callback["timeout_seconds"],
-                    desktop_context=callback.get("delivery_context"),
-                )
-            except SceneCallbackError as exc:
-                if callback["failure_mode"] == CALLBACK_FAILURE_STOP:
+            def finalize_callback():
+                try:
+                    dispatch_callback(
+                        callback["config"],
+                        callback["values"],
+                        callback["timeout_seconds"],
+                        desktop_context=callback.get("delivery_context"),
+                    )
+                except SceneCallbackError as exc:
+                    if callback["failure_mode"] == CALLBACK_FAILURE_STOP:
+                        finish_last_callback(run_handle, expand_node_id, False)
+                        return {"state": "error", "error": str(exc)}, 502
+                    finish_last_callback(run_handle, expand_node_id, True)
+                    return {"state": "finalized", "warning": str(exc)}, 200
+                except Exception:
                     finish_last_callback(run_handle, expand_node_id, False)
-                    return web.json_response({"state": "error", "error": str(exc)}, status=502)
+                    raise
                 finish_last_callback(run_handle, expand_node_id, True)
-                return web.json_response({"state": "finalized", "warning": str(exc)})
-            finish_last_callback(run_handle, expand_node_id, True)
-            return web.json_response({"state": "finalized"})
+                return {"state": "finalized"}, 200
+
+            worker = asyncio.create_task(asyncio.to_thread(finalize_callback))
+            cancelled = False
+            # Retain queued/running work through repeated HTTP cancellation.
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    break
+            try:
+                result, status = worker.result()
+            finally:
+                if cancelled:
+                    raise asyncio.CancelledError
+            return web.json_response(result, status=status)
         except (SceneRunError, ValueError, TypeError):
             return web.json_response({"state": "invalid"}, status=400)
         except Exception as exc:

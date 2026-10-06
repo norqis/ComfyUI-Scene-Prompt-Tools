@@ -8,6 +8,7 @@ import tempfile
 import threading
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -830,6 +831,333 @@ class PromptDataRouteTests(unittest.TestCase):
         os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
         with mock.patch.object(self.routes.time, "monotonic", return_value=999):
             self.assertEqual(self.routes._load_items()[0]["label"], "Fresh!")
+
+
+class RunLifetimeRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.routes = load_routes(Path(self.temp.name) / "data")
+        self.runs = sys.modules[f"{self.routes.__package__}.runs"]
+        self.presets = sys.modules[f"{self.routes.__package__}.presets"]
+        self.callbacks = sys.modules[f"{self.routes.__package__}.callbacks"]
+        self.prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
+        self.release = self.routes._test_routes[("POST", "/scene_prompt/runs/release")]
+        self.finalize = self.routes._test_routes[("POST", "/scene_prompt/runs/finalize")]
+        self.graph = {"output": {
+            "1": {"class_type": "ScenePrompter", "inputs": {
+                "prompt_name": "Fixture", "positive_base": "fixture", "positive_json": '{"version":1,"categories":{}}',
+                "negative_base": "", "negative_json": '{"version":1,"categories":{}}',
+                "category_order": "", "seed": 0, "randomize": True,
+            }},
+            "2": {"class_type": "ScenePrompterExpand", "inputs": {
+                "scene_prompt": ["1", 0], "run_id": "continuous",
+            }},
+        }}
+
+    async def asyncTearDown(self):
+        self.assert_no_runs()
+
+    @staticmethod
+    def request(payload, user_id="alice"):
+        async def json_payload():
+            return payload
+        return types.SimpleNamespace(user_id=user_id, json=json_payload)
+
+    def assert_no_runs(self):
+        self.assertEqual(self.runs.RUN_CONTEXTS._entries, {})
+        self.assertEqual(self.presets._RUN_SNAPSHOTS, {})
+        self.assertEqual(self.presets._RESOLVING_RUNS, {})
+
+    async def prepare_followup(self):
+        response = await self.prepare(self.request({"api_graph": self.graph, "expand_node_id": "2"}))
+        self.assertEqual(response["status"], 200, response)
+        handle = response["payload"]["run_handle"]
+        self.assertEqual(response["payload"]["total_images"], 1)
+        self.assertTrue(self.runs.require_run_context(handle)["continuous"])
+        self.assertIn(("alice", handle), self.presets._RUN_SNAPSHOTS)
+        denied = await self.release(self.request({"run_handle": handle}, "bob"))
+        self.assertFalse(denied["payload"]["released"])
+        self.assertIn(handle, self.runs.RUN_CONTEXTS._entries)
+        self.assertIn(("alice", handle), self.presets._RUN_SNAPSHOTS)
+        await self.release(self.request({"run_handle": handle}))
+        self.assert_no_runs()
+
+    async def test_prepare_cancelled_before_allocation_keeps_no_state(self):
+        entered = asyncio.Event()
+        never = asyncio.Event()
+
+        async def blocked_json():
+            entered.set()
+            await never.wait()
+
+        task = asyncio.create_task(self.prepare(types.SimpleNamespace(user_id="alice", json=blocked_json)))
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assert_no_runs()
+        self.assertEqual(self.presets._CANCELLED_RUNS, {})
+        await self.prepare_followup()
+
+    async def test_prepare_cancellation_prevents_actual_late_snapshot_publication(self):
+        loop = asyncio.get_running_loop()
+        for phase in ("resolving", "published"):
+            with self.subTest(phase=phase):
+                entered = asyncio.Event()
+                finished = asyncio.Event()
+                resume = threading.Event()
+                errors = []
+                snapshot = self.routes.snapshot_presets_for_run
+                scene_value = self.presets._scene_node_value
+
+                def pause():
+                    loop.call_soon_threadsafe(entered.set)
+                    self.assertTrue(resume.wait(5), "snapshot worker was not released")
+
+                def blocked_value(*args, **kwargs):
+                    pause()
+                    return scene_value(*args, **kwargs)
+
+                def observed_snapshot(*args, **kwargs):
+                    try:
+                        result = snapshot(*args, **kwargs)
+                        if phase == "published":
+                            pause()
+                        return result
+                    except self.presets.ScenePresetError as exc:
+                        errors.append(str(exc))
+                        raise
+                    finally:
+                        loop.call_soon_threadsafe(finished.set)
+
+                with mock.patch.object(self.routes, "snapshot_presets_for_run", observed_snapshot), \
+                     mock.patch.object(self.presets, "_scene_node_value", blocked_value if phase == "resolving" else scene_value):
+                    task = asyncio.create_task(self.prepare(self.request({
+                        "api_graph": self.graph, "expand_node_id": "2",
+                    })))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 5)
+                        handle, = self.runs.RUN_CONTEXTS._entries
+                        key = ("alice", handle)
+                        self.assertTrue(self.runs.require_run_context(handle)["continuous"])
+                        if phase == "published":
+                            self.assertIn(key, self.presets._RUN_SNAPSHOTS)
+                        else:
+                            self.assertEqual(self.presets._RESOLVING_RUNS, {key: 1})
+                        task.cancel()
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                        self.assertFalse(task.cancel())
+                        self.assertEqual(self.runs.RUN_CONTEXTS._entries, {})
+                        self.assertEqual(self.presets._RUN_SNAPSHOTS, {})
+                        self.assertIn(key, self.presets._CANCELLED_RUNS)
+                    finally:
+                        resume.set()
+                        await asyncio.wait_for(finished.wait(), 5)
+                    self.assertEqual(bool(errors), phase == "resolving")
+                self.assert_no_runs()
+                await self.prepare_followup()
+
+    async def test_prepare_resolution_failure_keeps_node_error_and_releases_state(self):
+        graph = {"output": {
+            "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "missing"}},
+            "2": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
+        }}
+        response = await self.prepare(self.request({"api_graph": graph, "expand_node_id": "2"}))
+        self.assertEqual(response["status"], 400)
+        self.assertEqual(response["payload"]["node_id"], "1")
+        self.assert_no_runs()
+        await self.prepare_followup()
+
+    def callback_run(self, failure_mode, prompt_id="prompt-1"):
+        handle = self.runs.create_run_context("alice", continuous=True)
+        self.assertTrue(self.runs.claim_run_context(handle, "alice", prompt_id))
+        self.assertTrue(self.runs.register_last_callback(
+            handle, "2", {"kind": "webhook"}, {"prompt_id": prompt_id}, 5,
+            failure_mode, prompt_id, {"user_id": "alice", "client_id": "client"},
+        ))
+        self.routes.PromptServer.instance.prompt_queue = types.SimpleNamespace(
+            get_history=lambda prompt_id: {prompt_id: {"status": {"status_str": "success", "completed": True}}},
+        )
+        return handle, {"run_handle": handle, "expand_node_id": "2", "prompt_id": prompt_id}
+
+    def callback_state(self, handle):
+        return self.runs.require_run_context(handle)["last_callbacks"]["2"]["state"]
+
+    async def test_finalize_rejects_incomplete_failed_and_foreign_requests_before_dispatch(self):
+        handle, payload = self.callback_run(self.callbacks.CALLBACK_FAILURE_STOP)
+        with mock.patch.object(self.routes, "dispatch_callback") as dispatch:
+            for status, completed, expected_state, expected_status in (
+                (None, False, "pending", 202), ("error", True, "not_success", 409),
+            ):
+                with self.subTest(status=status):
+                    self.routes.PromptServer.instance.prompt_queue = types.SimpleNamespace(
+                        get_history=lambda prompt_id: {prompt_id: {"status": {"status_str": status, "completed": completed}}},
+                    )
+                    result = await self.finalize(self.request(payload))
+                    self.assertEqual(result, {"payload": {"state": expected_state}, "status": expected_status})
+                    self.assertEqual(self.callback_state(handle), "pending")
+            self.routes.PromptServer.instance.prompt_queue = types.SimpleNamespace(
+                get_history=lambda prompt_id: {prompt_id: {"status": {"status_str": "success", "completed": True}}},
+            )
+            for request, expected in (
+                (self.request(payload, "bob"), "missing"),
+                (self.request({**payload, "prompt_id": "wrong"}), "wrong_prompt"),
+            ):
+                result = await self.finalize(request)
+                self.assertEqual(result, {"payload": {"state": expected}, "status": 409})
+                self.assertEqual(self.callback_state(handle), "pending")
+            dispatch.assert_not_called()
+        await self.release(self.request({"run_handle": handle}))
+
+    async def test_finalize_normal_outcomes_transition_in_dispatch_thread(self):
+        outcomes = (
+            (None, self.callbacks.CALLBACK_FAILURE_STOP, "finalized", 200),
+            (self.routes.SceneCallbackError("fixture failure"), self.callbacks.CALLBACK_FAILURE_CONTINUE, "finalized", 200),
+            (self.routes.SceneCallbackError("fixture failure"), self.callbacks.CALLBACK_FAILURE_STOP, "failed", 502),
+            (RuntimeError("unexpected worker failure"), self.callbacks.CALLBACK_FAILURE_CONTINUE, "failed", 400),
+        )
+        for error, mode, state, status in outcomes:
+            with self.subTest(error=error, mode=mode):
+                handle, payload = self.callback_run(mode)
+                threads = []
+                finish = self.routes.finish_last_callback
+
+                def dispatch(*args, **kwargs):
+                    threads.append(threading.get_ident())
+                    self.assertEqual(kwargs["desktop_context"], {"user_id": "alice", "client_id": "client"})
+                    if error:
+                        raise error
+
+                def record_finish(*args):
+                    threads.append(threading.get_ident())
+                    return finish(*args)
+
+                with mock.patch.object(self.routes, "dispatch_callback", side_effect=dispatch) as calls, \
+                     mock.patch.object(self.routes, "finish_last_callback", side_effect=record_finish):
+                    result = await self.finalize(self.request(payload))
+                    self.assertEqual(result["status"], status, result)
+                    if isinstance(error, self.routes.SceneCallbackError) and state == "finalized":
+                        self.assertEqual(result["payload"]["warning"], str(error))
+                    self.assertEqual(self.callback_state(handle), state)
+                    again = await self.finalize(self.request(payload))
+                    self.assertEqual(again["status"], 200 if state == "finalized" else 502)
+                    calls.assert_called_once()
+                self.assertEqual(len(threads), 2)
+                self.assertEqual(threads[0], threads[1])
+                self.assertNotEqual(threads[0], threading.get_ident())
+                await self.release(self.request({"run_handle": handle}))
+
+    async def test_finalize_cancelled_dispatch_settles_success_and_failures_once(self):
+        loop = asyncio.get_running_loop()
+        outcomes = (
+            (None, self.callbacks.CALLBACK_FAILURE_STOP, "finalized"),
+            (self.routes.SceneCallbackError("fixture failure"), self.callbacks.CALLBACK_FAILURE_CONTINUE, "finalized"),
+            (self.routes.SceneCallbackError("fixture failure"), self.callbacks.CALLBACK_FAILURE_STOP, "failed"),
+            (RuntimeError("unexpected worker failure"), self.callbacks.CALLBACK_FAILURE_CONTINUE, "failed"),
+        )
+        for error, mode, state in outcomes:
+            with self.subTest(error=error, mode=mode):
+                handle, payload = self.callback_run(mode)
+                entered = asyncio.Event()
+                resume = threading.Event()
+                dispatched = []
+
+                def dispatch(_config, values, _timeout, **_kwargs):
+                    dispatched.append(values["prompt_id"])
+                    if values["prompt_id"] == "prompt-1":
+                        loop.call_soon_threadsafe(entered.set)
+                        self.assertTrue(resume.wait(5), "callback worker was not released")
+                        if error:
+                            raise error
+
+                with mock.patch.object(self.routes, "dispatch_callback", side_effect=dispatch):
+                    task = asyncio.create_task(self.finalize(self.request(payload)))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 5)
+                        for _ in range(2):
+                            task.cancel()
+                            await asyncio.sleep(0)
+                            self.assertFalse(task.done())
+                            self.assertEqual(self.callback_state(handle), "in_progress")
+                        duplicate = await self.finalize(self.request(payload))
+                        self.assertEqual(duplicate, {"payload": {"state": "in_progress"}, "status": 202})
+                        foreign = await self.finalize(self.request(payload, "bob"))
+                        self.assertEqual(foreign, {"payload": {"state": "missing"}, "status": 409})
+                        wrong = await self.finalize(self.request({**payload, "prompt_id": "other"}))
+                        self.assertEqual(wrong, {"payload": {"state": "wrong_prompt"}, "status": 409})
+                        next_handle, next_payload = self.callback_run(mode, "next-prompt")
+                        next_result = await self.finalize(self.request(next_payload))
+                        self.assertEqual(next_result["payload"]["state"], "finalized")
+                        await self.release(self.request({"run_handle": next_handle}))
+                    finally:
+                        resume.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(task, 5)
+                    self.assertEqual(self.callback_state(handle), state)
+                    again = await self.finalize(self.request(payload))
+                    self.assertEqual(again["status"], 200 if state == "finalized" else 502)
+                    self.assertEqual(dispatched, ["prompt-1", "next-prompt"])
+                await self.release(self.request({"run_handle": handle}))
+
+    async def test_finalize_cancelled_while_executor_queued_retains_work_and_followup(self):
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        submitted = {2: asyncio.Event(), 3: asyncio.Event()}
+        resume = threading.Event()
+
+        class NotifyingExecutor(ThreadPoolExecutor):
+            def __init__(self):
+                super().__init__(max_workers=1)
+                self.submissions = 0
+
+            def submit(self, *args, **kwargs):
+                result = super().submit(*args, **kwargs)
+                self.submissions += 1
+                if self.submissions in submitted:
+                    submitted[self.submissions].set()
+                return result
+
+        loop.set_default_executor(NotifyingExecutor())
+
+        def occupy_executor():
+            loop.call_soon_threadsafe(entered.set)
+            self.assertTrue(resume.wait(5), "executor blocker was not released")
+
+        blocker = loop.run_in_executor(None, occupy_executor)
+        await asyncio.wait_for(entered.wait(), 5)
+        handle, payload = self.callback_run(self.callbacks.CALLBACK_FAILURE_STOP)
+        next_handle, next_payload = self.callback_run(self.callbacks.CALLBACK_FAILURE_STOP, "next-prompt")
+        dispatched = []
+        with mock.patch.object(self.routes, "dispatch_callback", side_effect=lambda _config, values, *_args, **_kwargs: dispatched.append(values["prompt_id"])):
+            task = asyncio.create_task(self.finalize(self.request(payload)))
+            try:
+                await asyncio.wait_for(submitted[2].wait(), 5)
+                for _ in range(2):
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done())
+                self.assertEqual(self.callback_state(handle), "in_progress")
+                self.assertEqual(dispatched, [])
+                duplicate = await self.finalize(self.request(payload))
+                self.assertEqual(duplicate["status"], 202)
+                followup = asyncio.create_task(self.finalize(self.request(next_payload)))
+                await asyncio.wait_for(submitted[3].wait(), 5)
+                self.assertFalse(followup.done())
+            finally:
+                resume.set()
+                await asyncio.wait_for(blocker, 5)
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            self.assertEqual((await asyncio.wait_for(followup, 5))["payload"]["state"], "finalized")
+            self.assertEqual(dispatched, ["prompt-1", "next-prompt"])
+            self.assertEqual(self.callback_state(handle), "finalized")
+            self.assertEqual(self.callback_state(next_handle), "finalized")
+        await self.release(self.request({"run_handle": handle}))
+        await self.release(self.request({"run_handle": next_handle}))
 
 
 if __name__ == "__main__":

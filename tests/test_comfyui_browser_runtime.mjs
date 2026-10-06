@@ -258,6 +258,8 @@ window.__sceneSeedRuntimeTest = {
     },
     updateLLMExpand(node) { updateSceneExpandButton(node); },
     countStats(node) { return scenePromptStats(node); },
+    sourceKey(node) { return scenePromptSourceCacheKey(node); },
+    latentConfig(node) { return sceneEmptyLatentConfig(node); },
     countPreview(node) { return sceneSchedulePrefix(sceneScheduleForNode(node), 40).map(entry => entry.parts.join("")); },
     presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
@@ -1325,6 +1327,108 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(countPolicyRuntime.legacySources.source_node_name, 'legacy-title');
     assert.equal(countPolicyRuntime.apiFlag, false); assert.equal(countPolicyRuntime.total, 23);
     console.log('real ComfyUI Count path policy, cache refresh, native defaults/legacy/named migration, bypass, undo/redo, reload and Merge passed');
+    nativeRunChecks = true;
+    const primitivePlanRuntime = await page.evaluate(async () => {
+        const app = window.app, { api } = await import('/scripts/api.js'); app.graph.clear();
+        const add = type => { const node = window.LiteGraph.createNode(type); if (!node) throw new Error(`Missing ${type}`); app.graph.add(node); return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const link = (from, to, name, type = 'SCENE_PROMPT') => {
+            if (!to.inputs.some(input => input.name === name)) to.addInput(name, type, { widget: { name } });
+            const connected = from.connect(0, to, to.inputs.findIndex(input => input.name === name));
+            if (!connected) throw new Error(`Cannot connect ${from.type} to ${name}`);
+        };
+        const seed = add('ScenePrompter'), count = add('ScenePromptCounter'), downstream = add('ScenePromptCounter');
+        const latent = add('SceneEmptyLatent'), expand = add('ScenePrompterExpand');
+        const number = add('PrimitiveInt'), flag = add('PrimitiveBoolean'), batch = add('PrimitiveInt');
+        const width = add('PrimitiveInt'), height = add('PrimitiveInt');
+        field(count, 'count').value = 99; field(count, 'enable_downstream_count').value = true;
+        field(downstream, 'count').value = 5; field(latent, 'batch_size').value = 99;
+        field(number, 'value').value = 3; field(flag, 'value').value = false; field(batch, 'value').value = 4;
+        field(width, 'value').value = 768; field(height, 'value').value = 640;
+        link(seed, count, 'scene_prompt'); link(count, downstream, 'scene_prompt'); link(downstream, latent, 'scene_prompt'); link(latent, expand, 'scene_prompt');
+        link(number, count, 'count', 'INT'); link(flag, count, 'enable_downstream_count', 'BOOLEAN');
+        link(batch, latent, 'batch_size', 'INT'); link(width, latent, 'width', 'INT'); link(height, latent, 'height', 'INT');
+        const ids = Object.fromEntries(Object.entries({ count, latent, expand, number, flag, batch, width, height }).map(([name,node]) => [name,node.id]));
+        const current = name => app.graph.getNodeById(ids[name]);
+        const edit = (name, value) => { const widget = field(current(name), 'value'); widget.value = value; widget.callback?.(value); };
+        const snapshot = async () => {
+            app.graph.setDirtyCanvas(true, true); app.canvas.draw(true, true);
+            await new Promise(done => setTimeout(done, 250));
+            app.canvas.draw(true, true);
+            const stats = window.__sceneSeedRuntimeTest.countStats(current('latent'));
+            const prompt = await app.graphToPrompt();
+            const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST', body: JSON.stringify({
+                api_graph: prompt, workflow: prompt.workflow, expand_node_id: String(ids.expand),
+            }) });
+            const prepared = await response.json(); if (!response.ok) throw new Error(JSON.stringify(prepared));
+            await api.fetchApi('/scene_prompt/runs/release', { method: 'POST', body: JSON.stringify({ run_handle: prepared.run_handle }) });
+            return { total: stats.total, images: stats.totalImages, error: stats.error,
+                displayed: current('expand').widgets.find(widget => widget.sceneRole === 'expand_total_count')?.sceneTotalCount,
+                config: window.__sceneSeedRuntimeTest.latentConfig(current('latent')),
+                prepared: { total: prepared.total_batches, images: prepared.total_images },
+                key: window.__sceneSeedRuntimeTest.sourceKey(current('latent')), inputs: prompt.output[String(ids.count)]?.inputs || {} };
+        };
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        const off = await snapshot(); edit('flag', true); const on = await snapshot();
+        edit('number', 2); edit('batch', 5); edit('width', 640); edit('height', 768); const edited = await snapshot();
+        const boolReroute = add('Reroute'), batchReroute = add('Reroute');
+        link(current('flag'), boolReroute, boolReroute.inputs[0].name, 'BOOLEAN');
+        link(boolReroute, current('count'), 'enable_downstream_count', 'BOOLEAN');
+        link(current('batch'), batchReroute, batchReroute.inputs[0].name, 'INT');
+        link(batchReroute, current('latent'), 'batch_size', 'INT');
+        edit('flag', false); const rerouted = await snapshot();
+        app.canvas.deselectAllNodes(); app.canvas.selectNode(current('count'));
+        await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass'); const bypassed = await snapshot();
+        await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass'); const resumed = await snapshot();
+        const workflow = app.graph.serialize(); await app.loadGraphData(workflow, true, true); const reloaded = await snapshot();
+        return { off, on, edited, rerouted, bypassed, resumed, reloaded };
+    });
+    nativeRunChecks = false;
+    for (const [name, total, images] of [['off',3,12], ['on',15,60], ['edited',10,50], ['rerouted',2,10], ['bypassed',5,25], ['resumed',2,10], ['reloaded',2,10]]) {
+        const result = primitivePlanRuntime[name];
+        assert.equal(result.error, undefined, JSON.stringify(primitivePlanRuntime));
+        assert.equal(result.total, total, name); assert.equal(result.images, images, name);
+        assert.equal(result.displayed, total, `${name} native canvas count`);
+        assert.deepEqual(result.prepared, { total, images }, `${name} frontend/backend parity`);
+    }
+    assert.deepEqual(primitivePlanRuntime.off.config, { width: 768, height: 640, batch_size: 4 });
+    assert.deepEqual(primitivePlanRuntime.reloaded.config, { width: 640, height: 768, batch_size: 5 });
+    assert.notEqual(primitivePlanRuntime.off.key, primitivePlanRuntime.on.key);
+    assert.notEqual(primitivePlanRuntime.on.key, primitivePlanRuntime.edited.key);
+    assert(Array.isArray(primitivePlanRuntime.off.inputs.count));
+    assert(Array.isArray(primitivePlanRuntime.off.inputs.enable_downstream_count));
+    console.log('real ComfyUI Primitive Count/Boolean/latent dimensions and batch edits, Reroute, native bypass/reload, visible canvas and backend plan parity passed');
+    const nativeLineageMeasurements = await page.evaluate(async () => {
+        const app = window.app, measurements = [];
+        for (const depth of [2, 4, 8]) {
+            app.graph.clear();
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            let root = add('ScenePrompter');
+            for (let index = 0; index < depth; index++) {
+                const merge = add('ScenePrompterMerge');
+                root.connect(0, merge, merge.inputs.findIndex(input => input.name === 'scene_prompt1'));
+                root.connect(0, merge, merge.inputs.findIndex(input => input.name === 'scene_prompt2'));
+                root = merge;
+            }
+            const rootId = root.id;
+            await app.loadGraphData(app.graph.serialize(), true, true);
+            await new Promise(done => setTimeout(done, 300));
+            root = app.graph.getNodeById(rootId);
+            const key = window.__sceneSeedRuntimeTest.sourceKey(root), stats = window.__sceneSeedRuntimeTest.countStats(root);
+            const start = performance.now();
+            for (let draw = 0; draw < 100; draw++) window.__sceneSeedRuntimeTest.countStats(root);
+            const warm100ms = performance.now() - start;
+            app.canvas.draw(true, true);
+            measurements.push({ nodes: app.graph._nodes.length, edges: depth * 2, chars: key.length,
+                descriptors: JSON.parse(key).length, total: stats.total, warm100ms });
+        }
+        return measurements;
+    });
+    for (const result of nativeLineageMeasurements) {
+        assert.equal(result.descriptors, result.nodes); assert.equal(result.total, 1);
+        assert(result.chars < result.nodes * 500, JSON.stringify(nativeLineageMeasurements));
+    }
+    console.log('real ComfyUI shared Merge load, redraw and warm count measurements', JSON.stringify(nativeLineageMeasurements));
     const executionRequestsBefore = { prompts: seedRequests.length, runs: runRequests.length, resources: resourceRequests.length };
     const llmRuntime = await page.evaluate(async () => {
         const app = window.app;
