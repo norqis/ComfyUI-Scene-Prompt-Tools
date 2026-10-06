@@ -58,6 +58,23 @@ const cached = context.buildSceneBatchCachedPrompt(prompt, 'e');
 for (const id of ['e', 't', 't2']) assert.equal(cached.output[id].inputs.scene_prompt, undefined);
 for (const id of ['a', 'b', 'p']) assert.equal(cached.output[id], undefined, 'unused plan ancestor is pruned');
 assert.ok(prompt.output.a, 'original snapshot remains available for PNG metadata');
+const switchPrompt = { output: {
+    input: { class_type: 'ScenePresetInput', inputs: { switch_values: Array(10).fill(true) } },
+    selected: { class_type: 'ScenePromptDelete', inputs: {} },
+    unselected: { class_type: 'SceneMatrix', inputs: {} },
+    gate: { class_type: 'ComfySwitchNode', inputs: { switch: ['input', 3], on_true: ['selected', 0], on_false: ['unselected', 0] } },
+    expand: { class_type: 'ScenePrompterExpand', inputs: { scene_prompt: ['gate', 0] } },
+    imageA: { class_type: 'EmptyImage', inputs: {} }, imageB: { class_type: 'EmptyImage', inputs: {} },
+    imageGate: { class_type: 'ComfySwitchNode', inputs: { switch: false, on_true: ['imageA', 0], on_false: ['imageB', 0] } },
+    sink: { class_type: 'SaveImage', inputs: { images: ['imageGate', 0], positive: ['expand', 0] } },
+} };
+const cachedSwitch = context.buildSceneBatchCachedPrompt(switchPrompt, 'expand');
+for (const id of ['input', 'selected', 'unselected', 'gate']) assert.equal(cachedSwitch.output[id], undefined,
+    'cached plan prunes only the Scene Switch and its now-unused Scene dependencies');
+for (const id of ['imageA', 'imageB', 'imageGate', 'sink', 'expand']) assert.ok(cachedSwitch.output[id]);
+for (const literal of [Array(10).fill(true), [true, 0], ['node', false], ['node', -1], ['node', 0, 1]])
+    assert.equal(context.scenePromptInputSourceId(literal), '', 'literal vectors and malformed links never become dependencies');
+assert.equal(context.scenePromptInputSourceId(['node', 11]), 'node');
 async function checkContinuous() {
     context.sceneBatchRun = { nodeId: 'e', runId: 'batch', nextIndex: 0, currentSeed: 300, firstPromptSnapshot: prompt };
     await context.queueSingleScenePrompt();

@@ -179,9 +179,21 @@ Scene Preset Input -> Scene Prompt / Matrix / Queue / Merge / Count / Reverse / 
 
 One editor workflow can contain several independent Preset branches. Set a Preset ID and name on the Output for the branch you want, then click **保存 (Save)**. Saving keeps only that Output's connected upstream branch; unrelated nodes and other Preset branches are not included.
 
-Each saved Preset requires one connected Input and one connected Output. Only Scene planning nodes and nested **Scene Preset Reference** nodes are accepted inside it; image-generation and image-saving nodes are not accepted.
+Each saved Preset requires one connected Input and one connected Output. Scene planning nodes, nested **Scene Preset Reference** nodes, the standard **If/Else Switch** on Scene paths, and its supported Boolean controls are accepted inside it; image-generation and image-saving nodes are not accepted.
 
 In a regular workflow, add **Scene Preset Reference**, choose the saved Preset, and connect its `scene_prompt` output to the next Scene node or to Scene Prompt Expand. Its **Preset編集 (Preset Edit)** button opens the saved fragment in a new workflow tab.
+
+### Named switches and nested Presets (v0.11.0)
+
+Use ComfyUI's standard **If/Else Switch** (Japanese **スイッチ**, marked BETA) to choose a Scene path. Connect the path with the optional Prompt, Matrix or LoRA to **on_true**, and its original upstream Scene to **on_false** to bypass that addition when false. Both sides should supply a Scene plan. Expand's plan, counts and connected-resource information follow the selected Scene side.
+
+**Scene Preset Input** provides ten Boolean outputs and one **スイッチ一式** output in addition to its existing `scene_prompt`. Open **スイッチ名設定** to name each switch. Names appear on its output sockets and in Reference settings; changing a name does not change the connection or its number. The ten output positions remain fixed.
+
+On **Scene Preset Reference**, open **スイッチ設定** above **Preset編集**. Each destination switch can be ON, OFF, or use any incoming switch 1–10. For example, destination 3 can use incoming 1, and several destinations can use that same incoming value. Destination labels come from the selected Preset; incoming labels describe the connected source. A missing incoming bundle supplies OFF values. New or legacy settings forward matching incoming numbers until changed.
+
+To pass settings into a nested Preset, connect the parent's Input **スイッチ一式** output to the child's Reference **スイッチ一式** input. This carries all ten values through one wire. The child's settings decide which values to use; its Input then exposes those resolved values for switches or another nested Reference. There is no implicit inheritance without this connection, and changing a child does not change its parent or sibling references. Continuous generation retains the settings captured when that run starts.
+
+ComfyUI's **Scene Prompt Tools** settings category contains both GPU options and Undo history. Updating preserves existing saved setting values.
 
 ## Per-scene models and LoRAs
 
@@ -311,7 +323,7 @@ Check the current user's `scene_prompt_tools/data` directory. The file name must
 
 **A saved Preset cannot run**
 
-Open it with **Preset編集 (Preset Edit)** and confirm one connected Scene Preset Input and Scene Preset Output. Allow Scene planning nodes and nested Scene Preset Reference nodes inside the saved fragment.
+Open it with **Preset編集 (Preset Edit)** and confirm one connected Scene Preset Input and Scene Preset Output. Use the supported Scene planning nodes, nested references and standard Scene switches inside the saved fragment.
 
 ## Development
 

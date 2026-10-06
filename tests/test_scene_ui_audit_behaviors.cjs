@@ -58,6 +58,7 @@ const previewContext = {
         return result;
     },
 };
+require("./scene_switches_test_context.cjs").install(previewContext);
 vm.createContext(previewContext);
 vm.runInContext(functionSource("nodeClassName"), previewContext);
 vm.runInContext(functionSource("scenePromptPreviewEntries"), previewContext);
@@ -83,6 +84,7 @@ assert.equal(
     "Callback can start a Scene plan without a scene_prompt input",
 );
 const mergeContext = { Array, Number, Math, sceneStatNumber(value) { return Number(value || 0); }, mergeScenePromptRows() { return {}; } };
+require("./scene_switches_test_context.cjs").install(mergeContext);
 vm.createContext(mergeContext);
 for (const name of ["mergeScenePromptEntryPair", "mergeScenePromptEntryLists"]) vm.runInContext(functionSource(name), mergeContext);
 assert.deepEqual(JSON.parse(JSON.stringify(mergeContext.mergeScenePromptEntryLists([{ count: 1 }], []))), [], "the real Merge helper treats a connected empty input as empty");
@@ -90,6 +92,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(mergeContext.mergeScenePromptEntryLis
 const displayContext = {
     Math, JSON,
     scenePromptQueueDisplayCacheKey() { return "cache"; },
+    scenePromptQueueRowsCacheKey() { return "rows"; },
     scenePromptQueueRowEntries() { throw new Error("full rows must not be expanded"); },
     scenePromptStats() { return { rows: 1000000, total: 1000000, totalImages: 1000000, unsetBatches: 1000000 }; },
     sceneQueuePreviewRows() { return Array.from({ length: 160 }, () => ({ parts: ["p"] })); },
@@ -101,6 +104,7 @@ const displayContext = {
     SCENE_COMPACT_WIDGET_HEIGHT: 18,
     app: { graph: { setDirtyCanvas() {} }, canvas: { setDirty() {} } },
 };
+require("./scene_switches_test_context.cjs").install(displayContext);
 vm.createContext(displayContext);
 for (const name of ["computeScenePromptQueueDisplayCache", "refreshScenePromptQueueNode"]) vm.runInContext(functionSource(name), displayContext);
 const queueNode = { size: [360, 100], setDirtyCanvas() {} };
@@ -125,6 +129,7 @@ const saveContext = {
     },
     app: { graph: { setDirtyCanvas() {} }, canvas: { setDirty() {} } },
 };
+require("./scene_switches_test_context.cjs").install(saveContext);
 vm.createContext(saveContext);
 vm.runInContext(functionSource("appendSceneSavePreview"), saveContext);
 const saveNode = { type: "SceneSaveImage", imgs: [], size: [100, 100], setDirtyCanvas() {} };
@@ -148,6 +153,7 @@ const dragContext = {
         removeEventListener(name, listener) { if (documentListeners.get(name) === listener) documentListeners.delete(name); },
     },
 };
+require("./scene_switches_test_context.cjs").install(dragContext);
 vm.createContext(dragContext);
 vm.runInContext(functionSource("makePopupDraggable"), dragContext);
 const handleListeners = new Map();
@@ -178,6 +184,7 @@ const expandContext = {
     installSceneEmptyLatentWidgetSyncHandlers() {}, installScenePromptReverseWidgetSyncHandlers() {},
     hideSceneUtilityWidgets() {}, scheduleHideInternalDomWidgets() {}, refreshSceneExpandNode() {},
 };
+require("./scene_switches_test_context.cjs").install(expandContext);
 vm.createContext(expandContext);
 for (const name of ["removeInternalInputSockets", "syncInputLinkTargetSlots", "attachSceneUtilityNode"]) {
     vm.runInContext(functionSource(name), expandContext);
@@ -235,6 +242,7 @@ const applyModelContext = {
     installSceneEmptyLatentWidgetSyncHandlers() {}, installScenePromptReverseWidgetSyncHandlers() {},
     hideSceneUtilityWidgets() {}, scheduleHideInternalDomWidgets() {},
 };
+require("./scene_switches_test_context.cjs").install(applyModelContext);
 vm.createContext(applyModelContext);
 for (const name of ["syncInputLinkTargetSlots", "moveScenePromptInputFirst", "attachSceneUtilityNode"]) {
     vm.runInContext(functionSource(name), applyModelContext);

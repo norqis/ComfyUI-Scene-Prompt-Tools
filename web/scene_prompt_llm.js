@@ -14,7 +14,8 @@ export function collectLLMTargets(graph, root, { presetTargets } = {}) {
         seen.add(node);
         if (Number(node.mode) === 2) return;
         for (const input of node.inputs || []) {
-            if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/.test(input.name || "") || className(node) === "Reroute")) continue;
+            if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/.test(input.name || "") || className(node) === "Reroute"
+                || (className(node) === "ComfySwitchNode" && ["on_true", "on_false"].includes(input.name)))) continue;
             const link = graph.links?.[input.link];
             if (link) visit(graph.getNodeById(link.origin_id));
         }
@@ -36,7 +37,8 @@ export function hasLLMTargets(graph, root, presetHasTargets) {
             if (className(node) === "ScenePresetReference" && presetHasTargets?.(node)) return true;
         }
         return (node.inputs || []).some((input) => {
-            if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/.test(input.name || "") || className(node) === "Reroute")) return false;
+            if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/.test(input.name || "") || className(node) === "Reroute"
+                || (className(node) === "ComfySwitchNode" && ["on_true", "on_false"].includes(input.name)))) return false;
             const link = graph.links?.[input.link];
             return link ? visit(graph.getNodeById(link.origin_id)) : false;
         });
@@ -69,7 +71,8 @@ function routeRecords(graph, root, anchor) {
         let reaches = node === anchor;
         if (!reaches && Number(node.mode) !== 2) {
             for (const [slot, input] of (node.inputs || []).entries()) {
-                if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/.test(input.name || "") || className(node) === "Reroute")) continue;
+                if (!(input.type === "SCENE_PROMPT" || /^scene_prompt\d*$/.test(input.name || "") || className(node) === "Reroute"
+                    || (className(node) === "ComfySwitchNode" && ["on_true", "on_false"].includes(input.name)))) continue;
                 const link = graph.links?.[input.link];
                 if (link && visit(graph.getNodeById(link.origin_id))) {
                     edges.push({ slot, input, id: input.link, endpoints: [link.origin_id, link.origin_slot, link.target_id, link.target_slot] });

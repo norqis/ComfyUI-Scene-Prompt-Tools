@@ -20,6 +20,15 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _switch_prompt_inputs(label, scene_prompt=None):
+    inputs = {"prompt_name": label, "positive_base": label, "negative_base": "",
+              "positive_json": '{"version":1,"categories":{}}', "negative_json": '{"version":1,"categories":{}}',
+              "category_order": "", "seed": 0, "randomize": False}
+    if scene_prompt is not None:
+        inputs["scene_prompt"] = scene_prompt
+    return inputs
+
+
 def _comfyui_source():
     if os.environ.get("RUN_REAL_COMFYUI_SMOKE") != "1":
         raise unittest.SkipTest("The real ComfyUI smoke test runs only when explicitly requested.")
@@ -333,6 +342,204 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertNotIn("ScenePromptExpand", self.package.NODE_CLASS_MAPPINGS)
         self.assertNotIn("ScenePromptQueue", self.package.NODE_CLASS_MAPPINGS)
         self.assertNotIn("ScenePromptMerge", self.package.NODE_CLASS_MAPPINGS)
+
+    def test_preset_switch_native_slot_contract_and_default_payload(self):
+        input_type = self.package.NODE_CLASS_MAPPINGS["ScenePresetInput"]
+        reference_type = self.package.NODE_CLASS_MAPPINGS["ScenePresetReference"]
+        self.assertEqual(input_type.RETURN_TYPES, ("SCENE_PROMPT",) + ("BOOLEAN",) * 10 + ("SCENE_SWITCHES",))
+        self.assertEqual(input_type.RETURN_NAMES, ("scene_prompt",) + tuple(f"switch_{index}" for index in range(1, 11)) + ("switches",))
+        self.assertEqual(input_type.INPUT_TYPES()["optional"]["switch_names_json"][0], "STRING")
+        self.assertEqual(input_type.INPUT_TYPES()["optional"]["switch_values"][0], "SCENE_SWITCHES")
+        self.assertEqual(reference_type.INPUT_TYPES()["optional"]["switches"][0], "SCENE_SWITCHES")
+        self.assertEqual(reference_type.INPUT_TYPES()["optional"]["switch_settings_json"][0], "STRING")
+        defaults = input_type().build()
+        self.assertEqual(defaults[1:11], (False,) * 10)
+        self.assertEqual(tuple(defaults[11]), (False,) * 10)
+        values = (True, False, True, False, False, True, False, True, False, True)
+        named = input_type().build(switch_values=values, switch_names_json='["重複", "重複", "", "日本語"]')
+        self.assertEqual(named[1:11], values)
+        self.assertEqual(tuple(named[11]), values, "display names cannot alter effective runtime values")
+        transported = input_type().build(switch_values={"values": list(values)})
+        self.assertEqual(transported[1:11], values, "internal literal transport remains valid to ComfyUI's link validator")
+
+    def _execute_native_switch_graph(self, graph, executor=None, allowed_models=()):
+        import execution
+        import nodes as comfy_nodes
+        from comfy_extras.nodes_logic import SwitchNode
+        from comfy_extras.nodes_primitive import Boolean
+        from server import PromptServer
+
+        presets = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.presets"]
+        runs = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.runs"]
+        self._switch_received = []
+        self._switch_model_calls = []
+        owner = self
+
+        class Sink:
+            RETURN_TYPES = ()
+            FUNCTION = "receive"
+            OUTPUT_NODE = True
+
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"positive": ("STRING",), "scene_info": ("SCENE_SAVE_INFO",)}}
+
+            def receive(self, positive, scene_info):
+                owner._switch_received.append((positive, scene_info["total_count"]))
+                return ()
+
+        class NeverLoadModel:
+            RETURN_TYPES = ("MODEL", "CLIP", "VAE")
+            FUNCTION = "load"
+
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {}}
+
+            def load(self):
+                owner._switch_model_calls.append("model")
+                raise AssertionError("The unselected Scene switch branch must never load models")
+
+        class SelectedModel:
+            RETURN_TYPES = ("MODEL", "CLIP", "VAE")
+            FUNCTION = "load"
+
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"label": ("STRING",)}}
+
+            def load(self, label):
+                owner._switch_model_calls.append(label)
+                return "fixture-model", "fixture-clip", "fixture-vae"
+
+        mappings = {**self.package.NODE_CLASS_MAPPINGS, "ComfySwitchNode": SwitchNode, "PrimitiveBoolean": Boolean,
+                    "NativeSwitchSink": Sink, "NativeSwitchNeverModel": NeverLoadModel, "NativeSwitchSelectedModel": SelectedModel}
+        prompt = copy.deepcopy(graph)
+        handle = runs.create_run_context("default")
+        prompt_id = f"native-switch-{handle}"
+        try:
+            for node in prompt.values():
+                if node["class_type"] in {"ScenePrompter", "SceneMatrix", "ScenePresetReference", "ScenePrompterExpand", "ScenePromptToText"}:
+                    node["inputs"]["run_handle"] = handle
+            with mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, mappings):
+                prepared = presets.snapshot_presets_for_run(handle, {"output": prompt}, "expand")
+                self.assertEqual(self._switch_model_calls, [], "preflight never executes either model branch")
+                self.assertTrue(runs.claim_run_context(handle, "default", prompt_id))
+                valid, error, outputs, node_errors = asyncio.run(execution.validate_prompt(prompt_id, prompt, None))
+                self.assertTrue(valid, (error, node_errors))
+                if executor is None:
+                    executor = execution.PromptExecutor(PromptServer.instance, cache_type=execution.CacheType.CLASSIC,
+                        cache_args={"lru": 0, "ram": 0, "ram_inactive": 0})
+                executor.execute(prompt, prompt_id, {}, outputs)
+                self.assertTrue(executor.success, executor.status_messages)
+            self.assertTrue(set(self._switch_model_calls).issubset(allowed_models), self._switch_model_calls)
+            self.assertEqual(len(self._switch_received), 1)
+            return prepared, self._switch_received[0], executor
+        finally:
+            runs.release_run_context(handle, "default")
+            presets.release_scene_preset_snapshot(handle, "default")
+
+    def test_standard_switch_native_executor_literal_and_primitive_select_only_one_scene_branch(self):
+        prompt_type = self.package.NODE_CLASS_MAPPINGS["ScenePrompter"]
+        original_build = prompt_type.build
+        visited = []
+
+        def record_build(instance, *args, **kwargs):
+            visited.append(kwargs.get("positive_base", args[1] if len(args) > 1 else ""))
+            return original_build(instance, *args, **kwargs)
+
+        for primitive in (False, True):
+            executor = None
+            for selected in (False, True, False):
+                with self.subTest(primitive=primitive, selected=selected):
+                    graph = {
+                        "model_false": {"class_type": "NativeSwitchNeverModel", "inputs": {}},
+                        "model_true": {"class_type": "NativeSwitchNeverModel", "inputs": {}},
+                        "apply_false": {"class_type": "SceneApplyModel", "inputs": {"model": ["model_false", 0], "clip": ["model_false", 1], "vae": ["model_false", 2]}},
+                        "apply_true": {"class_type": "SceneApplyModel", "inputs": {"model": ["model_true", 0], "clip": ["model_true", 1], "vae": ["model_true", 2]}},
+                        "false": {"class_type": "ScenePrompter", "inputs": _switch_prompt_inputs("false_branch", ["apply_false", 0])},
+                        "true": {"class_type": "ScenePrompter", "inputs": _switch_prompt_inputs("true_branch", ["apply_true", 0])},
+                        "false_count": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["false", 0], "count": 2}},
+                        "true_count": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["true", 0], "count": 3}},
+                        "switch": {"class_type": "ComfySwitchNode", "inputs": {"switch": selected, "on_false": ["false_count", 0], "on_true": ["true_count", 0]}},
+                        "count": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["switch", 0], "count": 2}},
+                        "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["count", 0], "current_index": 0, "seed_base": 11, "run_id": "auto", "timestamp_dir": False}},
+                        "sink": {"class_type": "NativeSwitchSink", "inputs": {"positive": ["expand", 0], "scene_info": ["expand", 2]}},
+                    }
+                    selected_model = "true" if selected else "false"
+                    graph[f"model_{selected_model}"] = {"class_type": "NativeSwitchSelectedModel", "inputs": {"label": selected_model}}
+                    if primitive:
+                        graph["boolean"] = {"class_type": "PrimitiveBoolean", "inputs": {"value": selected}}
+                        graph["switch"]["inputs"]["switch"] = ["boolean", 0]
+                    visited.clear()
+                    with mock.patch.object(prompt_type, "build", record_build):
+                        prepared, received, executor = self._execute_native_switch_graph(graph, executor, (selected_model,))
+                    expected = "true_branch" if selected else "false_branch"
+                    self.assertEqual(prepared["total_batches"], 6 if selected else 4)
+                    self.assertEqual(received, (expected, 6 if selected else 4))
+                    self.assertIn(expected, visited)
+                    self.assertNotIn("false_branch" if selected else "true_branch", visited,
+                        "preflight and native lazy execution must never visit the other Scene branch")
+
+    def test_nested_mapped_switch_native_expansion_duplicate_reference_cache_and_no_inheritance(self):
+        presets = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.presets"]
+        leaf = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {"switch_names_json": '["入口", "同名", "同名"]'}},
+            "2": {"class_type": "ScenePrompter", "inputs": _switch_prompt_inputs("leaf_false", ["1", 0])},
+            "3": {"class_type": "ScenePrompter", "inputs": _switch_prompt_inputs("leaf_true", ["1", 0])},
+            "4": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 2}},
+            "5": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["3", 0], "count": 3}},
+            "6": {"class_type": "ComfySwitchNode", "inputs": {"switch": ["1", 3], "on_false": ["4", 0], "on_true": ["5", 0]}},
+            "7": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["6", 0]}},
+        }
+        middle = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "native-switch-leaf", "switches": ["1", 11],
+                "switch_settings_json": json.dumps([False, False, 1, False, False, False, False, False, False, False])}},
+            "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+        }
+        outer = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "native-switch-middle", "switches": ["1", 11],
+                "switch_settings_json": json.dumps([2, 1, 3, 4, 5, 6, 7, 8, 9, 10])}},
+            "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(presets, "preset_directory", return_value=Path(directory)):
+            for preset_id, nodes, output_id in (("native-switch-leaf", leaf, "7"), ("native-switch-middle", middle, "3"), ("native-switch-outer", outer, "3")):
+                presets.save_preset({"preset_id": preset_id, "name": preset_id, "output_node_id": output_id,
+                    "api_graph": {"output": nodes}, "workflow": {"nodes": []}})
+            graph = {
+                "1": {"class_type": "ScenePresetInput", "inputs": {"switch_values": {"values": [True, False, False, False, False, False, False, False, False, False]}}},
+                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "native-switch-outer", "switches": ["1", 11], "switch_settings_json": json.dumps([False] * 10)}},
+                "3": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "native-switch-outer", "switches": ["1", 11], "switch_settings_json": json.dumps([2, 1, 3, 4, 5, 6, 7, 8, 9, 10])}},
+                "4": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["2", 0], "scene_prompt2": ["3", 0]}},
+                "expand": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["4", 0], "current_index": 0, "seed_base": 9, "run_id": "auto", "timestamp_dir": False}},
+                "sink": {"class_type": "NativeSwitchSink", "inputs": {"positive": ["expand", 0], "scene_info": ["expand", 2]}},
+            }
+            executor = None
+            for settings, expected_rows in (([2, 1, 3, 4, 5, 6, 7, 8, 9, 10], ["leaf_false"] * 2 + ["leaf_true"] * 3),
+                                            ([False] * 10, ["leaf_false"] * 4),
+                                            ([2, 1, 3, 4, 5, 6, 7, 8, 9, 10], ["leaf_false"] * 2 + ["leaf_true"] * 3)):
+                graph["3"]["inputs"]["switch_settings_json"] = json.dumps(settings)
+                observed = []
+                for index in range(len(expected_rows)):
+                    graph["expand"]["inputs"]["current_index"] = index
+                    prepared, received, executor = self._execute_native_switch_graph(graph, executor)
+                    self.assertEqual(prepared["total_batches"], len(expected_rows))
+                    self.assertEqual(received[1], len(expected_rows))
+                    observed.append(received[0])
+                self.assertEqual(observed, expected_rows, "occurrence vectors and changed settings cannot bleed through a reused native cache")
+            disconnected = copy.deepcopy(middle)
+            disconnected["2"]["inputs"].pop("switches")
+            disconnected["2"]["inputs"]["scene_prompt"] = ["1", 0]
+            presets.save_preset({"preset_id": "native-switch-disconnected", "name": "disconnected", "output_node_id": "3",
+                "api_graph": {"output": disconnected}, "workflow": {"nodes": []}})
+            graph["2"]["inputs"].update(preset_id="native-switch-disconnected", switch_settings_json=json.dumps([True] * 10))
+            graph["4"]["inputs"].pop("scene_prompt2")
+            graph["expand"]["inputs"]["current_index"] = 0
+            prepared, received, _ = self._execute_native_switch_graph(graph, executor)
+            self.assertEqual(prepared["total_batches"], 2)
+            self.assertEqual(received, ("leaf_false", 2), "a disconnected child bundle has no implicit inheritance")
 
     def test_uses_real_comfyui_graph_builder_and_routes(self):
         from comfy_execution.graph_utils import GraphBuilder

@@ -112,7 +112,8 @@ export function preparePresetReference(reference, definitions) {
             if (!entry) return false;
             if (modes.get(nodeId) !== 4 && ((entry.class_type === "ScenePromptLLM" && (entry.has_llm_input === true || String(entry.inputs.description || "").trim()))
                 || (entry.class_type === "ScenePresetReference" && children.get(nodeId)?.scenePresetHasLLM))) return true;
-            return Object.entries(entry.inputs || {}).some(([name, value]) => /^scene_prompt\d*$/u.test(name)
+            return Object.entries(entry.inputs || {}).some(([name, value]) => (/^scene_prompt\d*$/u.test(name)
+                || (entry.class_type === "ComfySwitchNode" && ["on_true", "on_false"].includes(name)))
                 && Array.isArray(value) && hasLLM(String(value[0])));
         }
         const output = Object.entries(definition.api_graph.output).find(([, entry]) => entry.class_type === "ScenePresetOutput");
@@ -148,7 +149,8 @@ function reachablePresetOccurrences(prepared) {
             const entry = preset.api_graph.output[id];
             if (!entry) return;
             for (const [name, value] of Object.entries(entry.inputs || {}))
-                if (/^scene_prompt\d*$/u.test(name) && Array.isArray(value)) visit(String(value[0]));
+                if ((/^scene_prompt\d*$/u.test(name) || (entry.class_type === "ComfySwitchNode" && ["on_true", "on_false"].includes(name)))
+                    && Array.isArray(value)) visit(String(value[0]));
             if (entry.class_type === "ScenePresetReference" && modes.get(id) !== 4) {
                 const child = presetOccurrenceChild(preset, id);
                 if (child?.scenePresetHasLLM) visitPreset(child);
@@ -209,7 +211,7 @@ function compactDefinition(definition) {
         if (node.type !== "ScenePresetReference" || !executionReferences.has(String(node.id))
             || !(node.widgets_values_named?.llm_presets_json || node.widgets_values?.[2])) return node;
         const stripped = { ...node, widgets_values: [...(node.widgets_values || [])] };
-        writeWorkflowWidget(stripped, "llm_presets_json", "", ["preset_id", "run_handle", "llm_presets_json"]);
+        writeWorkflowWidget(stripped, "llm_presets_json", "", ["preset_id", "run_handle", "llm_presets_json", "switch_settings_json"]);
         return stripped;
     });
     // Strip before deep-copying so legacy nested JSON is never duplicated here.
@@ -242,7 +244,7 @@ export function presetEditorDefinition(reference, definitions) {
         const value = JSON.stringify({ version: 1, presets });
         entry.inputs.llm_presets_json = value;
         const workflowNode = root.workflow.nodes.find((node) => String(node.id) === nodeId);
-        if (workflowNode) writeWorkflowWidget(workflowNode, "llm_presets_json", value, ["preset_id", "run_handle", "llm_presets_json"]);
+        if (workflowNode) writeWorkflowWidget(workflowNode, "llm_presets_json", value, ["preset_id", "run_handle", "llm_presets_json", "switch_settings_json"]);
     }
     return root;
 }
@@ -280,7 +282,8 @@ export function createPresetGraph(definition, ownerGraph) {
         const input = target.inputs[targetSlot];
         if (input.link != null) graph.removeLink(input.link);
         const id = ++nextLink;
-        graph.links[id] = { id, origin_id: this.id, origin_slot: slot, target_id: target.id, target_slot: targetSlot, type: "SCENE_PROMPT" };
+        graph.links[id] = { id, origin_id: this.id, origin_slot: slot, target_id: target.id, target_slot: targetSlot,
+            type: this.outputs[slot]?.type || input.type };
         (this.outputs[slot].links ||= []).push(id);
         input.link = id;
         return graph.links[id];
@@ -328,8 +331,18 @@ export function createPresetGraph(definition, ownerGraph) {
             graph, connect, properties: copy(saved.properties || {}),
             widgets: scalarNames.map((name) => ({ name, value: Object.hasOwn(entry.inputs || {}, name)
                 ? entry.inputs[name] : (name === "generation_state_json" ? "{}" : "") })),
-            inputs: copy(saved.inputs || Object.keys(entry.inputs || {}).filter((name) => Array.isArray(entry.inputs[name])).map((name) => ({ name, type: "SCENE_PROMPT", link: null }))),
-            outputs: copy(saved.outputs || [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }]) };
+            inputs: copy(saved.inputs || Object.keys(entry.inputs || {}).filter((name) => Array.isArray(entry.inputs[name]) && entry.inputs[name].length === 2)
+                .map((name) => ({ name, type: name === "switch" ? "BOOLEAN" : name === "switches" ? "SCENE_SWITCHES" : "SCENE_PROMPT", link: null }))),
+            outputs: copy(saved.outputs || (entry.class_type === "ScenePresetInput"
+                ? [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] },
+                    ...Array.from({ length: 10 }, (_, index) => ({ name: `switch_${index + 1}`, type: "BOOLEAN", links: [] })),
+                    { name: "switches", type: "SCENE_SWITCHES", links: [] }]
+                : [{ name: "scene_prompt", type: entry.class_type === "PrimitiveBoolean" ? "BOOLEAN" : "SCENE_PROMPT", links: [] }])) };
+        if (entry.class_type === "ScenePresetInput") {
+            node.outputs = Array.from({ length: 12 }, (_, slot) => ({ ...node.outputs[slot],
+                name: slot === 0 ? "scene_prompt" : slot === 11 ? "switches" : `switch_${slot}`,
+                type: slot === 0 ? "SCENE_PROMPT" : slot === 11 ? "SCENE_SWITCHES" : "BOOLEAN", links: [] }));
+        }
         for (const input of node.inputs) input.link = null;
         for (const port of node.outputs) port.links = [];
         nodes.set(id, node);
@@ -347,10 +360,11 @@ export function createPresetGraph(definition, ownerGraph) {
             if (!source || slot === undefined) continue;
             const existing = endpointLinks.get(edgeKey(source.id, value[1], target.id, slot));
             const linkId = existing?.[0] ?? (hasPhysicalLinks ? `api:${++virtualLink}` : ++nextLink);
-            source.outputs[value[1]] ||= { name: "scene_prompt", type: "SCENE_PROMPT", links: [] };
+            source.outputs[value[1]] ||= { name: "scene_prompt", type: target.inputs[slot].type, links: [] };
             source.outputs[value[1]].links.push(linkId);
             target.inputs[slot].link = linkId;
-            graph.links[linkId] = { id: linkId, origin_id: source.id, origin_slot: value[1], target_id: target.id, target_slot: slot, type: "SCENE_PROMPT" };
+            graph.links[linkId] = { id: linkId, origin_id: source.id, origin_slot: value[1], target_id: target.id, target_slot: slot,
+                type: existing?.[5] || source.outputs[value[1]].type || target.inputs[slot].type };
         }
     }
     graph.spliceLoras = (oldTail, slot, chain) => {
@@ -400,12 +414,12 @@ export function createPresetGraph(definition, ownerGraph) {
             for (const input of node.inputs || []) {
                 const link = graph.links[input.link];
                 if (link) inputs[input.name] = [String(link.origin_id), link.origin_slot];
-                else if (Array.isArray(inputs[input.name])) delete inputs[input.name];
+                else if (Array.isArray(inputs[input.name]) && inputs[input.name].length === 2) delete inputs[input.name];
             }
             api[String(node.id)] = { ...(old || {}), class_type: node.comfyClass || node.type || node.class_type, inputs };
             if (old) {
                 const scalarNames = old.class_type === "ScenePresetReference"
-                    ? ["preset_id", "run_handle", "llm_presets_json"]
+                    ? ["preset_id", "run_handle", "llm_presets_json", "switch_settings_json"]
                     : Object.keys(old.inputs || {}).filter((name) => !Array.isArray(old.inputs[name]));
                 for (const widget of storedWidgets) {
                     if (widget.value === initialWidgets.get(widget)) continue;
@@ -455,7 +469,8 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
             const node = graph.getNodeById(id);
             if (!node || Number(node.mode) === 2) return;
             for (const input of node.inputs || []) {
-                if (!/^scene_prompt\d*$/u.test(input.name)) continue;
+                if (!/^scene_prompt\d*$/u.test(input.name)
+                    && !(node.class_type === "ComfySwitchNode" && ["on_true", "on_false"].includes(input.name))) continue;
                 const link = graph.links[input.link];
                 if (link) visit(String(link.origin_id));
             }

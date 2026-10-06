@@ -20,6 +20,7 @@ import comfy.model_management
 import folder_paths
 from comfy.cli_args import args
 from comfy_execution.graph_utils import GraphBuilder, is_link
+from .switches import selected_switch_input
 
 from .prompt import (
     DEFAULT_CATEGORY_ORDER,
@@ -790,16 +791,18 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
         return _prompt_ancestor_ids(prompt, target_id)
 
     included = set()
-    pending = [str(target_id)]
+    pending = [(str(target_id), False)]
     while pending:
-        node_id = pending.pop()
+        node_id, scene_dependency = pending.pop()
         if node_id in included:
             continue
         node = prompt.get(node_id)
         if not isinstance(node, dict):
             raise ValueError(f"Scene Save Image の生成経路を保存できません: ノード {node_id} の定義が不正です。")
         class_type = str(node.get("class_type") or "")
-        if class_type in SCENE_NODE_TYPES and node_id not in selected_scene_ids:
+        if class_type == "ComfySwitchNode" and scene_dependency:
+            continue
+        if class_type in SCENE_NODE_TYPES and class_type != "ScenePresetInput" and node_id not in selected_scene_ids:
             continue
         inputs = node.get("inputs", {})
         if not isinstance(inputs, dict):
@@ -812,12 +815,15 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
                     raise ValueError(
                         f"Scene Save Image の生成経路を保存できません: ノード {node_id} の入力 {input_name} が存在しないノード {source_id} を参照しています。"
                     )
-                pending.append(source_id)
+                is_scene_input = (class_type in SCENE_NODE_TYPES or class_type == "ScenePromptToText") and input_name in _scene_prompt_input_names(node)
+                pending.append((source_id, is_scene_input))
     return included
 
 
 def _scene_prompt_input_names(node):
     class_type = node.get("class_type") if isinstance(node, dict) else ""
+    if class_type == "ComfySwitchNode":
+        return ("on_false", "on_true")
     if class_type in {"ScenePrompterQueue", "ScenePromptRandomRouteOutput"}:
         return SCENE_PROMPT_INPUT_NAMES
     if class_type == "ScenePrompterMerge":
@@ -838,10 +844,10 @@ def _scene_prompt_input_links(prompt, node_id):
     )
 
 
-def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=()):
+def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=(), scene_consumer_ids=()):
     """Keep the row-order effective Apply Model while preserving Scene routes."""
     selected_order = list(dict.fromkeys(str(node_id) for node_id in selected_scene_ids if str(node_id).strip()))
-    selected = set(selected_order)
+    selected = set(selected_order) | set(protected_source_ids)
     if not isinstance(prompt, dict):
         return prompt, selected, {}
 
@@ -852,6 +858,54 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
     superseded = set(model_ids[:-1]) - set(protected_source_ids)
 
     replacements = {}
+
+    # An execution-path PNG contracts selected Scene switches. Removing just
+    # their other branch would leave core Switch's required input unconnected.
+    connected_switches, switch_choices, visited, pending = set(), {}, set(), [*selected, *scene_consumer_ids]
+    while pending:
+        current_id = pending.pop()
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+        current = prompt.get(current_id, {})
+        if current.get("class_type") == "ComfySwitchNode":
+            try:
+                names = (selected_switch_input(prompt, current),)
+            except ValueError:
+                continue
+            connected_switches.add(current_id)
+            switch_choices[current_id] = current.get("inputs", {}).get(names[0])
+        else:
+            if current.get("class_type") in SCENE_NODE_TYPES and current.get("class_type") != "ScenePresetInput" and current_id not in selected:
+                continue
+            names = _scene_prompt_input_names(current)
+        pending.extend(str(value[0]) for name in names
+                       for value in (current.get("inputs", {}).get(name),) if is_link(value))
+    switch_outputs = {}
+    for node_id, node in prompt.items():
+        if node_id not in connected_switches or node_id in switch_outputs:
+            continue
+        current_id, path, seen = node_id, [], set()
+        output = None
+        while current_id not in seen:
+            if current_id in switch_outputs:
+                output = switch_outputs[current_id]
+                break
+            seen.add(current_id)
+            current = prompt.get(current_id, {})
+            if current.get("class_type") != "ComfySwitchNode":
+                break
+            path.append(current_id)
+            link = switch_choices.get(current_id)
+            if not is_link(link):
+                break
+            current_id = str(link[0])
+            if current_id in selected or prompt.get(current_id, {}).get("class_type") == "ScenePresetInput" and link[1] == 0:
+                output = list(link)
+                break
+        for switch_id in path:
+            switch_outputs[switch_id] = output
+    replacements.update({node_id: link for node_id, link in switch_outputs.items() if link is not None})
 
     def upstream_link(node_id, seen=None):
         if node_id in replacements:
@@ -871,6 +925,13 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
 
     for node_id in superseded:
         upstream_link(node_id)
+
+    for node_id, replacement in list(replacements.items()):
+        seen = {node_id}
+        while replacement is not None and str(replacement[0]) in replacements and str(replacement[0]) not in seen:
+            seen.add(str(replacement[0]))
+            replacement = replacements[str(replacement[0])]
+        replacements[node_id] = replacement
 
     contracted = copy.deepcopy(prompt)
     for node_id, node in contracted.items():
@@ -1059,7 +1120,7 @@ def _metadata_for_save_mode(
         ]
         text_ids = {node_id for node_id, alias in source_aliases.items() if alias in text_source_ids}
         contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
-            expanded_prompt, selected_ids, text_ids,
+            expanded_prompt, selected_ids, text_ids, text_replay_items,
         )
         selected_ids.update(text_ids)
         contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements)
@@ -1093,7 +1154,7 @@ def _metadata_for_save_mode(
 
     selected_source_ids = _scene_source_id_list(scene_info)
     contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(
-        prompt, selected_source_ids, text_source_ids,
+        prompt, selected_source_ids, text_source_ids, text_replay_items,
     )
     selected_sources.update(text_source_ids)
     ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)

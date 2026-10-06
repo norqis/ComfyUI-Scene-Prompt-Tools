@@ -12,6 +12,7 @@ const assets = new Map([
     ["/extensions/scene-prompt/web/scene_prompt_style.js", "web/scene_prompt_style.js"],
     ["/extensions/scene-prompt/web/scene_prompt_llm.js", "web/scene_prompt_llm.js"],
     ["/extensions/scene-prompt/web/scene_prompt_gpu.js", "web/scene_prompt_gpu.js"],
+    ["/extensions/scene-prompt/web/scene_prompt_switches.js", "web/scene_prompt_switches.js"],
     ["/extensions/scene-prompt/web/scene_prompt_civitai.js", "web/scene_prompt_civitai.js"],
     ["/extensions/scene-prompt/web/scene_llm_presets.js", "web/scene_llm_presets.js"],
 ]);
@@ -350,6 +351,7 @@ const server = http.createServer(async (request, response) => {
                 + `  openCreatePromptPopup,\n`
                 + `  openSearchPopup, openPromptCandidatePopup, openCategoryLevelPicker, loadFavorites, setMatrixLineDraftContext,\n`
                 + `  attachMatrixTextAreaAutocomplete, readMatrixState,\n`
+                + `  openScenePresetSwitchNames, openScenePresetSwitchSettings, commitScenePresetSwitchJSON, refreshScenePresetSwitchLabels, applyScenePresetSwitchBindings,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset,\n`
@@ -707,6 +709,109 @@ async function checkProgressiveCandidates(browser, url) {
 
 await new Promise((resolveServer) => server.listen(0, "127.0.0.1", resolveServer));
 const address = server.address();
+async function checkPresetSwitchModals(browser, url) {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+    await page.goto(url); await page.waitForFunction(() => window.__scenePromptBrowserReady);
+    await page.evaluate(async () => {
+        const graph = window.app.graph;
+        const history = window.__switchHistory = { graphBefore: 0, graphAfter: 0, canvasBefore: 0, canvasAfter: 0 };
+        graph.beforeChange = () => history.graphBefore++;
+        graph.afterChange = () => history.graphAfter++;
+        window.app.canvas = { graph, emitBeforeChange() { history.canvasBefore++; }, emitAfterChange() { history.canvasAfter++; } };
+        class PresetNode {
+            constructor(type, id, values) {
+                this.id = id; this.type = type; this.comfyClass = type; this.graph = graph; this.properties = {};
+                this.pos = [10, 10]; this.size = [400, 300]; this.mode = 0;
+                this.widgets = Object.entries(values).map(([name, value]) => ({ name, value, type: "text", options: {} }));
+                this.widgets_values = this.widgets.map(widget => widget.value);
+                this.inputs = type === "ScenePresetInput" ? [{ name: "switch_values", type: "SCENE_SWITCHES", link: null }]
+                    : [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }, { name: "switches", type: "SCENE_SWITCHES", link: null }];
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                if (type === "ScenePresetInput") this.outputs.push(...Array.from({ length: 10 }, (_, i) => ({ name: `switch_${i + 1}`, type: "BOOLEAN", links: [] })), { name: "switches", type: "SCENE_SWITCHES", links: [] });
+            }
+            addWidget(type, name, value, callback, options) { const widget = { type, name, value, callback, options }; this.widgets.push(widget); return widget; }
+            setDirtyCanvas() {}
+            configure(data) {
+                this.widgets_values = data.widgets_values;
+                this.widgets.forEach((widget, i) => { if (data.widgets_values[i] !== undefined) widget.value = data.widgets_values[i]; });
+                if (data.outputs) this.outputs = structuredClone(data.outputs);
+            }
+            serialize() { return { id: this.id, type: this.type, widgets_values: this.widgets_values, outputs: structuredClone(this.outputs), properties: structuredClone(this.properties) }; }
+        }
+        class Input extends PresetNode { constructor(id = 810) { super("ScenePresetInput", id, { switch_names_json: "[]" }); } }
+        class Reference extends PresetNode { constructor(id = 811) { super("ScenePresetReference", id, { preset_id: "browser-preset", run_handle: "", llm_presets_json: "", switch_settings_json: "[]" }); } }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(Input, { name: "ScenePresetInput" });
+        await window.__scenePromptExtension.beforeRegisterNodeDef(Reference, { name: "ScenePresetReference" });
+        const input = window.__switchInput = new Input(), reference = window.__switchReference = new Reference();
+        graph._nodes.push(input, reference); input.onNodeCreated(); reference.onNodeCreated();
+        window.__switchNodeClasses = { Input, Reference };
+    });
+    await page.evaluate(() => window.__switchInput.widgets.find(widget => widget.sceneRole === "preset_switch_names").callback());
+    const names = page.locator('[data-scene-preset-switch-modal="names"]');
+    assert.equal(await names.locator("input").count(), 10);
+    await names.locator('[data-scene-switch-save="names"]').click();
+    assert.equal(await page.evaluate(() => window.__switchHistory.graphBefore), 0, "unchanged name defaults create no history");
+    await page.evaluate(() => window.__switchInput.widgets.find(widget => widget.sceneRole === "preset_switch_names").callback());
+    await names.locator('[data-scene-switch-index="1"]').fill("光");
+    await names.locator('[data-scene-switch-index="3"]').fill("光");
+    await names.locator('[data-scene-switch-save="names"]').click();
+    assert.deepEqual(await page.evaluate(() => window.__switchHistory), { graphBefore: 1, graphAfter: 1, canvasBefore: 1, canvasAfter: 1 });
+    assert.deepEqual(await page.evaluate(() => window.__switchInput.outputs.map(port => [port.name, port.type, port.label])), [
+        ["scene_prompt", "SCENE_PROMPT", undefined], ...Array.from({ length: 10 }, (_, i) => [`switch_${i + 1}`, "BOOLEAN", i === 0 || i === 2 ? "光" : `スイッチ${i + 1}`]), ["switches", "SCENE_SWITCHES", "スイッチ一式"],
+    ]);
+    await page.evaluate(() => {
+        const graph = window.app.graph, reference = window.__switchReference, input = window.__switchInput;
+        reference.scenePresetGraph = { api_graph: { output: { 1: { class_type: "ScenePresetInput", inputs: { switch_names_json: '["子", "", "子"]' } } } } };
+        graph.links = { 1: { id: 1, origin_id: input.id, origin_slot: 11, target_id: reference.id, target_slot: 1, type: "SCENE_SWITCHES" } };
+        reference.inputs[1].link = 1; input.outputs[11].links = [1];
+        reference.widgets.find(widget => widget.sceneRole === "preset_switch_settings").callback();
+    });
+    const settings = page.locator('[data-scene-preset-switch-modal="settings"]');
+    assert.equal(await settings.locator("select").count(), 10);
+    assert.equal(await settings.locator('[data-scene-switch-index="3"]').locator("..").textContent().then(text => text.startsWith("設定先 3: 子")), true);
+    assert.equal(await settings.locator('[data-scene-switch-index="3"] option[value="1"]').textContent(), "入力 1: 光");
+    await settings.locator('[data-scene-switch-save="settings"]').click();
+    assert.equal(await page.evaluate(() => window.__switchHistory.graphBefore), 1, "identity mapping is a no-op");
+    await page.evaluate(() => window.__switchReference.widgets.find(widget => widget.sceneRole === "preset_switch_settings").callback());
+    await settings.locator('[data-scene-switch-index="3"]').selectOption("1");
+    await settings.locator('[data-scene-switch-index="1"]').selectOption("true");
+    await settings.locator('[data-scene-switch-save="settings"]').click();
+    assert.deepEqual(await page.evaluate(() => JSON.parse(window.__switchReference.widgets.find(widget => widget.name === "switch_settings_json").value)), [true, 2, 1, 4, 5, 6, 7, 8, 9, 10]);
+    assert.deepEqual(await page.evaluate(() => window.__switchHistory), { graphBefore: 2, graphAfter: 2, canvasBefore: 2, canvasAfter: 2 });
+    const migrations = await page.evaluate(() => {
+        const { Input, Reference } = window.__switchNodeClasses;
+        const input = new Input(812); input.configure(window.__switchInput.serialize());
+        const old = new Reference(813); old.configure({ widgets_values: ["legacy", "handle", "{}", "Presetを選択", "Preset編集"] });
+        const legacyInput = new Input(814);
+        legacyInput.outputs[0].widget = { _node: legacyInput };
+        legacyInput.configure({ widgets_values: [], outputs: [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [42], preserved: "slot0 metadata" }] });
+        return { clonedName: input.outputs[1].label, clonedSlot: input.outputs[3].name, legacy: old.widgets.find(widget => widget.name === "switch_settings_json").value,
+            id: old.widgets.find(widget => widget.name === "preset_id").value, handle: old.widgets.find(widget => widget.name === "run_handle").value,
+            legacyInput: { count: legacyInput.outputs.length, slot0: JSON.parse(JSON.stringify(legacyInput.outputs[0])) },
+            settingsAboveEdit: window.__switchReference.widgets.findIndex(widget => widget.sceneRole === "preset_switch_settings") < window.__switchReference.widgets.findIndex(widget => widget.sceneRole === "scene_preset_edit") };
+    });
+    assert.deepEqual(migrations, { clonedName: "光", clonedSlot: "switch_3", legacy: "[]", id: "legacy", handle: "handle", settingsAboveEdit: true,
+        legacyInput: { count: 12, slot0: { name: "scene_prompt", type: "SCENE_PROMPT", links: [42], preserved: "slot0 metadata" } } });
+    await page.evaluate(() => {
+        const input = window.__switchInput, graph = window.app.graph;
+        window.__scenePromptPopupTestHooks.openScenePresetSwitchNames(input);
+        graph._nodes = graph._nodes.filter(node => node !== input);
+        const replacement = new window.__switchNodeClasses.Input(input.id); graph._nodes.push(replacement); window.__switchReplacement = replacement;
+    });
+    await names.locator('[data-scene-switch-index="1"]').fill("stale"); await names.locator('[data-scene-switch-save="names"]').click();
+    assert.deepEqual(await page.evaluate(() => [window.__switchReplacement.widgets[0].value, window.__switchInput.widgets[0].value, window.__switchHistory.graphBefore]), ["[]", JSON.stringify(["光", "", "光", "", "", "", "", "", "", ""]), 2]);
+    const binding = await page.evaluate(() => {
+        const graph = window.app.graph, input = window.__switchReplacement;
+        input.properties.scene_switch_values = Array.from({ length: 10 }, (_, i) => i === 2);
+        const payload = { output: { [input.id]: { class_type: "ScenePresetInput", inputs: {} } } };
+        return window.__scenePromptPopupTestHooks.applyScenePresetSwitchBindings(payload, graph).output[input.id].inputs.switch_values;
+    });
+    assert.deepEqual(binding, { values: Array.from({ length: 10 }, (_, i) => i === 2) });
+    assert.equal(await page.evaluate(() => window.__scenePromptExtension.settings.every(setting => setting.category[0] === "Scene Prompt Tools")), true);
+    await page.close();
+    console.log("Chromium Preset switch names/mapping, source/target labels, no-op/history balance, stale owner, legacy migration and replay binding passed.");
+}
+
 const browser = await chromium.launch({ headless: true });
 try {
     const page = await browser.newPage();
@@ -2837,6 +2942,7 @@ try {
     await page.evaluate(() => { window.app.graphToPrompt = window.__originalResourceGraphToPrompt; });
     await checkFavorites(browser, `http://127.0.0.1:${address.port}/`);
     await checkProgressiveCandidates(browser, `http://127.0.0.1:${address.port}/`);
+    await checkPresetSwitchModals(browser, `http://127.0.0.1:${address.port}/`);
     await page.evaluate(async () => {
         class RandomNode {
             constructor() {

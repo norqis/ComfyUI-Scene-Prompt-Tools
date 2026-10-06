@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import vm from "node:vm";
+import * as switches from "../web/scene_prompt_switches.js";
 import { preparePresetReference, presetOccurrenceChild, collectPresetLLMTargets,
     presetEditorDefinition, parsePresetOverrides, hydratePresetReference, presetReferenceHasLLM, createPresetOperation, createPresetGraph } from "../web/scene_llm_presets.js";
 import { insertLoras } from "../web/scene_prompt_llm.js";
@@ -71,7 +72,7 @@ function uiFunction(name) {
     }
     throw new Error(`Missing function ${name}`);
 }
-const statsContext = vm.createContext({ Map, Set, Number, Object, String,
+const statsContext = vm.createContext({ ...switches, Map, Set, Number, Object, String,
     scenePresetDisplayGraphs: definitions, SCENE_PROMPT_QUEUE_INPUT_COUNT: 10,
     clampSceneCount: (value, fallback) => Number(value) || fallback });
 for (const name of ["scenePresetGraphNodes", "apiLink", "apiInput", "scenePresetStats", "emptyScenePromptStats",
