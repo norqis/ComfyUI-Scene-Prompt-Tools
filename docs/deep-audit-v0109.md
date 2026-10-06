@@ -40,8 +40,6 @@ Baseline Python: 656 tests pass (two native opt-ins skipped); all frontend suite
 
 Local Comfy sd1_clip.token_weights explicitly replaces an outer weight when a nested token has an explicit inner weight. Therefore multiplying nested explicit weights during duplicate selection would be incorrect; no speculative change is planned. Filename recovery without Scene metadata uses documented five-digit placement and can be ambiguous next to user numeric text; do not change its regex in a way that breaks existing numeric-prefix/suffix compatibility. Normal allocation persists counters and supports six-plus digits.
 
-## Release gates
-
 ## Additional root reproduction: HTML import loses case-colliding categories
 
 On Windows, importing Room/View and room/View reports two files/two entries but creates one prompt.json containing only the second entry. _output_payloads detects sanitized name collisions case-sensitively although the target filesystem aliases these names. The same problem affects subcategories. This is confirmed with synthetic temporary files; no user data was changed.
