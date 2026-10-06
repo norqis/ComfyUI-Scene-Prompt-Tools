@@ -266,6 +266,7 @@ const SCENE_NODE_DISPLAY_NAMES = {
 };
 
 let promptItems = null;
+const promptCatalogIndexes = new WeakMap();
 let savedPrompts = null;
 let promptItemsPromise = null;
 let savedPromptsPromise = null;
@@ -356,7 +357,7 @@ async function loadPromptItems(force = false) {
     }
     const generation = ++promptItemsRequestGeneration;
     let request = null;
-    const latest = () => promptItemsLatestPromise === request ? promptItems : promptItemsLatestPromise;
+    const latest = () => !promptItemsLatestPromise || promptItemsLatestPromise === request ? promptItems : promptItemsLatestPromise;
     request = (async () => {
         try {
             const response = await api.fetchApi(`/scene_prompt/items${force ? "?reload=1" : ""}`);
@@ -380,6 +381,7 @@ async function loadPromptItems(force = false) {
         return await request;
     } finally {
         if (promptItemsPromise === request) promptItemsPromise = null;
+        if (promptItemsLatestPromise === request) promptItemsLatestPromise = null;
     }
 }
 
@@ -392,7 +394,7 @@ async function loadSavedPrompts(force = false) {
     }
     const generation = ++savedPromptsRequestGeneration;
     let request = null;
-    const latest = () => savedPromptsLatestPromise === request ? savedPrompts : savedPromptsLatestPromise;
+    const latest = () => !savedPromptsLatestPromise || savedPromptsLatestPromise === request ? savedPrompts : savedPromptsLatestPromise;
     request = (async () => {
         try {
             const response = await api.fetchApi(`/scene_prompt/saved_prompts${force ? "?reload=1" : ""}`);
@@ -417,6 +419,7 @@ async function loadSavedPrompts(force = false) {
         return await request;
     } finally {
         if (savedPromptsPromise === request) savedPromptsPromise = null;
+        if (savedPromptsLatestPromise === request) savedPromptsLatestPromise = null;
     }
 }
 function clearSceneSelectedListLayoutCaches() {
@@ -743,11 +746,26 @@ function rememberPopupScroll(session, key, element) {
         return;
     }
     element.addEventListener("scroll", () => {
+        if (!element.isConnected) return;
+        if (element.scenePendingScrollRestore?.appliedTop === element.scrollTop) return;
+        element.scenePendingScrollRestore = null;
         session.scrollTops[key] = element.scrollTop;
     });
+    element.scenePendingScrollRestore = { top: session.scrollTops[key] || 0, appliedTop: element.scrollTop };
+    for (const event of ["wheel", "keydown", "pointerdown", "touchstart"]) {
+        element.addEventListener(event, () => { element.scenePendingScrollRestore = null; }, { passive: true });
+    }
     requestAnimationFrame(() => {
-        element.scrollTop = session.scrollTops[key] || 0;
+        if (element.isConnected) restorePopupScroll(element, !element.sceneListRender);
     });
+}
+
+function restorePopupScroll(element, complete = false) {
+    const pending = element.scenePendingScrollRestore;
+    if (!pending) return;
+    element.scrollTop = pending.top;
+    pending.appliedTop = element.scrollTop;
+    if (complete || element.scrollTop >= pending.top) element.scenePendingScrollRestore = null;
 }
 
 function resetPopupForm(session, formName) {
@@ -834,10 +852,11 @@ function writeState(node, state, options = {}) {
 }
 
 function itemPath(item) {
-    if (!Array.isArray(item.category_path)) {
+    const path = item.category_path;
+    if (!Array.isArray(path)) {
         return [];
     }
-    return item.category_path.map((part) => String(part).trim()).filter(Boolean);
+    return path.map((part) => String(part).trim()).filter(Boolean);
 }
 
 function pathKey(path) {
@@ -1460,15 +1479,71 @@ function pathSearchHaystack(path) {
 }
 
 function allCategoryPaths(items) {
-    const paths = new Map();
-    for (const item of items || []) {
+    return promptCatalogIndex(items).paths;
+}
+
+function catalogPathKey(path) {
+    return JSON.stringify(path);
+}
+
+function promptCatalogIndex(items) {
+    const cached = promptCatalogIndexes.get(items);
+    if (cached) return cached;
+    const rootKey = catalogPathKey([]);
+    const branches = new Map([[rootKey, { path: [], children: new Set(), items: [], total: 0 }]]);
+    const categories = new Set();
+    const byKey = new Map();
+    const fallback = new Map();
+    for (const item of items) {
         const path = itemPath(item);
-        for (let index = 1; index <= path.length; index += 1) {
-            const currentPath = path.slice(0, index);
-            paths.set(pathKey(currentPath), currentPath);
+        let parent = branches.get(rootKey);
+        parent.total += 1;
+        for (let depth = 1; depth <= path.length; depth += 1) {
+            const prefix = path.slice(0, depth);
+            const key = catalogPathKey(prefix);
+            let branch = branches.get(key);
+            if (!branch) {
+                branch = { path: prefix, children: new Set(), items: [], total: 0 };
+                branches.set(key, branch);
+            }
+            parent.children.add(path[depth - 1]);
+            branch.total += 1;
+            parent = branch;
+        }
+        parent.items.push(item);
+        const category = itemCategoryKey(item);
+        if (category) categories.add(category);
+        byKey.set(itemKey(item), item);
+        let labels = fallback.get(category);
+        if (!labels) fallback.set(category, labels = new Map());
+        let prompts = labels.get(item.label);
+        if (!prompts) labels.set(item.label, prompts = new Map());
+        // null retains the existing rejection of ambiguous legacy-ID matches.
+        prompts.set(item.prompt, prompts.has(item.prompt) ? null : item);
+    }
+    for (const branch of branches.values()) {
+        branch.children = [...branch.children].sort((a, b) => a.localeCompare(b, "ja"));
+    }
+    const paths = [...branches.values()].filter((branch) => branch.path.length).map((branch) => branch.path)
+        .sort((a, b) => displayPathLabel(a).localeCompare(displayPathLabel(b), "ja"));
+    const index = { branches, paths, categories, byKey, fallback };
+    promptCatalogIndexes.set(items, index);
+    return index;
+}
+
+function selectionPathCounts(state) {
+    const exact = new Map();
+    const branch = new Map();
+    for (const item of selectedItems(state)) {
+        const path = itemPath(item);
+        const key = catalogPathKey(path);
+        exact.set(key, (exact.get(key) || 0) + 1);
+        for (let depth = 0; depth <= path.length; depth += 1) {
+            const prefix = catalogPathKey(path.slice(0, depth));
+            branch.set(prefix, (branch.get(prefix) || 0) + 1);
         }
     }
-    return [...paths.values()].sort((left, right) => displayPathLabel(left).localeCompare(displayPathLabel(right), "ja"));
+    return { exact, branch };
 }
 
 function searchCategoryPaths(items, query, depth) {
@@ -1578,8 +1653,13 @@ function selectedKeys(state) {
     return new Set(selectedItems(state).map(itemKey));
 }
 
-function selectedItemMap(state) {
-    return new Map(selectedItems(state).map((item) => [itemKey(item), item]));
+function selectedItemMap(state, firstWins = false) {
+    const selected = new Map();
+    for (const item of selectedItems(state)) {
+        const key = itemKey(item);
+        if (!firstWins || !selected.has(key)) selected.set(key, item);
+    }
+    return selected;
 }
 
 function cloneSelectionState(state) {
@@ -1762,8 +1842,7 @@ function setSavedPromptChecked(node, savedPrompt, checked, options = {}) {
 }
 
 function pruneStateToData(node, state, items, options = {}) {
-    const validCategories = new Set(items.map(itemCategoryKey).filter(Boolean));
-    const currentItems = new Map(items.map((item) => [itemKey(item), item]));
+    const { categories: validCategories, byKey: currentItems, fallback } = promptCatalogIndex(items);
     let changed = false;
     const nextCategories = {};
 
@@ -1774,15 +1853,10 @@ function pruneStateToData(node, state, items, options = {}) {
         for (const item of selected || []) {
             let currentItem = currentItems.get(itemKey(item));
             if (!currentItem || itemCategoryKey(currentItem) !== category) {
-                const matchingItems = items.filter((candidate) => (
-                    itemCategoryKey(candidate) === category
-                    && candidate.label === item.label
-                    && candidate.prompt === item.prompt
-                ));
-                if (matchingItems.length !== 1) {
+                currentItem = fallback.get(category)?.get(item.label)?.get(item.prompt);
+                if (!currentItem) {
                     throw new Error(`選択済み候補「${item.label || item.prompt}」が候補データにありません。`);
                 }
-                currentItem = matchingItems[0];
             }
             const keptItem = itemForState(currentItem, item);
             kept.push(keptItem);
@@ -1821,58 +1895,39 @@ function pruneAllSelectionStatesToData(node, items) {
 }
 
 function getChildSegments(items, path) {
-    const names = new Set();
-    for (const item of items) {
-        const itemCategoryPath = itemPath(item);
-        if (itemCategoryPath.length > path.length && pathStartsWith(itemCategoryPath, path)) {
-            names.add(itemCategoryPath[path.length]);
-        }
-    }
-    return [...names].sort((a, b) => a.localeCompare(b, "ja"));
+    return promptCatalogIndex(items).branches.get(catalogPathKey(path))?.children || [];
 }
 
 function itemsForPath(items, path) {
-    return items.filter((item) => itemMatchesPath(item, path));
-}
-
-function branchItems(items, path) {
-    return items.filter((item) => itemStartsWithPath(item, path));
+    return promptCatalogIndex(items).branches.get(catalogPathKey(path))?.items || [];
 }
 
 function rootCategories(items) {
-    const categories = new Set();
-    for (const item of items || []) {
-        const path = itemPath(item);
-        if (path[0]) {
-            categories.add(stripCountSuffix(path[0]));
-        }
-    }
-    return [...categories].sort((a, b) => a.localeCompare(b, "ja"));
+    return [...new Set(getChildSegments(items, []).map(stripCountSuffix))].sort((a, b) => a.localeCompare(b, "ja"));
 }
 
 function subcategoriesFor(items, category) {
     const selectedCategory = stripCountSuffix(category);
     const subcategories = new Set();
-    for (const item of items || []) {
-        const path = itemPath(item);
-        if (stripCountSuffix(path[0]) === selectedCategory && path[1]) {
-            subcategories.add(stripCountSuffix(path[1]));
+    for (const root of getChildSegments(items, [])) {
+        if (stripCountSuffix(root) === selectedCategory) {
+            for (const child of getChildSegments(items, [root])) subcategories.add(stripCountSuffix(child));
         }
     }
     return [...subcategories].sort((a, b) => a.localeCompare(b, "ja"));
 }
 
-function countForPath(items, state, path) {
+function countForPath(items, state, path, counts = selectionPathCounts(state)) {
     return {
-        total: branchItems(items, path).length,
-        selected: selectedItems(state).filter((item) => itemStartsWithPath(item, path)).length,
+        total: promptCatalogIndex(items).branches.get(catalogPathKey(path))?.total || 0,
+        selected: counts.branch.get(catalogPathKey(path)) || 0,
     };
 }
 
-function countExactForPath(items, state, path) {
+function countExactForPath(items, state, path, counts = selectionPathCounts(state)) {
     return {
         total: itemsForPath(items, path).length,
-        selected: selectedItems(state).filter((item) => itemMatchesPath(item, path)).length,
+        selected: counts.exact.get(catalogPathKey(path)) || 0,
     };
 }
 
@@ -2130,6 +2185,7 @@ function readPopupSelectionState(node, stateWidgetName, data) {
 
 function closePopup(options = {}) {
     if (activePopup) {
+        cancelPopupRendering(activePopup);
         const closingContext = activePopupContext;
         const parent = activePopupContext?.parent || null;
         if (closingContext?.onClose && (!closingContext.secondary || options.discardPopupSession !== false)) {
@@ -2239,7 +2295,10 @@ function applyPopupRect(popup, rect) {
 }
 
 function fitPopupToContent(popup) {
-    requestAnimationFrame(() => {
+    if (popup.sceneFitFrame != null || !popup.isConnected) return;
+    popup.sceneFitFrame = requestAnimationFrame(() => {
+        popup.sceneFitFrame = null;
+        if (!popup.isConnected) return;
         const maxWidth = (window.innerWidth || 1280) - 24;
         const maxHeight = (window.innerHeight || 720) - 24;
         popup.classList.add("pc-fit-content");
@@ -2253,7 +2312,50 @@ function fitPopupToContent(popup) {
         const top = clamp(rect.top, 12, Math.max(12, (window.innerHeight || 720) - height - 12));
         popup.style.left = `${Math.round(left)}px`;
         popup.style.top = `${Math.round(top)}px`;
+        const list = popup.sceneListRender?.list;
+        if (list) restorePopupScroll(list);
     });
+}
+
+function cancelPopupListRender(popup) {
+    const task = popup.sceneListRender;
+    if (!task) return;
+    if (task.frame != null) cancelAnimationFrame(task.frame);
+    if (task.list.sceneListRender === task) task.list.sceneListRender = null;
+    popup.sceneListRender = null;
+}
+
+function cancelPopupRendering(popup) {
+    cancelPopupListRender(popup);
+    if (popup.sceneFitFrame != null) cancelAnimationFrame(popup.sceneFitFrame);
+    popup.sceneFitFrame = null;
+}
+
+function renderPopupListItems(popup, list, items, appendChunk) {
+    cancelPopupListRender(popup);
+    const task = { list, frame: null };
+    popup.sceneListRender = task;
+    list.sceneListRender = task;
+    let offset = 0;
+    const renderChunk = (size) => {
+        task.frame = null;
+        if (popup.sceneListRender !== task || list.sceneListRender !== task
+            || !popup.isConnected || !list.isConnected || !popup.contains(list)) {
+            if (popup.sceneListRender === task) cancelPopupListRender(popup);
+            return;
+        }
+        appendChunk(items.slice(offset, offset + size));
+        offset += size;
+        restorePopupScroll(list, offset >= items.length);
+        fitPopupToContent(popup);
+        if (offset < items.length) {
+            task.frame = requestAnimationFrame(() => renderChunk(64));
+        } else {
+            cancelPopupListRender(popup);
+        }
+    };
+    // Small leaves are immediate; broad searches yield before creating all rows.
+    renderChunk(items.length <= 64 ? 64 : 24);
 }
 
 function makePopupDraggable(node, popup, handle) {
@@ -2365,6 +2467,7 @@ function openPopupShell(node, titleText, options = {}) {
     if (!options.hideReload) {
         const reload = createButton("設定再読み込み");
         reload.addEventListener("click", async () => {
+            cancelPopupRendering(popup);
             setActiveStateWidget(node, stateWidgetName);
             promptItems = null;
             savedPrompts = null;
@@ -2376,7 +2479,7 @@ function openPopupShell(node, titleText, options = {}) {
             }
             setActiveStateWidget(node, stateWidgetName);
             refreshNode(node, { fitHeight: true });
-            activePopupContext?.reopen?.();
+            if (activePopupContext?.popup === popup) activePopupContext.reopen?.();
         });
         actions.appendChild(reload);
     }
@@ -2575,7 +2678,7 @@ function openPathFromSearch(node, items, path, options = {}) {
 
 function appendSearchPathRow(container, node, items, state, path, options = {}) {
     const stateWidgetName = popupStateWidgetName(node, options);
-    const counts = countForPath(items, state, path);
+    const counts = countForPath(items, state, path, options.pathCounts);
     const row = document.createElement("button");
     row.type = "button";
     row.className = "pc-button pc-search-path";
@@ -2783,7 +2886,7 @@ function appendCandidateRow(container, node, item, selected, onUpdate, options =
     const stateWidgetName = popupStateWidgetName(node, options);
     const showPath = !!options.showPath;
     const state = options.state || readStateFromWidget(node, stateWidgetName);
-    let selectedItem = selectedItemFor(state, item);
+    let selectedItem = options.selectedItems ? options.selectedItems.get(itemKey(item)) : selectedItemFor(state, item);
     const key = itemKey(item);
     const row = document.createElement("label");
     row.className = `pc-candidate ${selectedItem ? "pc-selected-item" : ""}`.trim();
@@ -3384,6 +3487,7 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
     }
     const children = getChildSegments(data, path);
     const directItems = itemsForPath(data, path);
+    const pathCounts = selectionPathCounts(state);
 
     if (!children.length && directItems.length) {
         openPromptCandidatePopup(node, path, navigationOptions);
@@ -3415,7 +3519,7 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
     }
 
     if (directItems.length && children.length) {
-        const directCounts = countExactForPath(data, state, path);
+        const directCounts = countExactForPath(data, state, path, pathCounts);
         const directCount = formatCategoryCount(directCounts);
         const direct = createButton(`この階層の候補 (${directCount})`);
         direct.classList.toggle("pc-on", !!directCounts.selected);
@@ -3445,7 +3549,7 @@ async function openCategoryLevelPicker(node, path = [], options = {}) {
 
     for (const segment of children) {
         const nextPath = [...path, segment];
-        const counts = countForPath(data, state, nextPath);
+        const counts = countForPath(data, state, nextPath, pathCounts);
         const countLabel = formatCategoryCount(counts);
         const option = createButton(`${stripCountSuffix(segment)} (${countLabel})`);
         option.classList.toggle("pc-on", !!counts.selected);
@@ -3587,16 +3691,16 @@ async function openPromptCandidatePopup(node, path, options = {}) {
     rememberPopupScroll(session, popupListScrollKey("candidates", path), list);
 
     const renderList = () => {
+        cancelPopupListRender(popup);
         const state = readPopupSelectionState(node, stateWidgetName, data);
         if (!state) {
             return;
         }
-        const selected = selectedKeys(state);
         const query = filter.value.trim().toLowerCase();
-        const candidates = data
-            .filter((item) => itemMatchesPath(item, path))
+        const candidates = itemsForPath(data, path)
             .filter((item) => !query || itemSearchHaystack(item).includes(query));
 
+        list.scenePendingScrollRestore ||= { top: list.scrollTop, appliedTop: list.scrollTop };
         list.innerHTML = "";
         if (path.length) {
             appendBackButton(list, "←戻る", () => openSearchNavigationBack(node, path, navigationOptions));
@@ -3606,18 +3710,23 @@ async function openPromptCandidatePopup(node, path, options = {}) {
             empty.className = "pc-empty";
             empty.textContent = "候補なし";
             list.appendChild(empty);
+            restorePopupScroll(list, true);
             fitPopupToContent(popup);
             return;
         }
 
-        for (const item of candidates) {
-            appendCandidateRow(list, node, item, selected, null, {
-                stateWidgetName,
-                state,
-                returnToCandidate: () => openPromptCandidatePopup(node, path, navigationOptions),
-            });
-        }
-        fitPopupToContent(popup);
+        renderPopupListItems(popup, list, candidates, (chunk) => {
+            const currentState = readStateFromWidget(node, stateWidgetName);
+            const selected = selectedItemMap(currentState, true);
+            for (const item of chunk) {
+                appendCandidateRow(list, node, item, null, null, {
+                    stateWidgetName,
+                    state: currentState,
+                    selectedItems: selected,
+                    returnToCandidate: () => openPromptCandidatePopup(node, path, navigationOptions),
+                });
+            }
+        });
     };
 
     filter.addEventListener("input", () => {
@@ -3809,11 +3918,11 @@ async function openSearchPopup(node, options = {}) {
     rememberPopupScroll(session, mode, list);
 
     const renderResults = () => {
+        cancelPopupListRender(popup);
         const state = readPopupSelectionState(node, stateWidgetName, data);
         if (!state) {
             return;
         }
-        const selected = selectedKeys(state);
         const query = input.value.trim().toLowerCase();
         const matchedCategories = query && !favorites ? searchCategoryPaths(data, query, 1) : [];
         const matchedSubcategories = query && !favorites ? searchCategoryPaths(data, query, 2) : [];
@@ -3823,12 +3932,14 @@ async function openSearchPopup(node, options = {}) {
         ));
 
         const scrollTop = list.scrollTop;
+        list.scenePendingScrollRestore ||= { top: scrollTop, appliedTop: scrollTop };
         list.innerHTML = "";
         if (!query && !favorites) {
             const empty = document.createElement("div");
             empty.className = "pc-empty";
             empty.textContent = "検索語を入力";
             list.appendChild(empty);
+            restorePopupScroll(list, true);
             fitPopupToContent(popup);
             return;
         }
@@ -3839,34 +3950,40 @@ async function openSearchPopup(node, options = {}) {
                 ? favoritesError ? "お気に入りを再読み込みしてください。" : "お気に入りを読み込み中です。"
                 : favorites && !query ? "お気に入りはありません。候補の☆から追加できます。" : "一致なし";
             list.appendChild(empty);
+            restorePopupScroll(list, true);
             fitPopupToContent(popup);
             return;
         }
-        if (matchedCategories.length) {
-            appendSearchHeading(list, "カテゴリ");
-        for (const path of matchedCategories) {
-            appendSearchPathRow(list, node, data, state, path, { stateWidgetName, popupSession: session });
+        const results = [];
+        for (const [heading, paths] of [["カテゴリ", matchedCategories], ["サブカテゴリ", matchedSubcategories]]) {
+            if (paths.length) results.push({ heading }, ...paths.map((path) => ({ path })));
         }
-        }
-        if (matchedSubcategories.length) {
-            appendSearchHeading(list, "サブカテゴリ");
-        for (const path of matchedSubcategories) {
-            appendSearchPathRow(list, node, data, state, path, { stateWidgetName, popupSession: session });
-        }
-        }
-        if (matchedItems.length) {
-            appendSearchHeading(list, "候補");
-        }
-        for (const item of matchedItems) {
-            appendCandidateRow(list, node, item, selected, null, {
-                showPath: true,
-                stateWidgetName,
-                state,
-                returnToCandidate: reopen,
-            });
-        }
-        fitPopupToContent(popup);
-        list.scrollTop = scrollTop;
+        if (matchedItems.length) results.push({ heading: "候補" });
+        for (const item of matchedItems) results.push({ item });
+        renderPopupListItems(popup, list, results, (chunk) => {
+            const currentState = readStateFromWidget(node, stateWidgetName);
+            const selected = selectedItemMap(currentState, true);
+            let pathCounts = null;
+            for (const result of chunk) {
+                if (result.heading) {
+                    appendSearchHeading(list, result.heading);
+                    continue;
+                }
+                if (result.path) {
+                    pathCounts ||= selectionPathCounts(currentState);
+                    appendSearchPathRow(list, node, data, currentState, result.path, { stateWidgetName, popupSession: session, pathCounts });
+                    continue;
+                }
+                const item = result.item;
+                appendCandidateRow(list, node, item, null, null, {
+                    showPath: true,
+                    stateWidgetName,
+                    state: currentState,
+                    selectedItems: selected,
+                    returnToCandidate: reopen,
+                });
+            }
+        });
     };
 
     input.addEventListener("input", () => {

@@ -348,7 +348,7 @@ const server = http.createServer(async (request, response) => {
             source += `\nwindow.__scenePromptPopupTestHooks = {\n`
                 + `  openSavePromptPopup, openSceneLoraDetails,\n`
                 + `  openCreatePromptPopup,\n`
-                + `  openSearchPopup, openPromptCandidatePopup, loadFavorites, setMatrixLineDraftContext,\n`
+                + `  openSearchPopup, openPromptCandidatePopup, openCategoryLevelPicker, loadFavorites, setMatrixLineDraftContext,\n`
                 + `  attachMatrixTextAreaAutocomplete, readMatrixState,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
@@ -564,6 +564,145 @@ async function checkFavorites(browser, url) {
     assert.equal(await reloadedPage.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("getUserData:")).length), 1, "a fresh page shares concurrent loads and restores persistent favorites");
     await reloadedPage.close();
     console.log("Favorite persistence, failure recovery, navigation, Matrix draft, and responsive layout passed.");
+}
+
+async function checkProgressiveCandidates(browser, url) {
+    const page = await browser.newPage();
+    const previousFavorites = storedFavorites;
+    try {
+        storedFavorites = Array.from({ length: 1200 }, (_, id) => `Bulk > Leaf::${id}`);
+        await prepareFavoriteFixture(page, url);
+        const initial = await page.evaluate(async () => {
+            const items = Array.from({ length: 1200 }, (_, id) => ({ id: String(id), label: `Chunk item ${id}`,
+                prompt: `chunk_tag_${id}`, category_path: ["Bulk", "Leaf"], category_key: "Bulk > Leaf", category_label: "Bulk > Leaf" }));
+            window.__scenePromptItems.splice(0, window.__scenePromptItems.length, ...items);
+            const hooks = window.__scenePromptPopupTestHooks, node = window.__favoriteNode;
+            await hooks.openSearchPopup(node);
+            const input = document.querySelector(".pc-searchbox"); input.value = "chunk"; input.dispatchEvent(new Event("input"));
+            const first = document.querySelectorAll(".pc-candidate").length;
+            document.querySelector('.pc-candidate input[type="checkbox"]').click();
+            const state = JSON.parse(node.widgets[0].value);
+            state.categories["Bulk > Leaf"].push({ ...items[900], weight: 1.6 });
+            node.widgets[0].value = JSON.stringify(state);
+            return first;
+        });
+        assert(initial > 0 && initial < 1200, "broad search returns after a small first chunk");
+        const ready = (expected = 1200) => page.waitForFunction(expected => document.querySelectorAll(".pc-candidate").length === expected
+            && !document.querySelector(".pc-popup-list").sceneListRender, expected);
+        await ready();
+        assert.deepEqual(await page.locator(".pc-candidate-title").allTextContents(), Array.from({ length: 1200 }, (_, id) => `Chunk item ${id}`));
+        const lastSelected = page.locator('.pc-candidate[title="chunk_tag_900"]');
+        assert.equal(await lastSelected.locator('input[type="checkbox"]').isChecked(), true, "later chunks see selections changed after the first chunk");
+        assert.equal(await lastSelected.locator('.pc-weight-input').inputValue(), "1.6", "later chunks preserve fresh weights");
+        await page.locator('.pc-candidate[title="chunk_tag_0"] .pc-weight-input').fill("1.25");
+        await page.locator('.pc-candidate[title="chunk_tag_0"] .pc-weight-input').dispatchEvent("change");
+        await page.locator('.pc-candidate[title="chunk_tag_0"] .pc-favorite').click();
+        await page.waitForFunction(() => window.__favoriteMock.activeWrites === 0);
+        await page.getByRole("button", { name: "お気に入り", exact: true }).click();
+        await ready(1199);
+        assert.equal(await page.locator('.pc-candidate[title="chunk_tag_0"]').count(), 0, "favorite toggling keeps identities across chunked results");
+        assert.equal(await page.locator('.pc-candidate[title="chunk_tag_900"] .pc-weight-input').inputValue(), "1.6");
+        await page.getByRole("button", { name: "検索", exact: true }).click(); await ready();
+
+        const savedScroll = await page.locator(".pc-popup-list").evaluate(list => {
+            list.scrollTop = 16000; list.dispatchEvent(new Event("scroll")); return list.scrollTop;
+        });
+        await page.evaluate(() => [...document.querySelector('.pc-candidate').querySelectorAll('button')].find(button => button.textContent === "編集").click());
+        await page.getByRole("button", { name: "←戻る", exact: true }).click(); await ready();
+        await page.waitForFunction(top => document.querySelector(".pc-popup-list")?.scrollTop === top, savedScroll);
+        assert.equal(await page.locator('.pc-searchbox').inputValue(), "chunk", "edit/back restores the broad query and deep scroll");
+        await page.getByRole("button", { name: "選択済み一覧", exact: true }).click();
+        await page.getByRole("button", { name: "検索", exact: true }).click(); await ready();
+        await page.waitForFunction(top => document.querySelector(".pc-popup-list")?.scrollTop === top, savedScroll);
+
+        for (const action of ["wheel", "keydown", "manual"]) {
+            await page.locator(".pc-popup-list").evaluate(list => { list.scrollTop = 16000; list.dispatchEvent(new Event("scroll")); });
+            const pending = await page.evaluate(async action => {
+                await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode);
+                const list = document.querySelector(".pc-popup-list"), restoring = !!list.scenePendingScrollRestore;
+                if (action !== "manual") list.dispatchEvent(new Event(action));
+                list.scrollTop = 37; list.dispatchEvent(new Event("scroll"));
+                return restoring;
+            }, action);
+            assert.equal(pending, true, "a deep restore remains pending while only the first chunk exists");
+            await ready();
+            assert.equal(await page.locator(".pc-popup-list").evaluate(list => list.scrollTop), 37,
+                `${action} scrolling cancels the pending restore`);
+        }
+
+        const filtered = await page.evaluate(async () => {
+            await window.__scenePromptPopupTestHooks.openPromptCandidatePopup(window.__favoriteNode, ["Bulk", "Leaf"]);
+            const popup = document.querySelector(".pc-popup"), list = popup.querySelector(".pc-popup-list");
+            const oldTask = popup.sceneListRender;
+            const filter = popup.querySelector(".pc-searchbox"); filter.value = "chunk_tag_1199"; filter.dispatchEvent(new Event("input"));
+            return { first: list.querySelectorAll(".pc-candidate").length, cancelled: oldTask !== popup.sceneListRender };
+        });
+        assert.deepEqual(filtered, { first: 1, cancelled: true });
+        await page.waitForTimeout(100);
+        assert.deepEqual(await page.locator(".pc-candidate-title").allTextContents(), ["Chunk item 1199"], "old candidate chunks cannot append after filtering");
+
+        await page.evaluate(async () => {
+            await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { stateWidgetName: "negative_json" });
+            const input = document.querySelector(".pc-searchbox"); input.value = "chunk"; input.dispatchEvent(new Event("input"));
+            document.querySelector('.pc-candidate input[type="checkbox"]').click();
+        }); await ready();
+        assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteNode.widgets[1].value).categories["Bulk > Leaf"][0].id), "0");
+        assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteNode.widgets[0].value).categories["Bulk > Leaf"][0].weight), 1.25,
+            "negative chunked selection keeps the positive weight");
+        await page.evaluate(async () => {
+            const node = window.__favoriteNode, hooks = window.__scenePromptPopupTestHooks;
+            const draft = { row_id: "large-matrix", positive_json: '{"version":1,"categories":{}}', negative_json: '{"version":1,"categories":{}}' };
+            window.__largeMatrixDraft = draft; window.__largeMatrixCommits = 0;
+            const stateWidgetName = hooks.setMatrixLineDraftContext(node, 0, draft, "positive", () => {}, () => { window.__largeMatrixCommits++; });
+            await hooks.openPromptCandidatePopup(node, ["Bulk", "Leaf"], { stateWidgetName });
+            document.querySelector('.pc-popup:last-child .pc-candidate input[type="checkbox"]').click();
+        });
+        await page.waitForFunction(() => document.querySelector('.pc-popup:last-child .pc-popup-list')?.querySelectorAll(".pc-candidate").length === 1200);
+        const matrixPopup = page.locator(".pc-popup").last();
+        await matrixPopup.getByRole("button", { name: "閉じる", exact: true }).click();
+        assert.equal(await page.evaluate(() => JSON.parse(window.__largeMatrixDraft.positive_json).categories["Bulk > Leaf"][0].id), "0");
+        assert(await page.evaluate(() => window.__largeMatrixCommits > 0), "closing the progressive Matrix picker commits its draft");
+
+        const closed = await page.evaluate(async () => {
+            await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode);
+            const input = document.querySelector(".pc-searchbox"); input.value = "chunk"; input.dispatchEvent(new Event("input"));
+            const popup = document.querySelector(".pc-popup"), list = popup.querySelector(".pc-popup-list");
+            window.__oldChunkList = list;
+            const before = list.querySelectorAll(".pc-candidate").length;
+            [...popup.querySelectorAll("button")].find(button => button.textContent === "閉じる").click();
+            return { before, task: popup.sceneListRender, fit: popup.sceneFitFrame };
+        });
+        assert(closed.before < 1200); assert.equal(closed.task, null); assert.equal(closed.fit, null);
+        await page.waitForTimeout(100);
+        assert.equal(await page.evaluate(() => window.__oldChunkList.querySelectorAll(".pc-candidate").length), closed.before);
+        assert.equal(await page.locator(".pc-popup").count(), 0, "close leaves no old DOM tasks or reopened popup");
+
+        await page.evaluate(async () => {
+            await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode);
+            const input = document.querySelector(".pc-searchbox"); input.value = "chunk"; input.dispatchEvent(new Event("input"));
+            window.__reloadOldPopup = document.querySelector(".pc-popup");
+            window.__delayScenePromptItems();
+            window.__scenePromptItems.push({ ...window.__scenePromptItems[0], id: "replacement", label: "Replacement only", prompt: "replacement_only" });
+            [...window.__reloadOldPopup.querySelectorAll("button")].find(button => button.textContent === "設定再読み込み").click();
+        });
+        await page.waitForFunction(() => window.__scenePromptItemsDelayed());
+        assert.equal(await page.evaluate(() => window.__reloadOldPopup.sceneListRender), null, "reload cancels old catalog rendering before the request finishes");
+        await page.evaluate(() => window.__releaseScenePromptItems());
+        await page.waitForFunction(() => document.querySelector(".pc-popup") !== window.__reloadOldPopup);
+        await page.locator('.pc-searchbox').fill("replacement_only");
+        assert.deepEqual(await page.locator(".pc-candidate-title").allTextContents(), ["Replacement only"]);
+        await page.waitForTimeout(100);
+        assert.equal(await page.locator(".pc-candidate").count(), 1, "reload uses the replacement array without late old results");
+        await page.evaluate(async () => {
+            await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode);
+            const input = document.querySelector(".pc-searchbox"); input.value = "chunk"; input.dispatchEvent(new Event("input"));
+            const node = window.__favoriteNode;
+            window.__scenePromptPopupTestHooks.installSceneNodeRemovalCleanup(node, "ScenePrompter"); node.onRemoved();
+        });
+        await page.waitForTimeout(100);
+        assert.equal(await page.locator(".pc-popup").count(), 0, "node removal cancels pending chunks and popup ownership");
+        console.log("Progressive positive/negative/Matrix candidates, order, fresh weights/favorites, deep scroll/user cancellation, filter/reload/close/removal passed");
+    } finally { storedFavorites = previousFavorites; await page.close(); }
 }
 
 await new Promise((resolveServer) => server.listen(0, "127.0.0.1", resolveServer));
@@ -2696,6 +2835,7 @@ try {
     assert.equal(await resources.count(), 0, "a late hash response cannot reopen a removed node's modal");
     await page.evaluate(() => { window.app.graphToPrompt = window.__originalResourceGraphToPrompt; });
     await checkFavorites(browser, `http://127.0.0.1:${address.port}/`);
+    await checkProgressiveCandidates(browser, `http://127.0.0.1:${address.port}/`);
     await page.evaluate(async () => {
         class RandomNode {
             constructor() {

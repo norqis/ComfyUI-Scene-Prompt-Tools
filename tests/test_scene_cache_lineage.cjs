@@ -386,3 +386,112 @@ async function testMatrixCurrentStateCache() {
     console.log("Matrix actual-parser warm cache, field invalidation, legacy fallback, delete-all, Undo/Redo/reload and release passed", JSON.stringify({ warm1000ms }));
 }
 testMatrixCurrentStateCache().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Catalog indexes retain only exact-leaf references and are owned by array identity.
+{
+    const catalog = { Map, Set, WeakMap, Object, String, JSON, promptCatalogIndexes: new WeakMap() };
+    vm.createContext(catalog);
+    for (const name of ["itemPath", "pathKey", "catalogPathKey", "stripCountSuffix", "displayPathLabel",
+        "itemCategoryKey", "itemKey", "promptCatalogIndex", "allCategoryPaths", "getChildSegments",
+        "itemsForPath", "rootCategories", "subcategoriesFor", "selectedItems", "selectionPathCounts",
+        "countForPath", "countExactForPath"]) vm.runInContext(functionSource(name), catalog);
+    let pathReads = 0;
+    const items = Array.from({ length: 10000 }, (_, id) => ({ id: String(id), label: `item-${id}`, prompt: `tag-${id}`,
+        category_key: `Root-${id % 100} > Leaf`,
+        get category_path() { pathReads++; return [`Root-${id % 100}`, "Leaf"]; } }));
+    const index = catalog.promptCatalogIndex(items);
+    assert.equal(pathReads, items.length, "each catalog item path is normalized once");
+    const state = { categories: { first: [items[0]], second: [items[1]] } };
+    const counts = catalog.selectionPathCounts(state);
+    pathReads = 0;
+    for (let repeat = 0; repeat < 10; repeat++) {
+        for (const path of catalog.allCategoryPaths(items)) {
+            catalog.getChildSegments(items, path); catalog.itemsForPath(items, path);
+            catalog.countForPath(items, state, path, counts); catalog.countExactForPath(items, state, path, counts);
+        }
+    }
+    assert.equal(pathReads, 0, "warm navigation and counts never rescan catalog paths");
+    assert.equal([...index.branches.values()].reduce((sum, branch) => sum + branch.items.length, 0), items.length,
+        "ancestor branches keep totals, without full descendant-array copies");
+    assert.equal(catalog.countForPath(items, state, ["Root-0"], counts).selected, 1);
+    const changedCounts = catalog.selectionPathCounts({ categories: {} });
+    assert.equal(catalog.countForPath(items, {}, ["Root-0"], changedCounts).selected, 0, "counts use current selection");
+    assert.strictEqual(catalog.promptCatalogIndex(items), index);
+    const replacement = [{ id: "new", label: "New", category_path: ["New"] }];
+    assert.notStrictEqual(catalog.promptCatalogIndex(replacement), index);
+    assert.deepEqual(Array.from(catalog.getChildSegments(replacement, [])), ["New"], "replacement catalog has no historical branches");
+    const collision = [{ id: "literal", category_path: ["A > B"], category_key: "literal" },
+        { id: "nested", category_path: ["A", "B"], category_key: "nested" },
+        { id: "child", category_path: ["A > B", "C"], category_key: "child" }];
+    assert.deepEqual(Array.from(catalog.itemsForPath(collision, ["A > B"]), item => item.id), ["literal"]);
+    assert.deepEqual(Array.from(catalog.itemsForPath(collision, ["A", "B"]), item => item.id), ["nested"]);
+    assert.deepEqual(Array.from(catalog.getChildSegments(collision, ["A > B"])), ["C"]);
+    const collisionState = { categories: { selected: [collision[0]] } }, collisionCounts = catalog.selectionPathCounts(collisionState);
+    assert.equal(catalog.countForPath(collision, collisionState, ["A > B"], collisionCounts).total, 2);
+    assert.equal(catalog.countForPath(collision, collisionState, ["A", "B"], collisionCounts).selected, 0);
+    assert.equal(catalog.allCategoryPaths(collision).length, 4, "structurally different paths survive identical display labels");
+    console.log("Current catalog index identity, linear storage, warm operation counts and structural paths passed");
+}
+
+// Control frame delivery explicitly, including delivery of a cancelled stale callback.
+{
+    const frames = new Map(); let frameId = 0, fits = 0, version = 1;
+    const render = { Math, Number, window: { innerWidth: 1280, innerHeight: 720 },
+        POPUP_MIN_HEIGHT: 180, POPUP_MIN_WIDTH: 420,
+        clamp: (value, min, max) => Math.max(min, Math.min(value, max)),
+        requestAnimationFrame(callback) { const id = ++frameId; frames.set(id, callback); return id; },
+        cancelAnimationFrame(id) { frames.delete(id); },
+    };
+    vm.createContext(render);
+    for (const name of ["fitPopupToContent", "cancelPopupListRender", "cancelPopupRendering", "renderPopupListItems",
+        "restorePopupScroll", "rememberPopupScroll"]) vm.runInContext(functionSource(name), render);
+    const list = { isConnected: true, scrollTop: 0 }, popup = {
+        isConnected: true, style: {}, classList: { add() {} }, scrollHeight: 500,
+        contains: candidate => candidate === list,
+        getBoundingClientRect() { fits++; return { width: 560, height: 500, left: 12, top: 12 }; },
+    };
+    const delivered = [], items = Array.from({ length: 1000 }, (_, index) => index);
+    render.renderPopupListItems(popup, list, items, chunk => delivered.push(...chunk.map(item => [item, version])));
+    assert.equal(delivered.length, 24, "large lists expose a small synchronous first chunk");
+    assert.equal(frames.size, 2, "one fit and one continuation are pending");
+    for (let index = 0; index < 20; index++) render.fitPopupToContent(popup);
+    assert.equal(frames.size, 2, "fit requests coalesce for the popup");
+    version = 2;
+    const tick = () => { const current = [...frames.values()]; frames.clear(); current.forEach(callback => callback()); };
+    while (frames.size) { const before = fits; tick(); assert(fits - before <= 1, "at most one fit in a frame"); }
+    assert.deepEqual(delivered.map(([item]) => item), items, "all results arrive in catalog order without a cap");
+    assert(delivered.slice(24).every(([, stateVersion]) => stateVersion === 2), "later chunks read fresh state");
+    assert.equal(popup.sceneListRender, null); assert.equal(list.sceneListRender, null);
+    render.renderPopupListItems(popup, list, [1, 2, 3], chunk => assert.deepEqual(Array.from(chunk), [1, 2, 3]));
+    assert.equal(popup.sceneListRender, null, "small leaves remain immediate"); tick();
+    const oldRows = [], newRows = [];
+    render.renderPopupListItems(popup, list, items, chunk => oldRows.push(...chunk));
+    const oldTask = popup.sceneListRender, stale = frames.get(oldTask.frame);
+    render.renderPopupListItems(popup, list, [9999], chunk => newRows.push(...chunk)); stale();
+    assert.equal(oldRows.length, 24, "stale callbacks cannot append into a replacement render"); assert.deepEqual(newRows, [9999]); tick();
+    render.renderPopupListItems(popup, list, items, () => {});
+    list.isConnected = false; tick(); assert.equal(popup.sceneListRender, null, "detached lists release their task");
+    list.isConnected = true; render.renderPopupListItems(popup, list, items, () => {});
+    render.cancelPopupRendering(popup); assert.equal(frames.size, 0, "close/reload cancels both continuation and layout");
+    const handlers = {}, session = { scrollTops: { search: 5000 } };
+    let scrollTop = 0, scrollLimit = 1000;
+    Object.defineProperty(list, "scrollTop", { get: () => scrollTop, set: value => { scrollTop = Math.min(value, scrollLimit); } });
+    list.addEventListener = (name, callback) => { handlers[name] = callback; };
+    popup.getBoundingClientRect = () => {
+        fits++; scrollLimit = 900; scrollTop = Math.min(scrollTop, scrollLimit);
+        return { width: 560, height: 500, left: 12, top: 12 };
+    };
+    render.rememberPopupScroll(session, "search", list);
+    render.renderPopupListItems(popup, list, items, () => {});
+    assert.equal(list.scenePendingScrollRestore.appliedTop, 1000);
+    tick(); handlers.scroll();
+    assert.equal(list.scenePendingScrollRestore.appliedTop, 900, "fit resynchronizes the browser's automatic viewport clamp");
+    assert.equal(session.scrollTops.search, 5000, "automatic clamp does not discard the deep saved target");
+    list.scrollTop = 37; handlers.scroll();
+    assert.equal(list.scenePendingScrollRestore, null, "manual scrolling cancels a pending deep restore");
+    assert.equal(session.scrollTops.search, 37);
+    list.isConnected = false; list.scrollTop = 0; handlers.scroll();
+    assert.equal(session.scrollTops.search, 37, "late scroll events from removed DOM cannot overwrite the current session");
+    render.cancelPopupRendering(popup); assert.equal(frames.size, 0);
+    console.log("Popup chunks preserve order/fresh state and cancel stale DOM tasks; fits coalesce");
+}

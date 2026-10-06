@@ -458,6 +458,19 @@ async function testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse() {
         const [firstResult, secondResult] = await Promise.all([first, second]);
         assert.equal(firstResult[0].label, "fresh");
         assert.equal(secondResult[0].label, "fresh");
+        assert.equal(context[kind === "items" ? "promptItemsLatestPromise" : "savedPromptsLatestPromise"], null,
+            "settled loader promises do not retain replaced catalog arrays");
+
+        const stale = deferred(), latest = deferred(), delayed = listRaceContext(kind, stale, latest);
+        const delayedLoad = kind === "items" ? delayed.loadPromptItems : delayed.loadSavedPrompts;
+        const oldResult = delayedLoad(true), newResult = delayedLoad(true);
+        latest.resolve({ ok: true, payload: { [key]: [{ label: "loaded" }] } });
+        await newResult;
+        const cacheKey = kind === "items" ? "promptItems" : "savedPrompts";
+        delayed[cacheKey] = [{ label: "edited-after-load" }];
+        stale.reject(new Error("old failed response"));
+        assert.strictEqual(await oldResult, delayed[cacheKey], "stale failures use the current post/edit catalog after the latest request settles");
+        assert.equal(delayed[kind === "items" ? "promptItemsLatestPromise" : "savedPromptsLatestPromise"], null);
     }
 }
 
