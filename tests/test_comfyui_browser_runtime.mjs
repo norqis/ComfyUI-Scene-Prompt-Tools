@@ -2434,6 +2434,20 @@ window.__sceneSeedRuntimeTest = {
     await page.evaluate(async before => { for (const [id, value] of Object.entries(before)) await window.app.extensionManager.setting.set(id, value); }, settingsBeforeSwitchReload.before);
     assert.deepEqual(await (await fetch(`${url}/scene_test/model_executions`)).json(), []);
 
+    const waitExpandDisplay = async (id, total) => {
+        try {
+            await page.waitForFunction(({ id, total }) => {
+                const widget = window.app.graph.getNodeById(id)?.widgets.find(widget => widget.sceneRole === 'expand_total_count');
+                return widget?.sceneTotalCount === total && widget.value === `${total}回`;
+            }, { id, total });
+        } catch (error) {
+            const displayed = await page.evaluate(id => {
+                const widget = window.app.graph.getNodeById(id)?.widgets.find(widget => widget.sceneRole === 'expand_total_count');
+                return { value: widget?.value, total: widget?.sceneTotalCount };
+            }, id);
+            throw new Error(`Expand ${id} did not display ${total} before test planner/API access: ${JSON.stringify(displayed)}`, { cause: error });
+        }
+    };
     const primitiveQueueSwitch = await page.evaluate(async () => {
         const app = window.app; app.graph.clear();
         const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); node.pos = [1400 + app.graph._nodes.length * 250, 160]; return node; };
@@ -2495,9 +2509,10 @@ window.__sceneSeedRuntimeTest = {
         await page.waitForTimeout(250);
     };
     await page.waitForTimeout(250);
+    await waitExpandDisplay(primitiveQueueSwitch.expand, 4);
     const primitiveQueueOff = await primitiveQueueSnapshot();
-    await clickPrimitiveBoolean(true); const primitiveQueueOn = await primitiveQueueSnapshot();
-    await clickPrimitiveBoolean(false); const primitiveQueueOffAgain = await primitiveQueueSnapshot();
+    await clickPrimitiveBoolean(true); await waitExpandDisplay(primitiveQueueSwitch.expand, 15); const primitiveQueueOn = await primitiveQueueSnapshot();
+    await clickPrimitiveBoolean(false); await waitExpandDisplay(primitiveQueueSwitch.expand, 4); const primitiveQueueOffAgain = await primitiveQueueSnapshot();
     for (const [name, result, total, disabled] of [['off', primitiveQueueOff, 4, false], ['on', primitiveQueueOn, 15, true], ['off again', primitiveQueueOffAgain, 4, false]]) {
         assert.deepEqual(result.values, ['alternate', 4, 'fixed'], `${name} retains the saved Queue settings`);
         assert.deepEqual(result.disabled, Array(3).fill(disabled), `${name} native controls refresh after the actual Boolean pointer click`);
@@ -2508,6 +2523,93 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(primitiveQueueOn.serialized, primitiveQueueOff.serialized);
     assert.deepEqual(primitiveQueueOffAgain.serialized, primitiveQueueOff.serialized);
     console.log('real ComfyUI PrimitiveBoolean canvas pointer toggle switches Queue boundary/controls/counts and preserves Queue settings');
+
+    const prepareAfterDisplay = async (id, total) => {
+        // This is deliberately after the display-only wait: no test planner, redraw,
+        // refresh or graphToPrompt call may repair the user's stale display first.
+        await waitExpandDisplay(id, total);
+        const preparedTotal = await page.evaluate(async id => {
+            const app = window.app, { api } = await import('/scripts/api.js'), prompt = await app.graphToPrompt();
+            const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST', body: JSON.stringify({
+                api_graph: prompt, workflow: prompt.workflow, expand_node_id: String(id),
+            }) });
+            const prepared = await response.json(); if (!response.ok) throw new Error(JSON.stringify(prepared));
+            await api.fetchApi('/scene_prompt/runs/release', { method: 'POST', body: JSON.stringify({ run_handle: prepared.run_handle }) });
+            return prepared.total_batches;
+        }, id);
+        assert.equal(preparedTotal, total, 'the already-updated display matches native prepare');
+    };
+    const clickCountWidget = async (id, name, expected, increment = false) => {
+        const point = await page.evaluate(({ id, name, increment }) => {
+            const node = window.app.graph.getNodeById(id), widget = node.widgets.find(widget => widget.name === name);
+            const canvas = window.app.canvas, rect = canvas.canvas.getBoundingClientRect(), width = widget.width || node.size[0];
+            if (!Number.isFinite(widget.last_y)) throw new Error(`Native ${name} widget has not been drawn`);
+            return { x: rect.left + (node.pos[0] + (increment ? width - 15 : width / 2) + canvas.ds.offset[0]) * canvas.ds.scale,
+                y: rect.top + (node.pos[1] + widget.last_y + window.LiteGraph.NODE_WIDGET_HEIGHT / 2 + canvas.ds.offset[1]) * canvas.ds.scale };
+        }, { id, name, increment });
+        await page.mouse.click(point.x, point.y);
+        await page.waitForFunction(({ id, name, expected }) => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === name).value === expected,
+            { id, name, expected });
+    };
+    const liveCounts = await page.evaluate(async () => {
+        const app = window.app; app.graph.clear();
+        const add = (type, pos) => { const node = window.LiteGraph.createNode(type); app.graph.add(node); node.pos = pos; return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const link = (from, to) => { if (!from.connect(0, to, to.inputs.findIndex(input => input.name === 'scene_prompt'))) throw new Error('Cannot connect live Count fixture'); };
+        const source = add('ScenePrompter', [1600, 160]), first = add('ScenePromptCounter', [120, 160]);
+        const second = add('ScenePromptCounter', [440, 160]), expand = add('ScenePrompterExpand', [760, 160]);
+        for (const node of [first, second]) { field(node, 'count').value = 10; field(node, 'enable_downstream_count').value = true; }
+        link(source, first); link(first, second); link(second, expand);
+        const ids = { first: first.id, second: second.id, expand: expand.id };
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0]; app.canvas.draw(true, true);
+        return ids;
+    });
+    await prepareAfterDisplay(liveCounts.expand, 100);
+    await clickCountWidget(liveCounts.first, 'enable_downstream_count', false); await prepareAfterDisplay(liveCounts.expand, 10);
+    await clickCountWidget(liveCounts.first, 'count', 11, true); await prepareAfterDisplay(liveCounts.expand, 11);
+    await clickCountWidget(liveCounts.first, 'enable_downstream_count', true); await prepareAfterDisplay(liveCounts.expand, 110);
+    await clickCountWidget(liveCounts.second, 'count', 11, true); await prepareAfterDisplay(liveCounts.expand, 121);
+    await clickCountWidget(liveCounts.first, 'enable_downstream_count', false); await prepareAfterDisplay(liveCounts.expand, 11);
+
+    const mappedCountLive = await page.evaluate(async () => {
+        const app = window.app; app.graph.clear();
+        const add = (type, pos) => { const node = window.LiteGraph.createNode(type); app.graph.add(node); node.pos = pos; return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const link = (from, slot, to, name, type = 'SCENE_PROMPT') => {
+            if (!to.inputs.some(input => input.name === name)) to.addInput(name, type, { widget: { name } });
+            if (!from.connect(slot, to, to.inputs.findIndex(input => input.name === name))) throw new Error(`Cannot connect mapped Count ${name}`);
+        };
+        const input = add('ScenePresetInput', [100, 160]), source = add('ScenePrompter', [500, 160]);
+        const count = add('ScenePromptCounter', [900, 160]), output = add('ScenePresetOutput', [1300, 160]);
+        field(input, 'switch_names_json').value = '["後続Countを有効化"]'; field(count, 'count').value = 10;
+        field(count, 'enable_downstream_count').value = true;
+        link(input, 0, source, 'scene_prompt'); link(source, 0, count, 'scene_prompt');
+        link(input, 1, count, 'enable_downstream_count', 'BOOLEAN'); link(count, 0, output, 'scene_prompt');
+        const response = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            preset_id: 'browser-native-count-switch', name: 'Live Count switch', output_node_id: String(output.id), api_graph: await app.graphToPrompt(), workflow: app.graph.serialize(),
+        }) });
+        const saved = await response.json(); if (!response.ok) throw new Error(JSON.stringify(saved));
+        app.graph.clear();
+        const reference = add('ScenePresetReference', [120, 160]), outer = add('ScenePromptCounter', [440, 160]), expand = add('ScenePrompterExpand', [760, 160]);
+        field(reference, 'preset_id').value = 'browser-native-count-switch'; field(reference, 'switch_settings_json').value = '[]';
+        field(outer, 'count').value = 10; field(outer, 'enable_downstream_count').value = true;
+        await window.__sceneSeedRuntimeTest.refreshPresetReference(reference);
+        link(reference, 0, outer, 'scene_prompt'); link(outer, 0, expand, 'scene_prompt');
+        const ids = { reference: reference.id, expand: expand.id };
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        await window.__sceneSeedRuntimeTest.refreshPresetReference(app.graph.getNodeById(ids.reference));
+        app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0]; app.canvas.draw(true, true);
+        return ids;
+    });
+    await prepareAfterDisplay(mappedCountLive.expand, 10);
+    for (const [value, total] of [['true', 100], ['false', 10], ['true', 100]]) {
+        await openSwitchModal(mappedCountLive.reference, 'settings');
+        await settingsModal.locator('[data-scene-switch-index="1"]').selectOption(value);
+        await settingsModal.locator('[data-scene-switch-save="settings"]').click();
+        await prepareAfterDisplay(mappedCountLive.expand, total);
+    }
+    console.log('real ComfyUI Count number/Boolean pointer edits and mapped Preset Count ON/OFF update the visible Expand count before any test planner/refresh/API capture');
     nativeRunChecks = false;
     console.log('real ComfyUI standard Switch MatchType, fixed slots, names/mapping DOM saves, siblings, count/selected preview, Undo/Redo, clone, legacy restore, reload and one settings category passed');
 
