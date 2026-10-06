@@ -1,6 +1,6 @@
 # Preset switches v0.11.0
 
-Status: implementation design for review; production and GPU must remain untouched.
+Status: implementation design approved by gpt-5.6-sol medium; production and GPU must remain untouched.
 
 ## Accepted scope
 
@@ -20,6 +20,7 @@ Unify all ComfyUI settings under category `Scene Prompt Tools`, including Undo h
 - Reference optional hidden STRING widget `switch_settings_json`, default `[]`: an array of ten entries when set. Entry is a JSON boolean (literal ON/OFF) or an integer 1..10 (incoming source index). Empty/absent array means identity 1..10. Keep bool and integer validation distinct in Python. No index-zero sentinels.
 - SCENE_SWITCHES runtime payload: fixed ten Boolean values (tuple/list), no node instances, model tensors or UI labels. No OUTPUT_IS_LIST behavior.
 - PresetInput internal hidden/optional value binding for effective switches may be added for GraphBuilder expansion; it is not a visible user socket. Keep name/schema coordination between backend and frontend explicit.
+- The agreed internal binding is `switch_values` (SCENE_SWITCHES), hidden from the user. Names metadata is a permitted literal on PresetInput; external links to its internal inputs remain invalid in saved Presets.
 - Reference's switches input is a real dependency. Effective values/settings participate in runtime caching and memo identity. Do not depend on process-global mutable context. Input display names do not select connections.
 
 ## Backend implementation boundaries
