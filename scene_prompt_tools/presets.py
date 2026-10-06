@@ -745,9 +745,18 @@ def save_preset(payload, user_id="default"):
     api_graph = _api_graph_with_titles({"output": connected_nodes}, workflow)
     try:
         _validate_workflow_nodes(workflow, api_graph["output"])
-        _validate_preset_graph(api_graph["output"])
+        validation = _validate_preset_graph(api_graph["output"])
     except ScenePresetError as exc:
         raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
+    # Expanded PNGs bind the image's effective values for replay. A saved
+    # Preset starts from its Reference's values, including the OFF defaults.
+    input_id = validation["input_id"]
+    _node_inputs(api_graph["output"][input_id]).pop("switch_values", None)
+    for node in workflow.get("nodes", []):
+        if str(node.get("id")) == input_id and node.get("type") == BOUNDARY_INPUT:
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                properties.pop("scene_switch_values", None)
     path = _preset_path(preset_id, user_id)
     # The connected workflow/API builders already own these objects. Keep the
     # large hash, serialization and verification work outside the shared lock.

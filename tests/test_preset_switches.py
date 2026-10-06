@@ -368,6 +368,49 @@ class PresetSwitchTests(unittest.TestCase):
         self.assertEqual(replay["5"]["inputs"]["scene_prompt"], ["3", 0])
         self.assertIn("3", replay)
 
+    def test_saving_expanded_png_removes_replay_binding_and_preserves_names_and_original_png(self):
+        choice = self.preset("choice", switched_nodes())
+        prompt = {"20": node("ScenePresetReference", preset_id="choice", switch_settings_json=json.dumps([True] * 10)),
+                  "30": node("ScenePresetOutput", preset_id="saved", preset_name="Saved", scene_prompt=["20", 0])}
+        expanded, workflow, _ = self.metadata.expand_preset_references(prompt, outer_workflow(prompt), {"choice": choice})
+        input_id = next(key for key, item in expanded.items() if item["class_type"] == "ScenePresetInput")
+        original_input = next(item for item in workflow["nodes"] if str(item["id"]) == input_id)
+        original_input["properties"]["kept"] = "ordinary metadata"
+        output_link = expanded["30"]["inputs"]["scene_prompt"]
+        self.assertEqual(self.module._scene_node_value(expanded, output_link[0], {}, set())["stats"]["total_images"], 7)
+        payload = {"preset_id": "saved", "name": "Saved", "output_node_id": "30",
+                   "api_graph": {"output": expanded}, "workflow": workflow}
+        self.module.save_preset(payload)
+        saved = self.module.load_preset("saved")
+        editor_nodes = saved["api_graph"]["output"]
+        self.assertNotIn("switch_values", editor_nodes[input_id]["inputs"])
+        saved_input = next(item for item in saved["workflow"]["nodes"] if str(item["id"]) == input_id)
+        self.assertNotIn("scene_switch_values", saved_input["properties"])
+        self.assertEqual(saved_input["properties"]["kept"], "ordinary metadata")
+        self.assertEqual(editor_nodes[input_id]["inputs"]["switch_names_json"], '["選択"]')
+        self.assertEqual(saved_input["widgets_values"], ['["選択"]'])
+        self.module._validate_preset_runtime(editor_nodes)
+        editor_plan = self.module._scene_node_value(editor_nodes, output_link[0], {}, set())
+        reference_plan = self.evaluate(saved)
+        self.assertEqual(editor_plan["stats"]["total_images"], 3)
+        self.assertEqual(editor_plan["stats"], reference_plan["stats"])
+        self.assertEqual(expanded[input_id]["inputs"]["switch_values"], {"values": [True] * 10})
+        self.assertEqual(original_input["properties"]["scene_switch_values"], [True] * 10)
+
+    def test_saved_png_runtime_validation_uses_normalized_off_branch(self):
+        nodes = switched_nodes()
+        nodes["1"]["inputs"]["switch_values"] = {"values": [True] * 10}
+        # Missing required prompt data fails only when the OFF branch executes.
+        nodes["2"]["inputs"].pop("positive_base")
+        choice = self.preset("invalid-off", nodes)
+        self.module._validate_preset_runtime(nodes)
+        payload = {"preset_id": "invalid-off", "name": "Invalid OFF", "output_node_id": "3",
+                   "api_graph": choice["api_graph"], "workflow": choice["workflow"]}
+        with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "positive_base"):
+            self.module.save_preset(payload)
+        self.assertFalse(self.module._preset_path("invalid-off").exists())
+        self.assertEqual(nodes["1"]["inputs"]["switch_values"], {"values": [True] * 10})
+
 
 if __name__ == "__main__":
     unittest.main()
