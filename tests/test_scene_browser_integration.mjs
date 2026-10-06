@@ -1448,7 +1448,28 @@ try {
     assert.deepEqual(loraCandidateRoundTrip.restored, loraCandidateRoundTrip.stored, "both LoRA candidate lists survive save and reload");
     await page.keyboard.press("Escape");
     await page.evaluate(() => {
+        const OriginalObserver = window.IntersectionObserver, held = [];
+        // Hold only the new row's visibility notification so the late request
+        // that raced the old global-count baseline is deterministic.
+        window.IntersectionObserver = class extends OriginalObserver {
+            constructor(callback, options) {
+                super((entries, observer) => {
+                    const third = entries.filter(entry => entry.isIntersecting
+                        && entry.target.querySelector('.pc-lora-path')?.textContent === 'third.safetensors');
+                    callback(entries.filter(entry => !third.includes(entry)), observer);
+                    if (third.length) held.push({ entries: third, observer, callback });
+                }, options);
+            }
+        };
+        window.__thirdLoraObservationHeld = () => held.some(job => job.entries.some(entry => entry.target.isConnected));
+        window.__releaseThirdLoraObservation = () => {
+            window.IntersectionObserver = OriginalObserver;
+            for (const job of held.splice(0)) job.callback(job.entries.filter(entry => entry.target.isConnected), job.observer);
+            delete window.__thirdLoraObservationHeld;
+            delete window.__releaseThirdLoraObservation;
+        };
         window.__sceneLoraCatalog.push({ path: "third.safetensors", size: 300, mtime_ns: 1 });
+        window.__delayNextSceneLoraInfo = true;
         const node = window.__sceneLoraTestNode;
         const widget = node.widgets.find((entry) => entry.name === "lora_name");
         widget.value = "folder\\other.safetensors";
@@ -1460,6 +1481,17 @@ try {
         ["folder/other.safetensors", "style.safetensors", "third.safetensors"], "slash identity promotes selected while preserving other catalog order");
     await loraPicker.getByRole("searchbox").fill("safetensors");
     assert.equal(await loraPicker.locator(".pc-lora-path").first().textContent(), "folder/other.safetensors");
+    await page.waitForFunction(() => window.__thirdLoraObservationHeld());
+    const unsettledCalls = await page.evaluate(() => window.__scenePromptCalls.filter(call => call.url.startsWith('/scene_prompt/loras/info?')).length);
+    await page.evaluate(() => window.__releaseThirdLoraObservation());
+    await page.waitForFunction(() => window.__sceneLoraInfoDelayed());
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter(call => call.url.startsWith('/scene_prompt/loras/info?')).length), unsettledCalls + 1,
+        'the new row metadata request can start after the old premature global-count baseline');
+    const thirdRow = loraPicker.locator('.pc-lora-row').filter({ hasText: 'third.safetensors' });
+    assert.equal(await thirdRow.locator('.pc-lora-source').textContent(), '確認中…', 'a delayed metadata response has not resolved the new row yet');
+    await page.evaluate(() => window.__releaseSceneLoraInfo());
+    await thirdRow.locator('.pc-lora-title').getByText('Civitai Style', { exact: true }).waitFor();
+    await thirdRow.locator('.pc-lora-source').getByText('Civitai', { exact: true }).waitFor();
     const normalizedBefore = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
     const normalizedCalls = await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length);
     await loraPicker.locator(".pc-lora-source").first().focus();
