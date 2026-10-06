@@ -19,7 +19,7 @@ SELECTION_ITEM_KNOWN_KEYS = (
 )
 SELECTED_PART_REQUIRED_KEYS = {"index", "text"}
 SELECTED_PART_OPTIONAL_KEYS = {"weight", "missing"}
-CHOICE_RE = re.compile(r"\{([^{}]*)\}")
+CHOICE_TOKEN_RE = re.compile(r"[{}|]")
 
 
 def _split_prompt(text):
@@ -184,27 +184,63 @@ def _selected_prompt_parts(categories, order):
     return parts
 
 
+def _choice_slot_text(fragments):
+    # Trim before joining so whitespace around a single nested choice does not
+    # copy its entire selected payload at every enclosing brace.
+    first = 0
+    while first < len(fragments):
+        value = fragments[first].lstrip()
+        if value:
+            fragments[first] = value
+            break
+        first += 1
+    if first == len(fragments):
+        return ""
+    last = len(fragments) - 1
+    while last > first and not fragments[last].rstrip():
+        last -= 1
+    fragments[last] = fragments[last].rstrip()
+    return "".join(fragments[first:last + 1])
+
+
 def _expand_choices(text, rng):
     if not text:
         return ""
+    if "{" not in text:
+        return text
 
-    result = text
-    seen = set()
-    while result not in seen:
-        seen.add(result)
-        match = CHOICE_RE.search(result)
-        if not match:
-            break
-
-        options = [option.strip() for option in match.group(1).split("|")]
-        if not options:
-            replacement = ""
+    # Each frame holds choice slots, each slot holds literal/selected fragments.
+    # Closing braces resolve innermost-leftmost, including single/empty choices.
+    frames = [[[]]]
+    start = 0
+    for match in CHOICE_TOKEN_RE.finditer(text):
+        frame = frames[-1]
+        if match.start() > start:
+            frame[-1].append(text[start:match.start()])
+        token = match.group()
+        if token == "{":
+            frames.append([[]])
+        elif token == "|" and len(frames) > 1:
+            frame.append([])
+        elif token == "}" and len(frames) > 1:
+            options = [_choice_slot_text(slot) for slot in frames.pop()]
+            frames[-1][-1].append(rng.choice(options))
         else:
-            replacement = rng.choice(options)
+            frame[-1].append(token)
+        start = match.end()
+    if start < len(text):
+        frames[-1][-1].append(text[start:])
 
-        result = result[: match.start()] + replacement + result[match.end() :]
-
-    return result
+    # Unclosed outer braces stay literal; completed inner choices are expanded.
+    fragments = []
+    for index, frame in enumerate(frames):
+        if index:
+            fragments.append("{")
+        for slot_index, slot in enumerate(frame):
+            if slot_index:
+                fragments.append("|")
+            fragments.extend(slot)
+    return "".join(fragments)
 
 
 def _choice_rng(seed, stream):
