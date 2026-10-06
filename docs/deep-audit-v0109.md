@@ -42,4 +42,12 @@ Local Comfy sd1_clip.token_weights explicitly replaces an outer weight when a ne
 
 ## Release gates
 
+## Additional root reproduction: HTML import loses case-colliding categories
+
+On Windows, importing Room/View and room/View reports two files/two entries but creates one prompt.json containing only the second entry. _output_payloads detects sanitized name collisions case-sensitively although the target filesystem aliases these names. The same problem affects subcategories. This is confirmed with synthetic temporary files; no user data was changed.
+
+Use a portable case-insensitive collision identity when allocating output directory names, while retaining original display spelling. Reuse the existing deterministic suffix convention for colliding names. Ensure the final allocated name itself is unique, including a user category whose literal name equals another category's suffixed name; a small local allocation helper and deterministic suffix/counter resolution suffice. Keep unique existing paths and merge/replace/abort/clean semantics unchanged. No global registry, extra manifests or new limits. Test both main/subcategory case collisions, ordinary sanitized collisions, natural names matching a generated suffix, stable repeated import/merge and actual Windows write results. Linux CI must exercise allocation identities without relying on its case-sensitive filesystem. Stage/rollback tests stay intact.
+
+## Release gates
+
 Root continues the remaining source audit during implementation. Every confirmed additional issue requires a concrete reproduction and a simple design before a fix. Root reviews the complete final diff; medium reviews implementation. Run full Python and frontend suites, native CPU node/HTTP tests, isolated native browser tests, old-workflow/node contract suites, public package and whitespace checks. Review exact-head CI before merge, publish v0.10.9 using existing release conventions, verify the public release, then synchronize installed tracked files only while the production queue is idle and verify hashes. Do not restart ComfyUI or alter private workflows. This audit cannot prove absence of all bugs, and CPU/browser probes do not establish GPU sampling speed.
