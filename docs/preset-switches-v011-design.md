@@ -21,6 +21,7 @@ Unify all ComfyUI settings under category `Scene Prompt Tools`, including Undo h
 - SCENE_SWITCHES runtime payload: fixed ten Boolean values (tuple/list), no node instances, model tensors or UI labels. No OUTPUT_IS_LIST behavior.
 - PresetInput internal hidden/optional value binding for effective switches may be added for GraphBuilder expansion; it is not a visible user socket. Keep name/schema coordination between backend and frontend explicit.
 - The agreed internal binding is `switch_values` (SCENE_SWITCHES), hidden from the user. Names metadata is a permitted literal on PresetInput; external links to its internal inputs remain invalid in saved Presets.
+- ComfyUI treats JSON arrays in API inputs as links. The internal literal binding therefore travels as `switch_values: {"values": [ten booleans]}` and is unwrapped at the Input/control boundary. The actual SCENE_SWITCHES output remains the plain Boolean tuple. Expanded workflow metadata stores the vector in Input `properties.scene_switch_values`; graphToPrompt restores the internal binding. This is replay state, not a new user setting or an override of a fresh Reference occurrence.
 - Reference's switches input is a real dependency. Effective values/settings participate in runtime caching and memo identity. Do not depend on process-global mutable context. Input display names do not select connections.
 
 ## Backend implementation boundaries
@@ -32,6 +33,7 @@ Unify all ComfyUI settings under category `Scene Prompt Tools`, including Undo h
 5. Reference effective vector = resolve(incoming-or-false, mapping); evaluate and expand the Preset with this occurrence-specific vector. Nested siblings and repeated identical Presets never mutate each other. Memo keys must distinguish settings/effective vector where the surrounding occurrence is insufficient. Freeze run inputs with the existing run snapshot. Replaying metadata must preserve mappings and names.
 6. Compact Preset list payload retains switch fields and literal control values needed by frontend counts, including PrimitiveBoolean.value, without restoring heavyweight prompt content. Exact slots/types remain validated. Preflight should support Preset editor defaults with no live Reference.
 7. Resource information traverses the selected Scene branch using the same Boolean semantics without evaluating model/LoRA nodes. Continue displaying model-mode-inapplicable resources according to existing rules within that branch. Keep unrelated top-level standard Switch uses untouched.
+8. Execution-path-only PNGs contract selected Scene switches to their chosen input: retaining the Switch while removing its unselected required input would produce an invalid replay. Full-workflow PNGs retain both branches, Boolean/bundle ports and physical bypassed/muted wiring. Preserve nonzero Input ports even when they appear only in physical workflow links. Resolve consecutive Switch contractions once per operation rather than walking each suffix repeatedly.
 
 ## Frontend implementation boundaries
 
