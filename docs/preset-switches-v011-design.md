@@ -1,6 +1,6 @@
 # Preset switches v0.11.0
 
-Status: implementation design approved by gpt-5.6-sol medium; production and GPU must remain untouched.
+Status: implementation and local validation complete; final implementation `a8581a3` approved by gpt-5.6-sol medium. Production and GPU remain untouched; required CI must pass before release.
 
 ## Accepted scope
 
@@ -64,11 +64,23 @@ Root profiled a private 122-node workflow with 22 loaded Preset references in an
 
 The approved optimization retains exact change detection. Each node keeps only its current flat local-value signature and serialized key. Compare scalar/string fields directly before serializing; copy the ten Boolean values of Input replay bindings into the signature so in-place changes are detected. Continue visiting the selected ancestry and every relevant edge/slot on each lineage check, but compare the resulting scalar descriptors with the current snapshot before serializing the full key. Keep the existing JSON key format. Scope reuse by graph and actual node identity; replacing an ancestor with another object at the same ID invalidates derived caches even when its serialized values are equal. Replace current snapshots on change and release them through existing cache clearing/removal. Do not introduce a hash, polling loop, global history or cache-size limit.
 
-Regression coverage includes long prompt text with zero warm key serialization, direct widget and edge changes without callbacks, selected/unselected Switch branches, Count flags, mutable Input Boolean bindings, graph replacement and same-ID node replacement, serialization/clone boundaries, and removal cleanup. Root repeats the same private native measurement after implementation. The design was reviewed and approved by gpt-5.6-sol medium before delegation.
+Regression coverage includes large Matrix text with zero warm key serialization, direct widget and edge changes without callbacks, selected/unselected Switch branches, Count flags, mutable Input Boolean bindings, graph replacement and same-ID node replacement, serialization/clone boundaries, and removal cleanup. Root repeats the same private native measurement after implementation. The design was reviewed and approved by gpt-5.6-sol medium before delegation.
 
 The first optimization eliminated warm serialization but did not measurably improve this particular native workflow. Follow-up CPU profiling found repeated native widget-value getters to be a major remaining cost. The display lineage has only four consumers: stats, schedule, preview and Queue rows. A ScenePrompter contributes its title and upstream rows to these consumers; its six prompt-body/selection/order/filename widgets do not affect their result. Exclude those six getters from the display descriptor while keeping title, type, ID, mode and revision. This cache never supplies the execution prompt: add native coverage that editing the excluded fields still reaches graphToPrompt, preparation and final positive/negative execution results. Keep the serialization regression on large Matrix data, which does affect the display.
 
 Also reuse the Queue display key when the current row key and rounded width are unchanged, and pass the already computed counts into Expand's label formatter rather than calculating them twice per update/draw. Preserve the formatter's existing callers when the optional counts argument is omitted. These follow-up changes received gpt-5.6-sol medium design approval before delegation. No class-name memo, private ComfyUI store dependency or event-only invalidation is introduced.
+
+## Final verification
+
+Root independently reviewed the product/test diffs and ran the full Python suite (698 tests, two opt-in native suites skipped here), all 25 frontend suites, all 44 real ComfyUI CPU module/HTTP tests, and the complete isolated native browser suite. All passed. Native pointer and modal interactions update the displayed Expand count before the test invokes a planner, refresh helper or API capture. Consecutive Counts, downstream-Count flags, Preset mappings and a PrimitiveBoolean-controlled Switch agree with server preparation. Direct Prompt body edits also reach real ToText/PreviewAny positive and negative outputs, with no model loader executions. Existing migration, save/reload, clone, Undo/Redo, nested Preset and PNG replay coverage passed.
+
+The final display optimization was measured twice against `7c548d8` (the completed switch feature before these performance changes), using the same frozen private 122-node workflow with 22 Preset references and the same isolated native CPU server/browser setup. No private workflow or Preset is included in the repository. Fifty passes of one Expand count update and six Queue display reads took 417.0–455.5 ms before and 183.5–187.4 ms after. The instrumented display descriptor's field reads fell from 41,450 to 716 per measurement. The Scene count portion of 30 native draw frames fell from 60.9–66.6 ms to 15.5–17.9 ms. Fifty Count flag edits took 71.0–71.3 ms before and 31.8–33.2 ms after. Every run had identical final counts and zero browser page errors.
+
+After garbage collection, another 300 warm passes changed the JS heap from about 66.7–67.0 MB to 67.2 MB before, and from 64.9 MB to 65.3 MB after. This short check does not prove that all memory leaks or every source of UI slowness are eliminated. The measured improvement concerns frontend display work, not GPU image sampling. Current snapshots replace old references; no cache capacity limit, background polling or history of serialized graphs was added.
+
+When a selected branch changes, different lineage keys invalidate derived caches normally. Only an identical key with different node/graph identities needs an explicit revision change; this preserves same-ID replacement correctness without a second display invalidation. Native widget setters retain their existing change notifications, so ordinary prompt editing can still change revisions. No test relies on suppressing those notifications.
+
+The designated gpt-5.6-sol medium reviewer approved the initial design, the measured optimization design and exact final implementation `a8581a3`. Public-package and whitespace checks passed. Temporary private measurement inputs and the untracked local harness are removed before publishing.
 
 ## Sources
 
