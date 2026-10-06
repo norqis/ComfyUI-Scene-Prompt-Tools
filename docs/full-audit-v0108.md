@@ -47,3 +47,13 @@ Add focused deterministic regression tests to existing suites and ensure CI invo
 References: https://docs.python.org/3/library/asyncio-task.html (CancelledError and worker cancellation); https://docs.comfy.org/custom-nodes/backend/server_overview (node execution/change contracts); local standard Primitive definitions in comfy_extras/nodes_primitive.py. Existing active model/hash caches remain reusable; only obsolete operation-owned data should be released.
 
 Baseline verification: all 649 Python tests pass (two opt-in native smoke skips) and all 23 frontend suites pass. These existing tests miss the four reproductions above; regression additions are required.
+
+## Final isolated verification
+
+- Root inspected the full implementation and regression diff. Backend adds seven deterministic lifetime tests; the expanded Python suite has 656 tests. Full Python 3.12 and 3.9 runs found only the old version expectation after the release bump; the corrected public-package suite's 16 tests then passed on both runtimes. Root independently ran all 40 route tests, including queued executor cancellation.
+- All 24 frontend suites passed independently under root, including flat lineage, Primitive parity, removal cleanup, shared refresh, direct/nested Preset masking cases and randomized DAG comparisons. For 2/5/9/17/33/65 actual nodes, descriptor sizes were 292/760/1391/2707/5347/10656 characters. Each connected edge was read once per key construction and existence traversal; no global history is retained.
+- Root ran all 39 native ComfyUI CPU module/HTTP tests successfully. The native browser harness also passed on the final source: direct Primitive links, edits, Reroute, actual bypass, reload and visible totals agreed with server-prepared batch/image totals in all seven cases. Historical widget migrations, Preset bypass, Count/Random scheduling, Undo/redo, seeds, Civitai UI and LLM settings remain covered.
+- Actual browser shared-Merge measurements at 3/5/9 nodes were 621/957/1636 key characters and 2.5/2.7/3.0 ms for 100 warm stats reads on this machine. These are isolated UI measurements, not GPU throughput claims.
+- Native LLM prompt generation still invokes zero connected checkpoint/diffusion/CLIP/VAE/LoRA loaders, creates no image jobs, and leaves resource inspection untouched. Production services and active generation were not changed by these checks.
+
+Publication remains gated on the final medium review and required CI for the exact PR head. Installed-copy synchronization requires an observed empty production queue; no production restart is performed.
