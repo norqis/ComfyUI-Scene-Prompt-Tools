@@ -316,6 +316,9 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    const screenshotDirectory = process.env.SCENE_BROWSER_SCREENSHOTS_DIR || resolve(tmpdir(), 'scene-prompt-civitai-review');
+    await mkdir(screenshotDirectory, { recursive: true });
+    if (process.env.SCENE_NATIVE_SWITCH_ONLY !== '1') {
     nativeGPUChecks = true;
     try {
         const snapshot = () => page.evaluate(async () => {
@@ -2070,8 +2073,6 @@ window.__sceneSeedRuntimeTest = {
     await nativeSearch.locator('.pc-civitai-card').first().waitFor();
     assert.equal(await nativeSearch.locator('.pc-civitai-status').textContent(), '', 'query-only search state is not a selected LoRA');
     assert.doesNotMatch(await nativeSearch.textContent(), /undefined/);
-    const screenshotDirectory = process.env.SCENE_BROWSER_SCREENSHOTS_DIR || resolve(tmpdir(), 'scene-prompt-civitai-review');
-    await mkdir(screenshotDirectory, {recursive:true});
     await page.setViewportSize({width:1600,height:950});
     assert.equal(await nativeSearch.locator('.pc-civitai-card').count(),12);
     const nativeCardRows=await nativeSearch.locator('.pc-civitai-card').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().top));
@@ -2201,6 +2202,239 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual({ prompts: seedRequests.length, runs: runRequests.length, services: llmRequests.length }, metadataBefore,
         "metadata-only dialogs never queue, prepare a run, infer or download weights");
     assert.deepEqual(await (await fetch(`${url}/scene_test/model_executions`)).json(), []);
+
+    }
+    nativeRunChecks = true;
+    const switchEditor = await page.evaluate(async () => {
+        const app = window.app; app.graph.clear();
+        const add = type => { const node = window.LiteGraph.createNode(type); if (!node) throw new Error(`Missing native ${type}`); app.graph.add(node); return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const link = (from, slot, to, name, type = 'SCENE_PROMPT') => {
+            if (!to.inputs.some(input => input.name === name)) to.addInput(name, type, { widget: { name } });
+            if (!from.connect(slot, to, to.inputs.findIndex(input => input.name === name))) throw new Error(`Native connection failed: ${from.type}[${slot}] -> ${to.type}.${name}`);
+        };
+        const input = add('ScenePresetInput'), off = add('ScenePrompter'), on = add('ScenePrompter');
+        const offCount = add('ScenePromptCounter'), onCount = add('ScenePromptCounter'), select = add('ComfySwitchNode'), output = add('ScenePresetOutput');
+        off.title = 'browser_false'; on.title = 'browser_true';
+        field(off, 'prompt_name').value = 'browser_false'; field(off, 'positive_base').value = 'browser_false'; field(off, 'randomize').value = false;
+        field(on, 'prompt_name').value = 'browser_true'; field(on, 'positive_base').value = 'browser_true'; field(on, 'randomize').value = false;
+        field(offCount, 'count').value = 2; field(onCount, 'count').value = 3;
+        field(offCount, 'enable_downstream_count').value = true; field(onCount, 'enable_downstream_count').value = true;
+        field(output, 'preset_id').value = 'browser-native-switch'; field(output, 'preset_name').value = 'Native switch names';
+        link(input, 0, off, 'scene_prompt'); link(input, 0, on, 'scene_prompt');
+        link(off, 0, offCount, 'scene_prompt'); link(on, 0, onCount, 'scene_prompt');
+        link(offCount, 0, select, 'on_false'); link(onCount, 0, select, 'on_true');
+        link(input, 3, select, 'switch', 'BOOLEAN'); link(select, 0, output, 'scene_prompt');
+        const ids = { input: input.id, select: select.id, output: output.id };
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
+        return ids;
+    });
+    const openSwitchModal = (id, kind) => page.evaluate(({ id, kind }) => {
+        const node = window.app.graph.getNodeById(id);
+        node.widgets.find(widget => widget.sceneRole === `preset_switch_${kind}`).callback();
+    }, { id, kind });
+    const namesModal = page.locator('[data-scene-preset-switch-modal="names"]');
+    const settingsModal = page.locator('[data-scene-preset-switch-modal="settings"]');
+    const inputSwitchSnapshot = id => page.evaluate(async id => {
+        const node = window.app.graph.getNodeById(id), prompt = await window.app.graphToPrompt();
+        return { ports: node.outputs.map(output => ({ name: output.name, type: output.type, label: output.label })),
+            inputNames: node.inputs.map(input => input.name), raw: node.widgets.find(widget => widget.name === 'switch_names_json').value,
+            serialized: node.serialize(), api: prompt.output[String(id)]?.inputs,
+            history: window.__sceneSeedRuntimeTest.tracker().undoQueue.length };
+    }, id);
+    const switchBeforeNames = await inputSwitchSnapshot(switchEditor.input);
+    assert.deepEqual(switchBeforeNames.ports.map(port => port.name), ['scene_prompt', ...Array.from({ length: 10 }, (_, index) => `switch_${index + 1}`), 'switches']);
+    assert.deepEqual(switchBeforeNames.ports.map(port => port.type), ['SCENE_PROMPT', ...Array(10).fill('BOOLEAN'), 'SCENE_SWITCHES']);
+    assert(!switchBeforeNames.inputNames.includes('switch_values'), 'internal binding never appears as a user socket');
+    await openSwitchModal(switchEditor.input, 'names');
+    assert.equal(await namesModal.locator('input[data-scene-switch-index]').count(), 10);
+    const longSwitchName = '非常に長い日本語のスイッチ名：髪色と衣装と背景の選択をまとめて切り替える';
+    for (const [index, value] of [[1, '入口'], [2, '同名'], [3, '同名'], [4, ''], [5, longSwitchName]])
+        await namesModal.locator(`[data-scene-switch-index="${index}"]`).fill(value);
+    await namesModal.screenshot({ path: resolve(screenshotDirectory, 'native-preset-switch-names.png') });
+    assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchBeforeNames.raw, 'editing a modal only changes its draft');
+    const nativeSwitchErrors = await page.locator('[role="dialog"][aria-labelledby="global-error"]').allTextContents();
+    assert.deepEqual(nativeSwitchErrors, [], 'native switch editor load/API error: ' + JSON.stringify(nativeSwitchErrors));
+    await namesModal.locator('[data-scene-switch-save="names"]').click();
+    const switchNamed = await inputSwitchSnapshot(switchEditor.input);
+    assert.deepEqual(switchNamed.ports.slice(1, 6).map(port => port.label), ['入口', '同名', '同名', 'スイッチ4', longSwitchName]);
+    assert.equal(switchNamed.history, switchBeforeNames.history + 1, 'one modal save owns one native history transaction');
+    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
+    assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchBeforeNames.raw);
+    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().redo());
+    assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchNamed.raw);
+    await openSwitchModal(switchEditor.input, 'names');
+    assert.equal(await namesModal.locator('[data-scene-switch-index="3"]').inputValue(), '同名');
+    await namesModal.locator('[data-scene-switch-save="names"]').click();
+    assert.equal((await inputSwitchSnapshot(switchEditor.input)).history, switchNamed.history, 'a no-op save adds no history');
+    await openSwitchModal(switchEditor.input, 'names');
+    await namesModal.locator('[data-scene-switch-index="1"]').fill('閉じると破棄');
+    await namesModal.getByRole('button', { name: '閉じる', exact: true }).click();
+    assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchNamed.raw);
+    await page.evaluate(id => {
+        const app = window.app, node = app.graph.getNodeById(id);
+        app.graph._nodes.forEach((other, index) => { other.pos = other === node ? [540, 100] : [1800 + index * 300, 100]; });
+        app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0]; app.canvas.draw(true, true);
+    }, switchEditor.input);
+    await page.screenshot({ path: resolve(screenshotDirectory, 'native-preset-switch-input-ports.png') });
+    const switchSaved = await page.evaluate(async ids => {
+        const app = window.app, input = app.graph.getNodeById(ids.input), clone = input.clone();
+        const prompt = await app.graphToPrompt();
+        const response = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            preset_id: 'browser-native-switch', name: 'Native switch names', output_node_id: String(ids.output), api_graph: prompt, workflow: app.graph.serialize(),
+        }) });
+        const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result));
+        const restoredResponse = await fetch('/scene_presets/load?preset_id=browser-native-switch');
+        const restored = await restoredResponse.json(); if (!restoredResponse.ok) throw new Error(JSON.stringify(restored));
+        return { clonePorts: clone.outputs.map(output => ({ name: output.name, label: output.label })),
+            cloneNames: clone.widgets.find(widget => widget.name === 'switch_names_json').value,
+            switchInputs: prompt.output[String(ids.select)].inputs, restored };
+    }, switchEditor);
+    assert.deepEqual(switchSaved.switchInputs.switch, [String(switchEditor.input), 3]);
+    assert.equal(switchSaved.cloneNames, switchNamed.raw);
+    assert.deepEqual(switchSaved.clonePorts, switchNamed.ports.map(({ name, label }) => ({ name, label })));
+    await page.evaluate(async workflow => window.app.loadGraphData(workflow, true, true), switchSaved.restored.workflow);
+    assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchNamed.raw, 'actual saved Preset workflow restores names');
+
+    const switchLive = await page.evaluate(async () => {
+        const app = window.app; app.graph.clear();
+        const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const link = (from, slot, to, name) => { if (!from.connect(slot, to, to.inputs.findIndex(input => input.name === name))) throw new Error(`Cannot connect ${name}`); };
+        const input = add('ScenePresetInput'), first = add('ScenePresetReference'), second = add('ScenePresetReference');
+        const queue = add('ScenePrompterQueue'), count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+        field(queue, 'order_mode').value = 'input_order'; field(queue, 'alternate_block_size').value = 1;
+        field(queue, 'downstream_count_mode').value = 'multiply'; field(queue, 'input_repeats_json').value = '{}';
+        field(input, 'switch_names_json').value = '["親の入口", "親の予備"]'; field(input, 'switch_names_json').callback?.();
+        input.properties.scene_switch_values = [true, false, false, false, false, false, false, false, false, false];
+        for (const node of [first, second]) { field(node, 'preset_id').value = 'browser-native-switch'; field(node, 'switch_settings_json').value = '[]'; await window.__sceneSeedRuntimeTest.refreshPresetReference(node); }
+        link(input, 11, second, 'switches'); link(input, 0, second, 'scene_prompt');
+        link(first, 0, queue, 'scene_prompt1'); link(second, 0, queue, 'scene_prompt2');
+        field(count, 'count').value = 2; field(count, 'enable_downstream_count').value = true;
+        link(queue, 0, count, 'scene_prompt'); link(count, 0, expand, 'scene_prompt');
+        const ids = Object.fromEntries(Object.entries({ input, first, second, queue, count, expand }).map(([name, node]) => [name, node.id]));
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        for (const id of [ids.first, ids.second]) await window.__sceneSeedRuntimeTest.refreshPresetReference(app.graph.getNodeById(id));
+        window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
+        return ids;
+    });
+    const switchPlanSnapshot = () => page.evaluate(async ids => {
+        const app = window.app, { api } = await import('/scripts/api.js'), current = name => app.graph.getNodeById(ids[name]);
+        app.graph.setDirtyCanvas(true, true); app.canvas.draw(true, true); await new Promise(done => setTimeout(done, 250)); app.canvas.draw(true, true);
+        const stats = window.__sceneSeedRuntimeTest.countStats(current('count')), prompt = await app.graphToPrompt();
+        const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST', body: JSON.stringify({ api_graph: prompt, workflow: prompt.workflow, expand_node_id: String(ids.expand) }) });
+        const prepared = await response.json(); if (!response.ok) throw new Error(JSON.stringify(prepared));
+        await api.fetchApi('/scene_prompt/runs/release', { method: 'POST', body: JSON.stringify({ run_handle: prepared.run_handle }) });
+        return { total: stats.total, error: stats.error, prepared: prepared.total_batches,
+            preview: window.__sceneSeedRuntimeTest.countPreview(current('count')),
+            firstTotal: window.__sceneSeedRuntimeTest.countStats(current('first')).total,
+            secondTotal: window.__sceneSeedRuntimeTest.countStats(current('second')).total,
+            displayed: current('expand').widgets.find(widget => widget.sceneRole === 'expand_total_count')?.sceneTotalCount,
+            settings: current('second').widgets.find(widget => widget.name === 'switch_settings_json').value,
+            names: current('input').widgets.find(widget => widget.name === 'switch_names_json').value,
+            api: prompt.output, history: window.__sceneSeedRuntimeTest.tracker().undoQueue.length };
+    }, switchLive);
+    const switchIdentity = await switchPlanSnapshot();
+    assert.equal(switchIdentity.error, undefined, JSON.stringify(switchIdentity));
+    assert.equal(switchIdentity.total, 8, JSON.stringify(switchIdentity)); assert.equal(switchIdentity.prepared, 8); assert.equal(switchIdentity.displayed, 8);
+    assert.deepEqual(switchIdentity.preview, Array(8).fill('Scene Prompt'), 'compact Preset preview retains its existing generic labels');
+    assert.equal(switchIdentity.firstTotal, 2); assert.equal(switchIdentity.secondTotal, 2);
+    assert.deepEqual(switchIdentity.api[String(switchLive.input)].inputs.switch_values, { values: [true, ...Array(9).fill(false)] });
+    await openSwitchModal(switchLive.first, 'settings');
+    assert.match(await settingsModal.textContent(), /入力スイッチ1〜10はすべてOFF/);
+    await settingsModal.getByRole('button', { name: '閉じる', exact: true }).click();
+    await openSwitchModal(switchLive.second, 'settings');
+    assert.equal(await settingsModal.locator('select[data-scene-switch-index]').count(), 10);
+    assert.match(await settingsModal.locator('[data-scene-switch-index="3"]').locator('..').textContent(), /設定先 3: 同名/);
+    assert.match(await settingsModal.locator('[data-scene-switch-index="3"] option[value="1"]').textContent(), /入力 1: 親の入口/);
+    await settingsModal.screenshot({ path: resolve(screenshotDirectory, 'native-preset-switch-settings.png') });
+    await settingsModal.locator('[data-scene-switch-index="3"]').selectOption('1');
+    assert.equal((await switchPlanSnapshot()).settings, switchIdentity.settings, 'mapping draft cannot change the plan');
+    await settingsModal.locator('[data-scene-switch-save="settings"]').click();
+    const switchMapped = await switchPlanSnapshot();
+    assert.equal(switchMapped.history, switchIdentity.history + 1);
+    for (const key of ['total', 'prepared', 'displayed']) assert.equal(switchMapped[key], 10, key);
+    assert.equal(switchMapped.firstTotal, 2); assert.equal(switchMapped.secondTotal, 3);
+    assert.deepEqual(switchMapped.preview, Array(10).fill('Scene Prompt'));
+    assert.equal(JSON.parse(switchMapped.settings)[2], 1);
+    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
+    const switchMappingUndo = await switchPlanSnapshot();
+    assert.equal(switchMappingUndo.total, 8); assert.equal(switchMappingUndo.prepared, 8); assert.equal(switchMappingUndo.settings, switchIdentity.settings);
+    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().redo());
+    const switchMappingRedo = await switchPlanSnapshot(); assert.equal(switchMappingRedo.total, 10); assert.equal(switchMappingRedo.prepared, 10);
+    await openSwitchModal(switchLive.input, 'names');
+    await namesModal.locator('[data-scene-switch-index="1"]').fill('親の変更後');
+    await namesModal.locator('[data-scene-switch-save="names"]').click();
+    const switchRenamed = await switchPlanSnapshot(); assert.equal(switchRenamed.total, 10); assert.equal(switchRenamed.settings, switchMapped.settings);
+    await openSwitchModal(switchLive.second, 'settings');
+    assert.equal(await settingsModal.locator('[data-scene-switch-index="3"]').inputValue(), '1');
+    assert.match(await settingsModal.locator('[data-scene-switch-index="3"] option[value="1"]').textContent(), /親の変更後/);
+    await settingsModal.locator('[data-scene-switch-save="settings"]').click();
+    assert.equal((await switchPlanSnapshot()).history, switchRenamed.history);
+    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
+    assert.equal((await switchPlanSnapshot()).total, 10, 'undoing only a name never changes switch values');
+    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().redo());
+    const switchReloadWorkflow = await page.evaluate(() => window.app.graph.serialize());
+    await openSwitchModal(switchLive.second, 'settings');
+    await settingsModal.locator('[data-scene-switch-index="3"]').selectOption('false');
+    await page.evaluate(id => {
+        window.__sceneStaleSwitchSave = document.querySelector('[data-scene-switch-save="settings"]');
+        window.__sceneStaleSwitchNode = window.app.graph.getNodeById(id);
+    }, switchLive.second);
+    await page.evaluate(async workflow => window.app.loadGraphData(workflow, true, true), switchReloadWorkflow);
+    // Invoke the detached old DOM action to prove it cannot edit either old or replacement nodes.
+    const staleMappingResult = await page.evaluate(() => {
+        const save = window.__sceneStaleSwitchSave, node = window.__sceneStaleSwitchNode;
+        const raw = () => node.widgets.find(widget => widget.name === 'switch_settings_json').value;
+        const before = raw(), history = window.__sceneSeedRuntimeTest.tracker().undoQueue.length; save.click();
+        delete window.__sceneStaleSwitchSave; delete window.__sceneStaleSwitchNode;
+        return { history, after: window.__sceneSeedRuntimeTest.tracker().undoQueue.length, before, raw: raw() };
+    });
+    assert.equal(staleMappingResult.after, staleMappingResult.history); assert.equal(staleMappingResult.raw, staleMappingResult.before);
+    const switchReloaded = await switchPlanSnapshot(); assert.equal(switchReloaded.total, 10); assert.equal(switchReloaded.prepared, 10);
+    assert.equal(switchReloaded.settings, switchMapped.settings);
+    const oldSwitchWorkflow = structuredClone(switchReloadWorkflow);
+    for (const node of oldSwitchWorkflow.nodes) {
+        if (node.type === 'ScenePresetInput') { node.outputs = node.outputs.slice(0, 1); node.widgets_values = []; delete node.widgets_values_named; delete node.properties.scene_switch_values; }
+        if (node.type === 'ScenePresetReference') { node.widgets_values = ['browser-native-switch', 'legacy-run', '{"version":1,"presets":{}}']; delete node.widgets_values_named; }
+    }
+    oldSwitchWorkflow.links = oldSwitchWorkflow.links.filter(link => link[2] !== 11);
+    for (const node of oldSwitchWorkflow.nodes) for (const input of node.inputs || []) if (input.name === 'switches') input.link = null;
+    await page.evaluate(async workflow => window.app.loadGraphData(workflow, true, true), oldSwitchWorkflow);
+    const switchLegacy = await switchPlanSnapshot(); assert.equal(switchLegacy.total, 8); assert.equal(switchLegacy.prepared, 8);
+    assert.equal(switchLegacy.settings, '[]');
+    assert.deepEqual(switchLegacy.api[String(switchLive.second)].inputs.scene_prompt, [String(switchLive.input), 0], 'legacy Input keeps its original Scene slot 0 link');
+    const oldReference = await page.evaluate(id => window.app.graph.getNodeById(id).serialize().widgets_values_named, switchLive.second);
+    assert.equal(oldReference.run_handle, 'legacy-run'); assert.equal(oldReference.llm_presets_json, '{"version":1,"presets":{}}');
+    assert.equal((await inputSwitchSnapshot(switchLive.input)).ports.length, 12, 'legacy one-output Input appends fixed slots');
+    await page.evaluate(async workflow => window.app.loadGraphData(workflow, true, true), switchReloadWorkflow);
+    const settingsBeforeSwitchReload = await page.evaluate(async () => {
+        const settings = window.app.extensionManager.setting, ids = ['ScenePrompt.UndoHistoryLimit', 'ScenePrompt.ReleaseComfyBeforeLLM', 'ScenePrompt.ReleaseLLMBeforeImage'];
+        const before = Object.fromEntries(ids.map(id => [id, settings.get(id)])); await settings.set(ids[0], 300);
+        return { before, expected: Object.fromEntries(ids.map(id => [id, settings.get(id)])) };
+    });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForFunction(() => window.__sceneSeedRuntimeTest && window.LiteGraph?.registered_node_types?.ComfySwitchNode && window.app?.graph);
+    await page.keyboard.press('Escape');
+    await page.evaluate(async workflow => window.app.loadGraphData(workflow, true, true), switchReloadWorkflow);
+    const switchBrowserReloaded = await switchPlanSnapshot(); assert.equal(switchBrowserReloaded.total, 10); assert.equal(switchBrowserReloaded.prepared, 10);
+    assert.equal(switchBrowserReloaded.settings, switchMapped.settings); assert.equal(switchBrowserReloaded.names, switchRenamed.names);
+    const switchSettings = await page.evaluate(() => ({
+        values: Object.fromEntries(Object.keys(window.app.ui.settings.settingsLookup).filter(id => id.startsWith('ScenePrompt.')).map(id => [id, window.app.extensionManager.setting.get(id)])),
+        categories: Object.entries(window.app.ui.settings.settingsLookup).filter(([id]) => id.startsWith('ScenePrompt.')).map(([id, setting]) => ({ id, category: setting.category })),
+    }));
+    assert.deepEqual(switchSettings.values, settingsBeforeSwitchReload.expected, 'existing setting IDs and values survive reload');
+    assert(switchSettings.categories.every(setting => setting.category?.[0] === 'Scene Prompt Tools'), JSON.stringify(switchSettings));
+    await page.evaluate(() => window.app.extensionManager.command.execute('Comfy.ShowSettingsDialog'));
+    await page.getByText('Scene Prompt Tools', { exact: true }).waitFor();
+    assert.equal(await page.getByText('Scene Prompt Tools', { exact: true }).count(), 1, 'native settings sidebar has one category');
+    assert.equal(await page.getByText('ScenePrompt', { exact: true }).count(), 0, 'old derived settings category is absent');
+    await page.keyboard.press('Escape');
+    await page.evaluate(async before => { for (const [id, value] of Object.entries(before)) await window.app.extensionManager.setting.set(id, value); }, settingsBeforeSwitchReload.before);
+    assert.deepEqual(await (await fetch(`${url}/scene_test/model_executions`)).json(), []);
+    nativeRunChecks = false;
+    console.log('real ComfyUI standard Switch MatchType, fixed slots, names/mapping DOM saves, siblings, count/selected preview, Undo/Redo, clone, legacy restore, reload and one settings category passed');
 
     const weightedInput = "first, ((TAG:4):0.5), (tag:1.2), (equal:1.), (EQUAL:1e0), (science:1_2e-1), (SCIENCE:1.1), (blocked:99)";
     const nativeMatrixId = await page.evaluate(async () => {

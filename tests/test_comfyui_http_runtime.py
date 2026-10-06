@@ -598,12 +598,17 @@ def _workflow_for_graph(graph):
         inputs = []
         for name, value in node.get("inputs", {}).items():
             inputs.append({"name": name, "type": "*", "link": None})
+        outputs = [{"name": "output", "type": "*", "links": []}]
+        if node["class_type"] == "ScenePresetInput":
+            outputs = [{"name": "scene_prompt", "type": "SCENE_PROMPT", "links": []},
+                *[{"name": f"switch_{slot}", "type": "BOOLEAN", "links": []} for slot in range(1, 11)],
+                {"name": "switches", "type": "SCENE_SWITCHES", "links": []}]
         nodes.append({
             "id": int(node_id),
             "type": node["class_type"],
             "pos": [index * 180, 40],
             "inputs": inputs,
-            "outputs": [{"name": "output", "type": "*", "links": []}],
+            "outputs": outputs,
             "widgets_values": [node.get("inputs", {}).get("preset_id", "")] if node["class_type"] == "ScenePresetReference" else [],
         })
     by_id = {str(node["id"]): node for node in nodes}
@@ -612,11 +617,29 @@ def _workflow_for_graph(graph):
             if not isinstance(value, list) or len(value) != 2:
                 continue
             source_id, source_slot = str(value[0]), value[1]
-            by_id[source_id]["outputs"][0]["links"].append(link_id)
+            outputs = by_id[source_id]["outputs"]
+            while len(outputs) <= source_slot:
+                outputs.append({"name": f"output_{len(outputs)}", "type": "*", "links": []})
+            outputs[source_slot]["links"].append(link_id)
             by_id[str(target_id)]["inputs"][target_slot]["link"] = link_id
             links.append([link_id, int(source_id), source_slot, int(target_id), target_slot, "*"])
             link_id += 1
     return {"version": 1, "nodes": nodes, "links": links, "groups": [], "last_node_id": max(int(node_id) for node_id in graph), "last_link_id": link_id - 1}
+
+
+def _switch_workflow_for_graph(graph):
+    workflow = _workflow_for_graph(graph)
+    for node in workflow["nodes"]:
+        values = graph[str(node["id"])]["inputs"]
+        if node["type"] == "ScenePresetInput":
+            node["widgets_values"] = [values.get("switch_names_json", "[]")]
+            node["widgets_values_named"] = {"switch_names_json": values.get("switch_names_json", "[]")}
+            if "switch_values" in values:
+                node["properties"] = {"scene_switch_values": copy.deepcopy(values["switch_values"]["values"])}
+        elif node["type"] == "ScenePresetReference":
+            node["widgets_values_named"] = {"preset_id": values["preset_id"],
+                "switch_settings_json": values.get("switch_settings_json", "[]")}
+    return workflow
 
 
 def _apply_run_handle(graph, handle):
@@ -1226,6 +1249,131 @@ NODE_CLASS_MAPPINGS = {
         }
         self._queue_and_wait(graph)
         self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["selected"])
+
+    def test_http_mapped_nested_switch_snapshot_selected_callbacks_and_expanded_png_replay(self):
+        from PIL import Image
+
+        with _CallbackReceiver() as receiver:
+            leaf = {
+                "1": {"class_type": "ScenePresetInput", "inputs": {"switch_names_json": '["子1", "同名", "同名"]'}},
+                "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 0], "positive_base": "switch_false", "randomize": False}},
+                "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 0], "positive_base": "switch_true", "randomize": False}},
+                "4": {"class_type": "ScenePromptCallbackRequest", "inputs": {"method": "POST", "url": receiver.url,
+                    "text": json.dumps({"side": "false"}), "body_type": "json", "headers_json": "{}"}},
+                "5": {"class_type": "ScenePromptCallbackRequest", "inputs": {"method": "POST", "url": receiver.url,
+                    "text": json.dumps({"side": "true"}), "body_type": "json", "headers_json": "{}"}},
+                "6": {"class_type": "ScenePromptCallback", "inputs": {"scene_prompt": ["2", 0], "callback": ["4", 0], "frequency": "毎回", "timeout_seconds": 10, "failure_mode": "停止"}},
+                "7": {"class_type": "ScenePromptCallback", "inputs": {"scene_prompt": ["3", 0], "callback": ["5", 0], "frequency": "毎回", "timeout_seconds": 10, "failure_mode": "停止"}},
+                "8": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["6", 0], "count": 2}},
+                "9": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["7", 0], "count": 3}},
+                "10": {"class_type": "ComfySwitchNode", "inputs": {"switch": ["1", 3], "on_false": ["8", 0], "on_true": ["9", 0]}},
+                "11": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["10", 0]}},
+            }
+            middle = {
+                "1": {"class_type": "ScenePresetInput", "inputs": {"switch_names_json": '["中1", "中2"]'}},
+                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "http-switch-leaf", "switches": ["1", 11],
+                    "switch_settings_json": json.dumps([False, False, 1, False, False, False, False, False, False, False])}},
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            }
+            outer = {
+                "1": {"class_type": "ScenePresetInput", "inputs": {"switch_names_json": '["親1", "親2"]'}},
+                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "http-switch-middle", "switches": ["1", 11],
+                    "switch_settings_json": json.dumps([2, 1, 3, 4, 5, 6, 7, 8, 9, 10])}},
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}},
+            }
+            for preset_id, definition, output_id in (("http-switch-leaf", leaf, "11"), ("http-switch-middle", middle, "3"), ("http-switch-outer", outer, "3")):
+                self._request("/scene_presets/save", {"preset_id": preset_id, "name": preset_id, "output_node_id": output_id,
+                    "api_graph": {"output": definition}, "workflow": _switch_workflow_for_graph(definition)})
+            marker = self.base / "switch-mapped-results.json"
+            graph = {
+                "1": {"class_type": "ScenePresetInput", "inputs": {"switch_names_json": '["外部1", "外部2"]',
+                    "switch_values": {"values": [True, False, False, False, False, False, False, False, False, False]}}},
+                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "http-switch-outer", "switches": ["1", 11], "switch_settings_json": json.dumps([False] * 10)}},
+                "3": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "http-switch-outer", "switches": ["1", 11], "switch_settings_json": json.dumps([2, 1, 3, 4, 5, 6, 7, 8, 9, 10])}},
+                "4": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["2", 0], "scene_prompt2": ["3", 0]}},
+                "5": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["4", 0], "count": 1}},
+                "6": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["5", 0], "current_index": 0, "seed_base": 19, "run_id": "http-switch", "timestamp_dir": False}},
+                "7": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+                "8": {"class_type": "TestSceneTextImage", "inputs": {"image": ["7", 0], "positive": ["6", 0], "negative": ["6", 1], "log_path": str(marker)}},
+                "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["8", 0], "scene_info": ["6", 2], "path": "mapped-switch-native", "metadata_mode": "生成経路ノードのみ", "expand_preset_contents": True}},
+                "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["8", 0], "scene_info": ["6", 2], "path": "mapped-switch-full", "metadata_mode": "ワークフロー全体", "expand_preset_contents": True}},
+            }
+            workflow = _switch_workflow_for_graph(graph)
+            self.assertTrue(any(link[2] == 11 for link in workflow["links"]), "fixture contains real nonzero bundle output links")
+            prepared = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "workflow": workflow, "expand_node_id": "6"})
+            self.assertEqual(prepared["total_batches"], 5)
+            self.assertEqual(receiver.requests, [], "preflight cannot send either branch's callbacks")
+            handle = prepared["run_handle"]; _apply_run_handle(graph, handle)
+            try:
+                observed = []
+                for index in range(5):
+                    graph["6"]["inputs"]["current_index"] = index
+                    self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                    observed.append(json.loads(marker.read_text(encoding="utf-8"))[0])
+                    if index == 0:
+                        graph["1"]["inputs"]["switch_values"] = {"values": [False] * 10}
+                        graph["2"]["inputs"]["switch_settings_json"] = json.dumps([True] * 10)
+                        graph["3"]["inputs"]["switch_settings_json"] = json.dumps([False] * 10)
+                self.assertEqual(observed, ["switch_false"] * 2 + ["switch_true"] * 3,
+                    "an active run keeps its occurrence vectors despite later live input/settings changes")
+                callbacks = receiver.wait_for(5)
+                self.assertEqual([json.loads(item["body"])["side"] for item in callbacks], ["false"] * 2 + ["true"] * 3)
+            finally:
+                self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
+            # The same native worker/cache must honor new mappings even with identical totals.
+            graph["6"]["inputs"]["current_index"] = 0
+            changed = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "workflow": _switch_workflow_for_graph(graph), "expand_node_id": "6"})
+            self.assertEqual(changed["total_batches"], 5)
+            changed_handle = changed["run_handle"]; _apply_run_handle(graph, changed_handle)
+            try:
+                self._queue_callback_graph(graph, changed_handle, _switch_workflow_for_graph(graph), claim_run=True)
+                self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], "switch_true")
+            finally:
+                self._request("/scene_prompt/runs/release", {"run_handle": changed_handle})
+
+            for mode, path in (("selected", "mapped-switch-native"), ("full", "mapped-switch-full")):
+                files = sorted((self.base / "output" / path).glob("*.png"), key=lambda path: path.stat().st_mtime_ns)
+                self.assertEqual(len(files), 6)
+                for selected, expected in ((files[1], "switch_false"), (files[4], "switch_true")):
+                    with self.subTest(mode=mode, side=expected), Image.open(selected) as image:
+                        replay, visual = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                    classes = {node["class_type"] for node in replay.values()}
+                    self.assertNotIn("ScenePresetReference", classes)
+                    if mode == "full":
+                        self.assertIn("ComfySwitchNode", classes)
+                        prompts = {node["inputs"].get("positive_base") for node in replay.values() if node["class_type"] == "ScenePrompter"}
+                        self.assertTrue({"switch_false", "switch_true"}.issubset(prompts), "full PNG keeps both connected branches")
+                        controls = [node["inputs"]["switch"] for node in replay.values() if node["class_type"] == "ComfySwitchNode"]
+                        self.assertTrue(any(isinstance(control, list) and control[1] == 3 for control in controls), "Boolean output slot survives expansion")
+                        boundary_nodes = [node for node in visual["nodes"] if node["type"] == "ScenePresetInput"]
+                        self.assertTrue(boundary_nodes)
+                        for node in boundary_nodes:
+                            self.assertEqual(node["outputs"][11]["name"], "switches")
+                            self.assertEqual(node["outputs"][11]["type"], "SCENE_SWITCHES")
+                            if str(node["id"]) == "1":
+                                continue  # The live parent becomes unused after both References are inlined.
+                            binding = replay[str(node["id"])]["inputs"]["switch_values"]["values"]
+                            self.assertEqual(node["properties"]["scene_switch_values"], binding,
+                                "inlined bundle edges become child occurrence bindings with the same frozen values")
+                            self.assertEqual(len(binding), 10)
+                            self.assertTrue(all(isinstance(value, bool) for value in binding))
+                        leaf_inputs = [node["inputs"] for node in replay.values() if node["class_type"] == "ScenePresetInput"
+                            and node["inputs"].get("switch_names_json") == '["子1", "同名", "同名"]']
+                        self.assertEqual(len(leaf_inputs), 2)
+                        self.assertEqual(sorted(inputs["switch_values"]["values"][2] for inputs in leaf_inputs), [False, True])
+                    for save_id in ("9", "10"):
+                        if save_id in replay:
+                            replay[save_id]["inputs"]["path"] = f"mapped-switch-replay-{mode}-{expected}-{save_id}"
+                    replay_handle, visual = self._prepare_callback_run(replay, "6", visual)
+                    try:
+                        self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], expected,
+                            "expanded PNG preserves the selected Scene and remains valid to the real executor")
+                        if mode == "selected":
+                            self.assertNotIn("ComfySwitchNode", classes, "selected-only PNG contracts Scene switches to their chosen branch before core validation")
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
 
     def test_model_specific_loras_execute_only_matching_loaders(self):
         for mode, include_illustrious, expected in (("Anima", True, ["lora:anima.safetensors"]),
