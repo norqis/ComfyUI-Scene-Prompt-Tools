@@ -41,6 +41,115 @@ class ImportSceneHtmlTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     self.module.parse_args()
 
+    def test_case_collisions_preserve_all_html_entries_on_disk(self):
+        source = self.root / "html"
+        source.mkdir()
+        sections = []
+        for main, sub, prompt in (("Room", "View", "first"), ("Room", "view", "second"), ("room", "View", "third")):
+            sections.append(
+                f"<h2>{main}</h2><h3>{sub}</h3><figure><table>"
+                f"<tr><td>{prompt}</td><td><code>{prompt}</code></td></tr>"
+                "</table></figure>"
+            )
+        (source / "prompt.html").write_text("".join(sections), encoding="utf-8")
+        grouped = self.module.load_html_items(source)
+        destination = self.root / "data"
+        payloads = self.module._output_payloads(grouped, destination)
+        paths = [str(path.relative_to(destination)).casefold() for path, _ in payloads]
+        self.assertEqual(len(set(paths)), 3)
+        self.assertEqual(self.module.write_data(grouped, destination), (2, 3, 3))
+        files = list(destination.rglob("prompt.json"))
+        self.assertEqual(len(files), 3)
+        self.assertEqual(
+            {item["prompt"] for path in files for item in json.loads(path.read_text(encoding="utf-8"))},
+            {"first", "second", "third"},
+        )
+        expected = {
+            "first": "Room/View/prompt.json",
+            "second": f"Room/view_{self.module.stable_suffix('view')}/prompt.json",
+            "third": f"room_{self.module.stable_suffix('room')}/View/prompt.json",
+        }
+        self.assertEqual({items[0]["prompt"]: path.relative_to(destination).as_posix() for path, items in payloads}, expected)
+
+    def test_sanitized_collisions_keep_existing_suffix_convention(self):
+        grouped = {
+            main: {sub: [{"label": f"{main}:{sub}", "prompt": f"{main}:{sub}"}] for sub in ("A/B", "A:B")}
+            for main in ("A/B", "A:B")
+        }
+        destination = self.root / "data"
+        payloads = self.module._output_payloads(grouped, destination)
+        suffixed = f"A_B_{self.module.stable_suffix('A:B')}"
+        self.assertEqual(
+            {path.relative_to(destination).as_posix() for path, _ in payloads},
+            {f"{main}/{sub}/prompt.json" for main in ("A_B", suffixed) for sub in ("A_B", suffixed)},
+        )
+        self.assertEqual(self.module.write_data(grouped, destination), (2, 4, 4))
+        self.assertEqual(len(list(destination.rglob("prompt.json"))), 4)
+
+    def test_literal_suffixed_names_and_hash_collisions_are_unique(self):
+        cases = (
+            (("ROOM", "ROOM_same", "ROOM_same_2", "room"), {"ROOM": "ROOM", "ROOM_same": "ROOM_same", "ROOM_same_2": "ROOM_same_2", "room": "room_same_3"}),
+            (("A/B", "A:B", "A?B", "A_B_same"), {"A/B": "A_B", "A:B": "A_B_same", "A?B": "A_B_same_2", "A_B_same": "A_B_same_same"}),
+        )
+        destination = self.root / "data"
+        for names, expected_names in cases:
+            for level in ("main", "sub"):
+                with self.subTest(names=names, level=level):
+                    if level == "main":
+                        grouped = {name: {"Sub": [{"label": name, "prompt": name}]} for name in names}
+                    else:
+                        grouped = {"Main": {name: [{"label": name, "prompt": name}] for name in names}}
+                    with mock.patch.object(self.module, "stable_suffix", return_value="same"):
+                        payloads = self.module._output_payloads(grouped, destination)
+                    self.assertEqual(
+                        {items[0]["label"]: path.relative_to(destination).parts[0 if level == "main" else 1] for path, items in payloads},
+                        expected_names,
+                    )
+                    self.assertEqual(len({str(path).casefold() for path, _ in payloads}), len(names))
+
+    def test_literal_name_matching_real_generated_suffix_keeps_all_entries(self):
+        literal = f"ROOM_{self.module.stable_suffix('room')}"
+        names = ("ROOM", literal, "room")
+        grouped = {
+            main: {sub: [{"label": f"{main}:{sub}", "prompt": f"{main}:{sub}"}] for sub in names}
+            for main in names
+        }
+        destination = self.root / "data"
+        self.assertEqual(self.module.write_data(grouped, destination), (3, 9, 9))
+        files = list(destination.rglob("prompt.json"))
+        self.assertEqual(len(files), 9)
+        self.assertEqual(
+            {item["prompt"] for path in files for item in json.loads(path.read_text(encoding="utf-8"))},
+            {f"{main}:{sub}" for main in names for sub in names},
+        )
+        final_name = f"room_{self.module.stable_suffix('room')}_2"
+        self.assertTrue((destination / final_name / final_name / "prompt.json").exists())
+
+    def test_allocation_is_deterministic_and_merge_stays_in_each_category(self):
+        names = ("Room", "room", "A/B", "A:B")
+        grouped = {
+            main: {sub: [{"label": f"{main}:{sub}", "prompt": f"{main}:{sub}"}] for sub in names}
+            for main in names
+        }
+        reversed_grouped = {main: dict(reversed(list(subs.items()))) for main, subs in reversed(list(grouped.items()))}
+        destination = self.root / "data"
+        initial = self.module._output_payloads(grouped, destination)
+        self.assertEqual(self.module._output_payloads(reversed_grouped, destination), initial)
+        self.assertEqual(self.module.write_data(grouped, destination), (4, 16, 16))
+        self.assertEqual(self.module.write_data(reversed_grouped, destination, "merge"), (4, 16, 16))
+        for subs in reversed_grouped.values():
+            for items in subs.values():
+                original = items[0]["prompt"]
+                items.append({"label": f"new:{original}", "prompt": f"new:{original}"})
+        self.assertEqual(self.module.write_data(reversed_grouped, destination, "merge"), (4, 16, 32))
+        self.assertEqual(len(list(destination.rglob("prompt.json"))), 16)
+        for path, items in initial:
+            original = items[0]["prompt"]
+            self.assertEqual(
+                [item["prompt"] for item in json.loads(path.read_text(encoding="utf-8"))],
+                [original, f"new:{original}"],
+            )
+
     def test_default_collision_aborts_without_mutating_destination(self):
         destination = self.root / "data"
         target = destination / "Main" / "Sub" / "prompt.json"

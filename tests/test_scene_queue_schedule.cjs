@@ -422,3 +422,24 @@ assert.equal(oldSources.source_node_id, "source-id"); assert.equal(oldSources.so
 assert.equal(ctx.sceneCounterConfiguredValues({ widgets_values: [10, false] }).enable_downstream_count, false);
 assert.equal(ctx.sceneCounterConfiguredValues({ widgets_values: [10, true], widgets_values_named: { enable_downstream_count: false } }).enable_downstream_count, false);
 console.log("Strict Count preview composition, Random policy, compact huge access, nested Presets and legacy widget migration passed.");
+
+if (process.argv.includes("--compact-count-response")) {
+    async function verifyCompactCountResponse() {
+        const { preparePresetReference } = await import(require("node:url").pathToFileURL(path.join(__dirname, "..", "web", "scene_llm_presets.js")).href);
+        const fixture = JSON.parse(fs.readFileSync(0, "utf8"));
+        assert.deepEqual(fixture.response.errors, []);
+        ctx.scenePresetDisplayGraphs.clear();
+        for (const preset of fixture.response.presets) ctx.scenePresetDisplayGraphs.set(preset.metadata.preset_id, preset);
+        for (const entry of fixture.cases) {
+            const reference = { widgets: [{ name: "preset_id", value: entry.preset_id }, { name: "llm_presets_json", value: "{}" }] };
+            const prepared = preparePresetReference(reference, ctx.scenePresetDisplayGraphs);
+            assert.equal(prepared.error, null);
+            const plan = ctx.sceneScheduleForPreset(entry.preset_id, null, new Set(), prepared.root);
+            const result = ctx.sceneScheduleCount(plan, entry.factor);
+            assert.equal(result.stats.total, entry.total, `${entry.preset_id} * ${entry.factor}: real compact response matches execution`);
+            assert.equal(result.stats.error, undefined);
+        }
+        console.log("Real compact Preset response Count parity passed.");
+    }
+    verifyCompactCountResponse().catch((error) => { console.error(error); process.exitCode = 1; });
+}

@@ -84,6 +84,157 @@ class PromptDataRouteTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def catalog_fixture(self, kind):
+        item = {"label": "Cached", "prompt": "cached"}
+        if kind == "items":
+            root = self.data_dir
+            data = [item]
+            load = self.routes._load_items
+        else:
+            root = self.routes._saved_prompts_dir()
+            data = {"name": "Cached", "description": "", "items": [{**item, "category_key": "Category"}]}
+            load = self.routes._load_saved_prompts
+        path = root / "Category" / "prompt.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        self.routes._clear_prompt_caches()
+        return root, path, load
+
+    def test_catalog_snapshots_read_each_file_once_per_check(self):
+        for kind in ("items", "saved_prompts"):
+            with self.subTest(kind=kind):
+                root, path, load = self.catalog_fixture(kind)
+                second = root / "Other" / "prompt.json"
+                second.parent.mkdir()
+                second.write_bytes(path.read_bytes())
+                with mock.patch.object(Path, "rglob", autospec=True, side_effect=Path.rglob) as walks, \
+                     mock.patch.object(Path, "read_bytes", autospec=True, side_effect=Path.read_bytes) as reads, \
+                     mock.patch.object(self.routes.time, "monotonic", return_value=0) as clock:
+                    def assert_operations(expected_walks, expected_reads):
+                        self.assertEqual(walks.call_count, expected_walks)
+                        self.assertEqual(reads.call_count, expected_reads)
+                        walks.reset_mock()
+                        reads.reset_mock()
+
+                    first = load(with_errors=True)
+                    assert_operations(2, 4)
+                    self.assertIs(load(with_errors=True), first)
+                    assert_operations(0, 0)
+                    clock.return_value = 3
+                    with mock.patch.object(self.routes, "_parse_prompt_json", side_effect=AssertionError("unchanged data must not parse")):
+                        self.assertIs(load(with_errors=True), first)
+                    assert_operations(1, 2)
+                    self.assertEqual(load(force=True, with_errors=True), first)
+                    assert_operations(2, 4)
+                    cache = self.routes._ITEMS_CACHE if kind == "items" else self.routes._SAVED_PROMPTS_CACHE
+                    self.assertEqual(set(cache["default"]), {"signature", "content_hash", "value", "expires"})
+                    json.dumps(cache)  # Raw bytes or snapshot Path objects cannot be retained here.
+
+    def test_catalog_read_and_stat_failures_are_stable_and_recover(self):
+        for kind in ("items", "saved_prompts"):
+            for operation in ("read_bytes", "stat"):
+                with self.subTest(kind=kind, operation=operation):
+                    root, path, load = self.catalog_fixture(kind)
+                    original = getattr(Path, operation)
+
+                    def fail_file(candidate, *args, **kwargs):
+                        if candidate == path:
+                            raise PermissionError("private path must not appear")
+                        return original(candidate, *args, **kwargs)
+
+                    with mock.patch.object(Path, "rglob", return_value=[path]), \
+                         mock.patch.object(Path, operation, autospec=True, side_effect=fail_file), \
+                         mock.patch.object(self.routes.time, "monotonic", return_value=0) as clock:
+                        snapshot = self.routes._prompt_file_snapshot(root)
+                        self.assertEqual(self.routes._prompt_file_snapshot(root), snapshot)
+                        self.assertIsNone(snapshot[2][0][1])
+                        value = load(with_errors=True)
+                        self.assertEqual(value[kind], [])
+                        label = "Prompt data" if kind == "items" else "Saved prompt"
+                        self.assertEqual(value["errors"], [{"file": "Category/prompt.json", "error": f"{label} file 'prompt.json' cannot be read."}])
+                        clock.return_value = 3
+                        self.assertIs(load(with_errors=True), value)
+                    with mock.patch.object(self.routes.time, "monotonic", return_value=6):
+                        recovered = load(with_errors=True)
+                    self.assertEqual(recovered["errors"], [])
+                    self.assertEqual(len(recovered[kind]), 1)
+
+    def test_catalog_snapshot_parsing_matches_direct_helpers(self):
+        for kind in ("items", "saved_prompts"):
+            root, path, load = self.catalog_fixture(kind)
+            direct = (lambda: self.routes._read_items(path, ["Category"])) if kind == "items" else (lambda: self.routes._read_saved_prompt(path, root))
+            valid = path.read_bytes()
+            for content in (valid, b"{broken", b"null", b"[{}]", b"\xff"):
+                with self.subTest(kind=kind, content=content):
+                    path.write_bytes(content)
+                    try:
+                        expected = direct()
+                    except ValueError as exc:
+                        expected_error = str(exc)
+                        result = load(force=True, with_errors=True)
+                        self.assertEqual(result[kind], [])
+                        self.assertEqual(result["errors"], [{"file": "Category/prompt.json", "error": expected_error}])
+                    else:
+                        self.assertEqual(load(force=True), expected if kind == "items" else [expected])
+
+    def test_catalog_content_race_retries_using_new_bytes_with_same_stat(self):
+        for kind in ("items", "saved_prompts"):
+            with self.subTest(kind=kind):
+                _root, path, load = self.catalog_fixture(kind)
+                stat = path.stat()
+                original = self.routes._prompt_file_snapshot
+                snapshots = []
+
+                def edit_after_snapshot(root):
+                    snapshot = original(root)
+                    snapshots.append(snapshot)
+                    if len(snapshots) == 1:
+                        path.write_bytes(path.read_bytes().replace(b"Cached", b"Fresh!").replace(b"cached", b"fresh!"))
+                        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                    return snapshot
+
+                with mock.patch.object(self.routes, "_prompt_file_snapshot", side_effect=edit_after_snapshot):
+                    value = load()
+                self.assertEqual(len(snapshots), 4)
+                self.assertEqual(snapshots[0][0], snapshots[1][0])
+                self.assertNotEqual(snapshots[0][1], snapshots[1][1])
+                self.assertEqual(value[0]["label" if kind == "items" else "name"], "Fresh!")
+                self.assertIs(load(), value)
+
+    def test_catalog_generation_change_during_snapshot_or_publication_retries(self):
+        for kind in ("items", "saved_prompts"):
+            for phase in ("snapshot", "publication"):
+                with self.subTest(kind=kind, phase=phase):
+                    _root, _path, load = self.catalog_fixture(kind)
+                    target = "_prompt_file_snapshot" if phase == "snapshot" else "_cache_entry"
+                    original = getattr(self.routes, target)
+                    calls = []
+
+                    def invalidate_once(*args, **kwargs):
+                        value = original(*args, **kwargs)
+                        calls.append(value)
+                        if len(calls) == 1:
+                            self.routes._clear_prompt_caches()
+                        return value
+
+                    with mock.patch.object(self.routes, target, side_effect=invalidate_once):
+                        value = load()
+                    self.assertEqual(len(calls), 3 if phase == "snapshot" else 2)
+                    self.assertEqual(len(value), 1)
+                    self.assertIs(load(), value)
+
+    def test_catalog_snapshot_scopes_keep_root_and_saved_files_out_of_items(self):
+        _root, item_file, load_items = self.catalog_fixture("items")
+        _saved_root, saved_file, load_saved = self.catalog_fixture("saved_prompts")
+        root_file = self.data_dir / "prompt.json"
+        root_file.write_text("{ignored root payload", encoding="utf-8")
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=Path.read_bytes) as reads:
+            self.assertEqual(len(load_items()), 1)
+            self.assertCountEqual([call.args[0] for call in reads.call_args_list], [item_file, saved_file, root_file] * 2)
+            reads.reset_mock()
+            self.assertEqual(len(load_saved()), 1)
+            self.assertEqual([call.args[0] for call in reads.call_args_list], [saved_file, saved_file])
+
     def test_empty_data_directory_returns_empty_lists(self):
         self.assertEqual(self.routes._load_items(), [])
         self.assertEqual(self.routes._load_saved_prompts(), [])
@@ -778,7 +929,7 @@ class PromptDataRouteTests(unittest.TestCase):
         self.routes._clear_prompt_caches("alice")
         started = threading.Event()
         continue_read = threading.Event()
-        original = self.routes._read_items
+        original = self.routes._parse_items
 
         def delayed_read(*args, **kwargs):
             value = original(*args, **kwargs)
@@ -786,7 +937,7 @@ class PromptDataRouteTests(unittest.TestCase):
             self.assertTrue(continue_read.wait(2))
             return value
 
-        self.routes._read_items = delayed_read
+        self.routes._parse_items = delayed_read
         result = {}
         worker = threading.Thread(target=lambda: result.setdefault("items", self.routes._load_items("alice")))
         worker.start()
@@ -795,7 +946,7 @@ class PromptDataRouteTests(unittest.TestCase):
         self.routes._clear_prompt_caches("alice")
         continue_read.set()
         worker.join(2)
-        self.routes._read_items = original
+        self.routes._parse_items = original
         self.assertEqual([item["label"] for item in result["items"]], ["New"])
         self.assertEqual([item["label"] for item in self.routes._load_items("alice")], ["New"])
 
@@ -809,28 +960,29 @@ class PromptDataRouteTests(unittest.TestCase):
         self.assertIn("user-0", self.routes._ITEMS_CACHE)
         self.assertIn("user-0", self.routes._SAVED_PROMPTS_CACHE)
 
-    def test_expired_matching_signature_renews_cache_without_rereading(self):
+    def test_expired_matching_signature_renews_cache_without_reparsing(self):
         path = self.data_dir / "Category" / "prompt.json"
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps([{"label": "Cached", "prompt": "cached"}]), encoding="utf-8")
         with mock.patch.object(self.routes.time, "monotonic", return_value=0):
             self.assertEqual(self.routes._load_items()[0]["label"], "Cached")
-        with mock.patch.object(self.routes, "_read_items", side_effect=AssertionError("must reuse matching cache")):
+        with mock.patch.object(self.routes, "_parse_items", side_effect=AssertionError("must reuse matching cache")):
             with mock.patch.object(self.routes.time, "monotonic", return_value=999):
                 self.assertEqual(self.routes._load_items()[0]["label"], "Cached")
 
     def test_expired_equal_signature_reloads_changed_prompt_content(self):
-        path = self.data_dir / "Category" / "prompt.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps([{"label": "Cached", "prompt": "cached"}]), encoding="utf-8")
-        original_stat = path.stat()
-        with mock.patch.object(self.routes.time, "monotonic", return_value=0):
-            self.assertEqual(self.routes._load_items()[0]["label"], "Cached")
-        path.write_text(json.dumps([{"label": "Fresh!", "prompt": "fresh!"}]), encoding="utf-8")
-        self.assertEqual(path.stat().st_size, original_stat.st_size)
-        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-        with mock.patch.object(self.routes.time, "monotonic", return_value=999):
-            self.assertEqual(self.routes._load_items()[0]["label"], "Fresh!")
+        for kind in ("items", "saved_prompts"):
+            with self.subTest(kind=kind):
+                _root, path, load = self.catalog_fixture(kind)
+                original_stat = path.stat()
+                field = "label" if kind == "items" else "name"
+                with mock.patch.object(self.routes.time, "monotonic", return_value=0):
+                    self.assertEqual(load()[0][field], "Cached")
+                path.write_bytes(path.read_bytes().replace(b"Cached", b"Fresh!").replace(b"cached", b"fresh!"))
+                self.assertEqual(path.stat().st_size, original_stat.st_size)
+                os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                with mock.patch.object(self.routes.time, "monotonic", return_value=999):
+                    self.assertEqual(load()[0][field], "Fresh!")
 
 
 class RunLifetimeRouteTests(unittest.IsolatedAsyncioTestCase):

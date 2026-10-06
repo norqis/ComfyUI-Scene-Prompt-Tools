@@ -57,6 +57,19 @@ def stable_suffix(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:8]
 
 
+def _allocate_dir_name(value: str, default_name: str, used_names: set[str]) -> str:
+    name = safe_dir_name(value, default_name)
+    if name.casefold() in used_names:
+        suffixed_name = f"{name}_{stable_suffix(value)}"
+        name = suffixed_name
+        counter = 2
+        while name.casefold() in used_names:
+            name = f"{suffixed_name}_{counter}"
+            counter += 1
+    used_names.add(name.casefold())
+    return name
+
+
 def cells_from_row(row_html: str) -> list[tuple[str, str]]:
     return [(match.group("tag").lower(), match.group("body")) for match in CELL_RE.finditer(row_html)]
 
@@ -188,22 +201,16 @@ def _atomic_write_json(path: Path, data: list[dict[str, str]]) -> None:
 
 
 def _output_payloads(grouped: dict[str, dict[str, list[dict[str, str]]]], output_dir: Path):
-    used_main_names: dict[str, str] = {}
+    used_main_names: set[str] = set()
     payloads = []
     for main_category, subcategories in sorted(grouped.items()):
-        main_dir_name = safe_dir_name(main_category, "main_category")
-        if main_dir_name in used_main_names and used_main_names[main_dir_name] != main_category:
-            main_dir_name = f"{main_dir_name}_{stable_suffix(main_category)}"
-        used_main_names[main_dir_name] = main_category
-        used_sub_names: dict[str, str] = {}
+        main_dir_name = _allocate_dir_name(main_category, "main_category", used_main_names)
+        used_sub_names: set[str] = set()
         for sub_category, raw_items in sorted(subcategories.items()):
             items = dedupe_items(raw_items)
             if not items:
                 continue
-            sub_dir_name = safe_dir_name(sub_category, "sub_category")
-            if sub_dir_name in used_sub_names and used_sub_names[sub_dir_name] != sub_category:
-                sub_dir_name = f"{sub_dir_name}_{stable_suffix(sub_category)}"
-            used_sub_names[sub_dir_name] = sub_category
+            sub_dir_name = _allocate_dir_name(sub_category, "sub_category", used_sub_names)
             payloads.append((output_dir / main_dir_name / sub_dir_name / "prompt.json", items))
     return payloads
 

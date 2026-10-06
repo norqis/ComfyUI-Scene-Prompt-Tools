@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import vm from "node:vm";
 import { preparePresetReference, presetOccurrenceChild, collectPresetLLMTargets,
-    presetEditorDefinition, parsePresetOverrides, hydratePresetReference, presetReferenceHasLLM, createPresetOperation } from "../web/scene_llm_presets.js";
+    presetEditorDefinition, parsePresetOverrides, hydratePresetReference, presetReferenceHasLLM, createPresetOperation, createPresetGraph } from "../web/scene_llm_presets.js";
 import { insertLoras } from "../web/scene_prompt_llm.js";
 
 function definition(id, output) {
@@ -210,6 +210,184 @@ assert.equal(editorReferenceNode.widgets_values[2], editor.api_graph.output[5].i
 assert.equal(editorChild.api_graph.output[1].inputs.positive, "local A first");
 assert.equal(editorChild.api_graph.output[String(additions[0].id)].inputs.lora_name, "llm/1.safetensors");
 assert.equal(JSON.stringify([...definitions]), original);
+// The execution API can contract physical bypass and Reroute chains. Scalar edits
+// preserve the physical graph, including nodes absent from the execution adapter.
+function physicalDefinition() {
+    const preset = definition("physical", {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePromptLLM", inputs: { scene_prompt: ["1", 0], model_mode: "Illustrious", description: "room", positive: "before", negative: "", generation_state_json: "{}" } },
+        4: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+        6: { class_type: "ScenePrompterQueue", inputs: { scene_prompt5: ["2", 0], alternate_block_size: 2 } },
+    });
+    const byId = new Map(preset.workflow.nodes.map(node => [node.id, node]));
+    byId.get(6).inputs = Array.from({ length: 6 }, (_, index) => ({ name: `scene_prompt${index + 1}`, type: "SCENE_PROMPT", link: null, label: `slot ${index + 1}` }));
+    const bypass = { id: 3, type: "ScenePrompter", mode: 4, pos: [500, 100], size: [300, 200],
+        widgets_values: ["retained"], properties: { annotation: "bypassed" }, inputs: [{ name: "scene_prompt", type: "SCENE_PROMPT", link: 11 }],
+        outputs: [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [12], shape: 3 }] };
+    const note = { id: 500, type: "Note", mode: 0, title: "Keep this note", widgets_values: ["retained note"], properties: { color: "blue" } };
+    const muted = { id: 7, type: "ScenePrompter", mode: 2, widgets_values: ["muted"], properties: {}, inputs: [], outputs: [] };
+    const bypassReference = { id: 8, type: "ScenePresetReference", mode: 4, widgets_values: ["unresolved", "run", JSON.stringify({ version: 1, presets: { ".": inner } })],
+        properties: { retained: true }, inputs: [{ name: "scene_prompt", type: "SCENE_PROMPT", link: 13 }],
+        outputs: [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [14] }] };
+    const reroute = { id: 9, type: "Reroute", mode: 0, inputs: [{ name: "", type: "*", link: 14 }], outputs: [{ name: "", type: "SCENE_PROMPT", links: [15] }],
+        properties: { showOutputText: true }, flags: { collapsed: false } };
+    const manual = { id: 10, type: "SceneApplyLora", mode: 0, widgets_values: ["manual", "Illustrious", "manual trigger"], properties: { manual: true },
+        inputs: [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }], outputs: [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }] };
+    byId.get(1).outputs[0].links = [10]; byId.get(2).inputs[0].link = 10; byId.get(2).outputs[0].links = [11,13];
+    byId.get(4).inputs[0].link = 12; byId.get(6).inputs[4].link = 15;
+    preset.workflow.nodes.push(bypass, note, muted, bypassReference, reroute, manual);
+    preset.workflow.links = [
+        [10,1,0,2,0,"SCENE_PROMPT",{ style: "incoming" }], [11,2,0,3,0,"SCENE_PROMPT",{ style: "fanout-a" }],
+        [12,3,0,4,0,"SCENE_PROMPT",{ style: "bypass" }], [13,2,0,8,0,"SCENE_PROMPT",{ style: "fanout-b" }],
+        [14,8,0,9,0,"SCENE_PROMPT",{ parentId: 90 }], [15,9,0,6,4,"SCENE_PROMPT",{ retained: true }],
+    ];
+    preset.workflow.groups = [{ title: "Physical group", bounding: [0,0,1200,500], color: "#abc" }];
+    preset.workflow.reroutes = [{ id: 90, parentId: null, linkIds: [14], pos: [400,80] }];
+    preset.workflow.extra = { ds: { scale: 0.7, offset: [1,2] } };
+    preset.workflow.last_node_id = 700; preset.workflow.last_link_id = 800;
+    return preset;
+}
+const physical = physicalDefinition(), physicalBefore = structuredClone(physical), physicalGraph = createPresetGraph(physical, ownerGraph);
+widget(physicalGraph.getNodeById(2), "positive").value = "edited prompt";
+const promptEdited = physicalGraph.definition();
+const editedWorkflowNode = promptEdited.workflow.nodes.find(node => node.id === 2);
+assert.equal(editedWorkflowNode.widgets_values[2], "edited prompt");
+const expectedWorkflow = structuredClone(physical.workflow), expectedLLM = expectedWorkflow.nodes.find(node => node.id === 2);
+expectedLLM.widgets_values[2] = "edited prompt"; expectedLLM.widgets_values_named = { positive: "edited prompt" };
+assert.deepEqual(promptEdited.workflow, expectedWorkflow, "prompt-only editing changes just its widgets, never the physical topology or last IDs");
+assert.deepEqual(promptEdited.api_graph.output[4].inputs.scene_prompt, ["2",0], "execution stays contracted");
+assert.deepEqual(physical, physicalBefore, "the original shared physical definition is unchanged");
+
+const physicalAdditions = insertLoras(physicalGraph, physicalGraph.getNodeById(2), candidates, loraNode);
+assert(physicalAdditions.every(node => node.id > physical.workflow.last_node_id), "allocation includes all physical nodes/reserved IDs");
+const spliced = physicalGraph.definition(), newTail = physicalAdditions.at(-1);
+assert.equal(spliced.workflow.nodes.length, physical.workflow.nodes.length + 2);
+for (const originalNode of physical.workflow.nodes.filter(node => node.id !== 2)) {
+    assert.deepEqual(spliced.workflow.nodes.find(node => node.id === originalNode.id), originalNode, "workflow-only nodes, modes and target socket references remain exact");
+}
+const existingPhysical = spliced.workflow.links.filter(link => link[0] <= 15);
+for (const originalLink of physical.workflow.links) {
+    const expected = structuredClone(originalLink);
+    if ([11,13].includes(expected[0])) expected[1] = newTail.id;
+    assert.deepEqual(existingPhysical.find(link => link[0] === expected[0]), expected,
+        "fanout retains original link IDs, target endpoints and metadata through bypasses/reroutes");
+}
+assert.deepEqual(spliced.workflow.groups, physical.workflow.groups);
+assert.deepEqual(spliced.workflow.reroutes, physical.workflow.reroutes);
+assert.deepEqual(spliced.workflow.extra, physical.workflow.extra);
+assert.deepEqual(spliced.api_graph.output[4].inputs.scene_prompt, [String(newTail.id),0]);
+assert.deepEqual(spliced.api_graph.output[6].inputs.scene_prompt5, [String(newTail.id),0]);
+assert(spliced.workflow.links.filter(link => link[0] > 800).every(link => link[0] > physical.workflow.last_link_id));
+const physicalNodeMap = new Map(spliced.workflow.nodes.map(node => [String(node.id), node]));
+for (const link of spliced.workflow.links) {
+    assert.equal(physicalNodeMap.get(String(link[3])).inputs[link[4]].link, link[0]);
+    assert(physicalNodeMap.get(String(link[1])).outputs[link[2]].links.includes(link[0]));
+}
+const rehydratedGraph = createPresetGraph(spliced, ownerGraph);
+assert.equal(insertLoras(rehydratedGraph, rehydratedGraph.getNodeById(2), candidates, loraNode).length, 0,
+    "reload recognizes the adjacent managed chain without reinserting it");
+assert.deepEqual(rehydratedGraph.definition().workflow, spliced.workflow);
+const thirdCandidate = { model_id: 3, version_id: 3, file_id: 3, lora_name: "llm/3.safetensors", triggers: ["third"] };
+const third = insertLoras(rehydratedGraph, rehydratedGraph.getNodeById(2), [...candidates,thirdCandidate], loraNode);
+assert.equal(third.length, 1);
+const extended = rehydratedGraph.definition();
+assert.equal(extended.workflow.links.find(link => link[0] === 11)[1], third[0].id);
+assert.equal(extended.workflow.links.find(link => link[0] === 13)[1], third[0].id);
+assert.deepEqual(extended.workflow.nodes.find(node => node.id === 3), physical.workflow.nodes.find(node => node.id === 3));
+assert(extended.workflow.links.some(link => link[1] === newTail.id && link[3] === third[0].id), "only the former managed tail is physically spliced");
+
+// The splice hook carries the exact Scene output slot rather than assuming slot zero.
+const nonzeroPreset = physicalDefinition(), nonzeroLLM = nonzeroPreset.workflow.nodes.find(node=>node.id===2);
+nonzeroLLM.outputs.unshift({name:'unused',type:'MODEL',links:[]});
+for (const link of nonzeroPreset.workflow.links) if (link[1]===2) link[2]=1;
+for (const entry of Object.values(nonzeroPreset.api_graph.output))
+    for (const input of Object.values(entry.inputs)) if (Array.isArray(input)&&input[0]==='2') input[1]=1;
+const nonzeroGraph=createPresetGraph(nonzeroPreset,ownerGraph);
+const nonzeroChain=insertLoras(nonzeroGraph,nonzeroGraph.getNodeById(2),candidates,()=>{
+    const node=loraNode();node.outputs.unshift({name:'unused',type:'MODEL',links:[]});return node;
+});
+const nonzeroResult=nonzeroGraph.definition(), nonzeroTail=nonzeroChain.at(-1).id;
+assert.deepEqual(nonzeroResult.api_graph.output[4].inputs.scene_prompt,[String(nonzeroTail),1]);
+for (const id of [11,13]) {
+    const link=nonzeroResult.workflow.links.find(link=>link[0]===id);
+    assert.equal(link[1],nonzeroTail);assert.equal(link[2],1);
+}
+
+// Legacy/test definitions with no physical links still retain isolated workflow-only nodes.
+const legacyPhysical = physicalDefinition(); legacyPhysical.workflow.links = [];
+const legacyGraph = createPresetGraph(legacyPhysical, ownerGraph);
+widget(legacyGraph.getNodeById(2), "positive").value = "legacy edit";
+const legacyResult = legacyGraph.definition();
+for (const node of legacyPhysical.workflow.nodes.filter(node => !legacyPhysical.api_graph.output[String(node.id)]))
+    assert.deepEqual(legacyResult.workflow.nodes.find(saved => saved.id === node.id), node);
+assert.equal(legacyResult.workflow.nodes.length, legacyPhysical.workflow.nodes.length);
+assert.deepEqual(legacyResult.workflow.groups, legacyPhysical.workflow.groups);
+
+// Missing legacy cache widgets and nullable scalar inputs are read without writing defaults onto untouched nodes.
+const untouchedDefaults = physicalDefinition();
+delete untouchedDefaults.api_graph.output[2].inputs.generation_state_json;
+untouchedDefaults.workflow.nodes.find(node => node.id === 2).widgets_values.pop();
+untouchedDefaults.api_graph.output[6].inputs.order_mode = null;
+untouchedDefaults.workflow.nodes.find(node => node.id === 6).widgets_values.push(null);
+const untouchedGraph = createPresetGraph(untouchedDefaults,ownerGraph);
+assert.equal(widget(untouchedGraph.getNodeById(6),'order_mode').value,null);
+assert.equal(widget(untouchedGraph.getNodeById(2),'generation_state_json').value,'{}');
+assert.deepEqual(untouchedGraph.definition(),untouchedDefaults,
+    "adapter reading an untouched nullable/default value never normalizes the saved physical or API definition");
+widget(untouchedGraph.getNodeById(2),'generation_state_json').value = '{"generated":true}';
+assert.equal(untouchedGraph.definition().api_graph.output[2].inputs.generation_state_json,'{"generated":true}');
+
+// Repeated/nested occurrences own independent copies of the same physical source.
+const physicalOuter = definition("physical-outer", {
+    1: { class_type: "ScenePresetReference", inputs: { preset_id: "physical" } },
+    2: { class_type: "ScenePresetReference", inputs: { preset_id: "physical" } },
+    3: { class_type: "ScenePrompterQueue", inputs: { scene_prompt1: ["1",0], scene_prompt2: ["2",0] } },
+    4: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["3",0] } },
+});
+const occurrenceSources = new Map([["physical",physical],["physical-outer",physicalOuter]]), occurrenceRef = reference(590);
+occurrenceRef.widgets[0].value = "physical-outer";
+const occurrenceOperation = createPresetOperation(occurrenceSources);
+const physicalTargets = collectPresetLLMTargets(occurrenceRef, occurrenceOperation.definitions);
+assert.equal(physicalTargets.length, 2);
+widget(physicalTargets[0].node,"positive").value = "occurrence one";
+insertLoras(physicalTargets[0].graph, physicalTargets[0].node, candidates, loraNode); physicalTargets[0].commit();
+widget(physicalTargets[1].node,"positive").value = "occurrence two"; physicalTargets[1].commit();
+const occurrenceState = parsePresetOverrides(occurrenceRef.widgets[1].value);
+assert.equal(occurrenceState["1"].workflow.nodes.length, physical.workflow.nodes.length + 2);
+assert.equal(occurrenceState["2"].workflow.nodes.length, physical.workflow.nodes.length);
+assert.deepEqual(occurrenceState["2"].workflow.links, physical.workflow.links);
+for (const path of ["1","2"]) assert.deepEqual(occurrenceState[path].workflow.nodes.find(node => node.id === 8),
+    physical.workflow.nodes.find(node => node.id === 8), "flattening local transport never erases bypassed workflow-only Reference state");
+assert.deepEqual(occurrenceState["1"].workflow.groups, physical.workflow.groups);
+occurrenceOperation.dispose();
+assert.equal(physicalTargets[0].graph.getNodeById(2), undefined, "disposal releases logical and physical detached state");
+assert.deepEqual(physicalTargets[0].graph.links, {});
+assert.equal(physicalTargets[0].current(), false);
+
+// Preparation indexes physical edges once rather than scanning all links per API edge.
+const indexedOutput = { 1: { class_type: "ScenePresetInput", inputs: {} } };
+for (let id = 2; id <= 2000; id++) indexedOutput[id] = { class_type: "ScenePromptLLM", inputs: { scene_prompt: [String(id-1),0], description: "fixture" } };
+const indexedDefinition = definition("indexed", indexedOutput);
+for (let id = 2; id <= 2000; id++) {
+    indexedDefinition.workflow.links.push([id-1,id-1,0,id,0,"SCENE_PROMPT"]);
+    indexedDefinition.workflow.nodes[id-2].outputs[0].links = [id-1];
+    indexedDefinition.workflow.nodes[id-1].inputs[0].link = id-1;
+}
+const indexedStart = performance.now();
+const arrayFind = Array.prototype.find; let edgeScans = 0, indexedGraph;
+try {
+    Array.prototype.find = function (...args) {
+        if (Array.isArray(this[0]) && this[0]?.[5] === "SCENE_PROMPT") edgeScans++;
+        return arrayFind.apply(this, args);
+    };
+    indexedGraph = createPresetGraph(indexedDefinition, ownerGraph);
+} finally { Array.prototype.find = arrayFind; }
+assert.equal(edgeScans, 0, "adapter creation never scans the physical edge array for an API edge");
+assert.equal(Object.keys(indexedGraph.links).length, 1999);
+assert.deepEqual(indexedGraph.definition().workflow.links, indexedDefinition.workflow.links);
+const indexedMs = performance.now()-indexedStart;
+console.log(`Preset physical preservation, fanout splice, reuse, isolated occurrences and indexed 2000-node adaptation passed (${indexedMs.toFixed(1)} ms).`);
+
 // Real widget order includes the preexisting optional hidden run handle.
 const threeWidgetRoot = structuredClone(editor);
 const threeWidgetReference = threeWidgetRoot.workflow.nodes.find((node) => node.id === 6);

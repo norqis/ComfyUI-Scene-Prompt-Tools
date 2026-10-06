@@ -146,7 +146,8 @@ def _clone_loras(value):
     for item in value:
         if not isinstance(item, dict):
             raise ScenePlanError("Scene Prompt row loras must contain objects.")
-        _require_exact_keys(item, LORA_KEYS, "Scene Prompt row lora")
+        if not LORA_KEYS.issubset(item) or set(item) - (LORA_KEYS | {"source_node_id"}):
+            raise ScenePlanError("Scene Prompt row lora has unsupported or missing fields.")
         name = _require_string(item["name"], "Scene Prompt row lora name", allow_empty=False)
         model_mode = item["model_mode"]
         if model_mode not in MODEL_MODE_CHOICES:
@@ -157,11 +158,14 @@ def _clone_loras(value):
             if not isinstance(strength, (int, float)) or isinstance(strength, bool):
                 raise ScenePlanError(f"Scene Prompt row lora {key} must be a number.")
             strengths[key] = float(strength)
-        result.append({
+        descriptor = {
             "name": name, **strengths, "model_mode": model_mode,
             "positive_parts": _require_string_list(item["positive_parts"], "Scene Prompt row lora positive_parts"),
             "negative_parts": _require_string_list(item["negative_parts"], "Scene Prompt row lora negative_parts"),
-        })
+        }
+        if "source_node_id" in item:
+            descriptor["source_node_id"] = _require_string(item["source_node_id"], "Scene Prompt row lora source_node_id")
+        result.append(descriptor)
     return result
 
 
@@ -336,10 +340,26 @@ def merge_rows(left, right):
     model_links = right_row.get("model_links") or left_row.get("model_links")
     if model_links is not None:
         row["model_links"] = model_links
-    loras = [*left_row.get("loras", []), *right_row.get("loras", [])]
+    loras = _merge_loras(left_row.get("loras", []), right_row.get("loras", []))
     if loras:
         row["loras"] = loras
     return row
+
+
+def _merge_loras(left, right):
+    result = []
+    by_source = {}
+    for descriptor in [*left, *right]:
+        source_id = descriptor.get("source_node_id", "")
+        existing = by_source.get(source_id) if source_id else None
+        if existing is not None:
+            for key in ("positive_parts", "negative_parts"):
+                existing[key] = _unique_strings([*existing[key], *descriptor[key]])
+        else:
+            result.append(descriptor)
+            if source_id:
+                by_source[source_id] = descriptor
+    return result
 
 
 def _merge_callbacks(left, right):

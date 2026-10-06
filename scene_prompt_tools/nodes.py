@@ -2462,6 +2462,9 @@ class SceneApplyLora:
             "model_mode": _normalize_model_mode(model_mode),
             "positive_parts": positive_parts, "negative_parts": negative_parts,
         }
+        source_id = str(source_node_id or unique_id or "").strip()
+        if source_id:
+            descriptor["source_node_id"] = source_id
         plan = transform(scene_prompt, operation={"kind": "lora_add", "payload": descriptor})
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 

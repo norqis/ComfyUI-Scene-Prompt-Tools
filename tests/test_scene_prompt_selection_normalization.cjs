@@ -26,6 +26,7 @@ const context = {
     Map,
     Set,
     JSON,
+    promptCatalogIndexes: new WeakMap(),
     writeStateToWidget(node, state, widgetName) {
         writes.push({ node, widgetName, value: JSON.parse(JSON.stringify(state)) });
     },
@@ -37,6 +38,12 @@ for (const name of [
     "pathKey",
     "itemCategoryKey",
     "itemKey",
+    "stripCountSuffix",
+    "displayPathLabel",
+    "promptCatalogIndex",
+    "catalogPathKey",
+    "selectedItems",
+    "selectedItemMap",
     "normalizeWeight",
     "weightForStorage",
     "splitPromptParts",
@@ -109,6 +116,11 @@ assert.throws(
     /候補データにありません/u,
     "ambiguous matches remain an error",
 );
+const duplicateSelection = { categories: { [category]: [{ ...current, weight: 1.25 }, { ...current, weight: 1.5 }] } };
+assert.equal(context.selectedItemMap(duplicateSelection, true).get(context.itemKey(current)).weight, 1.25,
+    "chunked candidate rows retain the old first selected-match weight");
+assert.equal(context.selectedItemMap(duplicateSelection).get(context.itemKey(current)).weight, 1.5,
+    "saved-prompt map matching retains its existing last-entry semantics");
 
 const movedOld = {
     ...candidate("stable", "Moved", "alpha, beta, alpha"),

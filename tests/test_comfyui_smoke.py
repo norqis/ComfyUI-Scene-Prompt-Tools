@@ -216,6 +216,118 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertEqual(empty_result["expand"], {})
         self.assertEqual(empty_result["result"][5:], (["checkpoint", 0], ["checkpoint", 1], ["checkpoint", 2]))
 
+    def test_native_executor_loads_shared_lora_once_and_distinct_same_file_twice(self):
+        import execution
+        import folder_paths
+        import nodes as comfy_nodes
+        from server import PromptServer
+
+        import comfy.model_management as management
+        self.assertEqual(management.get_torch_device().type, "cpu")
+        runs = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.runs"]
+        presets = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.presets"]
+        loaded = []
+        received = []
+
+        class ResourceSource:
+            RETURN_TYPES = ("MODEL", "CLIP", "VAE")
+            FUNCTION = "produce"
+
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {}}
+
+            def produce(self):
+                return (), (), "fixture-vae"
+
+        class Loader:
+            RETURN_TYPES = ("MODEL", "CLIP")
+            FUNCTION = "load"
+
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"model": ("MODEL",), "clip": ("CLIP",), "lora_name": ("STRING",),
+                                     "strength_model": ("FLOAT",), "strength_clip": ("FLOAT",)}}
+
+            def load(self, model, clip, lora_name, strength_model, strength_clip):
+                loaded.append((lora_name, strength_model, strength_clip))
+                return (*model, (lora_name, strength_model)), (*clip, (lora_name, strength_clip))
+
+        class ResourceSink:
+            RETURN_TYPES = ()
+            OUTPUT_NODE = True
+            FUNCTION = "receive"
+
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"model": ("MODEL",), "clip": ("CLIP",), "positive": ("STRING",), "negative": ("STRING",)}}
+
+            def receive(self, model, clip, positive, negative):
+                received.append((model, clip, positive, negative))
+                return ()
+
+        original_catalog = folder_paths.get_filename_list
+        mappings = {**self.package.NODE_CLASS_MAPPINGS, "SceneFixtureResources": ResourceSource,
+                    "SceneFixtureResourceSink": ResourceSink, "LoraLoader": Loader}
+        with mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, mappings), \
+             mock.patch.object(folder_paths, "get_filename_list", side_effect=lambda category: ["fixture.safetensors"] if category == "loras" else original_catalog(category)):
+            for mode in ("Illustrious", "Anima"):
+                for shared in (True, False):
+                    with self.subTest(mode=mode, shared=shared):
+                        loaded.clear()
+                        received.clear()
+                        prompt = {
+                            "resources": {"class_type": "SceneFixtureResources", "inputs": {}},
+                            "model": {"class_type": "SceneApplyModel", "inputs": {
+                                "model": ["resources", 0], "clip": ["resources", 1], "vae": ["resources", 2],
+                            }},
+                            "lora-a": {"class_type": "SceneApplyLora", "inputs": {
+                                "scene_prompt": ["model", 0], "lora_name": "fixture.safetensors", "strength_model": 0.8,
+                                "strength_clip": 0.7, "model_mode": mode, "positive": "trigger", "negative": "bad",
+                            }},
+                            "merge": {"class_type": "ScenePrompterMerge", "inputs": {"scene_prompt1": ["left", 0], "scene_prompt2": ["right", 0]}},
+                            "expand": {"class_type": "ScenePrompterExpand", "inputs": {
+                                "scene_prompt": ["merge", 0], "seed_base": 7, "timestamp_dir": False, "model_mode": mode,
+                                "current_index": 0, "run_id": "auto",
+                            }},
+                            "sink": {"class_type": "SceneFixtureResourceSink", "inputs": {
+                                "model": ["expand", 5], "clip": ["expand", 6], "positive": ["expand", 0], "negative": ["expand", 1],
+                            }},
+                        }
+                        if not shared:
+                            prompt["lora-b"] = copy.deepcopy(prompt["lora-a"])
+                            prompt["lora-b"]["inputs"].update({"strength_model": 0.5, "strength_clip": 0.4})
+                        for name in ("left", "right"):
+                            source = "lora-b" if name == "right" and not shared else "lora-a"
+                            prompt[name] = {"class_type": "ScenePrompter", "inputs": {
+                                "scene_prompt": [source, 0], "prompt_name": name, "positive_base": name,
+                                "positive_json": '{"version":1,"categories":{}}', "negative_base": "",
+                                "negative_json": '{"version":1,"categories":{}}', "category_order": "", "seed": 0, "randomize": False,
+                            }}
+                        prompt_id = f"scene-lora-convergence-{mode}-{shared}"
+                        handle = runs.create_run_context("default")
+                        try:
+                            for node_id in ("left", "right", "expand"):
+                                prompt[node_id]["inputs"]["run_handle"] = handle
+                            presets.snapshot_presets_for_run(handle, {"output": prompt}, "expand")
+                            self.assertTrue(runs.claim_run_context(handle, "default", prompt_id))
+                            valid, error, outputs, node_errors = asyncio.run(execution.validate_prompt(prompt_id, prompt, None))
+                            self.assertTrue(valid, (error, node_errors))
+                            executor = execution.PromptExecutor(PromptServer.instance, cache_type=execution.CacheType.CLASSIC,
+                                                                cache_args={"lru": 0, "ram": 0, "ram_inactive": 0})
+                            executor.execute(prompt, prompt_id, {}, outputs)
+                            self.assertTrue(executor.success, executor.status_messages)
+                        finally:
+                            runs.release_run_context(handle, "default")
+                            presets.release_scene_preset_snapshot(handle, "default")
+                        expected = [("fixture.safetensors", 0.8, 0.7)]
+                        if not shared:
+                            expected.append(("fixture.safetensors", 0.5, 0.4))
+                        self.assertEqual(loaded, expected)
+                        self.assertEqual(received, [(tuple((name, strength) for name, strength, _clip in expected),
+                                                    tuple((name, strength) for name, _model, strength in expected),
+                                                    "left, right, trigger", "bad")])
+
     def test_uses_established_scene_node_ids_without_aliases(self):
         self.assertNotIn("ScenePrompt", self.package.NODE_CLASS_MAPPINGS)
         self.assertNotIn("ScenePromptExpand", self.package.NODE_CLASS_MAPPINGS)

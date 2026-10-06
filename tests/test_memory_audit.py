@@ -239,8 +239,8 @@ class RouteMemoryTests(unittest.TestCase):
             self.routes._load_items("b")
             self.routes._load_saved_prompts("b")
         with mock.patch.object(self.routes.time, "monotonic", return_value=3), \
-                mock.patch.object(self.routes, "_read_items", side_effect=AssertionError("unchanged revalidation must not parse")), \
-                mock.patch.object(self.routes, "_read_saved_prompt", side_effect=AssertionError("unchanged revalidation must not parse")):
+                mock.patch.object(self.routes, "_parse_items", side_effect=AssertionError("unchanged revalidation must not parse")), \
+                mock.patch.object(self.routes, "_parse_saved_prompt", side_effect=AssertionError("unchanged revalidation must not parse")):
             self.assertIs(self.routes._load_items("a"), first_items)
             self.assertIs(self.routes._load_saved_prompts("a"), first_saved)
         self.assertEqual(list(self.routes._ITEMS_CACHE), ["a"])

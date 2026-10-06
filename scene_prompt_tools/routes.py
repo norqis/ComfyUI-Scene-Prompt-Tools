@@ -116,33 +116,36 @@ def _cache_generation(user_id):
     return _CACHE_GENERATION
 
 
-def _prompt_file_signature(root):
-    if not root.exists():
-        return ()
+def _read_prompt_bytes(path):
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _prompt_file_snapshot(root):
     signature = []
+    digest = hashlib.sha256()
+    files = []
+    if not root.exists():
+        return (), digest.hexdigest(), files
     for prompt_file in sorted(root.rglob(PROMPT_FILE_NAME)):
+        relative_path = str(prompt_file.relative_to(root))
         try:
             stat = prompt_file.stat()
         except OSError:
-            continue
-        signature.append((str(prompt_file.relative_to(root)), stat.st_mtime_ns, stat.st_size))
-    return tuple(signature)
-
-
-def _prompt_file_content_hash(root):
-    digest = hashlib.sha256()
-    if not root.exists():
-        return digest.hexdigest()
-    for prompt_file in sorted(root.rglob(PROMPT_FILE_NAME)):
-        try:
-            digest.update(str(prompt_file.relative_to(root)).encode("utf-8"))
-            digest.update(b"\0")
-            with prompt_file.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(65536), b""):
-                    digest.update(chunk)
-        except OSError:
-            continue
-    return digest.hexdigest()
+            signature.append((relative_path, None, None))
+            content = None
+        else:
+            signature.append((relative_path, stat.st_mtime_ns, stat.st_size))
+            content = _read_prompt_bytes(prompt_file)
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(b"\0" if content is None else b"\1")
+        if content is not None:
+            digest.update(content)
+        files.append((prompt_file, content))
+    return tuple(signature), digest.hexdigest(), files
 
 
 def _cache_get(caches, user_id, signature, content_hash):
@@ -199,26 +202,36 @@ def _validate_prompt_data_item(item, label="Prompt data item"):
     return result
 
 
-def _read_items(path, category_path):
+def _parse_prompt_json(content, path, label):
+    if content is None:
+        raise ValueError(f"{label} file '{path.name}' cannot be read.")
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        return json.loads(content.decode("utf-8"))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON.") from exc
-    except OSError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' cannot be read.") from exc
+        raise ValueError(f"{label} file '{path.name}' is invalid JSON.") from exc
 
+
+def _normalize_prompt_data(data, path):
     if not isinstance(data, list):
         raise ValueError(f"Prompt data file '{path.name}' must be a JSON array.")
+    return [
+        _validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
+        for index, item in enumerate(data)
+    ]
 
-    normalized = []
-    for index, item in enumerate(data):
-        normalized_item = _validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
+
+def _parse_items(content, path, category_path):
+    data = _parse_prompt_json(content, path, "Prompt data")
+    normalized = _normalize_prompt_data(data, path)
+    for normalized_item in normalized:
         normalized_item["category_path"] = category_path
         normalized_item["category_key"] = " > ".join(category_path)
         normalized_item["category_label"] = " > ".join(category_path)
-        normalized.append(normalized_item)
     return normalized
+
+
+def _read_items(path, category_path):
+    return _parse_items(_read_prompt_bytes(path), path, category_path)
 
 
 def _cache_value(value, key, with_errors):
@@ -236,8 +249,7 @@ def _load_items(user_id="default", force=False, with_errors=False):
             if cached is not None:
                 return _cache_value(cached, "items", with_errors)
 
-        signature = _prompt_file_signature(data_dir)
-        content_hash = _prompt_file_content_hash(data_dir)
+        signature, content_hash, files = _prompt_file_snapshot(data_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
@@ -247,17 +259,15 @@ def _load_items(user_id="default", force=False, with_errors=False):
 
         items = []
         errors = []
-        if data_dir.exists():
-            for prompt_file in sorted(data_dir.rglob(PROMPT_FILE_NAME)):
-                category_path = list(prompt_file.parent.relative_to(data_dir).parts)
-                if category_path and category_path[0] != saved_prompts_dir.name:
-                    try:
-                        items.extend(_read_items(prompt_file, category_path))
-                    except ValueError as exc:
-                        errors.append({"file": prompt_file.relative_to(data_dir).as_posix(), "error": str(exc)})
+        for prompt_file, content in files:
+            category_path = list(prompt_file.parent.relative_to(data_dir).parts)
+            if category_path and category_path[0] != saved_prompts_dir.name:
+                try:
+                    items.extend(_parse_items(content, prompt_file, category_path))
+                except ValueError as exc:
+                    errors.append({"file": prompt_file.relative_to(data_dir).as_posix(), "error": str(exc)})
 
-        refreshed_signature = _prompt_file_signature(data_dir)
-        refreshed_content_hash = _prompt_file_content_hash(data_dir)
+        refreshed_signature, refreshed_content_hash, _ = _prompt_file_snapshot(data_dir)
         value = {"items": items, "errors": errors}
         entry = _cache_entry(user_id, refreshed_signature, refreshed_content_hash, value)
         with DATA_CACHE_LOCK:
@@ -311,21 +321,8 @@ def _unique_item_id(data, base, exclude_index=None):
 def _read_prompt_payload(path):
     if not path.exists():
         return []
-
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' is invalid JSON.") from exc
-    except OSError as exc:
-        raise ValueError(f"Prompt data file '{path.name}' cannot be read.") from exc
-
-    if not isinstance(data, list):
-        raise ValueError(f"Prompt data file '{path.name}' must be a JSON array.")
-    return [
-        _validate_prompt_data_item(item, f"Prompt data file '{path.name}' item {index}")
-        for index, item in enumerate(data)
-    ]
+    data = _parse_prompt_json(_read_prompt_bytes(path), path, "Prompt data")
+    return _normalize_prompt_data(data, path)
 
 
 def _write_prompt_payload(path, data):
@@ -509,15 +506,8 @@ def _normalize_saved_item(item, prompt_file, index):
         raise ValueError(str(exc)) from exc
 
 
-def _read_saved_prompt(prompt_file, saved_prompts_dir):
-    try:
-        with prompt_file.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Saved prompt file '{prompt_file.name}' is invalid JSON.") from exc
-    except OSError as exc:
-        raise ValueError(f"Saved prompt file '{prompt_file.name}' cannot be read.") from exc
-
+def _parse_saved_prompt(content, prompt_file, saved_prompts_dir):
+    data = _parse_prompt_json(content, prompt_file, "Saved prompt")
     if not isinstance(data, dict) or set(data) != {"name", "description", "items"}:
         raise ValueError(f"Saved prompt file '{prompt_file.name}' must be an object.")
     if not isinstance(data.get("name"), str) or not data["name"].strip():
@@ -541,6 +531,10 @@ def _read_saved_prompt(prompt_file, saved_prompts_dir):
     }
 
 
+def _read_saved_prompt(prompt_file, saved_prompts_dir):
+    return _parse_saved_prompt(_read_prompt_bytes(prompt_file), prompt_file, saved_prompts_dir)
+
+
 def _load_saved_prompts(user_id="default", force=False, with_errors=False):
     saved_prompts_dir = _saved_prompts_dir(user_id)
     while True:
@@ -551,8 +545,7 @@ def _load_saved_prompts(user_id="default", force=False, with_errors=False):
             if cached is not None:
                 return _cache_value(cached, "saved_prompts", with_errors)
 
-        signature = _prompt_file_signature(saved_prompts_dir)
-        content_hash = _prompt_file_content_hash(saved_prompts_dir)
+        signature, content_hash, files = _prompt_file_snapshot(saved_prompts_dir)
         with DATA_CACHE_LOCK:
             if generation != _cache_generation(user_id):
                 continue
@@ -562,15 +555,13 @@ def _load_saved_prompts(user_id="default", force=False, with_errors=False):
 
         saved = []
         errors = []
-        if saved_prompts_dir.exists():
-            for prompt_file in sorted(saved_prompts_dir.rglob(PROMPT_FILE_NAME)):
-                try:
-                    saved.append(_read_saved_prompt(prompt_file, saved_prompts_dir))
-                except ValueError as exc:
-                    errors.append({"file": prompt_file.relative_to(saved_prompts_dir).as_posix(), "error": str(exc)})
+        for prompt_file, content in files:
+            try:
+                saved.append(_parse_saved_prompt(content, prompt_file, saved_prompts_dir))
+            except ValueError as exc:
+                errors.append({"file": prompt_file.relative_to(saved_prompts_dir).as_posix(), "error": str(exc)})
 
-        refreshed_signature = _prompt_file_signature(saved_prompts_dir)
-        refreshed_content_hash = _prompt_file_content_hash(saved_prompts_dir)
+        refreshed_signature, refreshed_content_hash, _ = _prompt_file_snapshot(saved_prompts_dir)
         value = {"saved_prompts": saved, "errors": errors}
         entry = _cache_entry(user_id, refreshed_signature, refreshed_content_hash, value)
         with DATA_CACHE_LOCK:

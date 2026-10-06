@@ -31,6 +31,9 @@ export function createPresetOperation(sources, currentSources = () => sources) {
                     restore.add(prepared.reference);
                 }
                 prepared.targets = null;
+                prepared.graphs?.forEach((graph) => graph.dispose());
+                prepared.graphs?.clear();
+                prepared.graphs = null;
                 prepared.root = null;
                 prepared.occurrences.clear();
                 prepared.localPaths.clear();
@@ -195,13 +198,16 @@ function writeWorkflowWidget(node, name, value, inputNames) {
 function compactDefinition(definition) {
     const result = { ...definition, api_graph: { ...definition.api_graph, output: { ...definition.api_graph.output } },
         workflow: { ...definition.workflow, nodes: [...definition.workflow.nodes] } };
+    const executionReferences = new Set();
     for (const [id, entry] of Object.entries(result.api_graph.output)) {
         if (entry.class_type !== "ScenePresetReference") continue;
+        executionReferences.add(id);
         if (entry.inputs?.llm_presets_json)
             result.api_graph.output[id] = { ...entry, inputs: { ...entry.inputs, llm_presets_json: "" } };
     }
     result.workflow.nodes = result.workflow.nodes.map((node) => {
-        if (node.type !== "ScenePresetReference" || !(node.widgets_values_named?.llm_presets_json || node.widgets_values?.[2])) return node;
+        if (node.type !== "ScenePresetReference" || !executionReferences.has(String(node.id))
+            || !(node.widgets_values_named?.llm_presets_json || node.widgets_values?.[2])) return node;
         const stripped = { ...node, widgets_values: [...(node.widgets_values || [])] };
         writeWorkflowWidget(stripped, "llm_presets_json", "", ["preset_id", "run_handle", "llm_presets_json"]);
         return stripped;
@@ -244,13 +250,30 @@ export function presetEditorDefinition(reference, definitions) {
 // A small serialized graph adapter supports the controller's regular graph insertion
 // operations without configuring a hidden Comfy graph or firing node-load hooks.
 export function createPresetGraph(definition, ownerGraph) {
-    const local = copy(definition), output = local.api_graph.output;
+    let local = copy(definition), output = local.api_graph.output;
     const workflowNodes = new Map(local.workflow.nodes.map((node) => [String(node.id), node]));
-    const nodes = new Map();
+    const physicalLinks = new Map(), physicalFanout = new Map(), endpointLinks = new Map();
+    const hasPhysicalLinks = !!local.workflow.links?.length;
+    const portKey = (id, slot) => JSON.stringify([String(id), slot]);
+    const edgeKey = (source, sourceSlot, target, targetSlot) => JSON.stringify([String(source), sourceSlot, String(target), targetSlot]);
+    const nodes = new Map(), inputSlots = new Map(), initialWidgets = new Map();
     const graph = { links: {}, getNodeById: (id) => nodes.get(String(id)),
         beforeChange: () => ownerGraph?.beforeChange?.(), afterChange: () => ownerGraph?.afterChange?.() };
-    let nextNode = Math.max(0, ...[...workflowNodes.keys()].map(Number).filter(Number.isFinite));
-    let nextLink = Math.max(0, ...((local.workflow.links || []).map((link) => Number(link[0]))));
+    let nextNode = Number(local.workflow.last_node_id) || 0, nextLink = Number(local.workflow.last_link_id) || 0;
+    let inserted = false, virtualLink = 0;
+    for (const id of [...workflowNodes.keys(), ...Object.keys(output)]) nextNode = Math.max(nextNode, Number(id) || 0);
+    function indexPhysicalLink(link) {
+        physicalLinks.set(link[0], link);
+        const key = portKey(link[1], link[2]);
+        if (!physicalFanout.has(key)) physicalFanout.set(key, new Set());
+        physicalFanout.get(key).add(link[0]);
+    }
+    for (const link of local.workflow.links || []) {
+        nextLink = Math.max(nextLink, Number(link[0]) || 0);
+        indexPhysicalLink(link);
+        endpointLinks.set(edgeKey(link[1], link[2], link[3], link[4]), link);
+    }
+    function indexInputs(node) { inputSlots.set(String(node.id), new Map(node.inputs.map((input, slot) => [input.name, slot]))); }
     function connect(slot, target, targetSlot) {
         target = graph.getNodeById(target.id) || target;
         if (targetSlot < 0) throw new Error("Preset Scene input is missing.");
@@ -292,6 +315,9 @@ export function createPresetGraph(definition, ownerGraph) {
         node.scenePresetDetachedSnapshot = true;
         node.onRemoved?.();
         nodes.set(String(facade.id), facade);
+        workflowNodes.set(String(facade.id), facade.serialize());
+        indexInputs(facade);
+        inserted = true;
         return facade;
     };
     for (const [id, entry] of Object.entries(output)) {
@@ -300,54 +326,89 @@ export function createPresetGraph(definition, ownerGraph) {
         if (entry.class_type === "ScenePromptLLM" && !scalarNames.includes("generation_state_json")) scalarNames.push("generation_state_json");
         const node = { ...saved, id: saved.id ?? Number(id), comfyClass: entry.class_type, class_type: entry.class_type,
             graph, connect, properties: copy(saved.properties || {}),
-            widgets: scalarNames.map((name) => ({ name, value: entry.inputs[name] ?? (name === "generation_state_json" ? "{}" : "") })),
+            widgets: scalarNames.map((name) => ({ name, value: Object.hasOwn(entry.inputs || {}, name)
+                ? entry.inputs[name] : (name === "generation_state_json" ? "{}" : "") })),
             inputs: copy(saved.inputs || Object.keys(entry.inputs || {}).filter((name) => Array.isArray(entry.inputs[name])).map((name) => ({ name, type: "SCENE_PROMPT", link: null }))),
             outputs: copy(saved.outputs || [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }]) };
         for (const input of node.inputs) input.link = null;
         for (const port of node.outputs) port.links = [];
         nodes.set(id, node);
+        for (const widget of node.widgets) initialWidgets.set(widget, widget.value);
+        if (!workflowNodes.has(id)) workflowNodes.set(id, copy(saved));
+        indexInputs(node);
     }
-    // Reconstruct from API links, retaining serialized slots and IDs where present.
+    // Logical API edges can contract bypass/Reroute nodes. Index matching physical
+    // endpoints once; unmatched logical links never change the physical snapshot.
     for (const [id, entry] of Object.entries(output)) {
-        const target = graph.getNodeById(id);
+        const target = graph.getNodeById(id), slots = inputSlots.get(id);
         for (const [name, value] of Object.entries(entry.inputs || {})) {
             if (!Array.isArray(value) || value.length !== 2) continue;
-            const source = graph.getNodeById(value[0]);
-            const slot = target.inputs.findIndex((input) => input.name === name);
-            if (!source || slot < 0) continue;
-            const existing = (local.workflow.links || []).find((link) => String(link[1]) === String(source.id) && link[2] === value[1] && String(link[3]) === String(target.id) && link[4] === slot);
-            const linkId = existing?.[0] ?? ++nextLink;
+            const source = graph.getNodeById(value[0]), slot = slots.get(name);
+            if (!source || slot === undefined) continue;
+            const existing = endpointLinks.get(edgeKey(source.id, value[1], target.id, slot));
+            const linkId = existing?.[0] ?? (hasPhysicalLinks ? `api:${++virtualLink}` : ++nextLink);
             source.outputs[value[1]] ||= { name: "scene_prompt", type: "SCENE_PROMPT", links: [] };
             source.outputs[value[1]].links.push(linkId);
             target.inputs[slot].link = linkId;
             graph.links[linkId] = { id: linkId, origin_id: source.id, origin_slot: value[1], target_id: target.id, target_slot: slot, type: "SCENE_PROMPT" };
         }
     }
+    graph.spliceLoras = (oldTail, slot, chain) => {
+        if (!hasPhysicalLinks) return; // Legacy definitions are reconstructed below, retaining every saved node.
+        const newTail = chain.at(-1), oldKey = portKey(oldTail.id, slot);
+        const fanout = physicalFanout.get(oldKey) || new Set();
+        const savedTail = workflowNodes.get(String(oldTail.id));
+        savedTail.outputs[slot].links = (savedTail.outputs[slot].links || []).filter((id) => !fanout.has(id));
+        physicalFanout.set(oldKey, new Set());
+        const newTailOutput = workflowNodes.get(String(newTail.id)).outputs[slot];
+        for (const id of fanout) {
+            const link = physicalLinks.get(id);
+            link[1] = newTail.id; link[2] = slot;
+            indexPhysicalLink(link);
+            (newTailOutput.links ||= []).push(id);
+        }
+        let source = oldTail;
+        for (const placed of chain) {
+            const targetSlot = inputSlots.get(String(placed.id)).get("scene_prompt");
+            const link = graph.links[placed.inputs[targetSlot].link];
+            indexPhysicalLink([link.id, source.id, slot, placed.id, targetSlot, link.type]);
+            const savedSource = workflowNodes.get(String(source.id)), savedTarget = workflowNodes.get(String(placed.id));
+            (savedSource.outputs[slot].links ||= []).push(link.id);
+            savedTarget.inputs[targetSlot].link = link.id;
+            source = placed;
+        }
+    };
     graph.definition = () => {
-        const api = {}, serialized = [];
+        const api = {}, serialized = new Map();
         for (const node of nodes.values()) {
             const old = output[String(node.id)], saved = workflowNodes.get(String(node.id));
             const storedWidgets = (node.widgets || []).filter((widget) => widget.serialize !== false && widget.options?.serialize !== false);
-            const workflowNode = saved ? { ...saved, properties: node.properties, inputs: copy(node.inputs), outputs: copy(node.outputs) }
-                : node.serialize();
+            const workflowNode = old ? copy(saved) : node.serialize();
+            if (saved.properties !== undefined || Object.keys(node.properties).length) workflowNode.properties = copy(node.properties);
+            if (hasPhysicalLinks) {
+                if (saved.inputs) workflowNode.inputs = copy(saved.inputs);
+                if (saved.outputs) workflowNode.outputs = copy(saved.outputs);
+            } else {
+                workflowNode.inputs = copy(node.inputs); workflowNode.outputs = copy(node.outputs);
+            }
             const inputs = { ...(old?.inputs || {}) };
-            const namedValues = !saved && workflowNode.widgets_values_named;
+            const namedValues = !old && workflowNode.widgets_values_named;
             if (namedValues && typeof namedValues === "object") Object.assign(inputs, namedValues);
-            else for (const widget of storedWidgets) inputs[widget.name] = widget.value;
+            else for (const widget of storedWidgets) {
+                if (!old || widget.value !== initialWidgets.get(widget)) inputs[widget.name] = widget.value;
+            }
             for (const input of node.inputs || []) {
                 const link = graph.links[input.link];
                 if (link) inputs[input.name] = [String(link.origin_id), link.origin_slot];
                 else if (Array.isArray(inputs[input.name])) delete inputs[input.name];
             }
             api[String(node.id)] = { ...(old || {}), class_type: node.comfyClass || node.type || node.class_type, inputs };
-            if (saved) {
-                workflowNode.widgets_values = [...(saved.widgets_values || [])];
-                workflowNode.widgets_values_named = { ...saved.widgets_values_named };
-                const scalarNames = old?.class_type === "ScenePresetReference"
+            if (old) {
+                const scalarNames = old.class_type === "ScenePresetReference"
                     ? ["preset_id", "run_handle", "llm_presets_json"]
-                    : Object.keys(old?.inputs || {}).filter((name) => !Array.isArray(old.inputs[name]));
+                    : Object.keys(old.inputs || {}).filter((name) => !Array.isArray(old.inputs[name]));
                 for (const widget of storedWidgets) {
-                    if (widget.value === old?.inputs?.[widget.name]) continue;
+                    if (widget.value === initialWidgets.get(widget)) continue;
                     if (!scalarNames.includes(widget.name)) scalarNames.push(widget.name);
                     writeWorkflowWidget(workflowNode, widget.name, widget.value, scalarNames);
                 }
@@ -355,11 +416,18 @@ export function createPresetGraph(definition, ownerGraph) {
                 if (!Array.isArray(workflowNode.widgets_values)) workflowNode.widgets_values = storedWidgets.map((widget) => widget.value);
                 if (!workflowNode.widgets_values_named) workflowNode.widgets_values_named = Object.fromEntries(storedWidgets.map((widget) => [widget.name, widget.value]));
             }
-            serialized.push(workflowNode);
+            serialized.set(String(node.id), workflowNode);
         }
-        return { ...local, api_graph: { ...local.api_graph, output: api }, workflow: { ...local.workflow, nodes: serialized,
-            links: Object.values(graph.links).map((link) => [link.id, link.origin_id, link.origin_slot, link.target_id, link.target_slot, link.type]),
-            last_node_id: nextNode, last_link_id: nextLink } };
+        const workflow = { ...local.workflow,
+            nodes: [...workflowNodes].map(([id, saved]) => serialized.get(id) || copy(saved)),
+            links: hasPhysicalLinks ? [...physicalLinks.values()].map(copy)
+                : Object.values(graph.links).map((link) => [link.id, link.origin_id, link.origin_slot, link.target_id, link.target_slot, link.type]) };
+        if (inserted || !hasPhysicalLinks) { workflow.last_node_id = nextNode; workflow.last_link_id = nextLink; }
+        return { ...local, api_graph: { ...local.api_graph, output: api }, workflow };
+    };
+    graph.dispose = () => {
+        nodes.clear(); inputSlots.clear(); initialWidgets.clear(); workflowNodes.clear(); physicalLinks.clear(); physicalFanout.clear(); endpointLinks.clear();
+        graph.links = {}; local = null; output = null;
     };
     return graph;
 }
@@ -372,6 +440,7 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
     const ownerGraph = reference.graph;
     const targets = [], visited = new Set();
     const graphs = new Map();
+    prepared.graphs = graphs;
     let flatOverrides;
     function visitPreset(preset) {
         if (!preset?.scenePresetHasLLM) return;
