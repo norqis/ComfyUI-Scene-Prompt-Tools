@@ -56,6 +56,16 @@ Use existing modal and graph transaction helpers for names/settings. Commit genu
 
 Root reviews final product and tests and independently runs full Python/frontend/native suites. Required gpt-5.6-sol medium design and final review must approve. Check CI before merge, release v0.11.0, synchronize tracked files to the installed copy only while queue is empty, verify hashes; do not restart production. Keep private files out of commits. Archive the managed worktree after success.
 
+## Count responsiveness and measured UI cost
+
+The final user follow-up explicitly requires immediate Expand count updates after changing Count values, the downstream-Count policy or switch settings. Native browser acceptance must observe the displayed count after actual widget/modal interaction, before a test calls stats, refresh, graphToPrompt or preparation. Then compare that displayed result with the backend prepared count. Cover ordinary consecutive Counts, a Preset switch controlling an internal Count, and a Boolean-controlled Scene Switch selecting a Queue boundary; retain the Queue's saved settings across selection changes.
+
+Root profiled a private 122-node workflow with 22 loaded Preset references in an isolated native CPU ComfyUI/Chromium instance. Fifty repeated updates of the Expand count and six Queue displays took about 394 ms; lineage-key work accounted for about 326 ms, including about 224 ms repeatedly serializing unchanged local widget text. This is an observed frontend hot path, not evidence that every reported slowdown has the same cause or that GPU sampling is affected.
+
+The approved optimization retains exact change detection. Each node keeps only its current flat local-value signature and serialized key. Compare scalar/string fields directly before serializing; copy the ten Boolean values of Input replay bindings into the signature so in-place changes are detected. Continue visiting the selected ancestry and every relevant edge/slot on each lineage check, but compare the resulting scalar descriptors with the current snapshot before serializing the full key. Keep the existing JSON key format. Scope reuse by graph and actual node identity; replacing an ancestor with another object at the same ID invalidates derived caches even when its serialized values are equal. Replace current snapshots on change and release them through existing cache clearing/removal. Do not introduce a hash, polling loop, global history or cache-size limit.
+
+Regression coverage includes long prompt text with zero warm key serialization, direct widget and edge changes without callbacks, selected/unselected Switch branches, Count flags, mutable Input Boolean bindings, graph replacement and same-ID node replacement, serialization/clone boundaries, and removal cleanup. Root repeats the same private native measurement after implementation. The design was reviewed and approved by gpt-5.6-sol medium before delegation.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
@@ -63,3 +73,4 @@ Root reviews final product and tests and independently runs full Python/frontend
 - https://docs.comfy.org/custom-nodes/backend/more_on_inputs
 - https://docs.comfy.org/custom-nodes/js/javascript_settings
 - https://github.com/Comfy-Org/ComfyUI_frontend/issues/16642 (live-label refresh regression to account for in browser tests)
+- https://developer.mozilla.org/en-US/docs/Learn_web_development/Extensions/Performance/JavaScript
