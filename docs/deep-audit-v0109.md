@@ -30,6 +30,12 @@ Tests: prompt-only edit roundtrip retains bypassed Prompt/Reference, muted nodes
 
 ## Audit evidence and exclusions
 
+### Unchanged Matrix reads still parse and serialize the full state
+
+Root loaded the production readMatrixState/ensureMatrixJsonWidget functions with the real scene_prompt_state parser. After warmup, 1,000 reads of an unchanged 100-row Matrix parsed 1,000 times and took about 1.15 seconds. The cache is checked only after ensureMatrixJsonWidget has already parsed and serialized the state. This is UI overhead, not GPU sampling time.
+
+Move the unchanged-state check before normalization. Retain one current node-owned normalized value/state (or extend the existing current cache) keyed by the actual widget value, serialized widget slot and legacy property value. Compare strings directly without building another large JSON cache key. A change to any source invalidates the reuse and follows existing migration precedence, including recovery from malformed widget data and a nonempty legacy property. Keep widget/property/serialized values synchronized on the slow path. Do not add historical entries or a global cache. Existing computed-cache clearing/removal must release the cached state. Matrix edits, delete-all, Undo/Redo, reload, graph replacement and legacy fallback must remain correct. Regressions assert zero parser calls on warm reads and equal output, then actual invalidation/recovery; native browser exercises edit/close/delete-all/undo/reload and the existing layout checks.
+
 Baseline Python: 656 tests pass (two native opt-ins skipped); all frontend suites pass. Coverage was collected to guide remaining reads, not treated as proof of correctness.
 
 Local Comfy sd1_clip.token_weights explicitly replaces an outer weight when a nested token has an explicit inner weight. Therefore multiplying nested explicit weights during duplicate selection would be incorrect; no speculative change is planned. Filename recovery without Scene metadata uses documented five-digit placement and can be ambiguous next to user numeric text; do not change its regex in a way that breaks existing numeric-prefix/suffix compatibility. Normal allocation persists counters and supports six-plus digits.
