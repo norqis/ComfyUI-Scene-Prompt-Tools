@@ -81,6 +81,11 @@ try {
         recursive: true,
         filter: (entry) => ![".git", ".venv", ".venv-http", ".venv-test", ".venv-audit", "node_modules", "__pycache__", ".pytest_cache", "test-results"].includes(entry.split(/[\\/]/u).at(-1)),
     });
+    if (process.env.SCENE_NATIVE_UI_SOURCE) {
+        // Reproduce a pre-fix renderer in this isolated copy without changing
+        // either the current worktree or the installed ComfyUI extension.
+        await writeFile(resolve(nodeDirectory, 'web', 'scene_prompt_ui.js'), await readFile(resolve(process.env.SCENE_NATIVE_UI_SOURCE)));
+    }
     const fixtureLoras = resolve(directory, "models", "loras");
     await mkdir(fixtureLoras, { recursive: true });
     const header = Buffer.from('{"__metadata__":{}}'.padEnd(24, " "));
@@ -318,6 +323,105 @@ window.__sceneSeedRuntimeTest = {
     await page.keyboard.press("Escape");
     const screenshotDirectory = process.env.SCENE_BROWSER_SCREENSHOTS_DIR || resolve(tmpdir(), 'scene-prompt-civitai-review');
     await mkdir(screenshotDirectory, { recursive: true });
+    const nativeCanvasCache = await page.evaluate(() => {
+        const app = window.app; app.graph.clear(); app.canvas.ds.scale = 1;
+        const textByCanvas = new WeakMap(), context = CanvasRenderingContext2D.prototype;
+        const fillText = context.fillText, drawImage = context.drawImage;
+        const record = (canvas, values) => {
+            const texts = textByCanvas.get(canvas) || new Set();
+            for (const value of values) texts.add(String(value));
+            textByCanvas.set(canvas, texts);
+        };
+        context.fillText = function (value, ...args) { record(this.canvas, [value]); return fillText.call(this, value, ...args); };
+        context.drawImage = function (image, ...args) { record(this.canvas, textByCanvas.get(image) || []); return drawImage.call(this, image, ...args); };
+        try {
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); node.size = [500, 800]; return node; };
+            const field = (node, name) => node.widgets.find(widget => widget.name === name);
+            const selection = (label, weight = 1.1) => JSON.stringify({ version: 1, categories: { Canvas: [{ label, prompt: 'safe text', weight }] } });
+            const snapshot = (node, role) => {
+                const canvas = document.createElement('canvas'); canvas.width = 500; canvas.height = 200;
+                const widget = node.widgets.find(widget => widget.sceneRole === role);
+                if (!widget?.draw) throw new Error(`Missing actual native ${role} widget`);
+                widget.draw(canvas.getContext('2d'), node, 500, 0, 200);
+                return { pixels: canvas.toDataURL(), texts: [...(textByCanvas.get(canvas) || [])] };
+            };
+            const prompt = add('ScenePrompter');
+            field(prompt, 'positive_json').value = selection('alpha'); field(prompt, 'negative_json').value = selection('omega');
+            const positiveBefore = snapshot(prompt, 'positive_selected_list'), negativeBefore = snapshot(prompt, 'negative_selected_list');
+            // Only real hidden widget values change: never call a callback,
+            // refresh helper or cache clear to repair the rendered contents.
+            field(prompt, 'positive_json').value = selection('bravo');
+            const positiveLabel = snapshot(prompt, 'positive_selected_list'), negativeAfterPositive = snapshot(prompt, 'negative_selected_list');
+            field(prompt, 'positive_json').value = selection('bravo', 1.7);
+            const positiveWeight = snapshot(prompt, 'positive_selected_list');
+            field(prompt, 'negative_json').value = selection('sigma');
+            const negativeLabel = snapshot(prompt, 'negative_selected_list'), positiveAfterNegative = snapshot(prompt, 'positive_selected_list');
+            field(prompt, 'negative_json').value = selection('sigma', 1.7);
+            const negativeWeight = snapshot(prompt, 'negative_selected_list');
+            const seed = add('ScenePrompter'); seed.title = 'Up prompt';
+            const upstream = add('SceneMatrix'), matrix = add('SceneMatrix');
+            seed.connect(0, upstream, upstream.inputs.findIndex(input => input.name === 'scene_prompt'));
+            upstream.connect(0, matrix, matrix.inputs.findIndex(input => input.name === 'scene_prompt'));
+            field(upstream, 'matrix_json').value = JSON.stringify({ version: 1, sets: [{ row_id: 'canvas-up', name: 'Up old', path_label: 'Up old' }] });
+            field(matrix, 'matrix_json').value = JSON.stringify({ version: 1, sets: [{ row_id: 'canvas-down', name: 'Down old', path_label: 'Down old' }] });
+            const matrixBefore = snapshot(matrix, 'matrix_connected_list');
+            field(matrix, 'matrix_json').value = JSON.stringify({ version: 1, sets: [{ row_id: 'canvas-down', name: 'Down new', path_label: 'Down new' }] });
+            const matrixEdited = snapshot(matrix, 'matrix_connected_list');
+            upstream.mode = 4;
+            const matrixBypassedInput = snapshot(matrix, 'matrix_connected_list');
+            upstream.mode = 0;
+            const matrixRestoredInput = snapshot(matrix, 'matrix_connected_list');
+            const other = add('ScenePrompter'); other.title = 'Other input';
+            matrix.disconnectInput(matrix.inputs.findIndex(input => input.name === 'scene_prompt'));
+            other.connect(0, matrix, matrix.inputs.findIndex(input => input.name === 'scene_prompt'));
+            const matrixRelinked = snapshot(matrix, 'matrix_connected_list');
+
+            const largeSelection = JSON.stringify({ version: 1, categories: { Canvas: Array.from({ length: 500 }, (_, index) => ({ label: `Label ${index}`, prompt: `safe ${index}` })) } });
+            const largeMatrix = JSON.stringify({ version: 1, sets: Array.from({ length: 30 }, (_, index) => ({ row_id: `canvas-${index}`, name: `Row ${index}`, path_label: `Row ${index}`, positive_base: 'safe '.repeat(2000) })) });
+            field(prompt, 'positive_json').value = largeSelection; field(matrix, 'matrix_json').value = largeMatrix;
+            snapshot(prompt, 'positive_selected_list'); snapshot(matrix, 'matrix_connected_list');
+            const normalizedMatrix = field(matrix, 'matrix_json').value;
+            const stringify = JSON.stringify, parse = JSON.parse, warm = { stringify: 0, parse: 0, draws: 100 };
+            JSON.stringify = function (value, ...args) {
+                if (value?.state === largeSelection || value?.matrix_json === normalizedMatrix) warm.stringify += 1;
+                return stringify.call(this, value, ...args);
+            };
+            JSON.parse = function (value, ...args) {
+                if (value === largeSelection || value === normalizedMatrix) warm.parse += 1;
+                return parse.call(this, value, ...args);
+            };
+            try {
+                const canvas = document.createElement('canvas'); canvas.width = 500; canvas.height = 200;
+                for (let index = 0; index < warm.draws; index++) {
+                    prompt.widgets.find(widget => widget.sceneRole === 'positive_selected_list').draw(canvas.getContext('2d'), prompt, 500, 0, 200);
+                    matrix.widgets.find(widget => widget.sceneRole === 'matrix_connected_list').draw(canvas.getContext('2d'), matrix, 500, 0, 200);
+                }
+            } finally { JSON.stringify = stringify; JSON.parse = parse; }
+            return { positiveBefore, positiveLabel, positiveWeight, negativeBefore, negativeAfterPositive, negativeLabel, negativeWeight, positiveAfterNegative,
+                matrixBefore, matrixEdited, matrixBypassedInput, matrixRestoredInput, matrixRelinked, warm };
+        } finally { context.fillText = fillText; context.drawImage = drawImage; }
+    });
+    console.log('real ComfyUI selected/Matrix warm native widget draw operations', nativeCanvasCache.warm);
+    const rendered = (snapshot, label) => assert(snapshot.texts.includes(label), `actual rendered canvas lacks ${label}: ${JSON.stringify(snapshot.texts)}`);
+    rendered(nativeCanvasCache.positiveBefore, 'alpha:1.1'); rendered(nativeCanvasCache.negativeBefore, 'omega:1.1');
+    rendered(nativeCanvasCache.positiveLabel, 'bravo:1.1'); rendered(nativeCanvasCache.positiveWeight, 'bravo:1.7');
+    rendered(nativeCanvasCache.negativeLabel, 'sigma:1.1'); rendered(nativeCanvasCache.negativeWeight, 'sigma:1.7');
+    assert.notEqual(nativeCanvasCache.positiveLabel.pixels, nativeCanvasCache.positiveBefore.pixels, 'same-size positive label changes actual pixels');
+    assert.notEqual(nativeCanvasCache.positiveWeight.pixels, nativeCanvasCache.positiveLabel.pixels, 'same-size positive weight changes actual pixels');
+    assert.notEqual(nativeCanvasCache.negativeLabel.pixels, nativeCanvasCache.negativeBefore.pixels, 'same-size negative label changes actual pixels');
+    assert.notEqual(nativeCanvasCache.negativeWeight.pixels, nativeCanvasCache.negativeLabel.pixels, 'same-size negative weight changes actual pixels');
+    assert.deepEqual(nativeCanvasCache.negativeAfterPositive, nativeCanvasCache.negativeBefore, 'positive edits leave negative raster contents unchanged');
+    assert.deepEqual(nativeCanvasCache.positiveAfterNegative, nativeCanvasCache.positiveWeight, 'negative edits leave positive raster contents unchanged');
+    const matrixRendered = (snapshot, label) => assert(snapshot.texts.some(text => text.includes(label)), `actual Matrix canvas lacks ${label}: ${JSON.stringify(snapshot.texts)}`);
+    matrixRendered(nativeCanvasCache.matrixBefore, 'Up old'); rendered(nativeCanvasCache.matrixBefore, 'Down old');
+    rendered(nativeCanvasCache.matrixEdited, 'Down new'); matrixRendered(nativeCanvasCache.matrixBypassedInput, 'Up prompt');
+    matrixRendered(nativeCanvasCache.matrixRestoredInput, 'Up old'); matrixRendered(nativeCanvasCache.matrixRelinked, 'Other input');
+    assert.notEqual(nativeCanvasCache.matrixBefore.pixels, nativeCanvasCache.matrixEdited.pixels);
+    assert.notEqual(nativeCanvasCache.matrixEdited.pixels, nativeCanvasCache.matrixBypassedInput.pixels);
+    assert.equal(nativeCanvasCache.warm.stringify, 0, 'unchanged large native widget draws never stringify raw selection/Matrix data');
+    assert.equal(nativeCanvasCache.warm.parse, 0, 'unchanged large native widget draws never parse raw selection/Matrix data');
+    assert.deepEqual(await (await fetch(`${url}/scene_test/model_executions`)).json(), []);
+    console.log('real ComfyUI same-size direct selection label/weight edits update actual canvas pixels, independent roles and Matrix content/upstream display');
     if (process.env.SCENE_NATIVE_SWITCH_ONLY !== '1') {
     nativeGPUChecks = true;
     try {
