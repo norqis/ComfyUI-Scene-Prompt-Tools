@@ -40,6 +40,8 @@ Baseline Python: 656 tests pass (two native opt-ins skipped); all frontend suite
 
 Local Comfy sd1_clip.token_weights explicitly replaces an outer weight when a nested token has an explicit inner weight. Therefore multiplying nested explicit weights during duplicate selection would be incorrect; no speculative change is planned. Filename recovery without Scene metadata uses documented five-digit placement and can be ambiguous next to user numeric text; do not change its regex in a way that breaks existing numeric-prefix/suffix compatibility. Normal allocation persists counters and supports six-plus digits.
 
+The reported empty-subdirectory numbering case was traced through saved Expand/Save metadata and the persisted parent-root counter: current allocation shares a counter across that output root's descendants, so a new child folder can start at a later number. Existing behavior starts at one and also respects the plan's file index. Switching to independent per-folder counters starting at zero would be a behavior change; it is not included in this audit release pending the user's specification decision.
+
 ## Additional root reproduction: HTML import loses case-colliding categories
 
 On Windows, importing Room/View and room/View reports two files/two entries but creates one prompt.json containing only the second entry. _output_payloads detects sanitized name collisions case-sensitively although the target filesystem aliases these names. The same problem affects subcategories. This is confirmed with synthetic temporary files; no user data was changed.
