@@ -92,6 +92,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(mergeContext.mergeScenePromptEntryLis
 const displayContext = {
     Math, JSON,
     scenePromptQueueDisplayCacheKey() { return "cache"; },
+    scenePromptQueueRowsCacheKey() { return "rows"; },
     scenePromptQueueRowEntries() { throw new Error("full rows must not be expanded"); },
     scenePromptStats() { return { rows: 1000000, total: 1000000, totalImages: 1000000, unsetBatches: 1000000 }; },
     sceneQueuePreviewRows() { return Array.from({ length: 160 }, () => ({ parts: ["p"] })); },

@@ -565,6 +565,7 @@ async function testExpandCountDrawText() {
     const widget = { sceneRole: "expand_total_count", value: "" };
     const node = { run, widgets: [widget] };
     const drawn = [];
+    let countReads = 0;
     const displayContext = {
         Math,
         Number,
@@ -573,6 +574,7 @@ async function testExpandCountDrawText() {
             return target.widgets.find((item) => item.sceneRole === role);
         },
         sceneExpandCounts(target) {
+            countReads++;
             return !target.run || target.run.snapshotReady
                 ? { totalBatches: 2, totalImages: 6 }
                 : { totalBatches: 2, totalImages: null };
@@ -588,6 +590,7 @@ async function testExpandCountDrawText() {
     vm.createContext(displayContext);
     vm.runInContext(functionSource("sceneExpandCountLabel"), displayContext);
     vm.runInContext(functionSource("drawSceneExpandCount"), displayContext);
+    vm.runInContext(functionSource("updateSceneExpandCountWidget"), displayContext);
     const ctx = {
         save() {},
         beginPath() {},
@@ -597,9 +600,20 @@ async function testExpandCountDrawText() {
         restore() {},
     };
     const draw = () => {
+        const before = countReads;
         displayContext.drawSceneExpandCount(ctx, node, 220, 0, 20);
+        assert.equal(countReads - before, 1, "draw reads one count snapshot for the value, label and image total");
+        assert.equal(widget.sceneTotalCount, 2);
+        assert.equal(widget.sceneTotalImages, !node.run || node.run.snapshotReady ? 6 : null);
         return drawn.at(-1);
     };
+
+    const beforeExplicit = countReads;
+    assert.equal(displayContext.sceneExpandCountLabel({ run: null }, { totalBatches: 9, totalImages: 18 }), "9回 / 18枚");
+    assert.equal(countReads, beforeExplicit, "an explicit count snapshot does not query the graph again");
+    displayContext.updateSceneExpandCountWidget(node);
+    assert.equal(countReads, beforeExplicit + 1, "update reads one count snapshot for both widget metadata and label");
+    assert.equal(widget.value, "準備中 6枚"); assert.equal(widget.sceneTotalCount, 2); assert.equal(widget.sceneTotalImages, 6);
 
     assert.equal(displayContext.sceneExpandCountLabel(node), "準備中 6枚");
     assert.equal(draw(), "生成準備中 6枚");

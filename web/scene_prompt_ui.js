@@ -7166,9 +7166,7 @@ function scenePromptSourceLocalCacheKey(node) {
         ]) });
     }
     if (isScenePromptNode(node)) {
-        return finish({ type: "prompt", title: scenePromptTitle(node), values: values([
-            "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "filename_enabled",
-        ]) });
+        return finish({ type: "prompt", title: scenePromptTitle(node) });
     }
     if (isPromptMatrixNode(node)) {
         return finish({ type: "matrix",
@@ -8637,12 +8635,13 @@ function scenePromptLineageKey(node) {
     const sameOwners = cache?.owners.length === owners.length && owners.every((owner, index) => owner === cache.owners[index]);
     if (sameOwners && cache.signature.length === signature.length
         && signature.every((value, index) => value === cache.signature[index])) return cache.key;
-    if (cache && !sameOwners) {
+    let key = JSON.stringify(descriptors);
+    if (cache && !sameOwners && key === cache.key) {
         // Identical IDs/values on replacement objects must not reuse plans from the old graph.
         clearSceneComputedCaches(node);
         descriptors[0][0] = signature[0] = scenePromptSourceLocalCacheKey(node);
+        key = JSON.stringify(descriptors);
     }
-    const key = JSON.stringify(descriptors);
     node.scenePromptLineageKeyCache = { owners, signature, key };
     return key;
 }
@@ -8861,18 +8860,19 @@ function scenePromptQueueRowsCacheKey(node) {
     return `${scenePromptSourceCacheKey(node)}::queue_rows`;
 }
 
-function scenePromptQueueDisplayCacheKey(node, width = null) {
+function scenePromptQueueDisplayCacheKey(node, width = null, rowKey = scenePromptQueueRowsCacheKey(node)) {
     const drawWidth = width || node.size?.[0] || 360;
-    const rowKey = scenePromptQueueRowsCacheKey(node);
+    const cached = node.scenePromptQueueDisplayCache;
+    if (cached?.rowKey === rowKey && Math.ceil(cached.width) === Math.ceil(drawWidth)) return cached.cacheKey;
     return JSON.stringify({
         width: Math.ceil(drawWidth),
         rows: rowKey,
     });
 }
 
-function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null) {
+function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null, rowKey = scenePromptQueueRowsCacheKey(node)) {
     const drawWidth = width || node.size?.[0] || 360;
-    const finalKey = cacheKey || scenePromptQueueDisplayCacheKey(node, drawWidth);
+    const finalKey = cacheKey || scenePromptQueueDisplayCacheKey(node, drawWidth, rowKey);
     if (node.scenePromptQueueDisplayCache?.cacheKey === finalKey) {
         return node.scenePromptQueueDisplayCache;
     }
@@ -8880,6 +8880,7 @@ function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null
     const entries = sceneQueueDisplayEntriesFromRows(sceneQueuePreviewRows(node));
     const cache = {
         cacheKey: finalKey,
+        rowKey,
         width: drawWidth,
         title: "生成キュー",
         emptyText: "scene_promptを接続してください",
@@ -8901,11 +8902,12 @@ function computeScenePromptQueueDisplayCache(node, width = null, cacheKey = null
 function scenePromptQueueDisplayCache(node, width = null) {
     const drawWidth = width || node.size?.[0] || 360;
     const cached = node.scenePromptQueueDisplayCache;
-    const cacheKey = scenePromptQueueDisplayCacheKey(node, drawWidth);
+    const rowKey = scenePromptQueueRowsCacheKey(node);
+    const cacheKey = scenePromptQueueDisplayCacheKey(node, drawWidth, rowKey);
     if (cached && Math.ceil(cached.width || 0) === Math.ceil(drawWidth) && cached.cacheKey === cacheKey) {
         return cached;
     }
-    return computeScenePromptQueueDisplayCache(node, drawWidth, cacheKey);
+    return computeScenePromptQueueDisplayCache(node, drawWidth, cacheKey, rowKey);
 }
 
 function scenePromptQueueListHeight(node) {
@@ -8992,8 +8994,8 @@ function sceneExpandCounts(node) {
     return { totalBatches: 0, totalImages: null };
 }
 
-function sceneExpandCountLabel(node) {
-    const { totalBatches, totalImages, error } = sceneExpandCounts(node);
+function sceneExpandCountLabel(node, counts = sceneExpandCounts(node)) {
+    const { totalBatches, totalImages, error } = counts;
     if (error) {
         return error;
     }
@@ -9241,8 +9243,9 @@ function updateSceneExpandCountWidget(node) {
     if (!widget) {
         return;
     }
-    const { totalBatches, totalImages } = sceneExpandCounts(node);
-    widget.value = sceneExpandCountLabel(node);
+    const counts = sceneExpandCounts(node);
+    const { totalBatches, totalImages } = counts;
+    widget.value = sceneExpandCountLabel(node, counts);
     widget.sceneTotalCount = totalBatches;
     widget.sceneTotalImages = totalImages;
 }
@@ -9250,10 +9253,12 @@ function updateSceneExpandCountWidget(node) {
 function drawSceneExpandCount(ctx, node, width, y, height) {
     const drawWidth = sceneWidgetDrawWidth(node, width, 220);
     const widget = findSceneWidget(node, "expand_total_count");
-    const { totalBatches } = sceneExpandCounts(node);
+    const counts = sceneExpandCounts(node);
+    const { totalBatches, totalImages } = counts;
     if (widget) {
         widget.sceneTotalCount = totalBatches;
-        widget.value = sceneExpandCountLabel(node);
+        widget.sceneTotalImages = totalImages;
+        widget.value = sceneExpandCountLabel(node, counts);
     }
     const label = widget?.value || "0回";
     const text = label.startsWith("準備中") ? `生成${label}` : `生成 ${label}`;

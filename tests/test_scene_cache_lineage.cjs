@@ -29,7 +29,7 @@ const ctx = {
     Set, Map, Math, JSON, String, Number, Array, Object, app: { graph: null },
     SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "downstream_count_mode"],
     SCENE_QUEUE_CONTROL_DEFAULTS: { order_mode: "input_order", alternate_block_size: 1, downstream_count_mode: "multiply" },
-    SCENE_QUEUE_DISPLAY_PREVIEW_ROWS: 40, scenePresetDisplayGraphs: new Map(), MATRIX_DEFAULT_JSON: "{}",
+    SCENE_QUEUE_DISPLAY_PREVIEW_ROWS: 40, MATRIX_SECTION_VISIBLE_ROWS: 40, scenePresetDisplayGraphs: new Map(), MATRIX_DEFAULT_JSON: "{}",
     sceneWorkflowLoadDepth: 0, sceneDownstreamRefreshTimer: null, sceneDownstreamRefreshSources: new Set(),
     sceneWorkflowLoadSources: new Set(), sceneTitleSyncNodes: new Set(), sceneLoadedRefreshNodes: new Set(),
     activePopupContext: null, clearTimeout() {}, clearSceneFitHeightTimer() {}, invalidatePopupRequests() {},
@@ -59,7 +59,7 @@ const core = ["nodeClassName", "nodeClassNames", "isRerouteNode", "liteGraphNode
     "scenePresetGraphNodes", "apiLink", "apiInput", "sceneQueueBoundaryInPreset",
     "sceneQueueBoundaryInNode", "sceneRandomRouteInNode", "sceneQueuePendingInNode",
     "scenePromptStats", "scenePromptInputNumber", "scenePromptQueueInputIndexes", "connectedScenePromptSourcesForQueue",
-    "connectedScenePromptSourcesForMerge", "sceneScheduleForLinkedInput", "sceneScheduleForNode",
+    "connectedScenePromptSourcesForMerge", "sceneScheduleForLinkedInput", "sceneScheduleForNode", "sceneRandomJoinReady", "sceneRandomChoicePlan",
     "clearSceneComputedCaches", "collectDownstreamSceneNodes", "downstreamNodes", "flushDownstreamSceneRefreshes",
     "installSceneNodeRemovalCleanup"];
 const scalarFunctions = [...source.matchAll(/^function (emptyScenePromptStats|sceneStat\w+|sceneStats\w+|sceneCount\w+|sceneSchedule\w+|sceneRandomGuard|sceneRandomZeroArm)\(/gm)]
@@ -128,7 +128,8 @@ for (const depth of [1, 4, 8, 16, 32, 64]) {
 const g = graph(), prompt = add(g, "ScenePrompter", { positive_base: "a" });
 const queue = add(g, "ScenePrompterQueue", { alternate_block_size: 1 }); connect(prompt, queue, "scene_prompt1");
 const queueKey = ctx.scenePromptQueueRowsCacheKey(queue);
-set(prompt, "positive_base", "b"); assert.notEqual(ctx.scenePromptQueueRowsCacheKey(queue), queueKey);
+set(prompt, "positive_base", "b"); assert.equal(ctx.scenePromptQueueRowsCacheKey(queue), queueKey, "unused Prompt text does not invalidate display calculations");
+prompt.title = "renamed"; assert.notEqual(ctx.scenePromptQueueRowsCacheKey(queue), queueKey, "Prompt titles still invalidate display labels");
 for (const [type, field, first, next] of [
     ["ScenePromptMatrix", "matrix_json", "[]", '[{"label":"x"}]'],
     ["ScenePromptTextDelete", "positive", "a", "b"], ["ScenePromptReverse", "reverse_scope", "all", "last"],
@@ -187,14 +188,15 @@ const cycleA = add(g, "Reroute"), cycleB = add(g, "Reroute");
 connect(cycleA, cycleB, "input"); connect(cycleB, cycleA, "input");
 assert.equal(JSON.parse(key(cycleA)).length, 2); assert.equal(ctx.resolveLinkedSourceFromInput(g, cycleA.inputs[0]).source, null);
 
-// Warm lineage still reads every current edge/value, but never serializes unchanged prompt text again.
+// Warm lineage still reads every current edge/value, but never serializes unchanged Matrix payloads again.
 {
     let stringifies = 0;
     const originalJSON = ctx.JSON;
     ctx.JSON = { parse: JSON.parse, stringify(value) { stringifies++; return JSON.stringify(value); } };
-    const large = graph(); let root = add(large, "ScenePrompter", { positive_base: "tag,".repeat(4000), positive_json: "{}" });
+    const matrixPayload = index => JSON.stringify([{ name: `row${index}`, positive_base: "tag,".repeat(4000), negative_base: "negative,".repeat(1000) }]);
+    const large = graph(); let root = add(large, "ScenePromptMatrix", { matrix_json: matrixPayload(0) });
     for (let index = 0; index < 119; index++) {
-        const next = add(large, "ScenePrompter", { positive_base: `row${index},` + "tag,".repeat(4000), negative_base: "negative,".repeat(1000) });
+        const next = add(large, "ScenePromptMatrix", { matrix_json: matrixPayload(index + 1) });
         connect(root, next, "scene_prompt"); root = next;
     }
     const encoded = key(root), localCache = root.scenePromptLocalKeyCache, lineageCache = root.scenePromptLineageKeyCache;
@@ -202,13 +204,13 @@ assert.equal(JSON.parse(key(cycleA)).length, 2); assert.equal(ctx.resolveLinkedS
     stringifies = 0; large.lookups = 0;
     const start = performance.now();
     for (let repeat = 0; repeat < 50; repeat++) assert.equal(key(root), encoded);
-    assert.equal(stringifies, 0, "large prompt strings and the full lineage JSON are reused on every unchanged read");
+    assert.equal(stringifies, 0, "large display-dependent Matrix payloads and the full lineage JSON are reused on every unchanged read");
     assert.equal(large.lookups, 119 * 50, "warm keys continue reading all current edges rather than relying on edit events");
     assert.strictEqual(root.scenePromptLocalKeyCache, localCache);
     assert.strictEqual(root.scenePromptLineageKeyCache, lineageCache);
     const warm50ms = Number((performance.now() - start).toFixed(2));
     const leaf = large.nodes.get(1);
-    leaf.widgets[0].value += "direct edit";
+    leaf.widgets[0].value = matrixPayload("direct edit");
     assert.notEqual(key(root), encoded, "direct edits without a callback still invalidate the selected ancestry");
     const edited = key(root); stringifies = 0; assert.equal(key(root), edited); assert.equal(stringifies, 0);
     const edge = large.links[root.inputs[0].link], oldSlot = edge.origin_slot;
@@ -220,7 +222,7 @@ assert.equal(JSON.parse(key(cycleA)).length, 2); assert.equal(ctx.resolveLinkedS
     assert.notEqual(key(root), displaced, "direct link endpoint changes need no downstream refresh notification");
     assert.equal(JSON.parse(key(root)).length, 2, "the current snapshot releases the removed ancestry");
     assert.equal(root.scenePromptLineageKeyCache.owners.length, 4);
-    const rawPrompt = add(large, "ScenePrompter", { positive_base: { nested: "one" } });
+    const rawPrompt = add(large, "ScenePromptLLM", { positive: { nested: "one" } });
     const objectKey = key(rawPrompt);
     rawPrompt.widgets[0].value.nested = "two"; assert.notEqual(key(rawPrompt), objectKey, "existing object fallback notices in-place changes");
     const typedKey = key(rawPrompt); rawPrompt.widgets[0].value = JSON.stringify(rawPrompt.widgets[0].value);
@@ -274,6 +276,90 @@ assert.equal(JSON.parse(key(cycleA)).length, 2); assert.equal(ctx.resolveLinkedS
     key(copied);
     assert.strictEqual(copied.scenePromptLocalKeyCache.node, copied, "even accidentally copied cache fields cannot claim another node's local key");
     assert.strictEqual(copied.scenePromptLineageKeyCache.owners[0], copied);
+}
+
+// Prompt display dependencies are pass-through counts and the visible title, never its generated text.
+{
+    const displayGraph = graph(), displayPrompt = add(displayGraph, "ScenePrompter");
+    const body = { positive_base: "positive", positive_json: "{}", negative_base: "negative", negative_json: "{}", category_order: "[]", filename_enabled: true };
+    let bodyReads = 0;
+    displayPrompt.widgets = Object.keys(body).map(name => ({ name,
+        get value() { bodyReads++; return body[name]; }, set value(value) { body[name] = value; } }));
+    const displayQueue = add(displayGraph, "ScenePrompterQueue"); connect(displayPrompt, displayQueue, "scene_prompt1");
+    const originalPreview = ctx.scenePromptPreviewEntries;
+    vm.runInContext(functionSource("scenePromptPreviewEntries"), ctx);
+    const firstKey = key(displayPrompt), firstStats = ctx.scenePromptStats(displayPrompt), firstPlan = ctx.sceneScheduleForNode(displayPrompt);
+    const firstRows = ctx.scenePromptPreviewEntries(displayPrompt), firstQueueKey = ctx.scenePromptQueueRowsCacheKey(displayQueue);
+    for (const [name, value] of Object.entries(body)) set(displayPrompt, name, typeof value === "boolean" ? !value : `${value} edited`);
+    assert.equal(key(displayPrompt), firstKey);
+    assert.strictEqual(ctx.scenePromptStats(displayPrompt), firstStats);
+    assert.strictEqual(ctx.sceneScheduleForNode(displayPrompt), firstPlan);
+    assert.strictEqual(ctx.scenePromptPreviewEntries(displayPrompt), firstRows);
+    assert.equal(ctx.scenePromptQueueRowsCacheKey(displayQueue), firstQueueKey);
+    assert.equal(bodyReads, 0, "Stats/Schedule/Preview/QueueRows never read the six unused Prompt body widgets");
+    displayPrompt.title = "Renamed Prompt";
+    assert.notEqual(key(displayPrompt), firstKey);
+    assert.notStrictEqual(ctx.scenePromptStats(displayPrompt), firstStats);
+    assert.notStrictEqual(ctx.sceneScheduleForNode(displayPrompt), firstPlan);
+    assert.deepEqual(Array.from(ctx.scenePromptPreviewEntries(displayPrompt)[0].parts), ["Renamed Prompt"]);
+    assert.notEqual(ctx.scenePromptQueueRowsCacheKey(displayQueue), firstQueueKey);
+    assert.equal(bodyReads, 0);
+    ctx.scenePromptPreviewEntries = originalPreview;
+}
+
+// Queue display JSON reuses the raw row key at the same rounded width, including selected Switch paths.
+{
+    const originalSourcePredicate = ctx.isScenePromptSourceNode;
+    ctx.isScenePromptSourceNode = node => originalSourcePredicate(node) || ctx.isSceneSwitch(node);
+    ctx.sceneQueueDisplayEntriesFromRows = rows => rows;
+    ctx.sceneQueueDisplayNaturalHeight = () => 56;
+    for (const name of ["sceneQueuePreviewRows", "scenePromptQueueDisplayCacheKey", "computeScenePromptQueueDisplayCache", "scenePromptQueueDisplayCache"])
+        vm.runInContext(functionSource(name), ctx);
+    const displayGraph = graph(), displaySeed = add(displayGraph, "ScenePrompter");
+    const onTrue = add(displayGraph, "ScenePromptCounter", { count: 2, enable_downstream_count: true });
+    const onFalse = add(displayGraph, "ScenePromptCounter", { count: 3, enable_downstream_count: true });
+    const control = add(displayGraph, "PrimitiveBoolean", { value: false }), gate = add(displayGraph, "ComfySwitchNode", { switch: false });
+    const displayQueue = add(displayGraph, "ScenePrompterQueue"); displayQueue.size = [360, 100];
+    connect(displaySeed, onTrue, "scene_prompt"); connect(displaySeed, onFalse, "scene_prompt");
+    connect(onTrue, gate, "on_true"); connect(onFalse, gate, "on_false"); connect(control, gate, "switch", "BOOLEAN"); connect(gate, displayQueue, "scene_prompt1");
+    const originalRowsKey = ctx.scenePromptQueueRowsCacheKey, originalJSON = ctx.JSON;
+    let rowReads = 0, stringifies = 0;
+    ctx.scenePromptQueueRowsCacheKey = node => { rowReads++; return originalRowsKey(node); };
+    ctx.JSON = { parse: JSON.parse, stringify(value) { stringifies++; return JSON.stringify(value); } };
+    let cached = ctx.scenePromptQueueDisplayCache(displayQueue, 360.1);
+    assert.equal(rowReads, 1, "a cold display computes its row key once and passes it into the cache builder");
+    assert.equal(cached.totalBatches, 3); assert.equal(cached.rowKey, originalRowsKey(displayQueue));
+    stringifies = 0; rowReads = 0;
+    for (let draw = 0; draw < 50; draw++) assert.strictEqual(ctx.scenePromptQueueDisplayCache(displayQueue, 360.9), cached);
+    assert.equal(rowReads, 50, "every warm draw still checks the current ancestry");
+    assert.equal(stringifies, 0, "same row key/rounded width does not wrap a large lineage JSON a second time");
+    assert.equal(ctx.scenePromptQueueDisplayCacheKey(displayQueue, 360.2), cached.cacheKey);
+    const changed = mutate => {
+        const previous = cached; mutate(); rowReads = 0;
+        cached = ctx.scenePromptQueueDisplayCache(displayQueue, 360.1);
+        assert.notStrictEqual(cached, previous); assert.notEqual(cached.cacheKey, previous.cacheKey);
+        assert.equal(rowReads, 1, "an invalidated display still derives its row key only once");
+    };
+    changed(() => { set(control, "value", true); }); assert.equal(cached.totalBatches, 2);
+    const selected = cached;
+    set(onFalse, "count", 8); assert.strictEqual(ctx.scenePromptQueueDisplayCache(displayQueue, 360.1), selected,
+        "unselected Switch branch edits do not change the Queue display snapshot");
+    changed(() => { set(onTrue, "count", 5); }); assert.equal(cached.totalBatches, 5);
+    changed(() => { onTrue.mode = 2; }); assert.equal(cached.totalBatches, 0);
+    changed(() => { onTrue.mode = 0; }); assert.equal(cached.totalBatches, 5);
+    const beforeWidth = cached;
+    cached = ctx.scenePromptQueueDisplayCache(displayQueue, 361.1);
+    assert.notStrictEqual(cached, beforeWidth); assert.equal(cached.rowKey, beforeWidth.rowKey);
+    assert.notEqual(cached.cacheKey, beforeWidth.cacheKey);
+    const largeMatrix = add(displayGraph, "ScenePromptMatrix", { matrix_json: JSON.stringify([{ name: "large", positive_base: "tag,".repeat(20000) }]) });
+    const largeQueue = add(displayGraph, "ScenePrompterQueue"); connect(largeMatrix, largeQueue, "scene_prompt1");
+    const largeCache = ctx.scenePromptQueueDisplayCache(largeQueue, 360);
+    assert(largeCache.rowKey.length > 80000, "the display cache regression includes a real large Matrix dependency");
+    stringifies = 0;
+    for (let draw = 0; draw < 50; draw++) assert.strictEqual(ctx.scenePromptQueueDisplayCache(largeQueue, 360), largeCache);
+    assert.equal(stringifies, 0, "large Queue row keys are never JSON wrapped again on warm draws");
+    ctx.JSON = originalJSON; ctx.scenePromptQueueRowsCacheKey = originalRowsKey;
+    ctx.isScenePromptSourceNode = originalSourcePredicate;
 }
 
 // Completed values and active recursion are separate: a masking Preset must not erase another branch's true Queue.
