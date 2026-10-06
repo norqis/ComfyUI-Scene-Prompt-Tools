@@ -6776,6 +6776,8 @@ function clearSceneComputedCaches(node) {
     node.scenePromptQueueDisplayCache = null;
     node.scenePromptQueueRenderCache = null;
     node.scenePromptTotalCache = null;
+    node.scenePromptLocalKeyCache = null;
+    node.scenePromptLineageKeyCache = null;
     node.scenePromptSourceKeyCache = null;
     node.scenePromptPreviewCache = null;
     node.sceneQueueScheduleCache = null;
@@ -7133,63 +7135,88 @@ function sceneExpandScenePromptSourceNode(node) {
 function scenePromptSourceLocalCacheKey(node) {
     const common = { id: node?.id ?? null, mode: sceneNodeMode(node), revision: sceneNodeRevision(node) };
     const values = (names) => names.map((name) => findWidget(node, name)?.value ?? null);
+    const finish = (fields) => {
+        const descriptor = { ...common, ...fields };
+        const signature = [];
+        for (const [name, value] of Object.entries(descriptor)) {
+            signature.push(name);
+            if (name === "switch_values") {
+                const vector = Array.isArray(value) ? value : value?.values;
+                if (Array.isArray(vector) && vector.length === 10 && vector.every((entry) => typeof entry === "boolean")
+                    && (Array.isArray(value) || Object.keys(value).length === 1)) {
+                    signature.push("switch_vector", Array.isArray(value), ...vector);
+                    continue;
+                }
+            }
+            signature.push(Array.isArray(value));
+            const entries = Array.isArray(value) ? [value.length, ...value] : [value];
+            for (const entry of entries) signature.push(typeof entry, entry && typeof entry === "object" ? JSON.stringify(entry) : entry);
+        }
+        const graph = node.graph || app.graph;
+        const cache = node.scenePromptLocalKeyCache;
+        if (cache?.node === node && cache.graph === graph && cache.signature.length === signature.length
+            && signature.every((value, index) => value === cache.signature[index])) return cache.key;
+        const key = JSON.stringify(descriptor);
+        node.scenePromptLocalKeyCache = { node, graph, signature, key };
+        return key;
+    };
     if (nodeClassName(node) === "ScenePromptLLM") {
-        return JSON.stringify({ ...common, type: "llm", values: values([
+        return finish({ type: "llm", values: values([
             "model_mode", "description", "positive", "negative", "generation_state_json",
         ]) });
     }
     if (isScenePromptNode(node)) {
-        return JSON.stringify({ ...common, type: "prompt", title: scenePromptTitle(node), values: values([
+        return finish({ type: "prompt", title: scenePromptTitle(node), values: values([
             "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "filename_enabled",
         ]) });
     }
     if (isPromptMatrixNode(node)) {
-        return JSON.stringify({ ...common, type: "matrix",
+        return finish({ type: "matrix",
             matrix_json: String(ensureMatrixJsonWidget(node)?.value || MATRIX_DEFAULT_JSON) });
     }
     if (isScenePathNode(node)) {
-        return JSON.stringify({ ...common, type: "path", title: scenePathTitle(node),
+        return finish({ type: "path", title: scenePathTitle(node),
             path_mode: normalizePathMode(findWidget(node, "path_mode")?.value) });
     }
-    if (isScenePromptMergeNode(node)) return JSON.stringify({ ...common, type: "merge" });
+    if (isScenePromptMergeNode(node)) return finish({ type: "merge" });
     if (isScenePromptDeleteNode(node)) {
-        return JSON.stringify({ ...common, type: "delete", values: values(["positive", "negative"]) });
+        return finish({ type: "delete", values: values(["positive", "negative"]) });
     }
     if (isScenePromptReverseNode(node)) {
-        return JSON.stringify({ ...common, type: "reverse", reverse_scope: scenePromptReverseScope(node) });
+        return finish({ type: "reverse", reverse_scope: scenePromptReverseScope(node) });
     }
     if (isScenePromptCounterNode(node)) {
-        return JSON.stringify({ ...common, type: "counter", values: values(["count", "enable_downstream_count"]) });
+        return finish({ type: "counter", values: values(["count", "enable_downstream_count"]) });
     }
     if (isScenePromptRandomRouteNode(node)) {
-        return JSON.stringify({ ...common, type: "random_route", values: values(["weights_json", "preserve_join"]) });
+        return finish({ type: "random_route", values: values(["weights_json", "preserve_join"]) });
     }
     if (isSceneEmptyLatentNode(node)) {
-        return JSON.stringify({ ...common, type: "empty_latent", values: values(["width", "height", "batch_size"]) });
+        return finish({ type: "empty_latent", values: values(["width", "height", "batch_size"]) });
     }
     if (isScenePromptJoinNode(node)) {
-        return JSON.stringify({ ...common, type: isScenePromptRandomRouteOutputNode(node) ? "random_output" : "queue",
+        return finish({ type: isScenePromptRandomRouteOutputNode(node) ? "random_output" : "queue",
             controls: SCENE_QUEUE_CONTROL_NAMES.map((name) => findWidget(node, name)?.value ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]),
             locked: node.sceneQueueControlLock || "" });
     }
     if (isScenePresetReferenceNode(node)) {
         const presetId = String(findWidget(node, "preset_id")?.value || "");
         const preset = node.scenePresetGraph || scenePresetDisplayGraphs.get(presetId);
-        return JSON.stringify({ ...common, type: "preset_reference", preset_id: presetId,
+        return finish({ type: "preset_reference", preset_id: presetId,
             snapshot: preset?.metadata?.sha256 || "", local_revision: node.scenePresetRevision || 0,
             switch_settings_json: findWidget(node, "switch_settings_json")?.value ?? "[]" });
     }
-    if (isScenePresetInputNode(node)) return JSON.stringify({ ...common, type: "preset_input",
+    if (isScenePresetInputNode(node)) return finish({ type: "preset_input",
         switch_values: findWidget(node, "switch_values")?.value ?? node.properties?.scene_switch_values ?? null });
-    if (isSceneSwitch(node)) return JSON.stringify({ ...common, type: "switch", value: findWidget(node, "switch")?.value });
-    if (isScenePromptCallbackNode(node)) return JSON.stringify({ ...common, type: "callback" });
+    if (isSceneSwitch(node)) return finish({ type: "switch", value: findWidget(node, "switch")?.value });
+    if (isScenePromptCallbackNode(node)) return finish({ type: "callback" });
     if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node)) {
-        return JSON.stringify({ ...common, type: isSceneApplyModelNode(node) ? "apply_model" : "apply_lora" });
+        return finish({ type: isSceneApplyModelNode(node) ? "apply_model" : "apply_lora" });
     }
     if (["PrimitiveNode", "PrimitiveInt", "PrimitiveFloat", "PrimitiveBoolean"].includes(nodeClassName(node))) {
-        return JSON.stringify({ ...common, type: nodeClassName(node), value: findWidget(node, "value")?.value });
+        return finish({ type: nodeClassName(node), value: findWidget(node, "value")?.value });
     }
-    return JSON.stringify({ ...common, type: nodeClassName(node) });
+    return finish({ type: nodeClassName(node) });
 }
 
 function scenePromptSourceCacheKey(node) {
@@ -8575,6 +8602,8 @@ function scenePromptLineageKey(node) {
     const indexes = new Map([[node, 0]]);
     const nodes = [node];
     const descriptors = [];
+    const owners = [];
+    const signature = [];
     for (let index = 0; index < nodes.length; index += 1) {
         const current = nodes[index];
         const graph = current.graph || app.graph;
@@ -8598,9 +8627,24 @@ function scenePromptLineageKey(node) {
                 link?.origin_id ?? null, link?.origin_slot ?? null, link?.target_id ?? null,
                 link?.target_slot ?? null, source ? indexes.get(source) : null]);
         }
-        descriptors.push([scenePromptSourceLocalCacheKey(current), edges]);
+        const localKey = scenePromptSourceLocalCacheKey(current);
+        descriptors.push([localKey, edges]);
+        owners.push(current, graph);
+        signature.push(localKey, edges.length);
+        for (const edge of edges) signature.push(...edge);
     }
-    return JSON.stringify(descriptors);
+    const cache = node.scenePromptLineageKeyCache;
+    const sameOwners = cache?.owners.length === owners.length && owners.every((owner, index) => owner === cache.owners[index]);
+    if (sameOwners && cache.signature.length === signature.length
+        && signature.every((value, index) => value === cache.signature[index])) return cache.key;
+    if (cache && !sameOwners) {
+        // Identical IDs/values on replacement objects must not reuse plans from the old graph.
+        clearSceneComputedCaches(node);
+        descriptors[0][0] = signature[0] = scenePromptSourceLocalCacheKey(node);
+    }
+    const key = JSON.stringify(descriptors);
+    node.scenePromptLineageKeyCache = { owners, signature, key };
+    return key;
 }
 
 function sceneQueueDisplayPartsForEntry(entry) {

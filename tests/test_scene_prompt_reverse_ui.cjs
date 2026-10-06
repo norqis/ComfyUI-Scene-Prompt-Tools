@@ -55,7 +55,7 @@ assert.equal(context.scenePromptReverseScope({ widgets: [{ name: "reverse_scope"
 assert.equal(context.scenePromptReverseScope({ widgets: [] }), "全てのノード");
 
 const applyContext = {
-    JSON, Set, Map,
+    JSON, Set, Map, app: { graph: null },
     isScenePromptNode(node) { return node.kind === "prompt"; },
     isPromptMatrixNode() { return false; }, isScenePathNode() { return false; },
     isScenePromptMergeNode() { return false; }, isScenePromptReverseNode() { return false; }, isScenePromptDeleteNode() { return false; },

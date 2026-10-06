@@ -187,6 +187,95 @@ const cycleA = add(g, "Reroute"), cycleB = add(g, "Reroute");
 connect(cycleA, cycleB, "input"); connect(cycleB, cycleA, "input");
 assert.equal(JSON.parse(key(cycleA)).length, 2); assert.equal(ctx.resolveLinkedSourceFromInput(g, cycleA.inputs[0]).source, null);
 
+// Warm lineage still reads every current edge/value, but never serializes unchanged prompt text again.
+{
+    let stringifies = 0;
+    const originalJSON = ctx.JSON;
+    ctx.JSON = { parse: JSON.parse, stringify(value) { stringifies++; return JSON.stringify(value); } };
+    const large = graph(); let root = add(large, "ScenePrompter", { positive_base: "tag,".repeat(4000), positive_json: "{}" });
+    for (let index = 0; index < 119; index++) {
+        const next = add(large, "ScenePrompter", { positive_base: `row${index},` + "tag,".repeat(4000), negative_base: "negative,".repeat(1000) });
+        connect(root, next, "scene_prompt"); root = next;
+    }
+    const encoded = key(root), localCache = root.scenePromptLocalKeyCache, lineageCache = root.scenePromptLineageKeyCache;
+    assert.equal(JSON.parse(encoded).length, large.nodes.size);
+    stringifies = 0; large.lookups = 0;
+    const start = performance.now();
+    for (let repeat = 0; repeat < 50; repeat++) assert.equal(key(root), encoded);
+    assert.equal(stringifies, 0, "large prompt strings and the full lineage JSON are reused on every unchanged read");
+    assert.equal(large.lookups, 119 * 50, "warm keys continue reading all current edges rather than relying on edit events");
+    assert.strictEqual(root.scenePromptLocalKeyCache, localCache);
+    assert.strictEqual(root.scenePromptLineageKeyCache, lineageCache);
+    const warm50ms = Number((performance.now() - start).toFixed(2));
+    const leaf = large.nodes.get(1);
+    leaf.widgets[0].value += "direct edit";
+    assert.notEqual(key(root), encoded, "direct edits without a callback still invalidate the selected ancestry");
+    const edited = key(root); stringifies = 0; assert.equal(key(root), edited); assert.equal(stringifies, 0);
+    const edge = large.links[root.inputs[0].link], oldSlot = edge.origin_slot;
+    edge.origin_slot = 1; assert.notEqual(key(root), edited, "direct output slot changes are in the scalar edge snapshot");
+    edge.origin_slot = oldSlot;
+    const oldInputType = root.inputs[0].type, beforeType = key(root);
+    root.inputs[0].type = "*"; assert.notEqual(key(root), beforeType); root.inputs[0].type = oldInputType;
+    const displaced = key(root); edge.origin_id = 1;
+    assert.notEqual(key(root), displaced, "direct link endpoint changes need no downstream refresh notification");
+    assert.equal(JSON.parse(key(root)).length, 2, "the current snapshot releases the removed ancestry");
+    assert.equal(root.scenePromptLineageKeyCache.owners.length, 4);
+    const rawPrompt = add(large, "ScenePrompter", { positive_base: { nested: "one" } });
+    const objectKey = key(rawPrompt);
+    rawPrompt.widgets[0].value.nested = "two"; assert.notEqual(key(rawPrompt), objectKey, "existing object fallback notices in-place changes");
+    const typedKey = key(rawPrompt); rawPrompt.widgets[0].value = JSON.stringify(rawPrompt.widgets[0].value);
+    assert.notEqual(key(rawPrompt), typedKey, "an object and its literal JSON string remain distinct descriptor values");
+    const input = add(large, "ScenePresetInput"); input.properties.scene_switch_values = Array(10).fill(false);
+    const arrayKey = key(input); input.properties.scene_switch_values[2] = true;
+    assert.notEqual(key(input), arrayKey, "Input's plain replay vector is compared element by element");
+    stringifies = 0; key(input); assert.equal(stringifies, 0);
+    input.widgets.push({ name: "switch_values", value: { values: [...input.properties.scene_switch_values] } });
+    const wrapperKey = key(input); input.widgets[0].value.values[2] = false;
+    assert.notEqual(key(input), wrapperKey, "Input's native binding wrapper also detects an in-place Boolean edit");
+    stringifies = 0; key(input); assert.equal(stringifies, 0);
+    const extraKey = key(input); input.widgets[0].value.extra = "preserve fallback";
+    assert.notEqual(key(input), extraKey, "other object fields preserve the original descriptor serialization behavior");
+    const savedFields = JSON.stringify({ widgets: input.widgets, properties: input.properties });
+    key(input); assert.equal(JSON.stringify({ widgets: input.widgets, properties: input.properties }), savedFields,
+        "derived signature snapshots never enter serialized widget/property state");
+    const cloned = add(large, input.type, Object.fromEntries(input.widgets.map(widget => [widget.name, structuredClone(widget.value)])));
+    cloned.properties = structuredClone(input.properties);
+    assert.equal(cloned.scenePromptLocalKeyCache, undefined); assert.equal(cloned.scenePromptLineageKeyCache, undefined);
+    key(cloned); assert.notStrictEqual(cloned.scenePromptLocalKeyCache, input.scenePromptLocalKeyCache);
+    assert.notStrictEqual(cloned.scenePromptLineageKeyCache, input.scenePromptLineageKeyCache);
+    ctx.JSON = originalJSON;
+    console.log("Current descriptor/lineage warm serialization reuse passed", JSON.stringify({ nodes: 120, chars: encoded.length, warm50ms, stringifies: 0 }));
+}
+
+// Same IDs and identical serialized fields never make replacement objects reuse old computed plans.
+{
+    const owners = graph(), ownerLeaf = add(owners, "ScenePrompter", { positive_base: "same" }), ownerRoot = add(owners, "ScenePromptCounter", { count: 2, enable_downstream_count: true });
+    connect(ownerLeaf, ownerRoot, "scene_prompt");
+    const previousStats = ctx.scenePromptStats(ownerRoot), previousPlan = ctx.sceneScheduleForNode(ownerRoot);
+    const revision = ownerRoot.scenePromptRevision || 0;
+    add(owners, ownerLeaf.type, { positive_base: "same" }, ownerLeaf.id);
+    assert.notStrictEqual(ctx.scenePromptStats(ownerRoot), previousStats, "same-ID source replacement releases old derived stats");
+    assert.notStrictEqual(ctx.sceneScheduleForNode(ownerRoot), previousPlan, "same-ID source replacement releases old derived schedules");
+    assert.equal(ownerRoot.scenePromptRevision, revision + 1);
+    const currentKey = key(ownerRoot), currentCache = ownerRoot.scenePromptLineageKeyCache;
+    assert.equal(key(ownerRoot), currentKey); assert.strictEqual(ownerRoot.scenePromptLineageKeyCache, currentCache,
+        "replacement cleanup refreshes the root descriptor before saving the new snapshot");
+    const moved = graph();
+    add(moved, ownerLeaf.type, { positive_base: "same" }, ownerLeaf.id);
+    moved.nodes.set(ownerRoot.id, ownerRoot); moved.links = structuredClone(owners.links); ownerRoot.graph = moved;
+    const beforeMove = ctx.scenePromptStats(ownerRoot);
+    const nextGraph = graph(); nextGraph.nodes.set(ownerRoot.id, ownerRoot);
+    add(nextGraph, ownerLeaf.type, { positive_base: "same" }, ownerLeaf.id); nextGraph.links = structuredClone(moved.links);
+    ownerRoot.graph = nextGraph;
+    assert.notStrictEqual(ctx.scenePromptStats(ownerRoot), beforeMove, "the same root node moved to another graph owns a fresh derived cache");
+    const copied = add(nextGraph, ownerRoot.type, { count: 2, enable_downstream_count: true });
+    copied.scenePromptLocalKeyCache = ownerRoot.scenePromptLocalKeyCache;
+    copied.scenePromptLineageKeyCache = ownerRoot.scenePromptLineageKeyCache;
+    key(copied);
+    assert.strictEqual(copied.scenePromptLocalKeyCache.node, copied, "even accidentally copied cache fields cannot claim another node's local key");
+    assert.strictEqual(copied.scenePromptLineageKeyCache.owners[0], copied);
+}
+
 // Completed values and active recursion are separate: a masking Preset must not erase another branch's true Queue.
 const cut = { api_graph: { output: {
     1: { class_type: "ScenePrompter", inputs: {} },

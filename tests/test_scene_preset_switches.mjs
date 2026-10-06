@@ -294,10 +294,15 @@ for (const depth of [1, 8, 32, 128]) {
     assert(encoded.length <= dag.nodes.size * 420);
     const stats = ctx.scenePromptStats(counter); assert.equal(stats.total, 100000000);
     lookups = 0;
+    let warmStringifies = 0;
+    const originalJSON = ctx.JSON;
+    ctx.JSON = { parse: JSON.parse, stringify(value) { warmStringifies++; return JSON.stringify(value); } };
     const start = performance.now();
     for (let draw = 0; draw < 100; draw++) assert.strictEqual(ctx.scenePromptStats(counter), stats);
+    ctx.JSON = originalJSON;
+    assert.equal(warmStringifies, 0, "selected Switch and linked Boolean/Count ancestry reuse all unchanged local and lineage JSON");
     assert(lookups <= dag.nodes.size * 400, "warm draws scale with actual nodes, not generated rows or repeated shared branches");
-    measurements.push({ nodes: dag.nodes.size, keyLookups, chars: encoded.length, warm100Lookups: lookups, warm100ms: Number((performance.now() - start).toFixed(2)) });
+    measurements.push({ nodes: dag.nodes.size, keyLookups, chars: encoded.length, warm100Lookups: lookups, warmStringifies, warm100ms: Number((performance.now() - start).toFixed(2)) });
 }
 console.log("Preset switch values, selected live lineage/counts, full/compact nested mappings, Queue boundaries and LLM physical slot/type preservation passed.");
 console.log("Selected Switch lineage retains linear node/edge storage independently of 100 million generated rows", JSON.stringify(measurements));
