@@ -1,5 +1,9 @@
 import json
+import random
+import re
 import sys
+import tempfile
+import tracemalloc
 import types
 import unittest
 from pathlib import Path
@@ -16,10 +20,26 @@ sys.modules.setdefault("folder_paths", folder_paths)
 from scene_prompt_tools.prompt import (
     _choice_rng, _compose_prompt_parts, _expand_choices, _expand_prompt_parts,
     _join_unique, _merge_positive_negative_parts, _parse_selection_json, _unique_parts,
+    _split_prompt,
 )
 
 
 EMPTY_SELECTION = '{"version":1,"categories":{}}'
+
+
+def legacy_expand_choices(text, rng):
+    """The original whole-string implementation, kept only as a small oracle."""
+    result = text or ""
+    seen = set()
+    while result not in seen:
+        seen.add(result)
+        match = re.search(r"\{([^{}]*)\}", result)
+        if not match:
+            break
+        options = [option.strip() for option in match.group(1).split("|")]
+        replacement = rng.choice(options) if options else ""
+        result = result[:match.start()] + replacement + result[match.end():]
+    return result
 
 
 def test_single_choice_is_always_present():
@@ -237,6 +257,153 @@ def test_missing_partial_selection_is_valid_but_not_emitted():
 
 
 class PromptChoiceTests(unittest.TestCase):
+    def test_plain_text_returns_original_without_consuming_rng(self):
+        text = "plain | literal }, (tag:1.4)\n日本語 " * 3000
+        rng = random.Random(123)
+        original_state = rng.getstate()
+        self.assertIs(_expand_choices(text, rng), text)
+        self.assertEqual(rng.getstate(), original_state)
+
+    def assert_legacy_choices(self, values):
+        for text in values:
+            for seed in (0, 1, 123, (1 << 64) - 1):
+                for stream in ("positive", "negative"):
+                    with self.subTest(text=text, seed=seed, stream=stream):
+                        old_rng = _choice_rng(seed, stream)
+                        new_rng = _choice_rng(seed, stream)
+                        self.assertEqual(_expand_choices(text, new_rng), legacy_expand_choices(text, old_rng))
+                        self.assertEqual(new_rng.getstate(), old_rng.getstate())
+
+    def test_parser_matches_legacy_output_and_rng_for_fixed_syntax(self):
+        self.assert_legacy_choices([
+            None, "", "literal | tags, (weight:1.4)\n日本語", "{}", "{|}", "{a||}",
+            "{single}", "{ \t single \n }", "{\u3000a\u00a0|\t\n}",
+            "before, {red dress, boots|blue dress, heels}, after",
+            "{a|{b|c}}", "{{a|b}|{c|d}}", "{a|}{}{{x}}{y|z}",
+            "{a{b|c}tail|fallback}", "({{|}:1.2})", "{{}}", "{{|}}",
+            "{", "}", "{{", "}}", "{|", "{a{b|c}", "{a|{b|c}",
+            "{ {a|b} | untouched", "{{a|b}}}", "}{a|b}{", "{a}{b|c}{d",
+            "{{a}{{b|c}}{d|e}", "{a|b}}{c|d}", "{a}b|{c|d}",
+        ])
+
+    def test_parser_matches_generated_balanced_and_unbalanced_choices(self):
+        generator = random.Random(3107)
+        literals = ("", "alpha", " beta ", "red, blue", "(tag:1.4)", "日本語", "\t", "\u3000")
+
+        def balanced(depth):
+            if depth == 0 or generator.randrange(3) == 0:
+                return generator.choice(literals)
+            return "{" + "|".join(balanced(depth - 1) for _ in range(generator.randrange(1, 5))) + "}"
+
+        cases = [balanced(4) for _ in range(150)]
+        cases.extend("".join(generator.choice("{}|ab ,\n\t") for _ in range(generator.randrange(100)))
+                     for _ in range(300))
+        # Broken outer braces must still allow complete inner choices to resolve.
+        cases.extend("{" + balanced(3) + "|" + balanced(2) for _ in range(50))
+        self.assert_legacy_choices(cases)
+
+    def test_single_and_empty_slots_still_call_choice_in_exact_order(self):
+        class ChoiceSpy:
+            def __init__(self):
+                self.calls = []
+
+            def choice(self, options):
+                self.calls.append(list(options))
+                return options[0]
+
+        rng = ChoiceSpy()
+        self.assertEqual(_expand_choices("{{}{}{ a }}{||}{last}", rng), "alast")
+        self.assertEqual(rng.calls, [[""], [""], ["a"], ["a"], ["", "", ""], ["last"]])
+
+    def test_many_adjacent_choices_use_linear_memory(self):
+        peaks = []
+        for count in (200, 1000, 3000, 9000):
+            text = ", ".join("{alpha|bravo}" for _ in range(count))
+            old_rng = random.Random(123)
+            expected = ", ".join(old_rng.choice(["alpha", "bravo"]) for _ in range(count))
+            rng = random.Random(123)
+            tracemalloc.start()
+            try:
+                result = _expand_choices(text, rng)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertEqual(result, expected)
+            self.assertEqual(rng.getstate(), old_rng.getstate())
+            # Generous per-input bound; the former 3000-choice peak was ~99 MB.
+            self.assertLess(peak, len(text) * 32 + 65536, (count, peak))
+            peaks.append(peak)
+        self.assertLess(peaks[-1], peaks[0] * 60)
+
+    def test_deep_single_choices_reuse_long_payload_without_recursion(self):
+        class ChoiceSpy(random.Random):
+            def __init__(self):
+                super().__init__(123)
+                self.calls = 0
+                self.payload_ids = set()
+
+            def choice(self, options):
+                self.calls += 1
+                self.payload_ids.add(id(options[0]))
+                return super().choice(options)
+
+        depth = 3000
+        payload = "long_payload" * 10000
+        text = "{ \t" * depth + payload + "\u3000}" * depth
+        rng = ChoiceSpy()
+        self.assertEqual(_expand_choices(text, rng), payload)
+        self.assertEqual(rng.calls, depth)
+        # Even surrounding whitespace must not force a new payload per frame.
+        self.assertEqual(len(rng.payload_ids), 1)
+        old_rng = random.Random(123)
+        for _ in range(depth):
+            old_rng.choice([payload])
+        self.assertEqual(rng.getstate(), old_rng.getstate())
+
+    def test_deep_unclosed_outer_braces_keep_literal_frames(self):
+        depth = 4000
+        rng = random.Random(123)
+        expected_rng = random.Random(123)
+        chosen = expected_rng.choice(["a", "b"])
+        text = "{prefix|" * depth + "{a|b} tail"
+        self.assertEqual(_expand_choices(text, rng), "{prefix|" * depth + chosen + " tail")
+        self.assertEqual(rng.getstate(), expected_rng.getstate())
+
+    def test_expand_to_text_and_delete_keep_seeded_choice_results(self):
+        from test_node_plan_semantics import load_nodes
+
+        with tempfile.TemporaryDirectory() as directory:
+            nodes, prompt = load_nodes(Path(directory))
+            plan = prompt.ScenePrompt().build(
+                "Choices", "before, {{red|blue}|{green|}}, {positive_remove|kept}, ({|spare}:1.2), after", EMPTY_SELECTION,
+                "{{bad|worse}|noise}, {negative_remove|}", EMPTY_SELECTION, "", 0, False,
+            )[0]
+            plan = nodes.ScenePromptDelete().delete("positive_remove", "negative_remove", plan)[0]
+            original = json.dumps(plan)
+            row = nodes.item_for_normalized_plan(plan, 0)["row"]
+            self.assertIn("{|kept}", row["positive_parts"])
+            self.assertIn("{|}", row["negative_parts"])
+
+            def legacy_parts(parts, seed, stream):
+                rng = _choice_rng(seed, stream)
+                return _unique_parts([candidate for part in parts
+                                      for candidate in _split_prompt(legacy_expand_choices(part, rng))
+                                      if not prompt._is_empty_weighted_part(candidate)])
+
+            for seed in (0, 1, 123, (1 << 64) - 1):
+                expected_parts = _merge_positive_negative_parts(
+                    legacy_parts(row["positive_parts"], seed, "positive"),
+                    legacy_parts(row["negative_parts"], seed, "negative"), [], [],
+                )
+                expected = tuple(", ".join(parts) for parts in expected_parts)
+                expanded = nodes.ScenePromptExpand().expand(scene_prompt=plan, seed_base=seed,
+                                                            seed_base_literal=True, timestamp_dir=False)
+                text = nodes.ScenePromptToText().to_text(scene_prompt=plan, seed_base=seed, seed_base_literal=True)
+                self.assertEqual(expanded[:2], expected)
+                self.assertEqual(text, expected)
+                self.assertEqual((expanded[2]["positive"], expanded[2]["negative"]), expected)
+            self.assertEqual(json.dumps(plan), original)
+
     def test_choices(self):
         test_single_choice_is_always_present()
         test_optional_choice_can_be_present_or_empty()
