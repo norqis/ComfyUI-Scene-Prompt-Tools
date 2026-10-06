@@ -30,6 +30,23 @@ Further verification: complete remaining metadata/save/import/UI event paths, ru
 
 First-pass baseline verification: all 698 Python tests passed (two opt-in native suites skipped), and all 25 frontend suites passed before changes. Root's independent deterministic schedule probe generated 1,000 Count/Queue/Matrix/Merge/Delete/latent combinations and checked 4,190 selected events for serialized roundtrip equality, image totals, repeat indices and event replay rank. No mismatch occurred. A native isolated browser reproduced the same-size selection label canvas defect and recorded 200 full-selection serializations across 100 unchanged draws. No production queue/model was touched.
 
+## Final review and repeated verification
+
+The approved fixes are ef222e3 (choice parser), 7075cca (display/raster ownership), and 548c047 (native browser regressions). The release metadata is 85526af. During repeat testing, an existing browser test counted the asynchronously discovered third LoRA file as a duplicate request for the selected file. 4429599 now deliberately delays that row's visibility/metadata response to reproduce the race, then waits for its resolved Civitai display before retaining the original global-count assertion. No product workaround, sleep or weakened assertion was added.
+
+Root reviewed all product and test changes. The gpt-5.6-sol medium reviewer approved the initial design and exact final code/test HEAD 4429599b76c11569ca20c7b86473d8abdd8e5cc5. The catalog dependency refinement uses a scalar revision: inactive graphs invalidate on their next draw without retaining previous catalog arrays.
+
+Root independently verified:
+
+- Python suite: 706 tests, successful, with two opt-in native suites run separately.
+- Real ComfyUI CPU module/HTTP suites: 44 tests, successful. Includes all registered Scene node paths, selected Switch/model routes, nested Presets, Callback finalization and PNG replay.
+- Complete native browser suite: successful. Actual canvas text and pixels change after direct same-size selection label/weight edits; the other side's raster stays unchanged. Matrix content, bypass/relink, Count/Switch pointer operations, Undo/Redo and workflow reload remain correct. Fixtures load no image models.
+- Choice compatibility: 39,062 additional exhaustive short-string/seed comparisons with baseline output and RNG state both equal, beyond the committed balanced/unbalanced, deep and integration cases.
+- Root's repeated 3,000-choice allocation probe: 99,260,406 bytes before versus 392,157 after. Large unchanged selection/Matrix key probes perform zero full-data serializations (previously 1,000 each); one selected-list draw also avoids the former duplicate layout lookup. These are isolated algorithm/display workload results, not GPU sampling benchmarks.
+- Cache lifecycle: only current layouts/descriptors are retained; same-size content changes rebuild the matching raster, inactive catalog changes are noticed, node removal clears ownership, and oversized direct draws release the obsolete canvas.
+
+The follow-up whole-area pass covered execution/schedule/Count/Queue/random composition, prompt handling, Preset/Switch snapshots and replay, save metadata and atomic image writes, API/import/storage, LLM/GPU ownership, Civitai/LoRA metadata, candidate/UI caches, batch cancellation/finalization and workflow lifecycle. No unresolved reproduced product finding remains in this pass. This does not establish that every possible input or third-party extension is bug-free. Existing documented filename counter behavior and unsupported control providers were not changed. Production was still running during final validation; no restart, browser reload or installed-copy synchronization occurred.
+
 ## Primary references
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation (selected lazy input execution)
