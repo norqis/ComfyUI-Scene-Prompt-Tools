@@ -349,7 +349,7 @@ const server = http.createServer(async (request, response) => {
                 + `  openSavePromptPopup, openSceneLoraDetails,\n`
                 + `  openCreatePromptPopup,\n`
                 + `  openSearchPopup, openPromptCandidatePopup, loadFavorites, setMatrixLineDraftContext,\n`
-                + `  attachMatrixTextAreaAutocomplete,\n`
+                + `  attachMatrixTextAreaAutocomplete, readMatrixState,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset,\n`
@@ -1921,6 +1921,50 @@ try {
         node.properties.scene_matrix_json = original.property;
         node.matrixWriteCount = original.writes;
     });
+
+    await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode;
+        const state = window.__scenePromptPopupTestHooks.readMatrixState(node);
+        const widget = node.widgets.find(item => item.name === 'matrix_json');
+        window.__matrixCacheSaved = { value: widget.value, property: node.properties.scene_matrix_json,
+            slot: node.widgets_values[node.widgets.indexOf(widget)] };
+        if (!state.sets.length) throw new Error('Matrix baseline rows missing');
+        node.widgets.find(item => item.sceneRole === 'matrix_rows').callback();
+    });
+    while (await page.locator('.pc-popup').last().getByRole('button', { name: '削除', exact: true }).count()) {
+        await page.locator('.pc-popup').last().getByRole('button', { name: '削除', exact: true }).first().click();
+    }
+    await page.locator('.pc-popup').last().getByRole('button', { name: '閉じる', exact: true }).click();
+    const matrixCacheRoundTrip = await page.evaluate(() => {
+        const node = window.__sceneMatrixTestNode, hooks = window.__scenePromptPopupTestHooks;
+        const widget = node.widgets.find(item => item.name === 'matrix_json'), index = node.widgets.indexOf(widget);
+        const empty = hooks.readMatrixState(node), deleted = { value: widget.value, property: node.properties.scene_matrix_json, slot: node.widgets_values[index] };
+        let warm = true; for (let draw = 0; draw < 1000; draw++) warm &&= hooks.readMatrixState(node) === empty;
+        const restore = saved => { widget.value = saved.value; node.properties.scene_matrix_json = saved.property; node.widgets_values[index] = saved.slot; };
+        restore(window.__matrixCacheSaved); const restored = hooks.readMatrixState(node);
+        restore(deleted); const redone = hooks.readMatrixState(node);
+        restore(window.__matrixCacheSaved); const original = hooks.readMatrixState(node);
+        node.onRemoved();
+        const reloaded = new node.constructor();
+        const loadedWidget = reloaded.widgets.find(item => item.name === 'matrix_json');
+        loadedWidget.value = window.__matrixCacheSaved.value;
+        reloaded.properties = { scene_matrix_json: window.__matrixCacheSaved.property };
+        reloaded.widgets_values[reloaded.widgets.indexOf(loadedWidget)] = window.__matrixCacheSaved.slot;
+        window.app.graph._nodes[window.app.graph._nodes.indexOf(node)] = reloaded;
+        reloaded.onNodeCreated(); window.__sceneMatrixTestNode = reloaded;
+        const loaded = hooks.readMatrixState(reloaded);
+        return { empty: empty.sets.length, warm, sourcesEmpty: [deleted.value, deleted.property, deleted.slot].every(raw => JSON.parse(raw).sets.length === 0),
+            restoredNames: restored.sets.map(line => line.name), redone: redone.sets.length,
+            loadedNames: loaded.sets.map(line => line.name), oldReleased: node.sceneMatrixStateCache === null,
+            distinct: original !== loaded, widgetOwned: reloaded.sceneMatrixStateCache.widget === loadedWidget };
+    });
+    assert.equal(matrixCacheRoundTrip.empty, 0); assert.equal(matrixCacheRoundTrip.sourcesEmpty, true);
+    assert.equal(matrixCacheRoundTrip.warm, true, 'delete-all reuses the current empty state on warm redraws');
+    assert(matrixCacheRoundTrip.restoredNames.length > 0, 'restoring pre-deletion fields reconstructs rows');
+    assert.equal(matrixCacheRoundTrip.redone, 0, 'restoring the saved empty fields keeps all rows deleted');
+    assert.deepEqual(matrixCacheRoundTrip.loadedNames, matrixCacheRoundTrip.restoredNames);
+    assert.equal(matrixCacheRoundTrip.oldReleased, true); assert.equal(matrixCacheRoundTrip.distinct, true); assert.equal(matrixCacheRoundTrip.widgetOwned, true);
+    console.log('Chromium Matrix edit/close/delete-all, direct field restoration, reload and cache release passed');
 
     await page.evaluate(async () => {
         class ScenePresetReferenceNode {

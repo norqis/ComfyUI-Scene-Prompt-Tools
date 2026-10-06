@@ -301,3 +301,88 @@ const secondRefresh = graph(), reused = add(secondRefresh, "ScenePrompter", {}, 
 connect(reused, reusedTail, "scene_prompt"); ctx.collectDownstreamSceneNodes(reused, targets, allSeen);
 assert(targets.has(reusedTail), "same IDs in another graph are distinct visited objects");
 console.log("Scene flat lineage/Primitive/cache cleanup regressions passed", JSON.stringify(measurements));
+
+// Exercise the actual Matrix normalizer with the real state parser, not a JSON stub.
+async function testMatrixCurrentStateCache() {
+    const stateModule = await import("../web/scene_prompt_state.js");
+    const calls = { parse: 0, serialize: 0, stringify: 0 };
+    const matrixContext = {
+        Array, String, Object, Number,
+        JSON: { parse: JSON.parse, stringify(value) { calls.stringify++; return JSON.stringify(value); } },
+        parseMatrixState(value) { calls.parse++; return stateModule.parseMatrixState(value); },
+        serializeMatrixState(value) { calls.serialize++; return stateModule.serializeMatrixState(value); },
+        createMatrixState: stateModule.createMatrixState,
+        findWidget: (node, name) => node?.widgets?.find(widget => widget.name === name),
+        hideWidget(widget) { widget.hidden = true; },
+        notifyWidgetChanged() {}, refreshNode() {}, refreshDownstreamSceneNodes() {}, app: { graph: { change() {} } },
+    };
+    vm.createContext(matrixContext);
+    for (const name of ["serializedMatrixJsonValue", "currentMatrixJsonValue", "cachedMatrixState",
+        "normalizeMatrixWidgetValues", "ensureMatrixJsonWidget", "parseMatrixStateValue", "normalizeMatrixState",
+        "readMatrixState", "writeMatrixState", "clearSceneComputedCaches"]) vm.runInContext(functionSource(name), matrixContext);
+    const raw = (label, rows = 1) => stateModule.serializeMatrixState({ version: 1, sets: Array.from({ length: rows }, (_, index) => ({
+        ...stateModule.createMatrixLine(`${label}-${index}`), row_id: `${label}-${index}`, name: `${label}-${index}`, path_label: `${label}-${index}`,
+    })) });
+    const node = { widgets: [{ name: "unrelated", value: "keep" }, { name: "matrix_json", value: raw("warm", 100) }],
+        properties: {}, widgets_values: ["keep"], mode: 0, type: "SceneMatrix" };
+    const widget = node.widgets[1];
+    const read = () => matrixContext.readMatrixState(node);
+    const warm = read(); assert.equal(warm.sets.length, 100);
+    const reset = () => { calls.parse = calls.serialize = calls.stringify = 0; };
+    reset(); const start = performance.now();
+    for (let index = 0; index < 1000; index++) {
+        assert.strictEqual(read(), warm);
+        assert.strictEqual(matrixContext.ensureMatrixJsonWidget(node), widget);
+    }
+    const warm1000ms = Number((performance.now() - start).toFixed(2));
+    assert.deepEqual(calls, { parse: 0, serialize: 0, stringify: 0 }, "warm reads and lineage ensure calls perform no state parsing or serialization");
+    assert.equal(node.widgets_values[0], "keep");
+    assert.equal(node.widgets_values[1], widget.value); assert.equal(node.properties.scene_matrix_json, widget.value);
+    assert.deepEqual(Object.keys(node.sceneMatrixStateCache).sort(), ["propertyValue", "serializedValue", "state", "widget", "widgetValue"]);
+    const changed = (mutate, expected) => {
+        const old = read(); reset(); mutate(); const next = read();
+        assert.notStrictEqual(next, old, "a raw source mutation invalidates the current cache");
+        assert(calls.parse > 0); assert(calls.serialize > 0);
+        assert.equal(next.sets[0]?.name, expected);
+        assert.equal(widget.value, node.properties.scene_matrix_json); assert.equal(widget.value, node.widgets_values[1]);
+        reset(); assert.strictEqual(read(), next); assert.deepEqual(calls, { parse: 0, serialize: 0, stringify: 0 });
+        return next;
+    };
+    changed(() => { widget.value = raw("widget-edit"); }, "widget-edit-0");
+    changed(() => { node.properties.scene_matrix_json = raw("property-edit"); }, "widget-edit-0");
+    changed(() => { node.widgets_values[1] = raw("slot-edit"); }, "widget-edit-0");
+    changed(() => { widget.value = "malformed"; node.properties.scene_matrix_json = raw("legacy-property"); }, "legacy-property-0");
+    changed(() => { widget.value = "malformed"; node.properties.scene_matrix_json = "malformed"; node.widgets_values[1] = raw("legacy-slot"); }, "legacy-slot-0");
+    changed(() => { widget.value = stateModule.serializeMatrixState(stateModule.createMatrixState()); node.properties.scene_matrix_json = raw("nonempty-property"); }, "nonempty-property-0");
+    changed(() => { widget.value = " "; node.properties.scene_matrix_json = " "; node.widgets_values[1] = raw("slot-only"); }, "slot-only-0");
+    const beforeDelete = { value: widget.value, property: node.properties.scene_matrix_json, slot: node.widgets_values[1] };
+    matrixContext.writeMatrixState(node, stateModule.createMatrixState(), { refresh: false });
+    assert(!Object.hasOwn(node, "sceneMatrixState"), "write does not retain a second permanent state object");
+    const empty = read(); assert.deepEqual(empty.sets, []);
+    reset(); for (let index = 0; index < 1000; index++) assert.strictEqual(read(), empty);
+    assert.deepEqual(calls, { parse: 0, serialize: 0, stringify: 0 }, "delete-all stays empty and warm, without restoring stale legacy rows");
+    const deleted = { value: widget.value, property: node.properties.scene_matrix_json, slot: node.widgets_values[1] };
+    const restore = saved => { widget.value = saved.value; node.properties.scene_matrix_json = saved.property; node.widgets_values[1] = saved.slot; matrixContext.clearSceneComputedCaches(node); };
+    restore(beforeDelete); assert.equal(read().sets[0].name, "slot-only-0", "Undo reconstructs the saved rows");
+    restore(deleted); assert.equal(read().sets.length, 0, "Redo reconstructs the saved empty state");
+    const reloaded = { ...node, widgets: [{ name: "unrelated", value: "keep" }, { name: "matrix_json", value: beforeDelete.value }],
+        properties: { scene_matrix_json: beforeDelete.property }, widgets_values: ["keep", beforeDelete.slot], sceneMatrixStateCache: null };
+    const loaded = matrixContext.readMatrixState(reloaded);
+    assert.equal(loaded.sets[0].name, "slot-only-0"); assert.notStrictEqual(loaded, empty);
+    const sameIdNewGraph = { ...reloaded, widgets: [{ name: "matrix_json", value: raw("new-graph") }], widgets_values: [],
+        properties: {}, sceneMatrixStateCache: null };
+    assert.equal(matrixContext.readMatrixState(sameIdNewGraph).sets[0].name, "new-graph-0");
+    const oldWidget = node.widgets[1]; restore(beforeDelete); read(); node.widgets[1] = { ...oldWidget };
+    const replaced = read(); assert.equal(replaced.sets[0].name, "slot-only-0");
+    assert.strictEqual(node.sceneMatrixStateCache.widget, node.widgets[1], "replacement widgets own the new current tuple");
+    node.widgets[1].value = node.properties.scene_matrix_json = node.widgets_values[1] = "malformed";
+    assert.throws(read, /JSON/); assert.equal(node.sceneMatrixStateCache, null, "a failed recovery releases the old parsed state");
+    node.widgets[1].value = beforeDelete.value; read();
+    ctx.installSceneNodeRemovalCleanup(node, node.type); node.onRemoved();
+    assert.equal(node.sceneMatrixStateCache, null, "node removal releases the current Matrix state");
+    assert.equal(read().sets[0].name, "slot-only-0", "saved fields suffice after removal/Undo");
+    const withoutWidget = { widgets: [], properties: { scene_matrix_json: raw("legacy-only") } };
+    assert.equal(matrixContext.readMatrixState(withoutWidget).sets[0].name, "legacy-only-0");
+    console.log("Matrix actual-parser warm cache, field invalidation, legacy fallback, delete-all, Undo/Redo/reload and release passed", JSON.stringify({ warm1000ms }));
+}
+testMatrixCurrentStateCache().catch(error => { console.error(error); process.exitCode = 1; });

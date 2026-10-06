@@ -5975,10 +5975,21 @@ function currentMatrixJsonValue(node, widget) {
     return serializeMatrixState(createMatrixState());
 }
 
+function cachedMatrixState(node, widget) {
+    const cache = node.sceneMatrixStateCache;
+    return widget && cache?.widget === widget
+        && cache.widgetValue === widget.value
+        && cache.propertyValue === node.properties?.scene_matrix_json
+        && cache.serializedValue === serializedMatrixJsonValue(node)
+        ? cache.state : null;
+}
+
 function normalizeMatrixWidgetValues(node, widget) {
     if (!node || !widget) {
         return;
     }
+    if (cachedMatrixState(node, widget)) return;
+    node.sceneMatrixStateCache = null;
     node.widgets_values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
     node.properties = node.properties || {};
 
@@ -5993,7 +6004,9 @@ function normalizeMatrixWidgetValues(node, widget) {
     if (node.properties.scene_matrix_json !== matrixValue) {
         node.properties.scene_matrix_json = matrixValue;
     }
-
+    node.sceneMatrixStateCache = { widget, widgetValue: widget.value,
+        propertyValue: node.properties.scene_matrix_json, serializedValue: serializedMatrixJsonValue(node),
+        state: parseMatrixStateValue(matrixValue) };
 }
 
 function ensureMatrixJsonWidget(node) {
@@ -6050,20 +6063,10 @@ function normalizeMatrixState(state) {
 }
 
 function readMatrixState(node) {
-    const widget = ensureMatrixJsonWidget(node);
-    const cacheKey = JSON.stringify({
-        widget: String(widget?.value || ""),
-        property: String(node?.properties?.scene_matrix_json || ""),
-        memory: node?.sceneMatrixState && typeof node.sceneMatrixState === "object"
-            ? JSON.stringify(node.sceneMatrixState)
-            : String(node?.sceneMatrixState || ""),
-    });
-    if (node.sceneMatrixStateCache?.cacheKey === cacheKey) {
-        return node.sceneMatrixStateCache.state;
-    }
-    const state = parseMatrixStateValue(currentMatrixJsonValue(node, widget));
-    node.sceneMatrixStateCache = { cacheKey, state };
-    return state;
+    const state = cachedMatrixState(node, findWidget(node, "matrix_json"));
+    if (state) return state;
+    ensureMatrixJsonWidget(node);
+    return node.sceneMatrixStateCache.state;
 }
 
 function writeMatrixState(node, state, options = {}) {
@@ -6080,7 +6083,6 @@ function writeMatrixState(node, state, options = {}) {
         }
         notifyWidgetChanged(node, widget, nextValue);
     }
-    node.sceneMatrixState = nextState;
     node.properties.scene_matrix_json = nextValue;
     clearSceneComputedCaches(node);
     if (options.refresh !== false) {
