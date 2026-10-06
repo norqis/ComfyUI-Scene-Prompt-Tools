@@ -13009,6 +13009,19 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
 function attachSceneNode(node, nodeName) {
     if (node.scenePresetDetachedSnapshot) return;
     installSceneNodeRemovalCleanup(node, nodeName);
+    if (nodeClassName(node) === "PrimitiveBoolean") {
+        const widget = findWidget(node, "value");
+        if (widget && !widget.sceneBooleanSync) {
+            const callback = widget.callback;
+            widget.callback = function (...args) {
+                const result = callback?.apply(this, args);
+                refreshDownstreamSceneNodes(node);
+                return result;
+            };
+            widget.sceneBooleanSync = true;
+        }
+        return;
+    }
     if (isSceneSwitch(node)) {
         // Keep native MatchType sockets and every non-Scene Switch behavior intact.
         installSceneConnectionWatcher(node);
@@ -13466,7 +13479,7 @@ app.registerExtension({
     },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (!NODE_NAMES.has(nodeData.name) && nodeData.name !== "ComfySwitchNode") {
+        if (!NODE_NAMES.has(nodeData.name) && !["ComfySwitchNode", "PrimitiveBoolean"].includes(nodeData.name)) {
             return;
         }
         const wrapMarker = `__ScenePromptWrapped_${nodeData.name}`;

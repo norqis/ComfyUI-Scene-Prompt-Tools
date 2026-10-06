@@ -28,6 +28,9 @@ const types = {
 };
 const ctx = { ...switches, Set, Map, Math, JSON, String, Number, Array, Object, parseMatrixState,
     app: { graph: null }, scenePresetDisplayGraphs: new Map(),
+    sceneWorkflowLoadDepth: 0, sceneWorkflowLoadSources: new Set(), sceneDownstreamRefreshSources: new Set(), sceneDownstreamRefreshTimer: null,
+    setTimeout: () => 1, clearTimeout: () => {}, scheduleSceneNodeRefresh: () => {}, installSceneNodeRemovalCleanup: () => {},
+    SCENE_WIDGET_LABELS: { order_mode: "順番", alternate_block_size: "交互ブロック", downstream_count_mode: "Count" },
     SCENE_PROMPT_QUEUE_INPUT_COUNT: 10, SCENE_PROMPT_QUEUE_INPUT_NAMES: new Set(Array.from({ length: 10 }, (_, i) => `scene_prompt${i + 1}`)),
     SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "downstream_count_mode"],
     SCENE_QUEUE_CONTROL_DEFAULTS: { order_mode: "input_order", alternate_block_size: 1, downstream_count_mode: "multiply" },
@@ -43,6 +46,7 @@ const ctx = { ...switches, Set, Map, Math, JSON, String, Number, Array, Object, 
 };
 for (const [name, type] of Object.entries(types)) ctx[name] = node => node?.type === type;
 ctx.isScenePromptJoinNode = node => ctx.isScenePromptQueueNode(node) || ctx.isScenePromptRandomRouteOutputNode(node);
+ctx.isSceneExpandNode = node => node?.type === "ScenePromptExpand";
 vm.createContext(ctx);
 const funcs = ["nodeClassName", "nodeClassNames", "isRerouteNode", "isScenePromptSourceNode", "liteGraphNodeMode", "sceneNodeMode", "isSceneNodeMuted", "isSceneNodeBypassed", "sceneNodeRevision",
     "linkedInput", "graphLink", "firstLinkedInput", "linkKey", "resolveLinkedSourceFromLink", "resolveLinkedSourceFromInput", "linkedSourceNode",
@@ -51,7 +55,8 @@ const funcs = ["nodeClassName", "nodeClassNames", "isRerouteNode", "isScenePromp
     "scenePresetGraphNodes", "apiLink", "apiInput", "apiMatrixEnabledCount", "apiMatrixConfigured", "parseMatrixStateValue", "scenePresetStats",
     "sceneQueueBoundaryInPreset", "sceneQueueBoundaryInNode", "sceneRandomRouteInNode", "sceneQueuePendingInNode", "scenePromptStats",
     "scenePromptInputNumber", "scenePromptQueueInputIndexes", "connectedScenePromptSourcesForQueue", "connectedScenePromptSourcesForMerge", "scenePromptPreviewEntries", "mergeScenePromptEntryPair",
-    "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry", "sceneRandomJoinReady", "sceneRandomChoicePlan", "applyScenePresetSwitchBindings"];
+    "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry", "sceneRandomJoinReady", "sceneRandomChoicePlan", "applyScenePresetSwitchBindings",
+    "downstreamNodes", "collectDownstreamSceneNodes", "clearSceneComputedCaches", "flushDownstreamSceneRefreshes", "refreshDownstreamSceneNodes", "sceneQueueLockState", "syncSceneQueueControls", "attachSceneNode"];
 const scheduleFuncs = [...source.matchAll(/^function (emptyScenePromptStats|sceneStat\w+|sceneStats\w+|sceneCount\w+|sceneSchedule\w+|sceneRandomGuard|sceneRandomZeroArm)\(/gm)]
     .map(match => match[1]).filter(name => !["sceneCounterConfiguredValues", "sceneCounterConfigureValues"].includes(name));
 for (const name of new Set([...funcs, ...scheduleFuncs])) vm.runInContext(functionSource(name), ctx);
@@ -138,6 +143,54 @@ input.properties.scene_switch_values = vector(1, 10);
 assert.equal(ctx.scenePromptCounterDownstreamEnabled(count), false, "Count reads a linked Preset Boolean slot without its widget fallback");
 const inputNamesKey = ctx.scenePromptLineageKey(input); set(input, "switch_names_json", '["rename"]');
 assert.equal(ctx.scenePromptLineageKey(input), inputNamesKey, "names never change effective values");
+
+// The actual native Boolean callback must synchronize downstream controls before the delayed draw refresh.
+const eventGraph = graph(), eventBool = add(eventGraph, "PrimitiveBoolean", { value: false });
+const eventA = add(eventGraph, "SceneMatrix", { matrix_json: matrix(2) }), eventB = add(eventGraph, "SceneMatrix", { matrix_json: matrix(3) });
+const eventQueueA = add(eventGraph, "ScenePrompterQueue", { order_mode: "input_order", alternate_block_size: 1, downstream_count_mode: "multiply" });
+const eventGate = add(eventGraph, "ComfySwitchNode", { switch: false });
+const eventQueueC = add(eventGraph, "ScenePrompterQueue", { order_mode: "alternate", alternate_block_size: 4, downstream_count_mode: "fixed" });
+connect(eventA, eventQueueA, "scene_prompt1"); connect(eventQueueA, eventGate, "on_true"); connect(eventB, eventGate, "on_false");
+connect(eventBool, eventGate, "switch", 0, "BOOLEAN"); connect(eventGate, eventQueueC, "scene_prompt1");
+ctx.app.graph = eventGraph;
+ctx.syncSceneQueueControls(eventQueueC);
+const eventWidget = ctx.findWidget(eventBool, "value"), nativeResult = { native: true }, callbackCalls = [];
+eventWidget.callback = function (value, ...args) { callbackCalls.push({ receiver: this, value, args }); this.value = value; return nativeResult; };
+const nativeWidgets = [...eventBool.widgets], nativeInputs = JSON.stringify(eventBool.inputs), nativeOutputs = JSON.stringify(eventBool.outputs);
+ctx.attachSceneNode(eventBool, "PrimitiveBoolean");
+const wrappedCallback = eventWidget.callback;
+ctx.attachSceneNode(eventBool, "PrimitiveBoolean");
+assert.strictEqual(eventWidget.callback, wrappedCallback, "reload/configure attachment does not wrap the native callback twice");
+assert.deepEqual(eventBool.widgets, nativeWidgets, "core Boolean receives no Scene widgets or positive_json state");
+assert.equal(JSON.stringify(eventBool.inputs), nativeInputs);
+assert.equal(JSON.stringify(eventBool.outputs), nativeOutputs);
+assert.equal(ctx.scenePromptStats(eventQueueC).total, 12);
+const storedControls = eventQueueC.widgets.map(widget => widget.value);
+const marker = { mouse: "native" };
+assert.strictEqual(eventWidget.callback.call(eventWidget, true, marker), nativeResult);
+assert.equal(eventQueueC.sceneQueueControlLock, "upstream", "Queue A selection disables Queue C immediately, without a draw or polling");
+for (const widget of eventQueueC.widgets) { assert.equal(widget.disabled, true); assert.equal(widget.options.disabled, true); }
+assert.equal(ctx.scenePromptStats(eventQueueC).total, 2, "the value event invalidates the warm count cache");
+assert.deepEqual(eventQueueC.widgets.map(widget => widget.value), storedControls, "locking never overwrites Queue control settings");
+assert.strictEqual(callbackCalls[0].receiver, eventWidget);
+assert.deepEqual(callbackCalls[0].args, [marker]);
+assert.strictEqual(eventWidget.callback.call(eventWidget, false), nativeResult);
+assert.equal(eventQueueC.sceneQueueControlLock, "");
+for (const widget of eventQueueC.widgets) { assert.equal(widget.disabled, false); assert.equal(widget.options.disabled, false); }
+assert.equal(ctx.scenePromptStats(eventQueueC).total, 12);
+assert.deepEqual(eventQueueC.widgets.map(widget => widget.value), storedControls);
+assert.equal(callbackCalls.length, 2);
+const unrelatedBool = add(eventGraph, "PrimitiveBoolean", { value: false });
+let unrelatedCalls = 0;
+const unrelatedWidget = ctx.findWidget(unrelatedBool, "value");
+unrelatedWidget.callback = value => { unrelatedCalls++; unrelatedWidget.value = value; return "native-return"; };
+ctx.attachSceneNode(unrelatedBool, "PrimitiveBoolean");
+const queueRevision = eventQueueC.scenePromptRevision;
+assert.equal(unrelatedWidget.callback(true), "native-return");
+assert.equal(unrelatedCalls, 1); assert.equal(unrelatedWidget.value, true);
+assert.equal(eventQueueC.scenePromptRevision, queueRevision, "an unrelated Boolean does not refresh disconnected Scene nodes");
+assert.deepEqual(unrelatedBool.widgets.map(widget => widget.name), ["value"]);
+ctx.sceneDownstreamRefreshSources.clear();
 
 function preset(output) { return { metadata: { preset_id: "fixture" }, api_graph: { output } }; }
 const leaf = preset({
