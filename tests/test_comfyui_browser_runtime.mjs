@@ -2558,9 +2558,12 @@ window.__sceneSeedRuntimeTest = {
         const link = (from, to) => { if (!from.connect(0, to, to.inputs.findIndex(input => input.name === 'scene_prompt'))) throw new Error('Cannot connect live Count fixture'); };
         const source = add('ScenePrompter', [1600, 160]), first = add('ScenePromptCounter', [120, 160]);
         const second = add('ScenePromptCounter', [440, 160]), expand = add('ScenePrompterExpand', [760, 160]);
+        const text = add('ScenePromptToText', [2000, 160]), positive = add('PreviewAny', [2400, 160]), negative = add('PreviewAny', [2800, 160]);
         for (const node of [first, second]) { field(node, 'count').value = 10; field(node, 'enable_downstream_count').value = true; }
         link(source, first); link(first, second); link(second, expand);
-        const ids = { first: first.id, second: second.id, expand: expand.id };
+        link(second, text); text.connect(0, positive, positive.inputs.findIndex(input => input.name === 'source'));
+        text.connect(1, negative, negative.inputs.findIndex(input => input.name === 'source'));
+        const ids = { source: source.id, first: first.id, second: second.id, expand: expand.id, positive: positive.id, negative: negative.id };
         await app.loadGraphData(app.graph.serialize(), true, true);
         app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0]; app.canvas.draw(true, true);
         return ids;
@@ -2571,6 +2574,64 @@ window.__sceneSeedRuntimeTest = {
     await clickCountWidget(liveCounts.first, 'enable_downstream_count', true); await prepareAfterDisplay(liveCounts.expand, 110);
     await clickCountWidget(liveCounts.second, 'count', 11, true); await prepareAfterDisplay(liveCounts.expand, 121);
     await clickCountWidget(liveCounts.first, 'enable_downstream_count', false); await prepareAfterDisplay(liveCounts.expand, 11);
+
+    const editedBody = { positive: 'fresh positive 本文', negative: 'fresh negative 除外' };
+    const bodyCache = await page.evaluate(({ ids, body }) => {
+        const app = window.app, hook = window.__sceneSeedRuntimeTest;
+        const source = app.graph.getNodeById(ids.source), downstream = app.graph.getNodeById(ids.second);
+        const display = app.graph.getNodeById(ids.expand).widgets.find(widget => widget.sceneRole === 'expand_total_count');
+        hook.sourceKey(source); hook.sourceKey(downstream);
+        const before = { value: display.value, total: display.sceneTotalCount };
+        // Deliberately bypass callbacks and cache clearing: display-only cache reuse
+        // must never make the API or execution reuse the previous prompt body.
+        // Native widget setters can still dispatch their ordinary change notifications.
+        source.widgets.find(widget => widget.name === 'positive_base').value = body.positive;
+        source.widgets.find(widget => widget.name === 'negative_base').value = body.negative;
+        const after = { value: display.value, total: display.sceneTotalCount };
+        return { before, after };
+    }, { ids: liveCounts, body: editedBody });
+    assert.deepEqual(bodyCache.after, bodyCache.before, 'body-only edits leave the Count display unchanged');
+    await waitExpandDisplay(liveCounts.expand, 11);
+    const bodyPrompt = await page.evaluate(async () => window.app.graphToPrompt());
+    assert.equal(bodyPrompt.output[String(liveCounts.source)].inputs.positive_base, editedBody.positive);
+    assert.equal(bodyPrompt.output[String(liveCounts.source)].inputs.negative_base, editedBody.negative);
+    const nativeBodyRequest = async (path, payload) => {
+        // Node fetch reaches the real isolated server, bypassing the browser's
+        // legacy fake /prompt route used by unrelated seed UI tests.
+        const response = await fetch(`${url}${path}`, payload === undefined ? undefined : {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        const result = await response.json();
+        assert.ok(response.ok, `${path}: ${JSON.stringify(result)}`);
+        return result;
+    };
+    const bodyPrepared = await nativeBodyRequest('/scene_prompt/runs/prepare', {
+        api_graph: bodyPrompt, workflow: bodyPrompt.workflow, expand_node_id: String(liveCounts.expand),
+    });
+    try {
+        assert.equal(bodyPrepared.total_batches, 11, 'native prepare accepts the current body without changing Count totals');
+        for (const node of Object.values(bodyPrompt.output)) {
+            if (['ScenePrompter', 'ScenePromptToText', 'ScenePrompterExpand'].includes(node.class_type)) node.inputs.run_handle = bodyPrepared.run_handle;
+        }
+        const queued = await nativeBodyRequest('/prompt', {
+            prompt: bodyPrompt.output, extra_data: { extra_pnginfo: { workflow: bodyPrompt.workflow } },
+        });
+        await nativeBodyRequest('/scene_prompt/runs/claim', { run_handle: bodyPrepared.run_handle, prompt_id: queued.prompt_id });
+        let history;
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+            history = (await nativeBodyRequest(`/history/${queued.prompt_id}`))[queued.prompt_id];
+            if (history?.status?.completed) break;
+            await new Promise(resolveTimer => setTimeout(resolveTimer, 100));
+        }
+        assert.equal(history?.status?.status_str, 'success', JSON.stringify(history));
+        assert.deepEqual(history.outputs[String(liveCounts.positive)].text, [editedBody.positive]);
+        assert.deepEqual(history.outputs[String(liveCounts.negative)].text, [editedBody.negative]);
+        assert.deepEqual(await nativeBodyRequest('/scene_test/model_executions'), [], 'text-only CPU execution never loads model weights');
+    } finally {
+        await nativeBodyRequest('/scene_prompt/runs/release', { run_handle: bodyPrepared.run_handle });
+    }
+    console.log('real ComfyUI body-only widget edits preserve counts while graphToPrompt, native prepare and CPU ToText/PreviewAny receive fresh positive/negative text without loading models');
 
     const mappedCountLive = await page.evaluate(async () => {
         const app = window.app; app.graph.clear();
