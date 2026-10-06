@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
+from .switches import safe_control, resolve_switches
 
 
 PRESET_REFERENCE = "ScenePresetReference"
@@ -109,6 +110,9 @@ def _preset_internal_ids(preset):
         for node in workflow_nodes
         if isinstance(node, dict) and node.get("id") is not None and node.get("type") in BOUNDARIES
     )
+    retain_input = _uses_switches(api_nodes, preset.get("workflow"))
+    if retain_input:
+        boundary_ids = {node_id for node_id in boundary_ids if api_nodes.get(node_id, {}).get("class_type") != PRESET_INPUT}
     physical_ids = set()
     workflow = preset.get("workflow") if isinstance(preset, dict) else None
     links = workflow.get("links") if isinstance(workflow, dict) else None
@@ -120,18 +124,30 @@ def _preset_internal_ids(preset):
     required = {
         str(node_id)
         for node_id, node in api_nodes.items()
-        if node.get("class_type") not in BOUNDARIES
+        if node.get("class_type") not in BOUNDARIES or retain_input and node.get("class_type") == PRESET_INPUT
     }
     required.update(physical_ids - boundary_ids)
     result = []
     for node in workflow_nodes:
         node_id = str(node.get("id")) if isinstance(node, dict) and node.get("id") is not None else None
-        if node_id in required and node.get("type") not in BOUNDARIES:
+        if node_id in required and (node.get("type") not in BOUNDARIES or retain_input and node.get("type") == PRESET_INPUT):
             result.append(node_id)
     missing = required - set(result)
     if missing:
         raise ValueError("Presetの編集用ワークフローにノードがありません: " + ", ".join(sorted(missing)))
     return result
+
+
+def _uses_switches(nodes, workflow=None):
+    input_ids = {str(node_id) for node_id, node in nodes.items() if node.get("class_type") == PRESET_INPUT}
+    if any(node.get("class_type") == PRESET_INPUT and node.get("inputs", {}).get("switch_names_json", "[]") != "[]"
+           or any(_link(value) and str(value[0]) in input_ids and value[1] != 0
+                  for value in node.get("inputs", {}).values()) for node in nodes.values()):
+        return True
+    if isinstance(workflow, dict):
+        return any(parts[1] in input_ids and parts[2] != 0
+                   for link in workflow.get("links", []) if (parts := _workflow_link_parts(link)) is not None)
+    return False
 
 
 def _preset_internal_links(preset, mapping):
@@ -162,7 +178,7 @@ def _preset_physical_boundaries(preset, mapping, input_id, output_id):
         if parts is None:
             continue
         _link_id, source_id, source_slot, target_id, target_slot, _link_type = parts
-        if source_id == input_id and target_id in mapping:
+        if source_id == input_id and source_slot == 0 and target_id in mapping:
             entries.append((mapping[target_id], target_slot))
         if target_id == output_id and source_id in mapping:
             output = (mapping[source_id], source_slot)
@@ -205,11 +221,17 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
     upstream = inputs.get("scene_prompt")
     upstream = list(upstream) if _link(upstream) else None
     reference_source = source_ids.get(reference_id, reference_id)
+    frozen = state["switch_values"]
+    if reference_source in frozen:
+        vector = tuple(frozen[reference_source])
+    else:
+        incoming = safe_control(prompt, inputs["switches"]) if "switches" in inputs else None
+        vector = resolve_switches(incoming, inputs.get("switch_settings_json", "[]"))
     entry_targets = []
 
     for original_id, original in nodes.items():
         original_id = str(original_id)
-        if original.get("class_type") in BOUNDARIES:
+        if original.get("class_type") in BOUNDARIES and original_id not in mapping:
             continue
         copied = copy.deepcopy(original)
         copied_inputs = copied.get("inputs")
@@ -219,20 +241,24 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
         for name, value in copied_inputs.items():
             if not _link(value):
                 remapped[name] = value
-            elif str(value[0]) == input_id:
+            elif str(value[0]) == input_id and value[1] == 0:
                 entry_targets.append((mapping[original_id], name))
                 if upstream is not None:
                     remapped[name] = list(upstream)
+                elif input_id in mapping:
+                    remapped[name] = [mapping[input_id], 0]
             else:
                 remapped[name] = [mapping[str(value[0])], value[1]]
-        if copied.get("class_type") == "ScenePromptRandomRoute":
+        if copied.get("class_type") == PRESET_INPUT:
+            remapped["switch_values"] = {"values": list(vector)}
+        if copied.get("class_type") in {"ScenePromptRandomRoute", "SceneApplyLora"}:
             remapped["source_node_id"] = f"{reference_source}/{original_id}"
         copied["inputs"] = remapped
         prompt[mapping[original_id]] = copied
         source_ids[mapping[original_id]] = f"{reference_source}/{original_id}"
 
     if str(output_link[0]) == input_id:
-        output = upstream
+        output = upstream if upstream is not None else [mapping[input_id], 0] if input_id in mapping else None
     else:
         output = [mapping[str(output_link[0])], output_link[1]]
     if output is None:
@@ -245,7 +271,12 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
     if not isinstance(workflow_reference, dict):
         raise ValueError(f"workflow にPreset参照ノード #{reference_id} がありません。")
     workflow["nodes"] = [node for node in outer_nodes if str(node.get("id")) != reference_id]
-    workflow["nodes"].extend(_clone_preset_workflow_nodes(preset, mapping, workflow_reference))
+    copied_workflow_nodes = _clone_preset_workflow_nodes(preset, mapping, workflow_reference)
+    if input_id in mapping:
+        for copied_node in copied_workflow_nodes:
+            if str(copied_node["id"]) == mapping[input_id]:
+                copied_node.setdefault("properties", {})["scene_switch_values"] = list(vector)
+    workflow["nodes"].extend(copied_workflow_nodes)
     state["inserted"].update(mapping.values())
     templates = _workflow_template_index(_workflow_nodes(preset))
     for original_id, copied_id in mapping.items():
@@ -258,7 +289,9 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
         "physical_entries": physical_entries,
         "physical_output": physical_output,
     }
-    state["physical_links"].extend(_preset_internal_links(preset, mapping))
+    state["physical_links"].extend(edge for edge in _preset_internal_links(preset, mapping)
+                                  if not (upstream is not None and input_id in mapping and str(edge[0]) == mapping[input_id] and edge[1] == 0))
+    state["references"][reference_id]["scene_input_slot"] = next((index for index, slot in enumerate(workflow_reference.get("inputs", [])) if slot.get("name") == "scene_prompt"), None)
     _replace_reference_links(prompt, reference_id, output)
     prompt.pop(reference_id, None)
     return output
@@ -453,14 +486,14 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
     }
     physical_reference_inputs = {}
     for source_id, source_slot, target_id, _target_slot, _link_type in state["physical_links"]:
-        if str(target_id) in reference_ids:
+        if str(target_id) in reference_ids and _target_slot == state["references"][str(target_id)].get("scene_input_slot", 0):
             physical_reference_inputs[str(target_id)] = (source_id, source_slot)
     for link in original_links:
         parts = _workflow_link_parts(link)
         if parts is None:
             continue
         _link_id, source_id, source_slot, target_id, _target_slot, _link_type = parts
-        if target_id in reference_ids:
+        if target_id in reference_ids and _target_slot == state["references"][target_id].get("scene_input_slot", 0):
             physical_reference_inputs[target_id] = (source_id, source_slot)
     for _source_id, _source_slot, target_id, _target_slot, _link_type in state["physical_links"]:
         if str(target_id) in reference_ids:
@@ -503,7 +536,7 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
             next_link_id = _add_workflow_link(
                 links, by_id, next_link_id, output_id, output_slot, target_id, target_slot, link_type, added
             )
-        if target_id in reference_ids and source_id in by_id:
+        if target_id in reference_ids and source_id in by_id and target_slot == state["references"][target_id].get("scene_input_slot", 0):
             for entry_id, entry_slot in _resolve_reference_entry_slots(target_id, state, by_id):
                 next_link_id = _add_workflow_link(
                     links,
@@ -522,7 +555,8 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
             source_ids = [_resolve_reference_physical_output(str(source_id), state, physical_reference_inputs)]
         target_ids = [(target_id, target_slot)]
         if str(target_id) in reference_ids:
-            target_ids = _resolve_reference_entry_slots(str(target_id), state, by_id)
+            target_ids = (_resolve_reference_entry_slots(str(target_id), state, by_id)
+                          if target_slot == state["references"][str(target_id)].get("scene_input_slot", 0) else [])
         for resolved_source_id, resolved_source_slot in source_ids:
             for resolved_target_id, resolved_target_slot in target_ids:
                 next_link_id = _add_workflow_link(
@@ -550,7 +584,7 @@ def _workflow_reference_preset_id(node):
     return preset_id
 
 
-def _expand_workflow_only_reference(workflow, reference_id, preset):
+def _expand_workflow_only_reference(workflow, reference_id, preset, frozen_vector=None):
     nodes = workflow.get("nodes")
     links = workflow.get("links")
     if not isinstance(nodes, list) or not isinstance(links, list):
@@ -562,6 +596,37 @@ def _expand_workflow_only_reference(workflow, reference_id, preset):
 
     preset_nodes = _nodes(preset)
     input_id, _output_id, output_link = _boundary_ids(preset_nodes)
+    scene_slot = next((index for index, slot in enumerate(reference.get("inputs", [])) if slot.get("name") == "scene_prompt"), None)
+    bundle_slot = next((index for index, slot in enumerate(reference.get("inputs", [])) if slot.get("name") == "switches"), None)
+    incoming_bundle = None
+    if frozen_vector is None and bundle_slot is not None:
+        bundle_edge = next((parts for link in links if (parts := _workflow_link_parts(link)) is not None
+                            and parts[3] == reference_id and parts[4] == bundle_slot), None)
+        if bundle_edge is not None:
+            edges = {(parts[3], parts[4]): (parts[1], parts[2]) for link in links
+                     if (parts := _workflow_link_parts(link)) is not None}
+            source_id, source_slot = bundle_edge[1:3]
+            seen = set()
+            while (source_id, source_slot) not in seen:
+                seen.add((source_id, source_slot))
+                source = by_id.get(source_id, {})
+                if str(source.get("type", "")).casefold() == "reroute":
+                    input_slot = 0
+                elif source.get("mode") == 4:
+                    input_slot = next((index for index, item in enumerate(source.get("inputs", []))
+                                       if item.get("type") in {"SCENE_SWITCHES", "*"} and (source_id, index) in edges), None)
+                else:
+                    break
+                if (source_id, input_slot) not in edges:
+                    break
+                source_id, source_slot = edges[(source_id, input_slot)]
+            source = by_id.get(source_id, {})
+            if source.get("type") != PRESET_INPUT or source_slot != 11:
+                raise ValueError("Presetのswitches入力を安全に取得できません。")
+            incoming_bundle = source.get("properties", {}).get("scene_switch_values")
+    widgets = reference.get("widgets_values", [])
+    settings = widgets[3] if len(widgets) > 3 else "[]"
+    vector = tuple(frozen_vector) if frozen_vector is not None else resolve_switches(incoming_bundle, settings)
     allocate = _new_node_ids({}, workflow)
     mapping = {node_id: allocate() for node_id in _preset_internal_ids(preset)}
     entry_targets = []
@@ -575,7 +640,7 @@ def _expand_workflow_only_reference(workflow, reference_id, preset):
             if not _link(value):
                 continue
             source_id, source_slot = str(value[0]), value[1]
-            if source_id == input_id:
+            if source_id == input_id and source_slot == 0:
                 entry_targets.append((mapping[target_id], name))
             else:
                 internal_edges.append((mapping[source_id], source_slot, mapping[target_id], name))
@@ -594,7 +659,12 @@ def _expand_workflow_only_reference(workflow, reference_id, preset):
         {parts[0] for link in removed if (parts := _workflow_link_parts(link)) is not None},
     )
     workflow["nodes"] = [node for node in nodes if str(node.get("id")) != reference_id]
-    workflow["nodes"].extend(_clone_preset_workflow_nodes(preset, mapping, reference))
+    copied_nodes = _clone_preset_workflow_nodes(preset, mapping, reference)
+    if input_id in mapping:
+        for copied in copied_nodes:
+            if str(copied["id"]) == mapping[input_id]:
+                copied.setdefault("properties", {})["scene_switch_values"] = list(vector)
+    workflow["nodes"].extend(copied_nodes)
     by_id = {str(node.get("id")): node for node in workflow["nodes"] if isinstance(node, dict) and node.get("id") is not None}
 
     old_link_ids = [parts[0] for link in links if (parts := _workflow_link_parts(link)) is not None and isinstance(parts[0], int)]
@@ -611,7 +681,7 @@ def _expand_workflow_only_reference(workflow, reference_id, preset):
         next_link_id = _add_workflow_link(
             retained, by_id, next_link_id, source_id, source_slot, target_id, target_slot, None, added,
         )
-    incoming = [parts for link in removed if (parts := _workflow_link_parts(link)) is not None and parts[3] == reference_id]
+    incoming = [parts for link in removed if (parts := _workflow_link_parts(link)) is not None and parts[3] == reference_id and parts[4] == scene_slot]
     outgoing = [parts for link in removed if (parts := _workflow_link_parts(link)) is not None and parts[1] == reference_id]
     for _link_id, source_id, source_slot, _target_id, _target_slot, link_type in incoming:
         targets = physical_entries or [
@@ -641,6 +711,8 @@ def _expand_workflow_only_reference(workflow, reference_id, preset):
                 retained, by_id, next_link_id, output_id, output_slot, target_id, target_slot, link_type, added,
             )
     for source_id, source_slot, target_id, target_slot, link_type in physical_edges:
+        if incoming and input_id in mapping and str(source_id) == mapping[input_id] and source_slot == 0:
+            continue
         next_link_id = _add_workflow_link(
             retained, by_id, next_link_id, source_id, source_slot, target_id, target_slot, link_type, added,
         )
@@ -677,7 +749,8 @@ def _expand_workflow_only_references(workflow, preset_snapshots, display_only_re
         if not isinstance(preset, dict):
             raise ValueError(f"Preset「{preset_id}」の実行開始時スナップショットがありません。")
         reference_id = str(reference.get("id"))
-        mapping = _expand_workflow_only_reference(workflow, reference_id, preset)
+        mapping = _expand_workflow_only_reference(workflow, reference_id, preset,
+                    preset_snapshots.get("__switch_values__", {}).get(reference_path))
         templates = _workflow_template_index(_workflow_nodes(preset))
         api_nodes = _nodes(preset)
         for original_id, copied_id in mapping.items():
@@ -698,7 +771,8 @@ def expand_preset_references(prompt, workflow, preset_snapshots, expand_workflow
     expanded_prompt = copy.deepcopy(prompt)
     expanded_workflow = copy.deepcopy(workflow)
     source_ids = {str(node_id): str(node_id) for node_id in expanded_prompt}
-    state = {"inserted": set(), "references": {}, "physical_links": [], "display_only_references": set()}
+    state = {"inserted": set(), "references": {}, "physical_links": [], "display_only_references": set(),
+             "switch_values": preset_snapshots.get("__switch_values__", {})}
     while True:
         reference_id = next(
             (

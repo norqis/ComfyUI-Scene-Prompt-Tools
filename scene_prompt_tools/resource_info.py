@@ -14,10 +14,11 @@ from .presets import (
     _node_inputs,
     _preset_nodes,
     _scene_nodes_for_expand,
-    _scene_prompt_closure,
+    _effective_scene_closure,
     _validate_preset_graph,
     prepare_preset_occurrences,
 )
+from .switches import safe_control, resolve_switches
 
 
 _MODEL_HASH_CACHE = {}
@@ -58,6 +59,8 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
     if not isinstance(nodes, dict):
         raise ScenePresetError("生成グラフを取得できませんでした。")
     scene_nodes, _source = _scene_nodes_for_expand(nodes, expand_node_id)
+    if _source is not None:
+        scene_nodes = _effective_scene_closure(nodes, _source[0])
     expand = nodes[str(expand_node_id)]
     raw_mode = _literal(nodes, _node_inputs(expand).get("model_mode"), MODEL_MODE_ILLUSTRIOUS)
     mode = _normalize_model_mode(raw_mode) if raw_mode is not None else None
@@ -134,7 +137,7 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
         else:
             add_model("unresolved", kind or f"#{node_id}", role, kind or "Unknown", True)
 
-    def visit_scene(scope, resource_nodes, path=""):
+    def visit_scene(scope, resource_nodes, path="", bindings=None):
         for node_id, node in scope.items():
             if not isinstance(node, dict):
                 continue
@@ -163,8 +166,15 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                 preset = occurrences[reference_path]
                 visiting_presets.add(preset_id)
                 preset_nodes = _preset_nodes(preset)
-                output_link = _validate_preset_graph(preset_nodes)["output_link"]
-                visit_scene(_scene_prompt_closure(preset_nodes, output_link[0]), preset_nodes, reference_path)
+                validation = _validate_preset_graph(preset_nodes)
+                output_link = validation["output_link"]
+                try:
+                    incoming = safe_control(resource_nodes, inputs["switches"], bindings) if "switches" in inputs else None
+                    vector = resolve_switches(incoming, inputs.get("switch_settings_json", "[]"))
+                except ValueError as exc:
+                    raise ScenePresetError(str(exc)) from exc
+                child_bindings = {validation["input_id"]: vector}
+                visit_scene(_effective_scene_closure(preset_nodes, output_link[0], child_bindings), preset_nodes, reference_path, child_bindings)
                 visiting_presets.remove(preset_id)
 
     visit_scene(scene_nodes, nodes)

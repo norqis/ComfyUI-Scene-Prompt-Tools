@@ -65,7 +65,7 @@ class LLMNodePresetTests(unittest.TestCase):
         self.assertIn('ScenePromptLLM', self.nodes.SCENE_NODE_TYPES)
         self.assertEqual(list(self.llm.INPUT_TYPES()['optional']), ['scene_prompt', 'generation_state_json'])
         self.assertEqual(list(self.presets.ScenePresetReference.INPUT_TYPES()['optional']),
-                         ['scene_prompt', 'run_handle', 'llm_presets_json'])
+                         ['scene_prompt', 'run_handle', 'llm_presets_json', 'switches', 'switch_settings_json'])
         self.assertEqual(self.llm.INPUT_TYPES()['optional']['generation_state_json'][1]['default'], '{}')
 
     def test_two_instances_local_output_count_snapshot_graphbuilder_and_metadata(self):

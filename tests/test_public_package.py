@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicPackageTests(unittest.TestCase):
     def test_runtime_modules_are_in_one_internal_package(self):
-        expected = {"__init__.py", "callbacks.py", "gpu_handoff.py", "lora_metadata.py", "llm_node.py", "llm_resources.py", "llm_service.py", "llm_settings.py", "civitai.py", "nodes.py", "plan.py", "preset_metadata.py", "prompt.py", "presets.py", "resource_info.py", "routes.py", "runs.py", "schedule.py", "storage.py"}
+        expected = {"__init__.py", "callbacks.py", "gpu_handoff.py", "lora_metadata.py", "llm_node.py", "llm_resources.py", "llm_service.py", "llm_settings.py", "civitai.py", "nodes.py", "plan.py", "preset_metadata.py", "prompt.py", "presets.py", "resource_info.py", "routes.py", "runs.py", "schedule.py", "storage.py", "switches.py"}
         self.assertSetEqual({path.name for path in (ROOT / "scene_prompt_tools").glob("*.py")}, expected)
         for filename in expected - {"__init__.py"}:
             self.assertFalse((ROOT / filename).exists())
