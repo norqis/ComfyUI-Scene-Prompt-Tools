@@ -155,6 +155,7 @@ export function insertLoras(graph, origin, candidates, createNode) {
     }
     const additions = candidates.filter((item) => !used.has(identity(item)) && (used.add(identity(item)), true));
     if (!additions.length) return [];
+    const oldTail = tail;
     const outgoing = (tail.outputs?.[slot]?.links || []).map((id) => graph.links[id]).filter(Boolean).map((link) => ({ ...link }));
     const nodes = additions.map((candidate) => {
         const node = createNode("SceneApplyLora");
@@ -176,6 +177,7 @@ export function insertLoras(graph, origin, candidates, createNode) {
         const target = graph.getNodeById(link.target_id);
         if (target) tail.connect(slot, target, link.target_slot);
     }
+    graph.spliceLoras?.(oldTail, slot, placedNodes);
     return placedNodes;
 }
 export function createLLMController({ app, api, createNode, refresh, presetTargets, presetHasTargets, prepareTargets, onError, onBusy,

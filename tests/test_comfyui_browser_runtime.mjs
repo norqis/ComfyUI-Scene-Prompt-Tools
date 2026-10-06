@@ -260,6 +260,12 @@ window.__sceneSeedRuntimeTest = {
     countStats(node) { return scenePromptStats(node); },
     sourceKey(node) { return scenePromptSourceCacheKey(node); },
     latentConfig(node) { return sceneEmptyLatentConfig(node); },
+    matrixState(node) { return readMatrixState(node); },
+    async presetAdapter(definition) { const { createPresetGraph } = await import("./scene_llm_presets.js"); return createPresetGraph(definition, app.graph); },
+    async splicePresetLoras(graph, id, candidates) {
+        const { insertLoras } = await import("./scene_prompt_llm.js");
+        return insertLoras(graph, graph.getNodeById(id), candidates, (type) => globalThis.LiteGraph.createNode(type));
+    },
     countPreview(node) { return sceneSchedulePrefix(sceneScheduleForNode(node), 40).map(entry => entry.parts.join("")); },
     presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
@@ -1551,6 +1557,148 @@ window.__sceneSeedRuntimeTest = {
     console.log("real ComfyUI prompt generation leaves connected checkpoint/diffusion/CLIP/VAE/LoRA loaders unexecuted, queue empty and resource inspection untouched");
     assert.doesNotMatch(JSON.stringify(llmRuntime.beforeReload.serial), /image_url|api_key|conversation_history/);
     console.log("real ComfyUI LLM widget controls, explicit generation, native LoRA insertion and workflow/API reload passed");
+
+    const physicalPresetRuntime = await page.evaluate(async () => {
+        const app = window.app; app.graph.clear();
+        const field = (node,name) => node.widgets.find(widget => widget.name === name);
+        const add = type => { const node = window.LiteGraph.createNode(type); if (!node) throw new Error(`Missing ${type}`); app.graph.add(node); return node; };
+        const link = (source,target,name='scene_prompt') => source.connect(0,target,target.inputs.findIndex(input => input.name === name));
+        const input = add('ScenePresetInput'), llm = add('ScenePromptLLM'), bypass = add('ScenePrompter');
+        const reference = add('ScenePresetReference'), reroute = add('Reroute'), output = add('ScenePresetOutput');
+        const note = add('Note'), muted = add('ScenePrompter'), manual = add('SceneApplyLora'), queue = add('ScenePrompterQueue');
+        field(llm,'description').value = 'local physical fixture'; field(llm,'positive').value = 'before';
+        field(reference,'preset_id').value = 'never-requested';
+        field(manual,'lora_name').value = 'runtime-hat.safetensors'; manual.properties.manual_fixture = true;
+        muted.mode = 2; note.title = 'Keep Note';
+        link(input,llm); link(llm,bypass); link(bypass,reference); link(reference,reroute,reroute.inputs[0].name); link(reroute,output);
+        link(llm,manual); link(manual,queue,'scene_prompt5');
+        for (const node of [bypass,reference]) {
+            app.canvas.deselectAllNodes(); app.canvas.selectNode(node);
+            await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass');
+        }
+        const initialWorkflow = app.graph.serialize();
+        initialWorkflow.groups = [{ title: 'Keep Group', bounding: [0,0,1300,500], color: '#334455', font_size: 24, flags: {} }];
+        await app.loadGraphData(initialWorkflow,true,true);
+        const original = { metadata: { preset_id: 'physical-native',sha256: 'fixture' },
+            workflow: app.graph.serialize(),api_graph: await app.graphToPrompt() };
+        const ids = { input: input.id,llm: llm.id,bypass: bypass.id,reference: reference.id,reroute: reroute.id,output: output.id,
+            note: note.id,muted: muted.id,manual: manual.id,queue: queue.id };
+        if (original.api_graph.output[String(ids.bypass)] || original.api_graph.output[String(ids.reference)])
+            throw new Error('Native command must contract both bypassed nodes in API');
+        const adapter = await window.__sceneSeedRuntimeTest.presetAdapter(original);
+        field(adapter.getNodeById(ids.llm),'positive').value = 'local edit';
+        const edited = adapter.definition();
+        const topology = workflow => ({ links: workflow.links,groups: workflow.groups,
+            nodes: workflow.nodes.map(node => ({ id:node.id,type:node.type,mode:node.mode,inputs:node.inputs,outputs:node.outputs })) });
+        const promptPreserved = JSON.stringify(topology(edited.workflow)) === JSON.stringify(topology(original.workflow));
+        await app.loadGraphData(edited.workflow,true,true);
+        const editedAPI = await app.graphToPrompt();
+        const candidates = [1,2].map(id => ({ model_id:id,version_id:id,file_id:id,lora_name:'runtime-hat.safetensors',triggers:[`physical${id}`],
+            search_state:{ model_mode:'Illustrious' } }));
+        const placed = await window.__sceneSeedRuntimeTest.splicePresetLoras(adapter,ids.llm,candidates);
+        const spliced = adapter.definition();
+        const reused = await window.__sceneSeedRuntimeTest.splicePresetLoras(adapter,ids.llm,candidates);
+        const newTail = placed.at(-1).id;
+        const originalFanout = original.workflow.links.filter(link => String(link[1]) === String(ids.llm) && link[2] === 0);
+        const preservedFanout = originalFanout.every(link => {
+            const actual = spliced.workflow.links.find(candidate => candidate[0] === link[0]);
+            return JSON.stringify(actual) === JSON.stringify([link[0],newTail,link[2],...link.slice(3)]);
+        });
+        const changedNodes = original.workflow.nodes.filter(node => String(node.id) !== String(ids.llm)).flatMap(node => {
+            const after=spliced.workflow.nodes.find(candidate=>String(candidate.id)===String(node.id));
+            return JSON.stringify(after)===JSON.stringify(node)?[]:[{before:node,after}];
+        });
+        const unchangedNodes = changedNodes.length === 0;
+        await app.loadGraphData(spliced.workflow,true,true); const api = await app.graphToPrompt();
+        const current = id => app.graph.getNodeById(id);
+        const snapshot = { nodes: app.graph.serialize().nodes.map(node => ({id:node.id,type:node.type,mode:node.mode})),
+            physicalLinks: app.graph.serialize().links,groups: app.graph.serialize().groups,
+            apiOutput: api.output[String(ids.output)].inputs.scene_prompt,apiManual:api.output[String(ids.manual)].inputs.scene_prompt,
+            llmPositive:api.output[String(ids.llm)].inputs.positive,loras:placed.map(node=>api.output[String(node.id)]?.inputs),
+            bypassModes:[current(ids.bypass).mode,current(ids.reference).mode], mutedMode:current(ids.muted).mode,
+            note:current(ids.note).title, manualProperty:current(ids.manual).properties.manual_fixture };
+        const reloadedAdapter = await window.__sceneSeedRuntimeTest.presetAdapter({ ...spliced,workflow:app.graph.serialize(),api_graph:api });
+        const reusedAfterReload = await window.__sceneSeedRuntimeTest.splicePresetLoras(reloadedAdapter,ids.llm,candidates);
+        const third = await window.__sceneSeedRuntimeTest.splicePresetLoras(reloadedAdapter,ids.llm,[...candidates,
+            { model_id:3,version_id:3,file_id:3,lora_name:'runtime-hat.safetensors',triggers:['physical3'] }]);
+        const extended = reloadedAdapter.definition();
+        await app.loadGraphData(extended.workflow,true,true); const extendedAPI = await app.graphToPrompt();
+        return { ids,promptPreserved,preservedFanout,unchangedNodes,
+            editedPositive:editedAPI.output[String(ids.llm)].inputs.positive,snapshot,changedNodes,
+            originalLinks:original.workflow.links.length, originalNodes:original.workflow.nodes.length,newTail,
+            reused:reused.length,reusedAfterReload:reusedAfterReload.length,
+            third:third.length,extendedTail:third[0].id,extendedOutput:extendedAPI.output[String(ids.output)].inputs.scene_prompt,
+            extendedManual:extendedAPI.output[String(ids.manual)].inputs.scene_prompt,
+            preservedIds:original.workflow.links.every(link=>extended.workflow.links.some(candidate=>candidate[0]===link[0])) };
+    });
+    assert(physicalPresetRuntime.promptPreserved); assert.equal(physicalPresetRuntime.editedPositive,'local edit');
+    assert(physicalPresetRuntime.preservedFanout); assert(physicalPresetRuntime.unchangedNodes,JSON.stringify(physicalPresetRuntime.changedNodes)); assert(physicalPresetRuntime.preservedIds);
+    assert.equal(physicalPresetRuntime.snapshot.nodes.length,physicalPresetRuntime.originalNodes+2);
+    assert.equal(physicalPresetRuntime.snapshot.physicalLinks.length,physicalPresetRuntime.originalLinks+2);
+    assert.deepEqual(physicalPresetRuntime.snapshot.apiOutput,[String(physicalPresetRuntime.newTail),0]);
+    assert.deepEqual(physicalPresetRuntime.snapshot.apiManual,[String(physicalPresetRuntime.newTail),0]);
+    assert.equal(physicalPresetRuntime.snapshot.llmPositive,'local edit');
+    assert.deepEqual(physicalPresetRuntime.snapshot.bypassModes,[4,4]); assert.equal(physicalPresetRuntime.snapshot.mutedMode,2);
+    assert.equal(physicalPresetRuntime.snapshot.note,'Keep Note'); assert.equal(physicalPresetRuntime.snapshot.manualProperty,true);
+    assert.equal(physicalPresetRuntime.snapshot.groups[0].title,'Keep Group');
+    assert(physicalPresetRuntime.snapshot.loras.every(inputs=>inputs.lora_name==='runtime-hat.safetensors'));
+    assert.equal(physicalPresetRuntime.reused,0); assert.equal(physicalPresetRuntime.reusedAfterReload,0); assert.equal(physicalPresetRuntime.third,1);
+    assert.deepEqual(physicalPresetRuntime.extendedOutput,[String(physicalPresetRuntime.extendedTail),0]);
+    assert.deepEqual(physicalPresetRuntime.extendedManual,[String(physicalPresetRuntime.extendedTail),0]);
+    console.log('real ComfyUI Preset local edit/insertion retains bypassed Prompt/Reference, Reroute, Note, mute, group, manual branch and physical IDs through native reload/API; adjacent chains reuse and extend');
+
+    const nativeMatrixIds = await page.evaluate(() => {
+        const app=window.app; app.graph.clear();
+        const add=type=>{const node=window.LiteGraph.createNode(type);app.graph.add(node);return node;};
+        const seed=add('ScenePrompter'),matrix=add('SceneMatrix'),expand=add('ScenePrompterExpand');
+        seed.connect(0,matrix,matrix.inputs.findIndex(input=>input.name==='scene_prompt'));
+        matrix.connect(0,expand,expand.inputs.findIndex(input=>input.name==='scene_prompt'));
+        matrix.widgets.find(widget=>widget.sceneRole==='matrix_rows').callback();
+        return {matrix:matrix.id,expand:expand.id};
+    });
+    await page.getByRole('button',{name:'行を追加',exact:true}).click();
+    await page.getByRole('button',{name:'行を追加',exact:true}).click();
+    await page.getByPlaceholder('名前').nth(0).fill('Native One'); await page.getByPlaceholder('名前').nth(1).fill('Native Two');
+    const matrixPopupBounds=await page.locator('.pc-popup').last().evaluate(element=>{
+        const rect=element.getBoundingClientRect();return {left:rect.left,right:rect.right,viewport:innerWidth};
+    });
+    assert(matrixPopupBounds.left>=0&&matrixPopupBounds.right<=matrixPopupBounds.viewport+2);
+    await page.locator('.pc-popup').last().getByRole('button',{name:'閉じる',exact:true}).click();
+    const matrixSnapshot=()=>page.evaluate(async ids=>{
+        await new Promise(done=>setTimeout(done,150)); const node=window.app.graph.getNodeById(ids.matrix);
+        const widget=node.widgets.find(widget=>widget.name==='matrix_json');
+        window.app.canvas.draw(true,true);
+        return { names:window.__sceneSeedRuntimeTest.matrixState(node).sets.map(row=>row.name),
+            total:window.__sceneSeedRuntimeTest.countStats(node).total,
+            raw:[widget.value,node.properties.scene_matrix_json,node.widgets_values[node.widgets.indexOf(widget)]] };
+    },nativeMatrixIds);
+    const matrixEdited=await matrixSnapshot(); assert.deepEqual(matrixEdited.names,['Native One','Native Two']); assert.equal(matrixEdited.total,2);
+    assert(matrixEdited.raw.every(value=>value===matrixEdited.raw[0]));
+    await page.evaluate(ids=>{
+        window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
+        window.app.graph.getNodeById(ids.matrix).widgets.find(widget=>widget.sceneRole==='matrix_rows').callback();
+    },nativeMatrixIds);
+    // Record each DOM edit in native history before checking restored cache state.
+    for (let index=0;index<2;index++) {
+        await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().beforeChange());
+        await page.getByRole('button',{name:'削除',exact:true}).nth(0).click();
+        await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().afterChange());
+    }
+    await page.locator('.pc-popup').last().getByRole('button',{name:'閉じる',exact:true}).click();
+    const matrixEmpty=await matrixSnapshot(); assert.deepEqual(matrixEmpty.names,[]); assert.equal(matrixEmpty.total,1);
+    assert(matrixEmpty.raw.every(value=>value===matrixEmpty.raw[0]));
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undo());
+    const matrixPartialUndo=await matrixSnapshot(); assert.deepEqual(matrixPartialUndo.names,['Native Two']); assert.equal(matrixPartialUndo.total,1);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undo());
+    const matrixUndone=await matrixSnapshot(); assert.deepEqual(matrixUndone.names,['Native One','Native Two']); assert.equal(matrixUndone.total,2);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());
+    const matrixPartialRedo=await matrixSnapshot(); assert.deepEqual(matrixPartialRedo.names,['Native Two']); assert.equal(matrixPartialRedo.total,1);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());
+    const matrixRedone=await matrixSnapshot(); assert.deepEqual(matrixRedone.names,[]); assert.equal(matrixRedone.total,1);
+    await page.evaluate(async()=>{const app=window.app;await app.loadGraphData(app.graph.serialize(),true,true);});
+    const matrixReloaded=await matrixSnapshot(); assert.deepEqual(matrixReloaded.names,[]); assert.equal(matrixReloaded.total,1);
+    assert(matrixReloaded.raw.every(value=>value===matrixReloaded.raw[0]));
+    console.log('real ComfyUI Matrix recorded-state Undo/Redo and workflow reload preserve synchronized state and counts without deleted-row revival');
 
     failNextGeneration = true;
     const presetLLMRuntime = await page.evaluate(async () => {
