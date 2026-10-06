@@ -275,7 +275,7 @@ const layoutContext = vm.createContext({ Map, Set, Math, Number, String, JSON,
     closeSceneExpandResources() {}, closeSceneLoraPicker() {}, popupContextReferencesNode() { return false; },
     isSceneExpandNodeName() { return false; },
 });
-for (const name of ["selectedListLayoutCacheKey", "cachedSelectedListLayout", "installSceneNodeRemovalCleanup"])
+for (const name of ["selectedListLayoutCacheKey", "cachedSelectedListLayout", "clearSceneComputedCaches", "installSceneNodeRemovalCleanup"])
     vm.runInContext(functionSource(name), layoutContext);
 const layoutNode = { widgets: Array.from({ length: 12 }, (_, index) => ({ name: `role${index}`, value: `state${index}` })) };
 for (let index = 0; index < 12; index++) layoutContext.cachedSelectedListLayout(layoutNode, 300, { stateWidgetName: `role${index}` });

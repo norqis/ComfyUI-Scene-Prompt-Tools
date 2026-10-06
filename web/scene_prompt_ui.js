@@ -6598,10 +6598,10 @@ function downstreamNodes(node) {
 }
 
 function collectDownstreamSceneNodes(node, targets = new Set(), seen = new Set()) {
-    if (!node || seen.has(node.id)) {
+    if (!node || seen.has(node)) {
         return targets;
     }
-    seen.add(node.id);
+    seen.add(node);
     for (const target of downstreamNodes(node)) {
         if (isRerouteNode(target)) {
             collectDownstreamSceneNodes(target, targets, seen);
@@ -6652,8 +6652,9 @@ function flushDownstreamSceneRefreshes() {
         return;
     }
     const targets = new Set();
+    const seen = new Set();
     for (const source of sources) {
-        collectDownstreamSceneNodes(source, targets);
+        collectDownstreamSceneNodes(source, targets, seen);
     }
     for (const target of targets) clearSceneComputedCaches(target);
     for (const target of targets) {
@@ -7017,177 +7018,72 @@ function scenePathLocalCacheKey(node) {
 }
 
 function scenePromptSourceLocalCacheKey(node) {
-    const upstream = scenePromptInputSource(node);
-    const upstreamKey = upstream
-        ? {
-            id: upstream.id ?? null,
-            type: nodeClassName(upstream),
-            mode: sceneNodeMode(upstream),
-            revision: sceneNodeRevision(upstream),
-            link: linkedInputKey(node, "scene_prompt"),
-            lineage: scenePromptLineageKey(upstream),
-        }
-        : null;
-
+    const common = { id: node?.id ?? null, mode: sceneNodeMode(node), revision: sceneNodeRevision(node) };
+    const values = (names) => names.map((name) => findWidget(node, name)?.value ?? null);
     if (nodeClassName(node) === "ScenePromptLLM") {
-        return JSON.stringify({ type: "llm", id: node.id, mode: sceneNodeMode(node), upstream: upstreamKey,
-            values: ["model_mode", "description", "positive", "negative", "generation_state_json"]
-                .map((name) => findWidget(node, name)?.value || "") });
+        return JSON.stringify({ ...common, type: "llm", values: values([
+            "model_mode", "description", "positive", "negative", "generation_state_json",
+        ]) });
     }
     if (isScenePromptNode(node)) {
-        return JSON.stringify({
-            local: scenePromptLocalCacheKey(node),
-            upstream: upstreamKey,
-        });
+        return JSON.stringify({ ...common, type: "prompt", title: scenePromptTitle(node), values: values([
+            "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "filename_enabled",
+        ]) });
     }
     if (isPromptMatrixNode(node)) {
-        return JSON.stringify({
-            type: "matrix",
-            id: node?.id ?? null,
-            mode: sceneNodeMode(node),
-            local: matrixSourceCacheKey(node),
-            upstream: upstreamKey,
-        });
+        return JSON.stringify({ ...common, type: "matrix",
+            matrix_json: String(ensureMatrixJsonWidget(node)?.value || MATRIX_DEFAULT_JSON) });
     }
     if (isScenePathNode(node)) {
-        return JSON.stringify({
-            local: scenePathLocalCacheKey(node),
-            upstream: upstreamKey,
-        });
+        return JSON.stringify({ ...common, type: "path", title: scenePathTitle(node),
+            path_mode: normalizePathMode(findWidget(node, "path_mode")?.value) });
     }
-    if (isScenePromptMergeNode(node)) {
-        const graph = node?.graph || app.graph;
-        return JSON.stringify({
-            type: "merge",
-            id: node?.id ?? null,
-            mode: sceneNodeMode(node),
-            inputs: ["scene_prompt1", "scene_prompt2"].map((name) => {
-                const input = linkedInput(node, name);
-                const resolved = resolveLinkedSourceFromInput(graph, input);
-                const source = resolved.source;
-                return {
-                    name,
-                    link: input?.link ?? null,
-                    source_path: resolved.keyParts,
-                    source_id: source?.id ?? null,
-                    source_type: nodeClassName(source),
-                    source_mode: sceneNodeMode(source),
-                    source_revision: sceneNodeRevision(source),
-                    source_lineage: source ? scenePromptLineageKey(source) : "",
-                };
-            }),
-        });
-    }
+    if (isScenePromptMergeNode(node)) return JSON.stringify({ ...common, type: "merge" });
     if (isScenePromptDeleteNode(node)) {
-        return JSON.stringify({ type: "delete", id: node.id, mode: sceneNodeMode(node),
-            positive: findWidget(node, "positive")?.value, negative: findWidget(node, "negative")?.value, upstream: upstreamKey });
+        return JSON.stringify({ ...common, type: "delete", values: values(["positive", "negative"]) });
     }
     if (isScenePromptReverseNode(node)) {
-        return JSON.stringify({
-            type: "reverse",
-            id: node?.id ?? null,
-            mode: sceneNodeMode(node),
-            reverse_scope: scenePromptReverseScope(node),
-            input: linkedInputKey(node, "scene_prompt"),
-            upstream: upstreamKey,
-        });
+        return JSON.stringify({ ...common, type: "reverse", reverse_scope: scenePromptReverseScope(node) });
     }
     if (isScenePromptCounterNode(node)) {
-        return JSON.stringify({
-            type: "counter",
-            id: node?.id ?? null,
-            mode: sceneNodeMode(node),
-            count: scenePromptCounterCount(node),
-            enable_downstream_count: scenePromptCounterDownstreamEnabled(node),
-            input: linkedInputKey(node, "scene_prompt"),
-            upstream: upstreamKey,
-        });
+        return JSON.stringify({ ...common, type: "counter", values: values(["count", "enable_downstream_count"]) });
     }
     if (isScenePromptRandomRouteNode(node)) {
-        return JSON.stringify({ type: "random_route", id: node?.id ?? null, mode: sceneNodeMode(node),
-            weights: findWidget(node, "weights_json")?.value, preserve_join: Boolean(findWidget(node, "preserve_join")?.value),
-            input: linkedInputKey(node, "scene_prompt"), upstream: upstreamKey });
+        return JSON.stringify({ ...common, type: "random_route", values: values(["weights_json", "preserve_join"]) });
     }
     if (isSceneEmptyLatentNode(node)) {
-        return JSON.stringify({
-            type: "empty_latent",
-            id: node?.id ?? null,
-            mode: sceneNodeMode(node),
-            width: Number(findWidget(node, "width")?.value || 512),
-            height: Number(findWidget(node, "height")?.value || 512),
-            batch_size: Number(findWidget(node, "batch_size")?.value || 1),
-            input: linkedInputKey(node, "scene_prompt"),
-            upstream: upstreamKey,
-        });
+        return JSON.stringify({ ...common, type: "empty_latent", values: values(["width", "height", "batch_size"]) });
     }
     if (isScenePromptJoinNode(node)) {
-        const graph = node?.graph || app.graph;
-        return JSON.stringify({
-            type: isScenePromptRandomRouteOutputNode(node) ? "random_output" : "queue",
-            id: node?.id ?? null,
-            mode: sceneNodeMode(node),
+        return JSON.stringify({ ...common, type: isScenePromptRandomRouteOutputNode(node) ? "random_output" : "queue",
             controls: SCENE_QUEUE_CONTROL_NAMES.map((name) => findWidget(node, name)?.value ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]),
-            locked: node.sceneQueueControlLock || "",
-            inputs: scenePromptQueueInputIndexes(node).map(({ input }) => {
-                const resolved = resolveLinkedSourceFromInput(graph, input);
-                const source = resolved.source;
-                return {
-                    name: String(input?.name || ""),
-                    link: input?.link ?? null,
-                    source_path: resolved.keyParts,
-                    source_id: source?.id ?? null,
-                    source_type: nodeClassName(source),
-                    source_mode: sceneNodeMode(source),
-                    source_revision: sceneNodeRevision(source),
-                    source_lineage: source ? scenePromptLineageKey(source) : "",
-                };
-            }),
-        });
+            locked: node.sceneQueueControlLock || "" });
     }
     if (isScenePresetReferenceNode(node)) {
-        return JSON.stringify({
-            type: "preset_reference",
-            id: node?.id ?? null,
-            preset_id: String(findWidget(node, "preset_id")?.value || ""),
-            input: linkedInputKey(node, "scene_prompt"),
-            snapshot: node?.scenePresetGraph?.metadata?.sha256 || "",
-            local_revision: node.scenePresetRevision || 0,
-        });
+        const presetId = String(findWidget(node, "preset_id")?.value || "");
+        const preset = node.scenePresetGraph || scenePresetDisplayGraphs.get(presetId);
+        return JSON.stringify({ ...common, type: "preset_reference", preset_id: presetId,
+            snapshot: preset?.metadata?.sha256 || "", local_revision: node.scenePresetRevision || 0 });
     }
-    if (isScenePromptCallbackNode(node)) {
-        return JSON.stringify({
-            type: "callback",
-            id: node?.id ?? null,
-            mode: sceneNodeMode(node),
-            input: linkedInputKey(node, "scene_prompt"),
-            callback: linkedInputKey(node, "callback"),
-        });
+    if (isScenePromptCallbackNode(node)) return JSON.stringify({ ...common, type: "callback" });
+    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node)) {
+        return JSON.stringify({ ...common, type: isSceneApplyModelNode(node) ? "apply_model" : "apply_lora" });
     }
-    if (isSceneApplyModelNode(node) || isSceneApplyLoraNode(node) || nodeClassName(node) === "ScenePromptLLM") {
-        return JSON.stringify({
-            type: isSceneApplyModelNode(node) ? "apply_model" : "apply_lora",
-            id: node?.id ?? null,
-            mode: sceneNodeMode(node),
-            input: linkedInputKey(node, "scene_prompt"),
-            upstream: upstreamKey,
-        });
+    if (["PrimitiveNode", "PrimitiveInt", "PrimitiveFloat", "PrimitiveBoolean"].includes(nodeClassName(node))) {
+        return JSON.stringify({ ...common, type: nodeClassName(node), value: findWidget(node, "value")?.value });
     }
-    return "";
+    return JSON.stringify({ ...common, type: nodeClassName(node) });
 }
 
-function scenePromptSourceCacheKey(node, seen = new Set()) {
-    if (!node || seen.has(node.id)) {
-        return "";
-    }
-    const localKey = scenePromptSourceLocalCacheKey(node);
-    if (localKey && node.scenePromptSourceKeyCache?.localKey === localKey) {
+function scenePromptSourceCacheKey(node) {
+    if (!node) return "";
+    const graph = node.graph || app.graph;
+    const key = scenePromptLineageKey(node);
+    if (node.scenePromptSourceKeyCache?.key === key && node.scenePromptSourceKeyCache.graph === graph) {
         return node.scenePromptSourceKeyCache.key;
     }
-    const cacheKey = localKey;
-    if (localKey && cacheKey) {
-        node.scenePromptSourceKeyCache = { localKey, key: cacheKey };
-    }
-    return cacheKey;
+    node.scenePromptSourceKeyCache = { graph, key };
+    return key;
 }
 
 function scenePromptTotalCount(node) {
@@ -7436,6 +7332,8 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
         return finish(bypassSource ? scenePromptStats(bypassSource, new Set(seen), memo) : emptyScenePromptStats());
     }
 
+    const settingsError = scenePromptSettingsError(node);
+    if (settingsError) return finish({ ...emptyScenePromptStats(), error: settingsError });
     const upstream = scenePromptInputSource(node);
     if (upstream && scenePromptStats(upstream, new Set(seen), memo).hasCountHold)
         return finish(sceneScheduleForNode(node).stats);
@@ -8105,6 +8003,8 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         return plan;
     };
     if (isSceneNodeBypassed(node)) return finish(sceneScheduleForNode(sceneBypassInputSource(node), seen));
+    const settingsError = scenePromptSettingsError(node);
+    if (settingsError) return finish(sceneScheduleError(settingsError));
     if (isScenePromptRandomRouteNode(node)) {
         if (!sceneRandomWeightsValid(node)) return finish(sceneScheduleError("ランダム分岐の確率の合計を100%にしてください。"));
         const weights = sceneRandomWeights(node);
@@ -8173,6 +8073,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         return finish(base);
     }
     const full = scenePromptStats(node);
+    if (full.error) return finish(sceneScheduleError(full.error));
     let rowLimit = SCENE_QUEUE_DISPLAY_PREVIEW_ROWS;
     let rows = [];
     let units = [];
@@ -8214,76 +8115,84 @@ function sceneQueueBoundaryInPreset(presetId, upstream, stack = new Set(), prefe
     const root = apiLink(apiInput(output, "scene_prompt"));
     const nextStack = new Set(stack);
     nextStack.add(id);
-    const seen = new Set();
+    const visiting = new Set();
+    const completed = new Map();
     const visit = (nodeId) => {
-        if (!nodeId || seen.has(nodeId)) return false;
-        seen.add(nodeId);
+        if (!nodeId || visiting.has(nodeId)) return false;
+        if (completed.has(nodeId)) return completed.get(nodeId);
+        visiting.add(nodeId);
+        const finish = (value) => { visiting.delete(nodeId); completed.set(nodeId, value); return value; };
         const entry = nodes[String(nodeId)];
-        if (!entry) return false;
-        if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(entry.class_type)) return true;
-        if (entry.class_type === "ScenePresetInput") return upstream;
+        if (!entry) return finish(false);
+        if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(entry.class_type)) return finish(true);
+        if (entry.class_type === "ScenePresetInput") return finish(upstream);
         if (entry.class_type === "ScenePresetReference") {
             const nested = sceneQueueBoundaryInPreset(apiInput(entry, "preset_id"),
                 visit(apiLink(apiInput(entry, "scene_prompt"))), nextStack,
                 preset?.scenePresetChildren?.get(String(nodeId)) || null);
-            if (nested !== null) return nested;
+            if (nested !== null) return finish(nested);
         }
-        return Object.entries(entry.inputs || {}).some(([name, value]) =>
-            /^scene_prompt(?:\d+)?$/u.test(name) && visit(apiLink(value)));
+        return finish(Object.entries(entry.inputs || {}).some(([name, value]) =>
+            /^scene_prompt(?:\d+)?$/u.test(name) && visit(apiLink(value))));
     };
     return visit(root);
 }
 
-function sceneQueueBoundaryInNode(node, seen = new Set()) {
-    if (!node || seen.has(node.id) || isSceneNodeMuted(node)) return false;
-    seen.add(node.id);
-    if (isSceneNodeBypassed(node)) return sceneQueueBoundaryInNode(sceneBypassInputSource(node), seen);
-    if (isScenePromptJoinNode(node)) return true;
+function sceneQueueBoundaryInNode(node, visiting = new Set(), completed = new Map()) {
+    if (!node || visiting.has(node) || isSceneNodeMuted(node)) return false;
+    if (completed.has(node)) return completed.get(node);
+    visiting.add(node);
+    const finish = (value) => { visiting.delete(node); completed.set(node, value); return value; };
+    if (isSceneNodeBypassed(node)) return finish(sceneQueueBoundaryInNode(sceneBypassInputSource(node), visiting, completed));
+    if (isScenePromptJoinNode(node)) return finish(true);
     if (isScenePresetReferenceNode(node)) {
-        const upstream = scenePromptInputSource(node);
-        const inherited = sceneQueueBoundaryInNode(upstream, new Set(seen));
+        const inherited = sceneQueueBoundaryInNode(scenePromptInputSource(node), visiting, completed);
         const inPreset = sceneQueueBoundaryInPreset(findWidget(node, "preset_id")?.value,
             inherited, new Set(), node.scenePresetGraph || null);
-        return inPreset === null ? inherited : inPreset;
+        return finish(inPreset === null ? inherited : inPreset);
     }
-    if (isScenePromptMergeNode(node)) return connectedScenePromptSourcesForMerge(node)
-        .some(({ source }) => sceneQueueBoundaryInNode(source, new Set(seen)));
-    return sceneQueueBoundaryInNode(scenePromptInputSource(node), seen);
+    if (isScenePromptMergeNode(node)) return finish(connectedScenePromptSourcesForMerge(node)
+        .some(({ source }) => sceneQueueBoundaryInNode(source, visiting, completed)));
+    return finish(sceneQueueBoundaryInNode(scenePromptInputSource(node), visiting, completed));
 }
 
-function sceneRandomRouteInNode(node, seen = new Set()) {
-    if (!node || seen.has(node.id) || isSceneNodeMuted(node)) return false;
-    seen.add(node.id);
-    if (isSceneNodeBypassed(node)) return sceneRandomRouteInNode(sceneBypassInputSource(node), seen);
-    if (isScenePromptRandomRouteNode(node)) return true;
-    if (isScenePromptJoinNode(node)) return connectedScenePromptSourcesForQueue(node)
-        .some(({ source }) => sceneRandomRouteInNode(source, new Set(seen)));
+function sceneRandomRouteInNode(node, visiting = new Set(), completed = new Map()) {
+    if (!node || visiting.has(node) || isSceneNodeMuted(node)) return false;
+    if (completed.has(node)) return completed.get(node);
+    visiting.add(node);
+    const finish = (value) => { visiting.delete(node); completed.set(node, value); return value; };
+    if (isSceneNodeBypassed(node)) return finish(sceneRandomRouteInNode(sceneBypassInputSource(node), visiting, completed));
+    if (isScenePromptRandomRouteNode(node)) return finish(true);
+    if (isScenePromptJoinNode(node)) return finish(connectedScenePromptSourcesForQueue(node)
+        .some(({ source }) => sceneRandomRouteInNode(source, visiting, completed)));
     if (isScenePresetReferenceNode(node)) {
         const plan = sceneScheduleForNode(node);
         const containsChoice = (unit) => unit?.kind === "random_choice"
             || (unit?.unit && containsChoice(unit.unit))
             || (unit?.plan?.units || []).some(containsChoice)
             || (unit?.plans || []).some((nested) => nested.units.some(containsChoice));
-        if (plan.stats.error || plan.randomGuards?.length || plan.units.some(containsChoice)) return true;
+        if (plan.stats.error || plan.randomGuards?.length || plan.units.some(containsChoice)) return finish(true);
     }
-    if (isScenePromptMergeNode(node)) return connectedScenePromptSourcesForMerge(node)
-        .some(({ source }) => sceneRandomRouteInNode(source, new Set(seen)));
-    return sceneRandomRouteInNode(scenePromptInputSource(node), seen);
+    if (isScenePromptMergeNode(node)) return finish(connectedScenePromptSourcesForMerge(node)
+        .some(({ source }) => sceneRandomRouteInNode(source, visiting, completed)));
+    return finish(sceneRandomRouteInNode(scenePromptInputSource(node), visiting, completed));
 }
 
-function sceneQueuePendingInNode(node, seen = new Set()) {
-    if (!node || seen.has(node.id) || isSceneNodeMuted(node)) return false;
-    seen.add(node.id);
-    if (isSceneNodeBypassed(node)) return sceneQueuePendingInNode(sceneBypassInputSource(node), seen);
+function sceneQueuePendingInNode(node, visiting = new Set(), completed = new Map()) {
+    if (!node || visiting.has(node) || isSceneNodeMuted(node)) return false;
+    if (completed.has(node)) return completed.get(node);
+    visiting.add(node);
+    const finish = (value) => { visiting.delete(node); completed.set(node, value); return value; };
+    if (isSceneNodeBypassed(node)) return finish(sceneQueuePendingInNode(sceneBypassInputSource(node), visiting, completed));
     if (isScenePresetReferenceNode(node)) {
         const id = String(findWidget(node, "preset_id")?.value || "");
-        if (id && !scenePresetGraphNodes(node.scenePresetGraph || scenePresetDisplayGraphs.get(id))) return true;
+        if (id && !scenePresetGraphNodes(node.scenePresetGraph || scenePresetDisplayGraphs.get(id))) return finish(true);
     }
-    if (isScenePromptMergeNode(node)) return connectedScenePromptSourcesForMerge(node)
-        .some(({ source }) => sceneQueuePendingInNode(source, new Set(seen)));
-    if (isScenePromptJoinNode(node)) return connectedScenePromptSourcesForQueue(node)
-        .some(({ source }) => sceneQueuePendingInNode(source, new Set(seen)));
-    return sceneQueuePendingInNode(scenePromptInputSource(node), seen);
+    if (isScenePromptMergeNode(node)) return finish(connectedScenePromptSourcesForMerge(node)
+        .some(({ source }) => sceneQueuePendingInNode(source, visiting, completed)));
+    if (isScenePromptJoinNode(node)) return finish(connectedScenePromptSourcesForQueue(node)
+        .some(({ source }) => sceneQueuePendingInNode(source, visiting, completed)));
+    return finish(sceneQueuePendingInNode(scenePromptInputSource(node), visiting, completed));
 }
 
 function sceneQueueLockState(node) {
@@ -8426,28 +8335,70 @@ function sceneBypassInputSource(node) {
     return scenePromptInputSource(node);
 }
 
-function scenePromptCounterCount(node) {
-    const primitive = linkedSourceNode(node, "count");
-    if (["PrimitiveInt", "PrimitiveFloat"].includes(nodeClassName(primitive))) {
-        return clampSceneCount(findWidget(primitive, "value")?.value, 1);
+function scenePrimitiveInputValue(node, inputName, kind) {
+    const input = linkedInput(node, inputName);
+    if (input?.link == null) return undefined;
+    const graph = node.graph || app.graph;
+    let resolved = resolveLinkedSourceFromInput(graph, input);
+    const seen = new Set();
+    while (resolved.source && !seen.has(resolved.source)) {
+        const source = resolved.source;
+        seen.add(source);
+        if (isSceneNodeMuted(source)) return null;
+        if (isSceneNodeBypassed(source)) {
+            const type = source.outputs?.[resolved.slot]?.type || input.type;
+            const bypass = (source.inputs || []).find((entry) => entry.link != null && entry.type === type);
+            resolved = resolveLinkedSourceFromInput(graph, bypass);
+            continue;
+        }
+        const type = nodeClassName(source);
+        const supported = kind === "boolean" ? ["PrimitiveBoolean", "PrimitiveNode"]
+            : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"];
+        if (resolved.slot !== 0 || !supported.includes(type) || linkedInput(source, "value")?.link != null) return null;
+        const value = findWidget(source, "value")?.value;
+        if (kind === "boolean") {
+            if (typeof value === "boolean") return value;
+            if (value === "true" || value === "false") return value === "true";
+            return null;
+        }
+        return typeof value === "number" && Number.isFinite(value) ? value : null;
     }
-    return clampSceneCount(findWidget(node, "count")?.value, 1);
+    return null;
+}
+
+function scenePromptCounterCount(node) {
+    const value = scenePrimitiveInputValue(node, "count", "number");
+    return value === null ? null : clampSceneCount(value ?? findWidget(node, "count")?.value, 1);
 }
 
 function scenePromptCounterDownstreamEnabled(node) {
-    return findWidget(node, "enable_downstream_count")?.value !== false;
+    const value = scenePrimitiveInputValue(node, "enable_downstream_count", "boolean");
+    return value === undefined ? findWidget(node, "enable_downstream_count")?.value !== false : value;
 }
 
 function sceneEmptyLatentConfig(node) {
-    const dimension = (name) => Math.max(
-        16,
-        Number.parseInt(String(findWidget(node, name)?.value ?? 512), 10) || 512,
-    );
-    return {
-        width: dimension("width"),
-        height: dimension("height"),
-        batch_size: clampSceneCount(findWidget(node, "batch_size")?.value, 1) || 1,
+    const value = (name, fallback) => {
+        const linked = scenePrimitiveInputValue(node, name, "number");
+        return linked === undefined ? findWidget(node, name)?.value ?? fallback : linked;
     };
+    const dimension = (name) => {
+        const raw = value(name, 512);
+        return raw === null ? null : Math.max(16, Number.parseInt(String(raw), 10) || 512);
+    };
+    const batch = value("batch_size", 1);
+    return { width: dimension("width"), height: dimension("height"),
+        batch_size: batch === null ? null : clampSceneCount(batch, 1) || 1 };
+}
+
+function scenePromptSettingsError(node) {
+    if (isScenePromptCounterNode(node) && (scenePromptCounterCount(node) === null
+        || scenePromptCounterDownstreamEnabled(node) === null)) {
+        return "Countの接続された値を確定できません。標準のPrimitiveを接続してください。";
+    }
+    if (isSceneEmptyLatentNode(node) && Object.values(sceneEmptyLatentConfig(node)).some((value) => value === null)) {
+        return "Empty Latentの接続された値を確定できません。標準のPrimitiveを接続してください。";
+    }
+    return "";
 }
 
 function scenePromptInputSource(node) {
@@ -8456,54 +8407,34 @@ function scenePromptInputSource(node) {
 }
 
 function scenePromptLineageKey(node) {
-    const parts = [];
-    const seen = new Set();
-    let current = node;
-    while (current) {
-        if (seen.has(current.id)) {
-            parts.push(`cycle:${current.id}`);
-            break;
+    if (!node) return "";
+    // Each actual node is described once. Edges retain shared branches and input/output slots.
+    const indexes = new Map([[node, 0]]);
+    const nodes = [node];
+    const descriptors = [];
+    for (let index = 0; index < nodes.length; index += 1) {
+        const current = nodes[index];
+        const graph = current.graph || app.graph;
+        const scalarNames = isScenePromptCounterNode(current) ? ["count", "enable_downstream_count"]
+            : isSceneEmptyLatentNode(current) ? ["width", "height", "batch_size"] : [];
+        const edges = [];
+        for (const [slot, input] of (current.inputs || []).entries()) {
+            if (!/^scene_prompt\d*$/u.test(input.name || "") && !scalarNames.includes(input.name)
+                && !isRerouteNode(current) && !isSceneNodeBypassed(current)
+                && input.name !== "value" && !(isScenePromptCallbackNode(current) && input.name === "callback")) continue;
+            const link = graphLink(graph, input.link);
+            const source = link ? graph?.getNodeById?.(link.origin_id) : null;
+            if (source && !indexes.has(source)) {
+                indexes.set(source, nodes.length);
+                nodes.push(source);
+            }
+            edges.push([input.name, slot, input.type, input.link ?? null,
+                link?.origin_id ?? null, link?.origin_slot ?? null, link?.target_id ?? null,
+                link?.target_slot ?? null, source ? indexes.get(source) : null]);
         }
-        seen.add(current.id);
-        parts.push([
-            current.id ?? "",
-            nodeClassName(current),
-            sceneNodeMode(current),
-            sceneNodeRevision(current),
-            linkedInputKey(current, "scene_prompt"),
-        ].map((part) => String(part ?? "")).join(":"));
-        if (isScenePromptCounterNode(current)) {
-            parts.push(`count:${scenePromptCounterCount(current)}:${scenePromptCounterDownstreamEnabled(current)}`);
-        }
-        if (isScenePromptRandomRouteNode(current)) {
-            parts.push(`random:${findWidget(current, "weights_json")?.value || ""}:${Boolean(findWidget(current, "preserve_join")?.value)}`);
-        }
-        if (isScenePromptDeleteNode(current)) {
-            parts.push(JSON.stringify([findWidget(current, "positive")?.value, findWidget(current, "negative")?.value]));
-        }
-        if (isScenePromptReverseNode(current)) {
-            parts.push(`reverse:${scenePromptReverseScope(current)}`);
-        }
-        if (isSceneEmptyLatentNode(current)) {
-            parts.push(`latent:${JSON.stringify(sceneEmptyLatentConfig(current))}`);
-        }
-        if (isPromptMatrixNode(current)) {
-            parts.push(`matrix:${matrixSourceCacheKey(current)}`);
-        }
-        if (isScenePromptMergeNode(current)) {
-            parts.push(JSON.stringify(connectedScenePromptSourcesForMerge(current).map(({ name, source }) => ({
-                name,
-                link: linkedInputKey(current, name),
-                source_key: source ? scenePromptSourceCacheKey(source) : "",
-            }))));
-            break;
-        }
-        if (isScenePromptJoinNode(current)) {
-            break;
-        }
-        current = scenePromptInputSource(current);
+        descriptors.push([scenePromptSourceLocalCacheKey(current), edges]);
     }
-    return parts.join("|");
+    return JSON.stringify(descriptors);
 }
 
 function sceneQueueDisplayPartsForEntry(entry) {
@@ -8543,8 +8474,9 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         return finish(bypassSource ? scenePromptPreviewEntries(bypassSource, maxEntries, new Set(seen), memo) : []);
     }
 
-    if (scenePromptStats(node).hasCountHold)
-        return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
+    const stats = scenePromptStats(node);
+    if (stats.error) return finish([]);
+    if (stats.hasCountHold) return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
 
     if (isScenePresetReferenceNode(node) && sceneQueueBoundaryInNode(node)) {
         return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
@@ -8711,25 +8643,7 @@ function sceneNodeRevision(node) {
 }
 
 function scenePromptQueueRowsCacheKey(node) {
-    const graph = node?.graph || app.graph;
-    return JSON.stringify({
-        type: "queue_rows",
-        id: node?.id ?? null,
-        mode: sceneNodeMode(node),
-        controls: SCENE_QUEUE_CONTROL_NAMES.map((name) => findWidget(node, name)?.value ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]),
-        locked: node.sceneQueueControlLock || "",
-        inputs: scenePromptQueueInputIndexes(node).map(({ input }) => {
-            const resolved = resolveLinkedSourceFromInput(graph, input);
-            return {
-                name: String(input?.name || ""),
-                link: input?.link ?? null,
-                source_path: resolved.keyParts,
-                source_mode: sceneNodeMode(resolved.source),
-                source_revision: sceneNodeRevision(resolved.source),
-                source_lineage: resolved.source ? scenePromptLineageKey(resolved.source) : "",
-            };
-        }),
-    });
+    return `${scenePromptSourceCacheKey(node)}::queue_rows`;
 }
 
 function scenePromptQueueDisplayCacheKey(node, width = null) {
@@ -12729,7 +12643,7 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         clearTimeout(this.sceneRefreshTimer);
         this.sceneRefreshTimer = null;
         this.scenePendingRefreshOptions = null;
-        this.sceneSelectedListLayoutCache = null;
+        clearSceneComputedCaches(this);
         invalidatePopupRequests(this);
         closeSceneLoraDetails(this);
         closeSceneExpandResources(this);
