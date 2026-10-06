@@ -63,6 +63,7 @@ const context = {
     },
     releaseSceneRunHandle() {},
 };
+require("./scene_switches_test_context.cjs").install(context);
 vm.createContext(context);
 for (const name of [
     "sceneBatchNodeRunId",
@@ -241,6 +242,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
         },
         queueNextSceneBatchItem() {},
     };
+    require("./scene_switches_test_context.cjs").install(tabContext);
     vm.createContext(tabContext);
     for (const name of [
         "apiLink",
@@ -350,6 +352,7 @@ async function testScenePresetResolution() {
             },
         },
     };
+    require("./scene_switches_test_context.cjs").install(presetContext);
     vm.createContext(presetContext);
     for (const name of [
         "readApiJson",
@@ -430,6 +433,7 @@ async function testPresetFailureDoesNotQueue() {
         releaseSceneBatchPlan() {},
         activateNextSceneBatchRun() {},
     };
+    require("./scene_switches_test_context.cjs").install(failureContext);
     vm.createContext(failureContext);
     vm.runInContext(functionSource("queueNextSceneBatchItem"), failureContext);
     await failureContext.queueNextSceneBatchItem();
@@ -453,6 +457,7 @@ async function testPresetResolutionKeepsClickFifo() {
             fifoContext.activated.push(fifoContext.sceneBatchRun.runId);
         },
     };
+    require("./scene_switches_test_context.cjs").install(fifoContext);
     vm.createContext(fifoContext);
     vm.runInContext(functionSource("activateNextSceneBatchRun"), fifoContext);
 
@@ -494,6 +499,7 @@ async function testPresetRunCountDisplay() {
         sceneBatchRunStatus() { return "active"; },
         markSceneNodeChanged() {},
     };
+    require("./scene_switches_test_context.cjs").install(displayContext);
     vm.createContext(displayContext);
     vm.runInContext(functionSource("updateSceneExpandButton"), displayContext);
     displayContext.updateSceneExpandButton(node);
@@ -525,6 +531,7 @@ async function testExpandCountTracksCompletedRuns() {
             return `${totalBatches}回 / ${totalImages}枚`;
         },
     };
+    require("./scene_switches_test_context.cjs").install(displayContext);
     vm.createContext(displayContext);
     vm.runInContext(functionSource("sceneExpandCountLabel"), displayContext);
 
@@ -577,6 +584,7 @@ async function testExpandCountDrawText() {
         },
         fitCanvasText(_ctx, text) { return text; },
     };
+    require("./scene_switches_test_context.cjs").install(displayContext);
     vm.createContext(displayContext);
     vm.runInContext(functionSource("sceneExpandCountLabel"), displayContext);
     vm.runInContext(functionSource("drawSceneExpandCount"), displayContext);
@@ -623,6 +631,7 @@ async function testRunRefreshAndResetUpdateCount() {
         updateSceneExpandButton() { refreshContext.buttonUpdates += 1; },
         updateSceneExpandCountWidget() { refreshContext.countUpdates += 1; },
     };
+    require("./scene_switches_test_context.cjs").install(refreshContext);
     vm.createContext(refreshContext);
     vm.runInContext(functionSource("refreshSceneBatchRunNode"), refreshContext);
     refreshContext.refreshSceneBatchRunNode(run);
@@ -638,6 +647,7 @@ async function testRunRefreshAndResetUpdateCount() {
         updateSceneExpandCountWidget() { resetContext.countUpdates += 1; },
         markSceneNodeChanged() {},
     };
+    require("./scene_switches_test_context.cjs").install(resetContext);
     vm.createContext(resetContext);
     vm.runInContext(functionSource("resetSceneExpandRunControls"), resetContext);
     resetContext.resetSceneExpandRunControls(node);
@@ -663,6 +673,7 @@ async function testMismatchedSuccessDoesNotAdvanceExpandProgress() {
         refreshSceneBatchRunNode() { progressContext.refreshes += 1; },
         scheduleNextSceneBatchItem() {},
     };
+    require("./scene_switches_test_context.cjs").install(progressContext);
     vm.createContext(progressContext);
     vm.runInContext(functionSource("continueSceneBatchRun"), progressContext);
     progressContext.continueSceneBatchRun({ prompt_id: "another-expand-prompt" });
@@ -686,6 +697,7 @@ async function testPresetErrorMarksOnlyTargetReference() {
         app: { graph: { _nodes: canvasNodes, setDirtyCanvas() {} } },
         isScenePresetReferenceNode(node) { return node.presetReference; },
     };
+    require("./scene_switches_test_context.cjs").install(markContext);
     vm.createContext(markContext);
     vm.runInContext(functionSource("markScenePresetReferenceErrors"), markContext);
     markContext.markScenePresetReferenceErrors("壊れています", { nodeId: "20", relatedNodeIds: ["10", "30"] });
@@ -694,6 +706,7 @@ async function testPresetErrorMarksOnlyTargetReference() {
     assert.equal(canvasNodes[2].color, "c");
 
     const graphContext = { Set, String, Object };
+    require("./scene_switches_test_context.cjs").install(graphContext);
     vm.createContext(graphContext);
     for (const name of ["apiLink", "apiInput", "scenePresetReferenceIdsForExpand"]) {
         vm.runInContext(functionSource(name), graphContext);
@@ -716,6 +729,7 @@ async function testSelectedExpandBranchOnlyQueues() {
         activePopupContext: { node: { sceneMatrixLineDraftContext: { commitDrafts() { snapshotDraftCommitted = true; } } } },
         applySceneSourceNodeNames(prompt) { return prompt; },
     };
+    require("./scene_switches_test_context.cjs").install(branchContext);
     vm.createContext(branchContext);
     for (const name of [
         "apiLink",
@@ -783,6 +797,7 @@ async function testCancelledPresetResolutionReleasesOnce() {
         resetSceneExpandRunControls() {},
         updateSceneExpandButton() {},
     };
+    require("./scene_switches_test_context.cjs").install(cancelledContext);
     vm.createContext(cancelledContext);
     for (const name of [
         "releaseCancelledSceneBatchRun",
@@ -823,6 +838,7 @@ async function testPresetErrorClearStaysInSelectedBranch() {
         app: { graph: { _nodes: nodes, setDirtyCanvas() {} } },
         isScenePresetReferenceNode(node) { return node.presetReference; },
     };
+    require("./scene_switches_test_context.cjs").install(clearContext);
     vm.createContext(clearContext);
     vm.runInContext(functionSource("clearScenePresetReferenceErrors"), clearContext);
     clearContext.clearScenePresetReferenceErrors({ nodeIds: ["2"] });
@@ -850,6 +866,7 @@ async function testPresetResolveClearsOnlyItsOwnReferences() {
             return { run_handle: "handle-A", presets: [], total_images: 1 };
         },
     };
+    require("./scene_switches_test_context.cjs").install(resolveContext);
     vm.createContext(resolveContext);
     for (const name of [
         "apiLink",
@@ -895,6 +912,7 @@ async function testPresetDisplayCacheStaysPerReference() {
             ["B", { metadata: { preset_id: "B", sha256: "b" }, api_graph: { output: {} } }],
         ]),
     };
+    require("./scene_switches_test_context.cjs").install(displayContext);
     vm.createContext(displayContext);
     for (const name of ["selectedScenePreset", "refreshScenePresetReference"]) {
         vm.runInContext(functionSource(name), displayContext);

@@ -25,6 +25,7 @@ const ctx = {
     sceneQueueDisplayPartsForEntry: (entry) => entry.parts,
     mergeScenePromptRows: () => ({}),
 };
+require("./scene_switches_test_context.cjs").install(ctx);
 vm.createContext(ctx);
 for (const name of [
     "emptyScenePromptStats", "sceneStatNumber", "sceneStatProduct", "sceneStatSum", "sceneStatsResult", "sceneStatsMerge",

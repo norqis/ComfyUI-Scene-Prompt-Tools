@@ -47,6 +47,7 @@ const context = {
         return node.widgets.find((widget) => widget.name === name);
     },
 };
+require("./scene_switches_test_context.cjs").install(context);
 vm.createContext(context);
 vm.runInContext(functionSource("scenePromptReverseScope"), context);
 assert.equal(context.scenePromptReverseScope({ widgets: [{ name: "reverse_scope", value: "直前のノード" }] }), "直前のノード");
@@ -77,6 +78,7 @@ const applyContext = {
     sceneStatsSeed() { return { rows: 1, total: 1, totalImages: 1, unsetBatches: 1 }; },
     sceneStatsResult(value) { return value; },
 };
+require("./scene_switches_test_context.cjs").install(applyContext);
 vm.createContext(applyContext);
 for (const name of ["scenePromptSourceLocalCacheKey", "scenePromptStats"]) vm.runInContext(functionSource(name), applyContext);
 const applyDirect = { id: "model-direct", kind: "apply_model" };

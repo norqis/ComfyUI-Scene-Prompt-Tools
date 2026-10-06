@@ -48,6 +48,7 @@ const ctx = {
 for (const [name, type] of Object.entries(classes)) ctx[name] = node => node?.type === type;
 ctx.isScenePromptJoinNode = node => ctx.isScenePromptQueueNode(node) || ctx.isScenePromptRandomRouteOutputNode(node);
 ctx.isScenePromptSourceNode = node => Object.entries(classes).some(([name]) => name !== "isSceneExpandNode" && ctx[name](node));
+require("./scene_switches_test_context.cjs").install(ctx);
 vm.createContext(ctx);
 const core = ["nodeClassName", "nodeClassNames", "isRerouteNode", "liteGraphNodeMode", "sceneNodeMode",
     "isSceneNodeMuted", "isSceneNodeBypassed", "sceneNodeRevision", "linkedInput", "graphLink", "firstLinkedInput",
@@ -316,6 +317,7 @@ async function testMatrixCurrentStateCache() {
         hideWidget(widget) { widget.hidden = true; },
         notifyWidgetChanged() {}, refreshNode() {}, refreshDownstreamSceneNodes() {}, app: { graph: { change() {} } },
     };
+    require("./scene_switches_test_context.cjs").install(matrixContext);
     vm.createContext(matrixContext);
     for (const name of ["serializedMatrixJsonValue", "currentMatrixJsonValue", "cachedMatrixState",
         "normalizeMatrixWidgetValues", "ensureMatrixJsonWidget", "parseMatrixStateValue", "normalizeMatrixState",
@@ -390,6 +392,7 @@ testMatrixCurrentStateCache().catch(error => { console.error(error); process.exi
 // Catalog indexes retain only exact-leaf references and are owned by array identity.
 {
     const catalog = { Map, Set, WeakMap, Object, String, JSON, promptCatalogIndexes: new WeakMap() };
+    require("./scene_switches_test_context.cjs").install(catalog);
     vm.createContext(catalog);
     for (const name of ["itemPath", "pathKey", "catalogPathKey", "stripCountSuffix", "displayPathLabel",
         "itemCategoryKey", "itemKey", "promptCatalogIndex", "allCategoryPaths", "getChildSegments",
@@ -442,6 +445,7 @@ testMatrixCurrentStateCache().catch(error => { console.error(error); process.exi
         requestAnimationFrame(callback) { const id = ++frameId; frames.set(id, callback); return id; },
         cancelAnimationFrame(id) { frames.delete(id); },
     };
+    require("./scene_switches_test_context.cjs").install(render);
     vm.createContext(render);
     for (const name of ["fitPopupToContent", "cancelPopupListRender", "cancelPopupRendering", "renderPopupListItems",
         "restorePopupScroll", "rememberPopupScroll"]) vm.runInContext(functionSource(name), render);
