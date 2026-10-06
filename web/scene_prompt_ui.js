@@ -835,20 +835,24 @@ function writeStateToWidget(node, state, stateWidgetName) {
 function writeState(node, state, options = {}) {
     const stateWidgetName = options.stateWidgetName || activeStateWidgetName(node);
     setActiveStateWidget(node, stateWidgetName);
-    writeStateToWidget(node, state, stateWidgetName);
     if (matrixLineDraftContextFor(node, stateWidgetName)) {
+        writeStateToWidget(node, state, stateWidgetName);
         return;
     }
-    clearSceneComputedCaches(node);
-    refreshNode(node, { expand: true, reserveSelectedListLine: !!options.reserveSelectedListLine });
-    if (isScenePromptNode(node) || isSceneApplyLoraNode(node)) {
-        refreshDownstreamSceneNodes(node);
-    }
-    if (options.fitHeight) {
-        scheduleFitHeight(node, options.fitDelay ?? 80);
-    }
-    app.graph?.change?.();
-    node.graph?.change?.();
+    const widget = findWidget(node, stateWidgetName);
+    if (!widget || widget.value === JSON.stringify(state)) return;
+    return withSceneUserChange(node, () => {
+        writeStateToWidget(node, state, stateWidgetName);
+        clearSceneComputedCaches(node);
+        refreshNode(node, { expand: true, reserveSelectedListLine: !!options.reserveSelectedListLine });
+        if (isScenePromptNode(node) || isSceneApplyLoraNode(node)) {
+            refreshDownstreamSceneNodes(node);
+        }
+        if (options.fitHeight) {
+            scheduleFitHeight(node, options.fitDelay ?? 80);
+        }
+        node.graph?.change?.();
+    });
 }
 
 function itemPath(item) {
@@ -5010,20 +5014,33 @@ function isSceneLLMNode(node) {
     return nodeClassNames(node).includes(LLM_TYPE);
 }
 
-function beginSceneLLMChange(graph) {
+function beginSceneGraphChange(graph, canvas = app.canvas) {
     graph.beforeChange?.();
-    app.canvas?.emitBeforeChange?.();
+    canvas?.emitBeforeChange?.();
 }
 
-function endSceneLLMChange(graph) {
+function endSceneGraphChange(graph, canvas = app.canvas) {
     try { graph.afterChange?.(); }
-    finally { app.canvas?.emitAfterChange?.(); }
+    finally { canvas?.emitAfterChange?.(); }
+}
+
+function sceneNodeHasCurrentOwner(node) {
+    return node.graph?.getNodeById?.(node.id) === node;
+}
+
+function withSceneUserChange(node, commit) {
+    if (!sceneNodeHasCurrentOwner(node)) return false;
+    const graph = node.graph, canvas = app.canvas;
+    if (graph !== app.graph || canvas?.graph !== graph) return commit();
+    beginSceneGraphChange(graph, canvas);
+    try { return commit(); }
+    finally { endSceneGraphChange(graph, canvas); }
 }
 
 const sceneGPUController = createGPUController({ app, api });
 const sceneLLMController = createLLMController({
     app, api, resources: sceneGPUController,
-    beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
+    beginChange: beginSceneGraphChange, endChange: endSceneGraphChange,
     createNode: (type) => globalThis.LiteGraph.createNode(type),
     refresh: (node) => {
         if (isScenePresetReferenceNode(node)) refreshScenePresetReference(node);
@@ -5068,7 +5085,7 @@ function attachSceneLLM(node) {
 
 function openSceneCivitaiSearch(node) {
     injectStyle();
-    return openCivitaiSearch({ node, api, activeGraph: () => app.graph, beginChange: beginSceneLLMChange, endChange: endSceneLLMChange,
+    return openCivitaiSearch({ node, api, activeGraph: () => app.graph, beginChange: beginSceneGraphChange, endChange: endSceneGraphChange,
         refresh: (target) => { syncSceneLoraSelectLabel(target); clearSceneComputedCaches(target); refreshDownstreamSceneNodes(target); } });
 }
 
@@ -6206,7 +6223,7 @@ function writeMatrixState(node, state, options = {}) {
         refreshNode(node, { fitHeight: !!options.fitHeight });
     }
     refreshDownstreamSceneNodes(node);
-    app.graph?.change?.();
+    node.graph?.change?.();
 }
 
 function installScenePromptWidgetSyncHandlers(node) {
@@ -11473,12 +11490,15 @@ function matrixLineDraftState(drafts) {
 }
 
 function commitMatrixLineDrafts(node, drafts) {
+    if (!sceneNodeHasCurrentOwner(node)) return false;
     const nextState = matrixLineDraftState(drafts);
     if (serializeMatrixState(readMatrixState(node)) === serializeMatrixState(nextState)) {
         return false;
     }
-    writeMatrixState(node, nextState, { fitHeight: true });
-    return true;
+    return withSceneUserChange(node, () => {
+        writeMatrixState(node, nextState, { fitHeight: true });
+        return true;
+    });
 }
 
 function ensureSceneFilenameToggle(node) {

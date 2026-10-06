@@ -1070,6 +1070,7 @@ try {
             linkTargetSlot: window.app.graph.links[211].target_slot,
         };
         window.__sceneLoraTestNode = applyLora;
+        window.app.graph._nodes.push(applyLora);
         window.__scenePromptTestNode = node;
         node.widgets.find((widget) => widget.sceneRole === "positive_open").callback();
     });
@@ -2108,7 +2109,7 @@ try {
     await page.evaluate(async () => {
         class ScenePresetReferenceNode {
             constructor() {
-                this.id = 2;
+                this.id = 5;
                 this.type = "ScenePresetReference";
                 this.comfyClass = "ScenePresetReference";
                 this.size = [300, 180];

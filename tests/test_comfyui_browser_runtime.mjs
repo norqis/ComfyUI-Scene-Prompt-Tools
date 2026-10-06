@@ -261,6 +261,7 @@ window.__sceneSeedRuntimeTest = {
     sourceKey(node) { return scenePromptSourceCacheKey(node); },
     latentConfig(node) { return sceneEmptyLatentConfig(node); },
     matrixState(node) { return readMatrixState(node); },
+    commitMatrixDrafts(node, drafts) { return commitMatrixLineDrafts(node, drafts); },
     async presetAdapter(definition) { const { createPresetGraph } = await import("./scene_llm_presets.js"); return createPresetGraph(definition, app.graph); },
     async splicePresetLoras(graph, id, candidates) {
         const { insertLoras } = await import("./scene_prompt_llm.js");
@@ -269,6 +270,9 @@ window.__sceneSeedRuntimeTest = {
     countPreview(node) { return sceneSchedulePrefix(sceneScheduleForNode(node), 40).map(entry => entry.parts.join("")); },
     presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
+    openCandidatePicker(id) { return openPromptCandidatePopup(app.graph.getNodeById(id), ["Modal Undo Runtime"], { stateWidgetName: "positive_json" }); },
+    reloadCandidateItems() { return loadPromptItems(true); },
+    writeSelection(node, state) { return writeState(node, state, { stateWidgetName: "positive_json" }); },
     async refreshPresetReference(node) { await loadScenePresetList(true); refreshScenePresetReference(node); },
     async openFavoritePicker(favorites = false) {
         const node = window.LiteGraph.createNode("ScenePrompter");
@@ -1653,12 +1657,19 @@ window.__sceneSeedRuntimeTest = {
         const seed=add('ScenePrompter'),matrix=add('SceneMatrix'),expand=add('ScenePrompterExpand');
         seed.connect(0,matrix,matrix.inputs.findIndex(input=>input.name==='scene_prompt'));
         matrix.connect(0,expand,expand.inputs.findIndex(input=>input.name==='scene_prompt'));
+        window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
         matrix.widgets.find(widget=>widget.sceneRole==='matrix_rows').callback();
         return {matrix:matrix.id,expand:expand.id};
     });
     await page.getByRole('button',{name:'行を追加',exact:true}).click();
     await page.getByRole('button',{name:'行を追加',exact:true}).click();
     await page.getByPlaceholder('名前').nth(0).fill('Native One'); await page.getByPlaceholder('名前').nth(1).fill('Native Two');
+    await page.getByRole('button',{name:'ポジティブ候補',exact:true}).nth(0).click();
+    await page.getByPlaceholder('ポジティブ基本文').fill('(native prompt:1.25)');
+    await page.locator('.pc-popup').last().getByRole('button',{name:'閉じる',exact:true}).click();
+    await page.getByRole('button',{name:'ネガティブ候補',exact:true}).nth(1).click();
+    await page.getByPlaceholder('ネガティブ基本文').fill('(native exclusion:.5)');
+    await page.locator('.pc-popup').last().getByRole('button',{name:'閉じる',exact:true}).click();
     const matrixPopupBounds=await page.locator('.pc-popup').last().evaluate(element=>{
         const rect=element.getBoundingClientRect();return {left:rect.left,right:rect.right,viewport:innerWidth};
     });
@@ -1668,22 +1679,22 @@ window.__sceneSeedRuntimeTest = {
         await new Promise(done=>setTimeout(done,150)); const node=window.app.graph.getNodeById(ids.matrix);
         const widget=node.widgets.find(widget=>widget.name==='matrix_json');
         window.app.canvas.draw(true,true);
-        return { names:window.__sceneSeedRuntimeTest.matrixState(node).sets.map(row=>row.name),
+        const lines=window.__sceneSeedRuntimeTest.matrixState(node).sets;
+        const api=await window.app.graphToPrompt();
+        return { names:lines.map(row=>row.name), lines,
             total:window.__sceneSeedRuntimeTest.countStats(node).total,
+            api:api.output[String(ids.matrix)].inputs.matrix_json,
             raw:[widget.value,node.properties.scene_matrix_json,node.widgets_values[node.widgets.indexOf(widget)]] };
     },nativeMatrixIds);
     const matrixEdited=await matrixSnapshot(); assert.deepEqual(matrixEdited.names,['Native One','Native Two']); assert.equal(matrixEdited.total,2);
+    assert.equal(matrixEdited.lines[0].positive_base,'(native prompt:1.25)');
+    assert.equal(matrixEdited.lines[1].negative_base,'(native exclusion:.5)');
     assert(matrixEdited.raw.every(value=>value===matrixEdited.raw[0]));
     await page.evaluate(ids=>{
-        window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
         window.app.graph.getNodeById(ids.matrix).widgets.find(widget=>widget.sceneRole==='matrix_rows').callback();
     },nativeMatrixIds);
-    // Record each DOM edit in native history before checking restored cache state.
-    for (let index=0;index<2;index++) {
-        await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().beforeChange());
-        await page.getByRole('button',{name:'削除',exact:true}).nth(0).click();
-        await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().afterChange());
-    }
+    await page.getByRole('button',{name:'削除',exact:true}).nth(0).click();
+    await page.getByRole('button',{name:'削除',exact:true}).nth(0).click();
     await page.locator('.pc-popup').last().getByRole('button',{name:'閉じる',exact:true}).click();
     const matrixEmpty=await matrixSnapshot(); assert.deepEqual(matrixEmpty.names,[]); assert.equal(matrixEmpty.total,1);
     assert(matrixEmpty.raw.every(value=>value===matrixEmpty.raw[0]));
@@ -1691,6 +1702,8 @@ window.__sceneSeedRuntimeTest = {
     const matrixPartialUndo=await matrixSnapshot(); assert.deepEqual(matrixPartialUndo.names,['Native Two']); assert.equal(matrixPartialUndo.total,1);
     await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undo());
     const matrixUndone=await matrixSnapshot(); assert.deepEqual(matrixUndone.names,['Native One','Native Two']); assert.equal(matrixUndone.total,2);
+    assert.deepEqual(matrixUndone.lines,matrixEdited.lines);
+    assert(matrixUndone.raw.every(value=>value===matrixUndone.raw[0]));
     await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());
     const matrixPartialRedo=await matrixSnapshot(); assert.deepEqual(matrixPartialRedo.names,['Native Two']); assert.equal(matrixPartialRedo.total,1);
     await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());
@@ -1698,7 +1711,80 @@ window.__sceneSeedRuntimeTest = {
     await page.evaluate(async()=>{const app=window.app;await app.loadGraphData(app.graph.serialize(),true,true);});
     const matrixReloaded=await matrixSnapshot(); assert.deepEqual(matrixReloaded.names,[]); assert.equal(matrixReloaded.total,1);
     assert(matrixReloaded.raw.every(value=>value===matrixReloaded.raw[0]));
-    console.log('real ComfyUI Matrix recorded-state Undo/Redo and workflow reload preserve synchronized state and counts without deleted-row revival');
+    const staleMatrix=await page.evaluate(async({ids,drafts})=>{
+        const app=window.app,oldNode=app.graph.getNodeById(ids.matrix);
+        await app.loadGraphData(JSON.parse(JSON.stringify(app.graph.serialize())),true,true);
+        const current=app.graph.getNodeById(ids.matrix),tracker=window.__sceneSeedRuntimeTest.tracker();
+        const raw=()=>{const widget=current.widgets.find(w=>w.name==='matrix_json');return [widget.value,current.properties.scene_matrix_json,current.widgets_values[current.widgets.indexOf(widget)]];};
+        const before=raw(),history=tracker.undoQueue.length;
+        const committed=window.__sceneSeedRuntimeTest.commitMatrixDrafts(oldNode,drafts);
+        return {sameNode:oldNode===current,committed,before,after:raw(),history,afterHistory:tracker.undoQueue.length};
+    },{ids:nativeMatrixIds,drafts:matrixEdited.lines});
+    assert.equal(staleMatrix.sameNode,false);assert.equal(staleMatrix.committed,false);
+    assert.deepEqual(staleMatrix.after,staleMatrix.before);assert.equal(staleMatrix.afterHistory,staleMatrix.history);
+    const matrixAfterStale=await matrixSnapshot();assert.deepEqual(matrixAfterStale.raw,matrixReloaded.raw);
+    assert.equal(matrixAfterStale.api,matrixReloaded.api);assert.equal(matrixAfterStale.total,1);
+    const matrixNoopHistory=await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undoQueue.length);
+    await page.evaluate(ids=>window.app.graph.getNodeById(ids.matrix).widgets.find(widget=>widget.sceneRole==='matrix_rows').callback(),nativeMatrixIds);
+    await page.locator('.pc-popup').last().getByRole('button',{name:'閉じる',exact:true}).click();
+    assert.equal(await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undoQueue.length),matrixNoopHistory);
+    console.log('real ComfyUI Matrix ordinary DOM edit/close/delete-all Undo/Redo and reload preserve fields, weights, synchronized state and counts; unchanged close adds no history');
+
+    await page.evaluate(async()=>{
+        const response=await fetch('/scene_prompt/items',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({category:'Modal Undo Runtime',name:'Runtime modal candidate',prompt:'modal prompt',description:'Isolated undo fixture'})});
+        if (!response.ok) throw new Error(await response.text());
+        await window.__sceneSeedRuntimeTest.reloadCandidateItems();
+    });
+    const modalCandidateId=await page.evaluate(()=>{
+        const app=window.app;app.graph.clear();const node=window.LiteGraph.createNode('ScenePrompter');app.graph.add(node);
+        window.__sceneSeedRuntimeTest.tracker().captureCanvasState();return node.id;
+    });
+    const openModalCandidate=()=>page.evaluate(id=>window.__sceneSeedRuntimeTest.openCandidatePicker(id),modalCandidateId);
+    const closeModalCandidate=()=>page.locator('.pc-popup').last().getByRole('button',{name:'閉じる',exact:true}).click();
+    const modalCandidateSnapshot=()=>page.evaluate(async id=>{
+        await new Promise(done=>setTimeout(done,100));const node=window.app.graph.getNodeById(id),widget=node.widgets.find(widget=>widget.name==='positive_json');
+        const state=JSON.parse(widget.value), api=await window.app.graphToPrompt();
+        return {items:Object.values(state.categories).flat(),raw:widget.value,stored:node.widgets_values[node.widgets.indexOf(widget)],
+            api:api.output[String(id)].inputs.positive_json,history:window.__sceneSeedRuntimeTest.tracker().undoQueue.length};
+    },modalCandidateId);
+    await openModalCandidate();
+    await page.locator('.pc-popup .pc-candidate input[type="checkbox"]').check();await closeModalCandidate();
+    const modalSelected=await modalCandidateSnapshot();assert.equal(modalSelected.items.length,1);assert.equal(modalSelected.items[0].weight,undefined);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undo());assert.equal((await modalCandidateSnapshot()).items.length,0);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());assert.equal((await modalCandidateSnapshot()).items.length,1);
+    await openModalCandidate();await page.locator('.pc-popup .pc-weight-input').fill('1.35');await page.locator('.pc-popup .pc-weight-input').press('Tab');await closeModalCandidate();
+    const modalWeighted=await modalCandidateSnapshot();assert.equal(modalWeighted.items[0].weight,1.35);
+    assert.equal(modalWeighted.raw,modalWeighted.stored);assert.equal(modalWeighted.raw,modalWeighted.api);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undo());assert.equal((await modalCandidateSnapshot()).items[0].weight,undefined);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());assert.equal((await modalCandidateSnapshot()).items[0].weight,1.35);
+    await page.evaluate(async()=>window.app.loadGraphData(window.app.graph.serialize(),true,true));
+    assert.equal((await modalCandidateSnapshot()).items[0].weight,1.35);
+    await openModalCandidate();await page.locator('.pc-popup .pc-candidate input[type="checkbox"]').uncheck();await closeModalCandidate();
+    assert.equal((await modalCandidateSnapshot()).items.length,0);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undo());assert.equal((await modalCandidateSnapshot()).items[0].weight,1.35);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());assert.equal((await modalCandidateSnapshot()).items.length,0);
+    await openModalCandidate();await page.locator('.pc-popup .pc-candidate input[type="checkbox"]').check();await closeModalCandidate();
+    await openModalCandidate();await page.getByRole('button',{name:'選択クリア',exact:true}).click();await closeModalCandidate();
+    assert.equal((await modalCandidateSnapshot()).items.length,0);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undo());assert.equal((await modalCandidateSnapshot()).items.length,1);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());assert.equal((await modalCandidateSnapshot()).items.length,0);
+    const modalNoop=await modalCandidateSnapshot();
+    await openModalCandidate();await page.getByRole('button',{name:'選択クリア',exact:true}).click();await closeModalCandidate();
+    assert.equal((await modalCandidateSnapshot()).history,modalNoop.history);
+    const inactiveCandidate=await page.evaluate(async({id,state})=>{
+        const oldNode=window.app.graph.getNodeById(id);
+        await window.app.loadGraphData(JSON.parse(JSON.stringify(window.app.graph.serialize())),true,true);
+        const tracker=window.__sceneSeedRuntimeTest.tracker(),history=tracker.undoQueue.length;
+        const current=window.app.graph.getNodeById(id),oldRaw=oldNode.widgets.find(widget=>widget.name==='positive_json').value;
+        const committed=window.__sceneSeedRuntimeTest.writeSelection(oldNode,state);
+        return {sameNode:oldNode===current,committed,history,after:tracker.undoQueue.length,beforeRaw:oldRaw,oldRaw:oldNode.widgets.find(widget=>widget.name==='positive_json').value};
+    },{id:modalCandidateId,state:JSON.parse(modalSelected.raw)});
+    assert.equal(inactiveCandidate.sameNode,false);assert.equal(inactiveCandidate.committed,false);
+    assert.equal(inactiveCandidate.after,inactiveCandidate.history);assert.equal(inactiveCandidate.oldRaw,inactiveCandidate.beforeRaw);
+    const modalAfterStale=await modalCandidateSnapshot();assert.equal(modalAfterStale.items.length,0);
+    assert.equal(modalAfterStale.raw,modalNoop.raw);assert.equal(modalAfterStale.stored,modalNoop.stored);assert.equal(modalAfterStale.api,modalNoop.api);
+    console.log('real ComfyUI candidate ordinary check/uncheck/weight/clear Undo/Redo and reload preserve selection; no-op and removed-owner edits add no active history');
 
     failNextGeneration = true;
     const presetLLMRuntime = await page.evaluate(async () => {

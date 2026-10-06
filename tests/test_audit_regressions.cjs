@@ -327,17 +327,21 @@ function testMatrixCommitWritesWholeDraftOnlyWhenChanged() {
         serializeMatrixState: JSON.stringify,
         current: { version: 1, sets: [original] },
         writes: 0,
+        withSceneUserChange: (_node, commit) => commit(),
         readMatrixState: () => context.current,
         writeMatrixState(_node, value) {
             context.writes += 1;
             context.current = value;
         },
     };
+    const node = { id: 1 };
+    node.graph = { getNodeById: id => id === node.id ? node : null };
     vm.createContext(context);
+    vm.runInContext(functionSource("sceneNodeHasCurrentOwner"), context);
     vm.runInContext(functionSource("commitMatrixLineDrafts"), context);
-    assert.equal(context.commitMatrixLineDrafts({}, [original]), false);
+    assert.equal(context.commitMatrixLineDrafts(node, [original]), false);
     assert.equal(context.writes, 0);
-    assert.equal(context.commitMatrixLineDrafts({}, [{ ...original, name: "Changed", enabled: false }]), true);
+    assert.equal(context.commitMatrixLineDrafts(node, [{ ...original, name: "Changed", enabled: false }]), true);
     assert.equal(context.writes, 1);
     assert.equal(context.current.sets[0].name, "Changed");
     assert.equal(context.current.sets[0].enabled, false);
@@ -354,6 +358,67 @@ function testMatrixEmptyNameUsesDefaultOnCommit() {
     const state = context.matrixLineDraftState([{ row_id: "row-a", name: "   ", path_label: "old" }]);
     assert.equal(state.sets[0].name, "行 1");
     assert.equal(state.sets[0].path_label, "行 1");
+}
+
+function testModalCommitsUseOnlyTheirActiveOwner() {
+    const events = [], nodes = new Map();
+    const graph = { getNodeById: id => nodes.get(id), beforeChange() { events.push("graph-before"); },
+        afterChange() { events.push("graph-after"); }, change() { events.push("owner-change"); } };
+    const canvas = { graph, emitBeforeChange() { events.push("canvas-before"); }, emitAfterChange() { events.push("canvas-after"); } };
+    const context = { JSON, Array, Object, app: { graph, canvas },
+        findWidget: (node, name) => node.widgets.find(widget => widget.name === name),
+        activeStateWidgetName: () => "positive_json", setActiveStateWidget() {},
+        matrixLineDraftContextFor: node => node.draft ? { draft: node.draft, side: "positive" } : null,
+        writeMatrixLineDraftSelectionState(draft, _side, state) { draft.state = state; },
+        notifyWidgetChanged() { events.push("write"); if (context.failWrite) throw new Error("Write failed"); },
+        clearSceneComputedCaches() {}, refreshNode() {}, refreshDownstreamSceneNodes() {}, scheduleFitHeight() {},
+        isScenePromptNode: () => false, isSceneApplyLoraNode: () => false,
+        serializeMatrixState: JSON.stringify, matrixLineDraftState: sets => ({ version: 1, sets }),
+        readMatrixState: node => node.matrix,
+        writeMatrixState(node, state) { events.push("matrix-write"); node.matrix = state; },
+    };
+    vm.createContext(context);
+    for (const name of ["beginSceneGraphChange", "endSceneGraphChange", "sceneNodeHasCurrentOwner", "withSceneUserChange", "writeStateToWidget", "writeState", "commitMatrixLineDrafts"])
+        vm.runInContext(functionSource(name), context);
+    const empty = { version: 1, categories: {} }, selected = { version: 1, categories: { Test: [{ id: "a", weight: 1.25 }] } };
+    const node = { id: 1, graph, widgets: [{ name: "positive_json", value: JSON.stringify(empty) }], widgets_values: [] };
+    nodes.set(node.id, node);
+    context.writeState(node, selected);
+    assert.deepEqual(events.splice(0), ["graph-before", "canvas-before", "write", "owner-change", "graph-after", "canvas-after"]);
+    assert.equal(node.widgets_values[0], JSON.stringify(selected));
+    context.writeState(node, selected); assert.deepEqual(events, [], "unchanged blur/close does not enter native history");
+    node.draft = {}; context.writeState(node, empty);
+    assert.deepEqual(node.draft.state, empty); assert.deepEqual(events, [], "Matrix selection remains a draft until its existing commit boundary");
+    assert.equal(node.widgets[0].value, JSON.stringify(selected)); delete node.draft;
+    node.matrix = { version: 1, sets: [] };
+    assert.equal(context.commitMatrixLineDrafts(node, []), false); assert.deepEqual(events, []);
+    assert.equal(context.commitMatrixLineDrafts(node, [{ name: "Edited", positive_base: "prompt" }]), true);
+    assert.deepEqual(events.splice(0), ["graph-before", "canvas-before", "matrix-write", "graph-after", "canvas-after"]);
+    assert.equal(context.commitMatrixLineDrafts(node, node.matrix.sets), false); assert.deepEqual(events, []);
+    const otherGraph = { getNodeById: () => node, change() { events.push("inactive-change"); } };
+    node.graph = otherGraph; context.writeState(node, empty);
+    assert.deepEqual(events.splice(0), ["write", "inactive-change"], "inactive owners never notify the active graph/canvas");
+    node.graph = graph; nodes.set(node.id, { id: node.id }); context.writeState(node, selected);
+    assert.deepEqual(events, [], "same-ID replacement nodes reject the old owner's commit entirely");
+    assert.equal(node.widgets[0].value, JSON.stringify(empty));
+    const matrixBuilder = context.matrixLineDraftState, matrixReader = context.readMatrixState;
+    context.matrixLineDraftState = context.readMatrixState = () => { throw new Error("Stale normalization must not run"); };
+    assert.equal(context.commitMatrixLineDrafts(node, []), false);
+    node.graph = null; assert.equal(context.withSceneUserChange(node, () => { throw new Error("Graph-less commit must not run"); }), false);
+    assert.equal(context.commitMatrixLineDrafts(node, []), false);
+    context.matrixLineDraftState = matrixBuilder; context.readMatrixState = matrixReader; node.graph = graph;
+    nodes.set(node.id, node); canvas.graph = otherGraph; context.writeState(node, selected);
+    assert.deepEqual(events.splice(0), ["write", "owner-change"], "a different displayed canvas graph receives no transaction");
+    canvas.graph = graph; context.failWrite = true;
+    assert.throws(() => context.writeState(node, empty), /Write failed/);
+    assert.deepEqual(events.splice(0), ["graph-before", "canvas-before", "write", "graph-after", "canvas-after"]);
+    context.failWrite = false;
+    context.withSceneUserChange(node, () => { context.app.canvas = { graph: otherGraph }; context.app.graph = otherGraph; });
+    assert.deepEqual(events.splice(0), ["graph-before", "canvas-before", "graph-after", "canvas-after"], "synchronous transaction ends on its captured owner/canvas");
+    context.app.graph = graph; context.app.canvas = canvas;
+    graph.afterChange = () => { events.push("graph-after"); throw new Error("Graph end failed"); };
+    assert.throws(() => context.withSceneUserChange(node, () => {}), /Graph end failed/);
+    assert.deepEqual(events.splice(0), ["graph-before", "canvas-before", "graph-after", "canvas-after"], "canvas end remains balanced when graph end throws");
 }
 
 function testMatrixStateUsesFirstValidStoredValue() {
@@ -1002,6 +1067,7 @@ Promise.resolve()
     .then(testNodeRemovalCancelsItsRun)
     .then(testMatrixCommitWritesWholeDraftOnlyWhenChanged)
     .then(testMatrixEmptyNameUsesDefaultOnCommit)
+    .then(testModalCommitsUseOnlyTheirActiveOwner)
     .then(testMatrixStateUsesFirstValidStoredValue)
     .then(testSourceOwnershipBoundaries)
     .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)

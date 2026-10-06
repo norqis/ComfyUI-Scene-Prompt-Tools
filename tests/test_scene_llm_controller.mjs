@@ -212,10 +212,10 @@ for (const outcome of ["success", "error", "stale-root", "stale-target", "retry"
 }
 {
     const source = await readFile(new URL("../web/scene_prompt_ui.js", import.meta.url), "utf8");
-    const start = source.indexOf("function endSceneLLMChange(");
+    const start = source.indexOf("function endSceneGraphChange(");
     const snippet = source.slice(start, source.indexOf("\nconst sceneGPUController", start));
     let completed = 0;
-    assert.throws(() => vm.runInNewContext(`${snippet}; endSceneLLMChange(graph);`, {
+    assert.throws(() => vm.runInNewContext(`${snippet}; endSceneGraphChange(graph);`, {
         graph: { afterChange() { throw new Error("Graph callback failed"); } }, app: { canvas: { emitAfterChange() { completed++; } } },
     }), /Graph callback failed/);
     assert.equal(completed, 1, "native ChangeTracker transaction closes even when graph callbacks fail");
