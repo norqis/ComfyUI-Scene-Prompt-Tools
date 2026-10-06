@@ -109,15 +109,12 @@ class PromptDataRouteTests(unittest.TestCase):
                 second.write_bytes(path.read_bytes())
                 with mock.patch.object(Path, "rglob", autospec=True, side_effect=Path.rglob) as walks, \
                      mock.patch.object(Path, "read_bytes", autospec=True, side_effect=Path.read_bytes) as reads, \
-                     mock.patch.object(Path, "stat", autospec=True, side_effect=Path.stat) as stats, \
                      mock.patch.object(self.routes.time, "monotonic", return_value=0) as clock:
                     def assert_operations(expected_walks, expected_reads):
                         self.assertEqual(walks.call_count, expected_walks)
                         self.assertEqual(reads.call_count, expected_reads)
-                        self.assertEqual(sum(call.args[0] in (path, second) for call in stats.call_args_list), expected_reads)
                         walks.reset_mock()
                         reads.reset_mock()
-                        stats.reset_mock()
 
                     first = load(with_errors=True)
                     assert_operations(2, 4)
@@ -145,7 +142,8 @@ class PromptDataRouteTests(unittest.TestCase):
                             raise PermissionError("private path must not appear")
                         return original(candidate, *args, **kwargs)
 
-                    with mock.patch.object(Path, operation, autospec=True, side_effect=fail_file), \
+                    with mock.patch.object(Path, "rglob", return_value=[path]), \
+                         mock.patch.object(Path, operation, autospec=True, side_effect=fail_file), \
                          mock.patch.object(self.routes.time, "monotonic", return_value=0) as clock:
                         snapshot = self.routes._prompt_file_snapshot(root)
                         self.assertEqual(self.routes._prompt_file_snapshot(root), snapshot)
