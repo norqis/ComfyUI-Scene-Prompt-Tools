@@ -377,7 +377,7 @@ def _validate_workflow_nodes(workflow, api_nodes):
             raise ScenePresetError(f"編集用ワークフローのノードID #{normalized_id} が重複しています。")
         workflow_by_id.add(normalized_id)
         if normalized_id not in api_by_id:
-            if node_type not in SAFE_NODE_CLASSES and node_type not in BOUNDARY_CLASSES:
+            if node_type not in SAFE_NODE_CLASSES and node_type not in BOUNDARY_CLASSES and node_type not in {"ComfySwitchNode", "PrimitiveBoolean"}:
                 raise ScenePresetError(
                     f"編集用ワークフローの {node_type} #{node_id} はPreset内で使えません。"
                 )

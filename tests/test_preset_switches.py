@@ -411,6 +411,41 @@ class PresetSwitchTests(unittest.TestCase):
         self.assertFalse(self.module._preset_path("invalid-off").exists())
         self.assertEqual(nodes["1"]["inputs"]["switch_values"], {"values": [True] * 10})
 
+    def test_save_load_retains_bypassed_and_muted_switch_with_physical_boolean_control(self):
+        for mode, total in ((4, 2), (2, 1)):
+            with self.subTest(mode=mode):
+                nodes = basic_nodes()
+                nodes["4"] = node("ScenePrompterQueue", scene_prompt1=["2", 0])
+                if mode == 4:
+                    nodes["4"]["inputs"]["scene_prompt2"] = ["1", 0]
+                nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+                choice = self.preset(f"physical-{mode}", nodes)
+                visual = choice["workflow"]
+                queue = next(item for item in visual["nodes"] if item["id"] == 4)
+                if len(queue["inputs"]) == 1:
+                    queue["inputs"].append({"name": "scene_prompt2", "type": "SCENE_PROMPT", "link": None})
+                switch = workflow_node("8", "ComfySwitchNode", [100, 0], ("switch", "on_false", "on_true"))
+                switch["mode"] = mode
+                switch["inputs"][0]["type"] = "BOOLEAN"
+                boolean = workflow_node("9", "PrimitiveBoolean", [0, 0])
+                boolean["widgets_values"] = [True]
+                boolean["outputs"][0]["type"] = "BOOLEAN"
+                visual["nodes"].extend([switch, boolean])
+                visual["links"] = [link for link in visual["links"] if not (link[3] == 4 and link[4] == 1)]
+                visual["links"].extend([[10, 9, 0, 8, 0, "BOOLEAN"], [11, 1, 0, 8, 1, "SCENE_PROMPT"],
+                                        [12, 1, 0, 8, 2, "SCENE_PROMPT"], [13, 8, 0, 4, 1, "SCENE_PROMPT"]])
+                self.module.save_preset({"preset_id": f"physical-{mode}", "output_node_id": "3",
+                                        "api_graph": choice["api_graph"], "workflow": visual})
+                saved = self.module.load_preset(f"physical-{mode}")
+                physical = {item["id"]: item for item in saved["workflow"]["nodes"]}
+                self.assertEqual(physical[8]["mode"], mode)
+                self.assertEqual(physical[9]["widgets_values"], [True])
+                self.assertIn([10, 9, 0, 8, 0, "BOOLEAN"], saved["workflow"]["links"])
+                self.assertIn([13, 8, 0, 4, 1, "SCENE_PROMPT"], saved["workflow"]["links"])
+                self.assertNotIn("8", saved["api_graph"]["output"])
+                self.assertNotIn("9", saved["api_graph"]["output"])
+                self.assertEqual(self.evaluate(saved)["stats"]["total_images"], total)
+
 
 if __name__ == "__main__":
     unittest.main()
