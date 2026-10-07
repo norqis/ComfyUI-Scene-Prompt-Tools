@@ -911,20 +911,25 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
             switch_outputs[switch_id] = output
     replacements.update({node_id: link for node_id, link in switch_outputs.items() if link is not None})
 
-    def upstream_link(node_id, seen=None):
-        if node_id in replacements:
-            return replacements[node_id]
-        seen = set() if seen is None else seen
-        if node_id in seen:
-            return None
-        seen.add(node_id)
-        links = _scene_prompt_input_links(prompt, node_id)
-        if not links:
-            replacements[node_id] = None
-            return None
-        _name, source_id, output_index = links[0]
-        replacement = upstream_link(source_id, seen) if source_id in superseded else [source_id, output_index]
-        replacements[node_id] = replacement
+    def upstream_link(node_id):
+        current_id, path, seen = node_id, [], set()
+        replacement = None
+        while current_id not in seen:
+            if current_id in replacements:
+                replacement = replacements[current_id]
+                break
+            seen.add(current_id)
+            path.append(current_id)
+            links = _scene_prompt_input_links(prompt, current_id)
+            if not links:
+                break
+            _name, source_id, output_index = links[0]
+            if source_id not in superseded:
+                replacement = [source_id, output_index]
+                break
+            current_id = source_id
+        for source_id in path:
+            replacements[source_id] = replacement
         return replacement
 
     for node_id in superseded:

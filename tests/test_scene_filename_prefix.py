@@ -1538,6 +1538,29 @@ class SceneFilenamePrefixTests(unittest.TestCase):
             self.assertIn(str(link[1]), saved_prompt)
             self.assertIn(str(link[3]), saved_prompt)
 
+    def test_generation_path_metadata_contracts_deep_actual_model_chain(self):
+        prompt = {"base": {"class_type": "ScenePrompter", "inputs": {}},
+                  "loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}}
+        # Visit the deep tail first regardless of the process hash seed, so an
+        # earlier shallow contraction cannot hide recursive traversal.
+        model_ids = list(set(f"model{i}" for i in range(1500)) - set())[::-1] + ["final_model"]
+        selected, plan = ["base"], None
+        for node_id in model_ids:
+            prompt[node_id] = {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": [selected[-1], 0], "model": ["loader", 0], "clip": ["loader", 1], "vae": ["loader", 2]}}
+            plan = self.nodes.SceneApplyModel().apply_model(
+                ["loader", 0], ["loader", 1], ["loader", 2], plan, unique_id=node_id)[0]
+            selected.append(node_id)
+        self.assertEqual(plan["stats"]["total_batches"], 1)
+        self.assertEqual(plan["stats"]["total_images"], 1)
+        prompt["expand"] = {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["final_model", 0]}}
+        prompt["save"] = {"class_type": "SceneSaveImage", "inputs": {"scene_info": ["expand", 2]}}
+        saved, _ = self.nodes._metadata_for_save_mode(
+            prompt, None, "save", self.nodes.SAVE_METADATA_EXECUTION_PATH, {"source_node_ids": [*selected, "expand"]})
+        self.assertEqual(set(saved), {"base", "loader", "final_model", "expand", "save"})
+        self.assertEqual(saved["final_model"]["inputs"]["scene_prompt"], ["base", 0])
+        self.assertEqual(prompt["final_model"]["inputs"]["scene_prompt"], [model_ids[-2], 0])
+
     def test_generation_path_metadata_contracts_models_behind_merge_and_queue(self):
         prompt = {
             "left": {"class_type": "ScenePrompter", "inputs": {}},
