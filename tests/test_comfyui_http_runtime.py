@@ -1122,6 +1122,53 @@ NODE_CLASS_MAPPINGS = {
                     self._queue_and_wait(graph)
                     self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], prompt_text)
 
+    def test_compact_matrix_merge_counts_and_selected_png_replay(self):
+        from PIL import Image
+        marker = self.base / "compact-row-results.json"
+        graph = {}
+        for node_id, name, count in ((1, "alpha", 2), (3, "beta", 3), (7, "gamma", 2), (9, "delta", 1)):
+            graph[str(node_id)] = {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": name}}
+            graph[str(node_id + 1)] = {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": [str(node_id), 0], "count": count}}
+        for node_id, first, second in ((5, 2, 4), (11, 8, 10)):
+            graph[str(node_id)] = {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": [str(first), 0], "scene_prompt2": [str(second), 0]}}
+        for node_id, upstream, names in ((6, 5, ("x", "y")), (13, 12, ("u", "v"))):
+            graph[str(node_id)] = {"class_type": "SceneMatrix", "inputs": {"scene_prompt": [str(upstream), 0], "run_handle": "",
+                "matrix_json": json.dumps({"version": 1, "sets": [{"row_id": name, "name": name, "positive_base": name} for name in names]})}}
+        graph.update({
+            "12": {"class_type": "ScenePromptMerge", "inputs": {"scene_prompt1": ["6", 0], "scene_prompt2": ["11", 0]}},
+            "14": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["13", 0], "count": 2}},
+            "15": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["14", 0], "current_index": 0, "seed_base": 123, "timestamp_dir": False}},
+            "16": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "17": {"class_type": "TestSceneTextImage", "inputs": {"image": ["16", 0], "positive": ["15", 0], "negative": ["15", 1], "log_path": str(marker)}},
+            "18": {"class_type": "SceneSaveImage", "inputs": {"images": ["17", 0], "scene_info": ["15", 2], "path": "compact-rows", "metadata_mode": "生成経路ノードのみ"}},
+        })
+        expected = [f"{first}, {x}, {second}, {y}" for first, a_count in (("alpha", 2), ("beta", 3))
+                    for x in ("x", "y") for second, b_count in (("gamma", 2), ("delta", 1))
+                    for y in ("u", "v") for _ in range(a_count * b_count * 2)]
+        self.assertEqual(len(expected), 120)
+        prepared = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "expand_node_id": "15"})
+        self.assertEqual(prepared["total_batches"], len(expected))
+        self._request("/scene_prompt/runs/release", {"run_handle": prepared["run_handle"]})
+        handle, workflow = self._prepare_callback_run(graph, "15")
+        try:
+            for index in (0, 7, 49, 119):
+                with self.subTest(index=index):
+                    graph["15"]["inputs"]["current_index"] = index
+                    self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                    self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], expected[index])
+                    selected = max((self.base / "output" / "compact-rows").glob("*.png"), key=lambda path: path.stat().st_mtime_ns)
+                    with Image.open(selected) as image:
+                        replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                    replay["18"]["inputs"]["path"] = "compact-rows-replay"
+                    replay_handle, replay_workflow = self._prepare_callback_run(replay, "15", replay_workflow)
+                    try:
+                        self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], expected[index])
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
     def test_count_path_policy_native_order_preflight_and_selected_png_replay(self):
         from PIL import Image
         marker = self.base / "count-policy-results.json"

@@ -33,7 +33,10 @@ UNIT_KEYS = {
     "count_hold": {"unit"},
     "count_scale": {"unit", "factor"},
     "matrix_map": {"unit", "matrix_rows"},
+    "matrix_rows": {"unit", "matrix_rows"},
+    "row_repeat": {"unit", "factor"},
     "product": {"left", "right"},
+    "row_product": {"left", "right"},
     "map": {"unit", "operations"},
     "random_choice": {"gate_id", "weights", "inputs", "selected_arm"},
 }
@@ -55,14 +58,14 @@ class ScheduleUnit(dict):
             self.depth = 1 + data["plan"].depth
         elif kind in {"alternate", "random_choice"}:
             self.depth = 1 + max((plan.depth for plan in data["inputs"]), default=0)
-        elif kind == "product":
+        elif kind in {"product", "row_product"}:
             self.depth = 1 + max(data["left"].depth, data["right"].depth)
         else:
             self.depth = 1 + data["unit"].depth
         self.has_count_hold = kind == "count_hold" or (
             data["plan"].has_count_hold if kind == "sequence" else
             any(plan.has_count_hold for plan in data["inputs"]) if kind in {"alternate", "random_choice"} else
-            data["left"].has_count_hold or data["right"].has_count_hold if kind == "product" else
+            data["left"].has_count_hold or data["right"].has_count_hold if kind in {"product", "row_product"} else
             data["unit"].has_count_hold if "unit" in data else False)
         self.digest = _fingerprint(data)
 
@@ -112,7 +115,7 @@ def _fingerprint(value):
 
 
 def _unit(kind, **values):
-    if kind == "matrix_map":
+    if kind in {"matrix_map", "matrix_rows"}:
         values["matrix_rows"] = _clone_matrix_rows(values["matrix_rows"])
     elif kind == "map":
         values["operations"] = [_clone_operation(operation) for operation in values["operations"]]
@@ -141,7 +144,7 @@ def _unit_stats(unit):
         if not active or any(stats != active[0] for stats in active[1:]):
             raise ScenePlanError("Scene Prompt Random Route の各経路の生成件数が一致しません。")
         return dict(active[0])
-    if kind in {"repeat", "repeat_each"}:
+    if kind in {"repeat", "repeat_each", "row_repeat"}:
         stats = unit["unit"]["stats"]
         factor = _old._require_int(unit["factor"], "Scene Prompt repeat factor",
                                    1 if kind == "repeat_each" else 0, MAX_SAFE_INTEGER)
@@ -158,11 +161,11 @@ def _unit_stats(unit):
         values = tuple(stats[key] for key in _POLICY_KEYS) if factor == 1 else projection if factor == 0 else tuple(
             stats[key] + (factor - 1) * value for key, value in zip(_POLICY_KEYS, projection))
         return _stats(*values, stats["row_count"])
-    if kind == "matrix_map":
+    if kind in {"matrix_map", "matrix_rows"}:
         stats = unit["unit"]["stats"]
         length = len(unit["matrix_rows"])
         return _stats(*(_safe(stats[key] * length) for key in ("total_batches", "total_images", "unset_batches", "row_count")))
-    if kind == "product":
+    if kind in {"product", "row_product"}:
         left, right = unit["left"]["stats"], unit["right"]["stats"]
         lb, li, lu, lr = (left[key] for key in ("total_batches", "total_images", "unset_batches", "row_count"))
         rb, ri, ru, rr = (right[key] for key in ("total_batches", "total_images", "unset_batches", "row_count"))
@@ -214,7 +217,7 @@ def _unit_policy(unit):
     """Strict, legacy-fixed and free statistics, with unknown Random components."""
     kind = unit["kind"]
     total = tuple(unit["stats"][key] for key in _POLICY_KEYS)
-    if kind == "run":
+    if kind in {"run", "row_product"}:
         return _POLICY_ZERO, _POLICY_ZERO, total
     if kind == "sequence":
         return _plan_policy(unit["plan"])
@@ -243,8 +246,8 @@ def _unit_policy(unit):
             return child[0], _POLICY_ZERO, _POLICY_ZERO
         free = tuple(None if value is None else value * unit["factor"] for value in child[2])
         return child[0], child[1], free
-    if kind in {"repeat", "repeat_each", "matrix_map"}:
-        factor = len(unit["matrix_rows"]) if kind == "matrix_map" else unit["factor"]
+    if kind in {"repeat", "repeat_each", "matrix_map", "matrix_rows", "row_repeat"}:
+        factor = len(unit["matrix_rows"]) if kind in {"matrix_map", "matrix_rows"} else unit["factor"]
         return tuple(_POLICY_ZERO if factor == 0 else tuple(None if value is None else value * factor for value in part)
                      for part in child)
     if kind == "map":
@@ -363,10 +366,10 @@ def _validate_unit(value, depth, ancestors):
         selected = data["selected_arm"]
         if selected is not None and (type(selected) is not int or not 0 <= selected < 10):
             raise ScenePlanError("Scene Prompt Random Route の選択先が不正です。")
-    elif kind == "product":
+    elif kind in {"product", "row_product"}:
         data["left"] = _validate_plan(data["left"], depth + 1, ancestors)
         data["right"] = _validate_plan(data["right"], depth + 1, ancestors)
-    elif kind == "matrix_map":
+    elif kind in {"matrix_map", "matrix_rows"}:
         data["matrix_rows"] = _clone_matrix_rows(data["matrix_rows"])
         data["unit"] = _validate_unit(data["unit"], depth + 1, ancestors)
     elif kind == "map":
@@ -379,6 +382,10 @@ def _validate_unit(value, depth, ancestors):
     else:
         data["unit"] = _validate_unit(data["unit"], depth + 1, ancestors)
     ancestors.remove(id(value))
+    if kind == "row_product" and any(_contains_composite(child) for side in ("left", "right") for child in data[side]["units"]):
+        raise ScenePlanError("A row product requires contiguous Scene Prompt rows.")
+    if kind in {"matrix_rows", "row_repeat"} and _contains_composite(data["unit"]):
+        raise ScenePlanError("A row operation requires contiguous Scene Prompt rows.")
     expected = _unit(kind, **data)
     if expected["stats"] != value["stats"]:
         raise ScenePlanError("Scene Prompt schedule unit statistics are invalid.")
@@ -617,11 +624,14 @@ def transform(plan, transform_row=None, *, latent=None, operation=None):
         fixed = unit["kind"] in {"count_fixed", "count_hold"}
         child = unit["unit"] if fixed else unit
         simple = _unwrap_run(child)
-        if simple is None:
+        if simple is None and _contains_composite(child):
             raise ScenePlanError("A composite Scene Prompt transform needs a named operation.")
-        row = _old._clone_row(transform_row(copy.deepcopy(simple["row"]), {"row": copy.deepcopy(simple["row"]), "count": simple["count"]}))
-        result = _unit("run", row=row, count=simple["count"])
-        units.append(_unit(unit["kind"], unit=result) if fixed else result)
+        # Arbitrary callables are a compatibility path; runtime nodes use named
+        # operations so Matrix combinations remain lazy throughout preparation.
+        for item in [simple] if simple is not None else legacy_rows(_plan([child])):
+            row = _old._clone_row(transform_row(copy.deepcopy(item["row"]), {"row": copy.deepcopy(item["row"]), "count": item["count"]}))
+            result = _unit("run", row=row, count=item["count"])
+            units.append(_unit(unit["kind"], unit=result) if fixed else result)
     return _plan(units, source["sources"], source["contains_queue_boundary"], source["random_guards"])
 
 
@@ -656,6 +666,10 @@ def _repeat(unit, factor):
         return unit
     if unit["kind"] == "run":
         return _unit("run", row=unit["row"], count=_safe(unit["count"] * factor))
+    if not _contains_composite(unit) and unit["kind"] != "count_fixed":
+        if unit["kind"] == "row_repeat":
+            return _unit("row_repeat", unit=unit["unit"], factor=_safe(unit["factor"] * factor))
+        return _unit("row_repeat", unit=unit, factor=factor)
     if unit["kind"] == "repeat":
         return _unit("repeat", unit=unit["unit"], factor=_safe(unit["factor"] * factor))
     return _unit("repeat", unit=unit, factor=factor)
@@ -698,7 +712,7 @@ def _contains_composite(unit):
     kind = unit["kind"]
     if kind in {"alternate", "sequence", "repeat_each", "random_choice", "count_hold", "count_scale"}:
         return True
-    if kind == "product":
+    if kind in {"product", "row_product"}:
         return any(_contains_composite(subunit) for plan in (unit["left"], unit["right"]) for subunit in plan["units"])
     if "unit" in unit:
         return _contains_composite(unit["unit"])
@@ -714,13 +728,12 @@ def merge(left, right):
     if composite:
         units = [_unit("product", left=first, right=second)]
     else:
-        units = []
-        for left_unit in first["units"]:
-            for right_unit in second["units"]:
-                a, b = _unwrap_run(left_unit), _unwrap_run(right_unit)
-                if a is None or b is None:
-                    raise ScenePlanError("Unsupported Scene Prompt merge unit.")
-                units.append(_unit("run", row=_old.merge_rows(a["row"], b["row"]), count=_safe(a["count"] * b["count"])))
+        a = _unwrap_run(first["units"][0]) if len(first["units"]) == 1 else None
+        b = _unwrap_run(second["units"][0]) if len(second["units"]) == 1 else None
+        if a is not None and b is not None:
+            units = [_unit("run", row=_old.merge_rows(a["row"], b["row"]), count=_safe(a["count"] * b["count"]))]
+        else:
+            units = [_unit("row_product", left=first, right=second)]
     return mark_prompt_whole(_plan(units, boundary=boundary))
 
 
@@ -841,10 +854,11 @@ def matrix_product(plan, matrix_rows, configured):
     for unit in source["units"]:
         fixed = unit["kind"] in {"count_fixed", "count_hold"}
         child = unit["unit"] if fixed else unit
-        if child["kind"] == "run":
+        if child["kind"] == "run" and len(active) == 1:
             derived = [_unit("run", row=_matrix_row(child["row"], matrix_row), count=child["count"]) for matrix_row in active]
         elif active:
-            derived = [_unit("matrix_map", unit=child, matrix_rows=active)]
+            kind = "matrix_map" if _contains_composite(child) else "matrix_rows"
+            derived = [_unit(kind, unit=child, matrix_rows=active)]
         else:
             derived = []
         units.extend(_unit(unit["kind"], unit=item) if fixed else item for item in derived)
@@ -905,7 +919,7 @@ def _prefix_unit_policy(unit, end, seed=0):
     if not end:
         return 0, 0, 0
     kind = unit["kind"]
-    if kind == "run":
+    if kind in {"run", "row_product"}:
         return 0, 0, end
     if kind == "count_hold":
         return end, 0, 0
@@ -965,7 +979,18 @@ def _prefix_unit_policy(unit, end, seed=0):
         total = _prefix_unit_policy(unit["unit"], length, seed)
         partial = _prefix_unit_policy(unit["unit"], within, seed)
         return tuple(value * cycles + rest for value, rest in zip(total, partial))
-    if kind in {"repeat_each", "matrix_map"}:
+    if kind == "matrix_rows":
+        size = len(unit["matrix_rows"])
+        child = unit["unit"]
+        if end == unit["stats"]["total_batches"]:
+            return tuple(value * size for value in _prefix_unit_policy(child, child["stats"]["total_batches"], seed))
+        probe = end // size
+        item = _select_unit(child, probe, seed)
+        start = probe - item["repeat_index"] + 1
+        prefix = _prefix_unit_policy(child, start, seed)
+        after = _prefix_unit_policy(child, start + 1, seed)
+        return tuple(value * size + (next_value - value) * (end - start * size) for value, next_value in zip(prefix, after))
+    if kind in {"repeat_each", "matrix_map", "row_repeat"}:
         factor = len(unit["matrix_rows"]) if kind == "matrix_map" else unit["factor"]
         full, within = divmod(end, factor)
         prefix = _prefix_unit_policy(unit["unit"], full, seed)
@@ -1037,12 +1062,12 @@ def _select_unit(unit, index, seed=0):
         item["count"] *= unit["factor"]
         item["event_ref"] = (("repeat", cycle), *item["event_ref"])
         return item
-    if kind == "repeat_each":
+    if kind in {"repeat_each", "row_repeat"}:
         child_index, within = divmod(index, unit["factor"])
         item = _select_unit(unit["unit"], child_index, seed)
         item["repeat_index"] = (item["repeat_index"] - 1) * unit["factor"] + within + 1
         item["count"] *= unit["factor"]
-        item["event_ref"] = (("repeat_each", within), *item["event_ref"])
+        item["event_ref"] = ((kind, within), *item["event_ref"])
         return item
     if kind == "alternate":
         lengths = [plan["stats"]["total_batches"] for plan in unit["inputs"]]
@@ -1076,6 +1101,31 @@ def _select_unit(unit, index, seed=0):
         item["row_index"] = item["row_index"] * size + matrix_index
         item["event_ref"] = (("matrix", matrix_index), *item["event_ref"])
         return item
+    if kind == "matrix_rows":
+        size = len(unit["matrix_rows"])
+        probe = index // size
+        item = _select_unit(unit["unit"], probe, seed)
+        start = probe - item["repeat_index"] + 1
+        matrix_index, within = divmod(index - start * size, item["count"])
+        item["row"] = _matrix_row(item["row"], unit["matrix_rows"][matrix_index])
+        item["row_index"] = item["row_index"] * size + matrix_index
+        item["repeat_index"] = within + 1
+        item["event_ref"] = (("matrix_rows", matrix_index, within), *item["event_ref"])
+        return item
+    if kind == "row_product":
+        right_batches = unit["right"]["stats"]["total_batches"]
+        left_probe = index // right_batches
+        left = _select_plan(unit["left"], left_probe, seed)
+        left_start = left_probe - left["repeat_index"] + 1
+        local = index - left_start * right_batches
+        right_probe = local // left["count"]
+        right = _select_plan(unit["right"], right_probe, seed)
+        right_start = right_probe - right["repeat_index"] + 1
+        within = local - right_start * left["count"]
+        return {"row": _old.merge_rows(left["row"], right["row"]), "count": left["count"] * right["count"],
+                "row_index": left["row_index"] * unit["right"]["stats"]["row_count"] + right["row_index"],
+                "repeat_index": within + 1,
+                "event_ref": (("row_product", within), left["event_ref"], right["event_ref"])}
     if kind == "product":
         right_batches = unit["right"]["stats"]["total_batches"]
         left_index, right_index = divmod(index, right_batches)
@@ -1131,8 +1181,6 @@ def legacy_rows(plan):
     """
     if plan["random_guards"]:
         raise ScenePlanError(f"Scene Prompt Random Route Input {plan['random_guards'][-1]['gate_id']} の分岐がOutputまたはQueueで合流していません。")
-    if plan["stats"]["row_count"] > 100_000:
-        raise ScenePlanError("This schedule has too many logical rows to list.")
     rows = []
 
     def visit(unit):
@@ -1141,7 +1189,7 @@ def legacy_rows(plan):
             rows.append({"row": copy.deepcopy(unit["row"]), "count": unit["count"]})
         elif kind in {"count_fixed", "count_hold"}:
             visit(unit["unit"])
-        elif kind in {"repeat", "repeat_each"}:
+        elif kind in {"repeat", "repeat_each", "row_repeat"}:
             before = len(rows)
             visit(unit["unit"])
             for item in rows[before:]:
@@ -1155,6 +1203,16 @@ def legacy_rows(plan):
         elif kind == "sequence":
             for child in unit["plan"]["units"]:
                 visit(child)
+        elif kind == "matrix_rows":
+            before = len(rows)
+            visit(unit["unit"])
+            children = rows[before:]
+            rows[before:] = [{"row": _matrix_row(item["row"], matrix_row), "count": item["count"]}
+                             for item in children for matrix_row in unit["matrix_rows"]]
+        elif kind == "row_product":
+            left, right = legacy_rows(unit["left"]), legacy_rows(unit["right"])
+            rows.extend({"row": _old.merge_rows(a["row"], b["row"]), "count": a["count"] * b["count"]}
+                        for a in left for b in right)
         else:
             raise ScenePlanError("An alternating schedule has no contiguous rows view.")
 
@@ -1199,18 +1257,20 @@ def _prune_unit(unit, selected_sources, visible_sources, pending_operations=(), 
         inputs = [_plan([]) for _ in range(10)]
         inputs[arm] = _prune_plan(unit["inputs"][arm], selected_sources, visible_sources, pending_operations, selected_arms)
         return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=inputs, selected_arm=arm)
-    if kind == "product":
-        return _unit("product", left=_prune_plan(unit["left"], selected_sources, visible_sources, selected_arms=selected_arms), right=_prune_plan(unit["right"], selected_sources, visible_sources, selected_arms=selected_arms))
+    if kind in {"product", "row_product"}:
+        return _unit(kind,
+                     left=_prune_plan(unit["left"], selected_sources, visible_sources, pending_operations, selected_arms),
+                     right=_prune_plan(unit["right"], selected_sources, visible_sources, pending_operations, selected_arms))
     if kind == "map":
         child = _prune_unit(unit["unit"], selected_sources, visible_sources, (*unit["operations"], *pending_operations), selected_arms)
         return _unit("map", unit=child, operations=unit["operations"])
     child = _prune_unit(unit["unit"], selected_sources, visible_sources, pending_operations, selected_arms)
-    if kind in {"repeat", "repeat_each", "count_scale"}:
+    if kind in {"repeat", "repeat_each", "count_scale", "row_repeat"}:
         return _unit(kind, unit=child, factor=unit["factor"])
     if kind in {"count_fixed", "count_hold"}:
         return _unit(kind, unit=child)
-    if kind == "matrix_map":
-        return _unit("matrix_map", unit=child, matrix_rows=unit["matrix_rows"])
+    if kind in {"matrix_map", "matrix_rows"}:
+        return _unit(kind, unit=child, matrix_rows=unit["matrix_rows"])
     raise ScenePlanError("Unsupported Scene Prompt replay unit.")
 
 
@@ -1263,7 +1323,7 @@ def _rank_unit(unit, path):
         if type(cycle) is not int or not 0 <= cycle < unit["factor"]:
             raise ScenePlanError("Selected Scene Prompt repeat no longer exists.")
         return cycle * unit["unit"]["stats"]["total_batches"] + _rank_unit(unit["unit"], path[1:])
-    if kind == "repeat_each" and marker[0] == "repeat_each":
+    if kind in {"repeat_each", "row_repeat"} and marker[0] == kind:
         within = marker[1]
         if type(within) is not int or not 0 <= within < unit["factor"]:
             raise ScenePlanError("Selected Scene Prompt row repeat no longer exists.")
@@ -1289,6 +1349,21 @@ def _rank_unit(unit, path):
         if type(matrix_index) is not int or not 0 <= matrix_index < len(unit["matrix_rows"]):
             raise ScenePlanError("Selected Scene Prompt Matrix row no longer exists.")
         return _rank_unit(unit["unit"], path[1:]) * len(unit["matrix_rows"]) + matrix_index
+    if kind == "matrix_rows" and marker[0] == kind:
+        _, matrix_index, within = marker
+        local = _rank_unit(unit["unit"], path[1:])
+        item = _select_unit(unit["unit"], local, 0)
+        if not 0 <= matrix_index < len(unit["matrix_rows"]) or not 0 <= within < item["count"]:
+            raise ScenePlanError("Selected Scene Prompt Matrix row no longer exists.")
+        return (local - item["repeat_index"] + 1) * len(unit["matrix_rows"]) + matrix_index * item["count"] + within
+    if kind == "row_product" and marker[0] == kind:
+        left_index, right_index = _rank_plan(unit["left"], path[1]), _rank_plan(unit["right"], path[2])
+        left, right = _select_plan(unit["left"], left_index, 0), _select_plan(unit["right"], right_index, 0)
+        within = marker[1]
+        if not 0 <= within < left["count"] * right["count"]:
+            raise ScenePlanError("Selected Scene Prompt Merge repetition no longer exists.")
+        return ((left_index - left["repeat_index"] + 1) * unit["right"]["stats"]["total_batches"]
+                + (right_index - right["repeat_index"] + 1) * left["count"] + within)
     if kind == "product" and marker[0] == "product":
         if len(path) != 3:
             raise ScenePlanError("Selected Scene Prompt Merge path is invalid.")

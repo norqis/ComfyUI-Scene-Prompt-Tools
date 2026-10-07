@@ -7670,7 +7670,7 @@ function sceneCountUnitPolicy(unit) {
     const totals = (source) => [source.total, source.totalImages, source.unsetBatches];
     const total = totals(unit);
     let result;
-    if (unit.kind === "run" || unit.kind === "tail") result = [zero, zero, total];
+    if (["run", "tail", "row_product"].includes(unit.kind)) result = [zero, zero, total];
     else if (unit.kind === "count_hold") result = [total, zero, zero];
     else if (unit.kind === "sequence") result = sceneCountPlanPolicy(unit.plan);
     else if (unit.kind === "alternate") result = unit.plans.reduce((sum, plan) =>
@@ -7693,7 +7693,7 @@ function sceneCountUnitPolicy(unit) {
         else if (unit.kind === "map") result = unit.latentSize == null ? child
             : child.map((part) => [part[0], part[0] === null ? null : part[0] * unit.latentSize, 0]);
         else {
-            const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
+            const factor = ["matrix", "matrix_rows"].includes(unit.kind) ? unit.matrixRows.length : unit.factor;
             result = child.map((part) => factor === 0 ? zero : part.map((value) => value === null ? null : value * factor));
         }
     }
@@ -7716,7 +7716,7 @@ function sceneCountPrefixPlan(plan, end) {
 function sceneCountPrefixUnit(unit, end) {
     if (!end) return [0, 0, 0];
     const add = (first, second) => first.map((value, index) => value + second[index]);
-    if (unit.kind === "run" || unit.kind === "tail") return [0, 0, end];
+    if (["run", "tail", "row_product"].includes(unit.kind)) return [0, 0, end];
     if (unit.kind === "count_hold") return [end, 0, 0];
     if (unit.kind === "sequence") return sceneCountPrefixPlan(unit.plan, end);
     // Preview retains the existing Random placeholder. Use the same arm for its
@@ -7768,6 +7768,14 @@ function sceneCountPrefixUnit(unit, end) {
         const length = unit.unit.total, cycles = Math.floor(end / length);
         return add(sceneCountPrefixUnit(unit.unit, length).map((value) => value * cycles), sceneCountPrefixUnit(unit.unit, end % length));
     }
+    if (unit.kind === "matrix_rows") {
+        const size = unit.matrixRows.length, probe = Math.floor((end - 1) / size);
+        const entry = sceneScheduleAtUnit(unit.unit, probe);
+        const start = probe - entry.repeatIndex + 1;
+        const before = sceneCountPrefixUnit(unit.unit, start);
+        const after = sceneCountPrefixUnit(unit.unit, start + 1);
+        return before.map((value, index) => value * size + (after[index] - value) * (end - start * size));
+    }
     const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
     const full = Math.floor(end / factor), within = end % factor;
     const prefix = unit.unit ? sceneCountPrefixUnit(unit.unit, full) : sceneCountPrefixPlan(unit.plan, full);
@@ -7797,6 +7805,13 @@ function sceneScheduleRun(entry) {
 function sceneScheduleWrapper(kind, unit, factor = 1) {
     if (kind === "repeat" && unit.kind === "run") {
         return sceneScheduleRun({ ...unit.entry, count: sceneStatProduct(unit.total, factor) });
+    }
+    if (kind === "repeat" && unit.kind !== "fixed" && !sceneScheduleHasComposite({ units: [unit] })) {
+        kind = "row_repeat";
+        if (unit.kind === kind) {
+            factor = sceneStatProduct(unit.factor, factor);
+            unit = unit.unit;
+        }
     }
     return {
         kind, unit, factor, total: sceneStatProduct(unit.total, factor),
@@ -7860,7 +7875,7 @@ function sceneRandomJoinReady(plans) {
 }
 
 function sceneScheduleAtUnit(unit, index) {
-    if (unit.kind === "run") return unit.entry;
+    if (unit.kind === "run") return { ...unit.entry, repeatIndex: index + 1 };
     if (unit.kind === "sequence") return sceneScheduleAt(unit.plan, index);
     if (unit.kind === "random_choice") return { parts: ["ランダム候補"], count: 1, row: emptyMatrixRow() };
     if (unit.kind === "repeat_each") return sceneScheduleAt(unit.plan, Math.floor(index / unit.factor));
@@ -7876,16 +7891,35 @@ function sceneScheduleAtUnit(unit, index) {
         return unit.unit.total ? sceneScheduleAtUnit(unit.unit, index % unit.unit.total) : null;
     }
     if (unit.kind === "map") return unit.transform(sceneScheduleAtUnit(unit.unit, index));
-    if (unit.kind === "matrix") {
+    if (unit.kind === "row_repeat") {
+        const entry = sceneScheduleAtUnit(unit.unit, Math.floor(index / unit.factor));
+        return entry && { ...entry, count: sceneStatProduct(entry.count, unit.factor),
+            repeatIndex: (entry.repeatIndex - 1) * unit.factor + index % unit.factor + 1 };
+    }
+    if (unit.kind === "matrix" || unit.kind === "matrix_rows") {
         const rows = unit.matrixRows;
-        const entry = sceneScheduleAtUnit(unit.unit, Math.floor(index / rows.length));
-        const matrixRow = rows[index % rows.length];
+        const probe = Math.floor(index / rows.length);
+        const entry = sceneScheduleAtUnit(unit.unit, probe);
+        if (!entry) return null;
+        const local = index - (probe - entry.repeatIndex + 1) * rows.length;
+        const matrixIndex = unit.kind === "matrix_rows" ? Math.floor(local / entry.count) : index % rows.length;
+        const matrixRow = rows[matrixIndex];
         const label = matrixLineLabel(matrixRow);
         const row = entry?.row || emptyMatrixRow();
         return entry && {
-            ...entry, parts: [...(entry.parts || []), label],
+            ...entry, repeatIndex: unit.kind === "matrix_rows" ? local % entry.count + 1 : entry.repeatIndex,
+            parts: [...(entry.parts || []), label],
             row: { ...row, labels: [...(row.labels || []), label], path_parts: [...(row.path_parts || [])] },
         };
+    }
+    if (unit.kind === "row_product") {
+        const rightTotal = unit.right.stats.total;
+        const leftProbe = Math.floor(index / rightTotal), left = sceneScheduleAt(unit.left, leftProbe);
+        if (!left) return null;
+        const local = index - (leftProbe - left.repeatIndex + 1) * rightTotal;
+        const rightProbe = Math.floor(local / left.count), right = sceneScheduleAt(unit.right, rightProbe);
+        return right && { ...mergeScenePromptEntryPair(left, right),
+            repeatIndex: local - (rightProbe - right.repeatIndex + 1) * left.count + 1 };
     }
     if (unit.kind === "product") {
         const rightCount = unit.right.stats.total;
@@ -7995,10 +8029,9 @@ function sceneScheduleMatrix(plan, matrixRows) {
     const mapUnit = (unit) => {
         if (["fixed", "count_hold"].includes(unit.kind)) return mapUnit(unit.unit)
             .map((child) => sceneScheduleWrapper(unit.kind, child));
-        if (unit.kind === "run") return matrixRows.map((matrixRow) =>
-            sceneScheduleRun(matrixEntry(unit.entry, matrixRow)));
+        if (unit.kind === "run" && matrixRows.length === 1) return [sceneScheduleRun(matrixEntry(unit.entry, matrixRows[0]))];
         return [{
-            kind: "matrix", unit, matrixRows,
+            kind: sceneScheduleHasComposite({ units: [unit] }) ? "matrix" : "matrix_rows", unit, matrixRows,
             total: sceneStatProduct(unit.total, matrixRows.length),
             totalImages: sceneStatProduct(unit.totalImages, matrixRows.length),
             unsetBatches: sceneStatProduct(unit.unsetBatches, matrixRows.length),
@@ -8022,30 +8055,18 @@ function sceneScheduleMerge(left, right) {
     if (left.randomGuards?.length || right.randomGuards?.length)
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMergeを接続してください。");
     const boundary = left.boundary || right.boundary;
-    if (!sceneScheduleHasComposite(left) && !sceneScheduleHasComposite(right)) {
-        const units = [];
-        for (const leftUnit of left.units) {
-            for (const rightUnit of right.units) {
-                const first = sceneScheduleAtUnit(leftUnit, 0);
-                const second = sceneScheduleAtUnit(rightUnit, 0);
-                if (!first || !second) continue;
-                units.push(sceneScheduleRun(mergeScenePromptEntryPair(
-                    { ...first, count: sceneStatProduct(leftUnit.total, rightUnit.total) },
-                    { ...second, count: 1 })));
-            }
-        }
-        const represented = sceneSchedulePlan(units).stats;
-        const expected = sceneStatsMerge(left.stats, right.stats);
-        if (expected.total > represented.total) units.push({ kind: "tail", entry: null,
-            total: expected.total - represented.total,
-            totalImages: expected.totalImages - represented.totalImages,
-            unsetBatches: expected.unsetBatches - represented.unsetBatches,
-            rows: expected.rows - represented.rows });
-        return sceneSchedulePlan(units, boundary);
+    const composite = sceneScheduleHasComposite(left) || sceneScheduleHasComposite(right);
+    if (!composite && left.units.length === 1 && right.units.length === 1) {
+        const run = (unit) => {
+            while (unit.kind === "fixed") unit = unit.unit;
+            return unit.kind === "run" ? unit.entry : null;
+        };
+        const first = run(left.units[0]), second = run(right.units[0]);
+        if (first && second) return sceneSchedulePlan([sceneScheduleRun(mergeScenePromptEntryPair(first, second))], boundary);
     }
     const l = left.stats;
     const r = right.stats;
-    const unit = { kind: "product", left, right,
+    const unit = { kind: composite ? "product" : "row_product", left, right,
         total: sceneStatProduct(l.total, r.total),
         totalImages: sceneStatSum(sceneStatProduct(l.total, r.totalImages - r.unsetBatches),
             sceneStatProduct(l.totalImages, r.unsetBatches)),
@@ -8491,7 +8512,7 @@ function mergeScenePromptEntryPair(firstEntry, secondEntry) {
     }
     return {
         ...primary,
-        parts: [...(firstEntry.parts || []), ...(secondEntry.parts || [])],
+        parts: [...new Set([...(firstEntry.parts || []), ...(secondEntry.parts || [])])],
         count: sceneStatNumber(firstEntry.count) * sceneStatNumber(secondEntry.count),
         row: mergeScenePromptRows(firstEntry.row, secondEntry.row),
     };

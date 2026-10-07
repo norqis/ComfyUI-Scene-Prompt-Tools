@@ -13,11 +13,25 @@ Agent `astra_audit_round1` completed Python modules and API, schedule/Count/Queu
 
 Root independently reproduced the tab races. Commit `63b98e4` uses the captured workflow for save/run metadata, captures switch fallback values before await, confines candidate replacement to retained original nodes, suppresses obsolete popup completion, and aligns simple preview Count/map/latent handling with the backend. Browser regression covers graph replacement and reuse, delayed save, names, switch values, Matrix data, and prepare ownership. Focused browser/queue/Preset/schedule/audit suites pass. Full final validation and review are still pending.
 
-## Compact ordinary row schedules (design in review)
+## Compact ordinary row schedules
 
 Preserve the existing composite schedules and add compact expressions for ordinary contiguous rows: Matrix rows, row-product Merge, and repetition of each logical row. Row selection uses the child event's count/repeat index to recover the row's starting offset, preserving legacy left-row/right-row/repetition ordering without materializing combinations. Event references retain the candidate child path plus the selected within-row offset; replay rank recovers child row offsets after pruning. Only the legacy explicit rows view materializes rows when requested. No row-count cap, size threshold or historical cache.
 
 Required verification: legacy eager oracle versus all selected rows/counts/metadata on small cases, variable-count Merge groups, repeated matrices, zero Counts, fixed Queue and downstream Count policy, callbacks/LoRA/latent/source trace, JSON roundtrip, PNG event pruning/rank, backend/frontend parity, and large Cartesian plans that retain only original data. Fix review and a fresh independent full audit remain mandatory.
+
+The Astra reviewer approved the design after an independent 300-case / 19,649-event arithmetic comparison. Root implemented `matrix_rows`, `row_product`, and `row_repeat`, preserving scalar run fast paths and existing composite schedules. Root tests compare all row payloads, count/repetition/index metadata, image totals, JSON roundtrip and event ranks against an eager reference, plus fixed/strict Count, source pruning, callbacks, and large plans. Python and JavaScript retain input rows only; no cache or new limit is used. The pre-existing 100,000-row restriction on the explicit compatibility view was removed.
+
+The same actual SceneMatrix.build benchmark now reports:
+
+| Rows per Matrix (3 stages) | Events | Units retained | Preparation | Retained bytes | Peak bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 10 | 1,000 | 1 | 0.0047 s | 67,912 | 97,832 |
+| 20 | 8,000 | 1 | 0.0102 s | 113,934 | 183,178 |
+| 30 | 27,000 | 1 | 0.0122 s | 154,924 | 267,333 |
+
+During regression work root also reproduced exponential growth of duplicate UI labels in shared Merge chains. Backend Merge already removes duplicate labels; frontend Merge now follows the same behavior. Forty shared scalar merges stay a single run. The previous frontend terminated with a V8 invalid-size error in this probe.
+
+Validation in progress: npm syntax and all 25 frontend suites passed, including Chromium snapshot ownership races. The 713-test Python run passed except the Count policy suite that executed the shared-Merge probe just before its UI fix landed; its focused 24 tests pass after the fix. Final clean full validation, independent diff approval, and fresh whole-repository audit remain pending.
 
 ## Sources
 

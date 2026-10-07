@@ -165,6 +165,42 @@ assert.equal(huge.stats.total, 200000000);
 assert.equal(huge.units.length, 1, "large Counts keep a bounded schedule");
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(huge, 6))), ["A", "B", "A", "B", "A", "B"]);
 
+function verifyCompactOrdinaryRows() {
+    for (let factor = 0; factor < 4; factor += 1) {
+        const leftEntries = [["a", 2], ["empty", 0], ["b", 3]];
+        const rightEntries = [["c", 1], ["d", 2]];
+        const toPlan = (entries) => ctx.sceneSchedulePlan(entries.flatMap(([name, count]) => leaf(name, count).units));
+        let actual = ctx.sceneScheduleMatrix(toPlan(leftEntries), [{ label: "x" }, { label: "y" }]);
+        actual = ctx.sceneScheduleCount(actual, factor);
+        actual = ctx.sceneScheduleMerge(actual, toPlan(rightEntries));
+        actual = ctx.sceneScheduleMatrix(actual, [{ label: "u" }, { label: "v" }]);
+        const expected = leftEntries.flatMap(([name, count]) => ["x", "y"].flatMap((first) =>
+            rightEntries.flatMap(([other, otherCount]) => ["u", "v"].map((last) =>
+                ({ label: name + first + other + last, count: count * factor * otherCount })))));
+        assert.deepEqual(Array.from(prefix(actual)), expected.flatMap((entry) => Array(entry.count).fill(entry.label)));
+        let index = 0;
+        for (const entry of expected) for (let repeat = 1; repeat <= entry.count; repeat += 1) {
+            const selected = ctx.sceneScheduleAt(actual, index++);
+            assert.equal(selected.count, entry.count);
+            assert.equal(selected.repeatIndex, repeat);
+        }
+    }
+    let compact = leaf("base");
+    const rows = Array.from({ length: 30 }, (_, index) => ({ label: String(index) }));
+    for (let stage = 0; stage < 3; stage += 1) compact = ctx.sceneScheduleMatrix(compact, rows);
+    assert.equal(compact.units.length, 1);
+    assert.equal(compact.stats.rows, 27000);
+    assert.ok(JSON.stringify(compact).length < 6000, "preview retains Matrix input rows, not Cartesian combinations");
+    compact = ctx.sceneScheduleCount(compact, 100000000);
+    const last = ctx.sceneScheduleAt(compact, compact.stats.total - 1);
+    assert.deepEqual(Array.from(last.parts), ["base", "29", "29", "29"]);
+    assert.equal(last.repeatIndex, 100000000);
+    let scalar = leaf("same");
+    for (let depth = 0; depth < 40; depth += 1) scalar = ctx.sceneScheduleMerge(scalar, scalar);
+    assert.equal(scalar.units[0].kind, "run", "single-row shared Merge chains must not create exponentially traversed products");
+}
+verifyCompactOrdinaryRows();
+
 Object.assign(ctx, {
     sceneWorkflowLoadDepth: 0,
     sceneWorkflowLoadSources: new Set(),
