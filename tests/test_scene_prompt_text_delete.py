@@ -542,6 +542,57 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         self.assertIn('2', saved, 'the previous contribution must remain passthrough on replay')
         self.assertEqual(saved['5']['inputs']['scene_prompt'], ['2', 0])
 
+    def test_execution_path_contracts_generic_switch_without_requiring_inactive_text(self):
+        for control in ('literal', 'primitive', 'preset'):
+            for selected in (True, False):
+                with self.subTest(control=control, selected=selected):
+                    handle = self.runs.create_run_context('default')
+                    prompt = {
+                        '1': scene_prompt('image'),
+                        '2': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['1', 0]}},
+                        '3': scene_prompt('text-positive'),
+                        '4': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['3', 0], 'seed_base': 123}},
+                        '5': {'class_type': 'PrimitiveString', 'inputs': {'value': 'literal-path'}},
+                        '6': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': selected, 'on_true': ['5', 0], 'on_false': ['4', 1]}},
+                        '7': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': False, 'on_true': ['6', 0], 'on_false': ['6', 0]}},
+                        '8': {'class_type': 'Save', 'inputs': {'info': ['2', 2], 'path': ['7', 0], 'label': ['6', 0]}},
+                    }
+                    if control != 'literal':
+                        prompt['9'] = ({'class_type': 'PrimitiveBoolean', 'inputs': {'value': selected}}
+                            if control == 'primitive' else {'class_type': 'ScenePresetInput', 'inputs': {'switch_values': {'values': [selected] + [False] * 9}}})
+                        prompt['6']['inputs']['switch'] = ['9', 0 if control == 'primitive' else 1]
+                    if not selected:
+                        self.text(self.build('text-positive', 'text-negative', node_id='3'), run_handle=handle, unique_id='4')
+                    expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=self.build('image', node_id='1'), seed_base=123,
+                        unique_id='2', run_handle=handle, prompt=prompt)
+                    original = copy.deepcopy(prompt)
+                    workflow = self.workflow(prompt)
+                    saved, extra = self.nodes._metadata_for_save_mode(prompt, {'workflow': workflow}, '8', self.nodes.SAVE_METADATA_EXECUTION_PATH, expanded[2])
+                    expected = ['5', 0] if selected else ['4', 1]
+                    self.assertEqual(saved['8']['inputs']['path'], expected)
+                    self.assertEqual(saved['8']['inputs']['label'], expected)
+                    self.assertNotIn('6', saved)
+                    self.assertNotIn('7', saved)
+                    self.assertEqual('4' in saved, not selected)
+                    self.assertEqual('3' in saved, not selected)
+                    saved_ids = {str(node['id']) for node in extra['workflow']['nodes']}
+                    self.assertEqual(saved_ids, set(saved))
+                    self.assertTrue(all(str(link[1]) in saved_ids and str(link[3]) in saved_ids for link in extra['workflow']['links']))
+                    self.assertEqual(prompt, original)
+                    full, _ = self.nodes._metadata_for_save_mode(prompt, {'workflow': workflow}, '8', self.nodes.SAVE_METADATA_WORKFLOW, expanded[2])
+                    self.assertEqual(full, original)
+
+    def test_execution_path_unknown_switch_control_does_not_hide_missing_text_plan(self):
+        prompt = {
+            '1': {'class_type': 'ScenePromptToText', 'inputs': {}},
+            '2': {'class_type': 'PrimitiveString', 'inputs': {'value': 'path'}},
+            '3': {'class_type': 'ExternalBooleanProvider', 'inputs': {}},
+            '4': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': ['3', 0], 'on_true': ['2', 0], 'on_false': ['1', 0]}},
+            '5': {'class_type': 'Save', 'inputs': {'path': ['4', 0]}},
+        }
+        with self.assertRaisesRegex(ValueError, 'Scene Prompt To Text'):
+            self.nodes._metadata_for_save_mode(prompt, None, '5', self.nodes.SAVE_METADATA_EXECUTION_PATH, {'file_index': 1, 'seed': 10})
+
     def test_execution_path_requires_executed_text_plan(self):
         prompt = {'1': {'class_type': 'ScenePromptToText', 'inputs': {}}, '2': {'class_type': 'Save', 'inputs': {'text': ['1', 0]}}}
         with self.assertRaisesRegex(ValueError, 'Scene Prompt To Text'):

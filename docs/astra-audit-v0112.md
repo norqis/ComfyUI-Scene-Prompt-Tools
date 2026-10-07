@@ -186,6 +186,18 @@ Root reproduced all four cases (main/subcategory, dot/space) and applies the exi
 
 The auditor also reproduced delayed initialization retaining deleted nodes: configuring then removing 20 native Matrix nodes left the graph empty but a queued animation frame reinserted all 20 into the title synchronization set. Root reproduced this with the real scheduling/removal helpers. The existing scheduling field now holds the frame ID; removal cancels it and clears the field before releasing other state. No new registry or graph-membership restriction is added. Tests cover frame ID zero, coalescing, callback release, later configuration and configure-before-add. The native browser confirms zero deleted nodes retained after the frames and a valid live node still attached. All 25 frontend suites and the complete native browser pass. Independent mixed semantics comparisons pass 328 plans / 8,007 events / 2,085 pruned replay ranks. The auditor is completing whole-repository coverage and reviewing the final remediation.
 
+The fifteenth auditor approved exact HEAD `69012436cffc7b5da854e44818f3930103aab436`; all required CI checks passed. A new sixteenth GPT-6 Astra xhigh agent then audited the entire repository again.
+
+## Sixteenth independent full audit
+
+The new auditor reproduced one native Switch issue: when a generic String Switch selected a literal provider for Save's path, selected-path saving still searched its inactive To Text branch and required a plan that had never executed. Full-workflow saving and selecting To Text itself succeeded.
+
+Root uses the same effective-input helper for consumer ancestry and selected graph contraction. Resolvable native Switches retain their selected input and control dependency during traversal; the saved selected graph contracts their output to the chosen source, including generic image/model/text consumers. Only Switch output slot zero is rewritten. Unknown external Boolean providers retain existing conservative traversal; genuinely required missing To Text plans still error. The existing iterative, operation-local contraction is reused without persistent state.
+
+Unit cases cover literal, PrimitiveBoolean and Preset Input controls, true/false, nested/shared Switches, negative output slot preservation, unchanged full-workflow mode and unresolved controls. The former generic Switch regression now requires the selected image/model links rather than keeping both branches. All 55 focused Switch/text tests pass. Isolated native CPU tests save and re-execute four actual PNGs (both modes and selections); native browser tests create connected nodes, save PNGs, import through the real frontend and execute again with the same selected text. The full Python run passed every other case; its sole old assertion expected both generic branches to remain and has been updated to the corrected selected-path contract.
+
+The auditor completed coverage across all 20 Python production modules, 8 frontend modules, importer, packaging, storage, networking, UI lifetime and GPU/LLM lifecycle. Its independent cross-language probe passed 700 compositions / 12,678 events, including Queue/Count holds, Matrix, Merge and variable latent batches. Trillion-event indexing/replay and weak-reference release passed in 0.030 seconds with a 105,266-byte traced peak. No second actionable finding was identified; exact-HEAD remediation review follows before the next fresh audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation

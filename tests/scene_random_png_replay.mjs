@@ -45,6 +45,31 @@ export async function testRandomPngReplay(page) {
             await app.handleFile(new File([blob], 'random-replay.png', { type: 'image/png' }));
         };
 
+        const switches = [];
+        for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) {
+            for (const selected of [true, false]) {
+                app.graph.clear();
+                const source = add('ScenePrompter'), expand = add('ScenePrompterExpand');
+                const textSource = add('ScenePrompter'), text = add('ScenePromptToText');
+                const literal = add('PrimitiveString'), gate = add('ComfySwitchNode');
+                const image = add('TestSceneTextImage'), save = add('SceneSaveImage');
+                set(source, 'positive_base', 'IMAGE_CONTEXT'); set(textSource, 'positive_base', 'TEXT_SELECTED');
+                set(literal, 'value', 'LITERAL_SELECTED'); set(gate, 'switch', selected);
+                set(expand, 'timestamp_dir', false); set(expand, 'seed_base', 123); set(text, 'seed_base', 123);
+                set(save, 'metadata_mode', mode);
+                connect(source, expand); connect(textSource, text);
+                connect(literal, gate, 'on_true'); connect(text, gate, 'on_false');
+                connect(gate, image, 'positive'); connect(image, save, 'images'); connect(expand, save, 'scene_info', 2);
+                let execution = await execute();
+                const rows = [execution[image.id].text];
+                await reloadPng(execution[save.id].images[0]);
+                const reloaded = await app.graphToPrompt();
+                execution = await execute();
+                rows.push(execution[image.id].text);
+                switches.push({ mode, selected, rows, retained: Object.values(reloaded.output).map(node => node.class_type) });
+            }
+        }
+
         app.graph.clear();
         const input = add('ScenePresetInput'), gate = add('ScenePromptRandomRoute');
         const a = add('ScenePrompter'), b = add('ScenePrompter'), join = add('ScenePromptRandomRouteOutput'), output = add('ScenePresetOutput');
@@ -101,9 +126,17 @@ export async function testRandomPngReplay(page) {
                 index: captured.output[String(first.id)].inputs.current_index,
                 weights: captured.output[String(random.id)].inputs.weights_json });
         }
-        return results;
+        return { random: results, switches };
     });
-    for (const entry of result) {
+    for (const entry of result.switches) {
+        const expected = entry.selected ? 'LITERAL_SELECTED' : 'TEXT_SELECTED';
+        assert.deepEqual(entry.rows.map(row => row[0]), [expected, expected], 'native PNG import preserves the actual generic Switch branch');
+        if (entry.mode === '生成経路ノードのみ') {
+            assert(!entry.retained.includes('ComfySwitchNode'));
+            assert.equal(entry.retained.includes('ScenePromptToText'), !entry.selected);
+        } else assert(entry.retained.includes('ComfySwitchNode'));
+    }
+    for (const entry of result.random) {
         if (entry.ordinary) assert.equal(entry.rows[0][0], entry.rows[0][1], 'ordinary Queue assigns a common fresh seed');
         else assert.notEqual(entry.rows[0][0], entry.rows[0][1], 'two consumers must exercise different Random arms');
         assert.deepEqual(entry.rows[1], entry.rows[0], `${entry.mode}: PNG load must preserve both draws`);
@@ -116,5 +149,5 @@ export async function testRandomPngReplay(page) {
         if (entry.ordinary) assert.equal(JSON.parse(entry.weights).filter(Boolean).length, 1, 'ordinary Queue freezes the selected arm through named-widget reload');
         else assert.deepEqual(JSON.parse(entry.weights), [5000, 5000, ...Array(8).fill(0)], 'conflicting consumers must not freeze one arm');
     }
-    console.log('real ComfyUI full/selected expanded Preset PNG import and second save preserve distinct Random consumers and independent clones');
+    console.log('real ComfyUI full/selected PNG import preserves generic Switch selection, distinct Random consumers and independent clones');
 }

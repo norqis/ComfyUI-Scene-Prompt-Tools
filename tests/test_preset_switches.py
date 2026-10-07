@@ -331,7 +331,7 @@ class PresetSwitchTests(unittest.TestCase):
                 self.assertEqual(copies[0]["properties"]["scene_switch_values"], [True] * 10)
                 self.assertFalse(any(item["type"] == "ScenePresetReference" for item in expanded["nodes"]))
 
-    def test_selected_queue_png_drops_other_scene_switch_but_keeps_image_model_switches(self):
+    def test_selected_queue_png_keeps_only_selected_scene_image_and_model_branches(self):
         module_nodes = sys.modules[f"{self.module.__package__}.nodes"]
         graph = {"1": node("ScenePromptCounter", count=2), "2": node("ScenePromptCounter", count=3),
                  "3": node("ScenePromptCounter", count=4), "4": node("ScenePromptCounter", count=5),
@@ -344,13 +344,14 @@ class PresetSwitchTests(unittest.TestCase):
                  "21": node("ImageFixture", model=["30", 0]), "22": node("ImageFixture", model=["30", 0]),
                  "30": node("ComfySwitchNode", switch=False, on_false=["31", 0], on_true=["32", 0]),
                  "31": node("ModelFixture"), "32": node("ModelFixture")}
-        contracted, selected, replacements = module_nodes._contract_superseded_model_sources(graph, ["1", "8", "9"])
-        self.assertEqual(replacements, {"6": ["1", 0]})
+        contracted, selected, replacements = module_nodes._contract_superseded_model_sources(graph, ["1", "8", "9"], output_node_id="10")
+        self.assertEqual(replacements, {"6": ["1", 0], "20": ["22", 0], "30": ["31", 0]})
         replay = module_nodes._slice_prompt_to_ids(contracted, module_nodes._selected_ancestor_ids(contracted, "10", {}, selected))
         self.assertEqual(replay["8"]["inputs"], {"scene_prompt1": ["1", 0]})
         self.assertNotIn("7", replay)
-        self.assertEqual(replay["20"]["inputs"], graph["20"]["inputs"])
-        self.assertEqual(replay["30"]["inputs"], graph["30"]["inputs"])
+        self.assertEqual(replay["10"]["inputs"]["images"], ["22", 0])
+        self.assertEqual(replay["22"]["inputs"]["model"], ["31", 0])
+        self.assertTrue({"20", "21", "30", "32"}.isdisjoint(replay))
         self.assertEqual(self.module._scene_node_value(replay, "8", {}, set())["stats"]["total_images"], 2)
 
     def test_independent_to_text_scene_consumer_keeps_its_selected_switch_path(self):

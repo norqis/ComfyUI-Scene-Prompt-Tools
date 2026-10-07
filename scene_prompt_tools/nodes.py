@@ -224,6 +224,17 @@ def _prompt_link_source(value, node_id, input_name):
     return source_id
 
 
+def _execution_inputs(prompt, node):
+    inputs = node.get("inputs", {})
+    if node.get("class_type") == "ComfySwitchNode":
+        try:
+            selected = selected_switch_input(prompt, node)
+        except ValueError:
+            return inputs
+        return {name: inputs[name] for name in ("switch", selected) if name in inputs}
+    return inputs
+
+
 def _prompt_ancestor_ids(prompt, target_id):
     if not isinstance(prompt, dict):
         raise ValueError("Scene Save Image の生成経路を保存できません: prompt がノード辞書ではありません。")
@@ -250,7 +261,7 @@ def _prompt_ancestor_ids(prompt, target_id):
                 f"Scene Save Image の生成経路を保存できません: ノード {node_id} の inputs が不正です。"
             )
         ancestors.add(node_id)
-        for input_name, value in inputs.items():
+        for input_name, value in _execution_inputs(prompt, node).items():
             source_id = _prompt_link_source(value, node_id, input_name)
             if source_id is None:
                 continue
@@ -863,7 +874,7 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
         if not isinstance(inputs, dict):
             raise ValueError(f"Scene Save Image の生成経路を保存できません: ノード {node_id} の inputs が不正です。")
         included.add(node_id)
-        for input_name, value in inputs.items():
+        for input_name, value in _execution_inputs(prompt, node).items():
             source_id = _prompt_link_source(value, node_id, input_name)
             if source_id is not None:
                 if source_id not in prompt:
@@ -899,7 +910,7 @@ def _scene_prompt_input_links(prompt, node_id):
     )
 
 
-def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=(), scene_consumer_ids=(), effective_model_ids=None):
+def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=(), scene_consumer_ids=(), effective_model_ids=None, output_node_id=None):
     """Keep the consumers' effective Apply Models while preserving Scene routes."""
     selected_order = list(dict.fromkeys(str(node_id) for node_id in selected_scene_ids if str(node_id).strip()))
     selected = set(selected_order) | set(protected_source_ids)
@@ -915,28 +926,25 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
 
     replacements = {}
 
-    # An execution-path PNG contracts selected Scene switches. Removing just
+    # An execution-path PNG contracts selected switches. Removing just
     # their other branch would leave core Switch's required input unconnected.
     connected_switches, switch_choices, visited, pending = set(), {}, set(), [*selected, *scene_consumer_ids]
+    if output_node_id is not None:
+        pending.append(str(output_node_id))
     while pending:
         current_id = pending.pop()
         if current_id in visited:
             continue
         visited.add(current_id)
         current = prompt.get(current_id, {})
-        if current.get("class_type") == "ComfySwitchNode":
-            try:
-                names = (selected_switch_input(prompt, current),)
-            except ValueError:
-                continue
+        if current.get("class_type") in SCENE_NODE_TYPES and current.get("class_type") != "ScenePresetInput" and current_id not in selected and current_id not in scene_consumer_ids:
+            continue
+        inputs = _execution_inputs(prompt, current)
+        branches = [name for name in ("on_true", "on_false") if name in inputs]
+        if current.get("class_type") == "ComfySwitchNode" and len(branches) == 1:
             connected_switches.add(current_id)
-            switch_choices[current_id] = current.get("inputs", {}).get(names[0])
-        else:
-            if current.get("class_type") in SCENE_NODE_TYPES and current.get("class_type") != "ScenePresetInput" and current_id not in selected:
-                continue
-            names = _scene_prompt_input_names(current)
-        pending.extend(str(value[0]) for name in names
-                       for value in (current.get("inputs", {}).get(name),) if is_link(value))
+            switch_choices[current_id] = inputs[branches[0]]
+        pending.extend(str(value[0]) for value in inputs.values() if is_link(value))
     switch_outputs = {}
     for node_id, node in prompt.items():
         if node_id not in connected_switches or node_id in switch_outputs:
@@ -956,7 +964,11 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
             if not is_link(link):
                 break
             current_id = str(link[0])
-            if current_id in selected or prompt.get(current_id, {}).get("class_type") == "ScenePresetInput" and link[1] == 0:
+            source_type = prompt.get(current_id, {}).get("class_type")
+            if source_type == "ComfySwitchNode":
+                if link[1] != 0:
+                    break
+            elif current_id in selected or source_type == "ScenePresetInput" or source_type not in SCENE_NODE_TYPES:
                 output = list(link)
                 break
         for switch_id in path:
@@ -998,7 +1010,7 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
 
     for node_id, replacement in list(replacements.items()):
         seen = {node_id}
-        while replacement is not None and str(replacement[0]) in replacements and str(replacement[0]) not in seen:
+        while replacement is not None and replacement[1] == 0 and str(replacement[0]) in replacements and str(replacement[0]) not in seen:
             seen.add(str(replacement[0]))
             replacement = replacements[str(replacement[0])]
         replacements[node_id] = replacement
@@ -1014,9 +1026,9 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
         inputs = node.get("inputs") if isinstance(node, dict) else None
         if not isinstance(inputs, dict):
             continue
-        for name in _scene_prompt_input_names(node):
+        for name in list(inputs):
             source_id = _prompt_link_source(inputs.get(name), node_id, name)
-            if source_id not in replacements:
+            if source_id not in replacements or inputs[name][1] != 0:
                 continue
             replacement = replacements[source_id]
             if replacement is None:
@@ -1074,7 +1086,7 @@ def _contract_superseded_model_workflow(workflow, replacements, prompt=None):
     links[:] = [link for link in links if not (parts := _workflow_link_parts(link)) or parts[3] not in empty_models]
     for link in links:
         parts = _workflow_link_parts(link)
-        if parts is None or parts[1] not in replacements:
+        if parts is None or parts[1] not in replacements or parts[2] != 0:
             continue
         replacement = replacements[parts[1]]
         if replacement is None:
@@ -1233,7 +1245,7 @@ def _metadata_for_save_mode(
         text_ids = {node_id for node_id, alias in source_aliases.items() if alias in text_source_ids}
         effective_models = _effective_model_source_ids(expanded_prompt, [scene_info, *expand_infos], source_aliases)
         contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
-            expanded_prompt, selected_ids, text_ids, consumer_items, effective_models,
+            expanded_prompt, selected_ids, text_ids, consumer_items, effective_models, unique_id,
         )
         selected_ids.update(text_ids)
         contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements, contracted_prompt)
@@ -1269,7 +1281,7 @@ def _metadata_for_save_mode(
 
     effective_models = _effective_model_source_ids(prompt, [scene_info, *expand_infos])
     contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(
-        prompt, selected_source_ids, text_source_ids, consumer_items, effective_models,
+        prompt, selected_source_ids, text_source_ids, consumer_items, effective_models, unique_id,
     )
     selected_sources.update(text_source_ids)
     ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)

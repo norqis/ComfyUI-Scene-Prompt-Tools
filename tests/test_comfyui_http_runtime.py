@@ -1430,6 +1430,50 @@ NODE_CLASS_MAPPINGS = {
                     finally:
                         self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
 
+    def test_generic_switch_selected_png_skips_inactive_text_and_replays(self):
+        from PIL import Image
+        for mode in ('ワークフロー全体', '生成経路ノードのみ'):
+            for selected in (True, False):
+                with self.subTest(mode=mode, selected=selected):
+                    folder = f'generic-switch-{mode}-{selected}'
+                    graph = _save_graph(mode)
+                    graph.pop('7')
+                    graph['4']['inputs']['seed_base'] = 123
+                    graph['3']['inputs'].update(width=16, height=16)
+                    graph.update({
+                        '8': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'text-positive', 'negative_base': folder}},
+                        '9': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['8', 0], 'scope': '全てのノード', 'seed_base': 123}},
+                        '10': {'class_type': 'PrimitiveString', 'inputs': {'value': folder}},
+                        '11': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': ['12', 0], 'on_true': ['10', 0], 'on_false': ['9', 1]}},
+                        '12': {'class_type': 'PrimitiveBoolean', 'inputs': {'value': selected}},
+                        '13': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': False, 'on_true': ['11', 0], 'on_false': ['11', 0]}},
+                    })
+                    graph['6']['inputs']['path'] = ['13', 0]
+                    handle, workflow = self._prepare_callback_run(graph, '4')
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': handle})
+                    files = list((self.base / 'output' / folder).glob('*.png'))
+                    self.assertEqual(len(files), 1)
+                    with Image.open(files[0]) as image:
+                        replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
+                    if mode == '生成経路ノードのみ':
+                        self.assertEqual(replay['6']['inputs']['path'], ['10', 0] if selected else ['9', 1])
+                        self.assertNotIn('11', replay)
+                        self.assertNotIn('13', replay)
+                        self.assertEqual('9' in replay, not selected)
+                    else:
+                        self.assertIn('9', replay)
+                        self.assertIn('11', replay)
+                    # Requeue the actual embedded graph with its own saved workflow.
+                    replay_handle, visual = self._prepare_callback_run(replay, '4', visual)
+                    try:
+                        self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+                    self.assertEqual(len(list((self.base / 'output' / folder).glob('*.png'))), 2)
+
     def test_model_specific_loras_execute_only_matching_loaders(self):
         for mode, include_illustrious, expected in (("Anima", True, ["lora:anima.safetensors"]),
                 ("Illustrious", True, ["lora:illustrious.safetensors"]), ("Illustrious", False, [])):
