@@ -762,6 +762,7 @@ async function checkPresetSwitchModals(browser, url) {
     await page.evaluate(async () => {
         const graph = window.app.graph;
         const history = window.__switchHistory = { graphBefore: 0, graphAfter: 0, canvasBefore: 0, canvasAfter: 0 };
+        window.LiteGraph = { NODE_SLOT_HEIGHT: 20 };
         graph.beforeChange = () => history.graphBefore++;
         graph.afterChange = () => history.graphAfter++;
         window.app.canvas = { graph, emitBeforeChange() { history.canvasBefore++; }, emitAfterChange() { history.canvasAfter++; } };
