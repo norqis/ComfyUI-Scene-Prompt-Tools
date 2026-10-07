@@ -148,11 +148,27 @@ class CompactRowTests(unittest.TestCase):
         self.assertEqual(last["row_index"], 26_999)
 
     def test_single_row_shared_merge_chain_does_not_build_a_recursive_product(self):
-        compact = p.make_plan([{"row": row("a"), "count": 1}])
-        for _ in range(40):
-            compact = p.merge(compact, compact)
-        self.assertLess(compact.depth, 3)
-        self.assertEqual(p.item_for_index(compact, 0)["row"]["positive_parts"], ["a"])
+        for held in (False, True):
+            compact = p.multiply_count(p.make_plan([{"row": row("a"), "count": 1}]), 1, not held)
+            for _ in range(40):
+                compact = p.merge(compact, compact)
+            self.assertLess(compact.depth, 3)
+            selected = p.item_for_index(compact, 0)
+            self.assertEqual(selected["row"]["positive_parts"], ["a"])
+            self.assertEqual(p.replay_index_for_event(compact, selected["event_ref"], {"a"}, {"a"}), 0)
+            self.assertEqual(p.multiply_count(compact, 10)["stats"]["total_batches"], 1 if held else 10)
+
+    def test_scalar_merge_preserves_strict_count_union_and_zero_counts(self):
+        for left_held, right_held in ((True, False), (False, True), (True, True)):
+            for a_count in (0, 1, 3):
+                for b_count in (0, 1, 2):
+                    first, second = [{"row": row("a"), "count": a_count}], [{"row": row("b"), "count": b_count}]
+                    left = p.multiply_count(p.make_plan(first), 1, not left_held)
+                    right = p.multiply_count(p.make_plan(second), 1, not right_held)
+                    result = p.merge(left, right)
+                    self.assert_eager(result, eager_merge(first, second))
+                    self.assertEqual(p.multiply_count(result, 0)["stats"], result["stats"])
+                    self.assertEqual(p.multiply_count(result, 10)["stats"], result["stats"])
 
 
 if __name__ == "__main__":

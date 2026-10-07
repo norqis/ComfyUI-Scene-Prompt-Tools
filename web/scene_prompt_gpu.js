@@ -18,6 +18,7 @@ export const GPU_HANDOFF_SETTINGS = [
 
 export function createGPUController({ app, api, onCleanupError = (error) => console.warn("[Scene Prompt] GPU操作の終了に失敗しました。", error) }) {
     const sessions = new Set(), policies = new Set();
+    const failedSessionEnds = new Set(), failedPolicyReleases = new Set();
     let pageHidden = false;
     function snapshot() {
         const read = (id) => app.extensionManager?.setting?.get
@@ -40,15 +41,34 @@ export function createGPUController({ app, api, onCleanupError = (error) => cons
     }
     async function endLLM(sessionId, options) {
         if (!sessionId) return;
-        try { await post("llm/end", { session_id: sessionId, client_id: api.clientId || "" }, options); }
-        finally { sessions.delete(sessionId); }
+        try {
+            await post("llm/end", { session_id: sessionId, client_id: api.clientId || "" }, options);
+            sessions.delete(sessionId);
+            failedSessionEnds.delete(sessionId);
+        } catch (error) {
+            if (sessions.has(sessionId)) failedSessionEnds.add(sessionId);
+            throw error;
+        }
     }
     async function releaseImage(policyId, options) {
         if (!policyId) return;
-        try { await post("gpu/release", { policy_id: policyId, client_id: api.clientId || "" }, options); }
-        finally { policies.delete(policyId); }
+        try {
+            await post("gpu/release", { policy_id: policyId, client_id: api.clientId || "" }, options);
+            policies.delete(policyId);
+            failedPolicyReleases.delete(policyId);
+        } catch (error) {
+            if (policies.has(policyId)) failedPolicyReleases.add(policyId);
+            throw error;
+        }
+    }
+    async function finishPendingCleanup() {
+        // Retry only failed cleanup, once per new user action. Active operations
+        // remain owned, and a persistent failure is reported before new work.
+        for (const sessionId of failedSessionEnds) await endLLM(sessionId);
+        for (const policyId of failedPolicyReleases) await releaseImage(policyId);
     }
     async function beginLLM(settings) {
+        await finishPendingCleanup();
         if (!settings?.releaseComfyBeforeLLM) return "";
         const data = await post("llm/begin", { client_id: api.clientId || "" });
         if (!data.session_id) throw new Error("LLM生成のGPU準備に失敗しました。");
@@ -61,6 +81,7 @@ export function createGPUController({ app, api, onCleanupError = (error) => cons
         return sessionId;
     }
     async function prepareImage(settings, { runHandle = "", continuous = false } = {}) {
+        await finishPendingCleanup();
         if (!settings?.releaseLLMBeforeImage) return "";
         const data = await post("gpu/prepare", {
             client_id: api.clientId || "", continuous,
@@ -83,7 +104,10 @@ export function createGPUController({ app, api, onCleanupError = (error) => cons
             delete prompt.extra_data.scene_gpu_policy;
         }
     }
-    function acceptImage(policyId) { policies.delete(policyId); }
+    function acceptImage(policyId) {
+        policies.delete(policyId);
+        failedPolicyReleases.delete(policyId);
+    }
     function queueClient(queuePrompt, policyId) {
         if (!policyId) return api;
         if (queuePrompt.name.startsWith("bound ")) {

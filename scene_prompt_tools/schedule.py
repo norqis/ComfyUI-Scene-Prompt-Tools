@@ -723,17 +723,19 @@ def merge(left, right):
     first, second = normalize_plan(left), normalize_plan(right)
     if first["random_guards"] or second["random_guards"]:
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Prompt Merge は使えません。")
-    composite = any(_contains_composite(unit) for plan in (first, second) for unit in plan["units"])
     boundary = first["contains_queue_boundary"] or second["contains_queue_boundary"]
-    if composite:
+    a = _unwrap_run(first["units"][0]) if len(first["units"]) == 1 else None
+    b = _unwrap_run(second["units"][0]) if len(second["units"]) == 1 else None
+    if a is not None and b is not None:
+        result = _unit("run", row=_old.merge_rows(a["row"], b["row"]), count=_safe(a["count"] * b["count"]))
+        # A held scalar row protects every event in this scalar product.
+        if first.has_count_hold or second.has_count_hold:
+            result = _unit("count_hold", unit=result)
+        units = [result]
+    elif any(_contains_composite(unit) for plan in (first, second) for unit in plan["units"]):
         units = [_unit("product", left=first, right=second)]
     else:
-        a = _unwrap_run(first["units"][0]) if len(first["units"]) == 1 else None
-        b = _unwrap_run(second["units"][0]) if len(second["units"]) == 1 else None
-        if a is not None and b is not None:
-            units = [_unit("run", row=_old.merge_rows(a["row"], b["row"]), count=_safe(a["count"] * b["count"]))]
-        else:
-            units = [_unit("row_product", left=first, right=second)]
+        units = [_unit("row_product", left=first, right=second)]
     return mark_prompt_whole(_plan(units, boundary=boundary))
 
 

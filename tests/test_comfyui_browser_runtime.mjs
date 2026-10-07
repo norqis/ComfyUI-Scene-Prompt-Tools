@@ -526,6 +526,33 @@ window.__sceneSeedRuntimeTest = {
         assert(!nativeGPURequests.at(-1).extra_data.scene_gpu_policy);
         assert.equal(nativeResourceRequests.length, resourceCount, "native OFF queue adds no resource-control requests");
         assert.equal(gpuEvents.length, providerCount, "native OFF queue never touches the provider resource API");
+
+        // Drop one cleanup request before it reaches the real coordinator. The
+        // next normal Queue action must recover before entering its image gate.
+        await setGPU(true, false);
+        const cleanupStart = nativeResourceRequests.length;
+        let droppedEnd = false;
+        const dropFirstEnd = async (route) => {
+            if (!droppedEnd) { droppedEnd = true; return route.abort("failed"); }
+            return route.continue();
+        };
+        await page.route("**/scene_prompt/llm/end", dropFirstEnd);
+        try {
+            const recoveredPrompt = await page.evaluate(async () => {
+                const { app } = await import("/scripts/app.js"); app.graph.clear();
+                const target = window.LiteGraph.createNode("ScenePromptLLM"); app.graph.add(target);
+                target.widgets.find((widget) => widget.name === "description").value = "recover failed resource cleanup";
+                await target.widgets.find((widget) => widget.sceneRole === "llm_generate").callback();
+                return target.widgets.find((widget) => widget.name === "positive").value;
+            });
+            assert.equal(recoveredPrompt, "fixture prompt");
+            assert.equal(droppedEnd, true);
+            const recoveredImage = await queueImage(2);
+            const recoveredHistory = await completedHistory(recoveredImage.prompt_id);
+            assert.equal(recoveredHistory[recoveredImage.prompt_id].status.status_str, "success");
+            assert.deepEqual(nativeResourceRequests.slice(cleanupStart).map(({ path }) => path),
+                ["/scene_prompt/llm/begin", "/scene_prompt/llm/generate", "/scene_prompt/llm/end", "/scene_prompt/llm/end"]);
+        } finally { await page.unroute("**/scene_prompt/llm/end", dropFirstEnd); }
         await setGPU(false, false);
         await page.evaluate(async (connection) => {
             const { api } = await import("/scripts/api.js");
@@ -533,7 +560,7 @@ window.__sceneSeedRuntimeTest = {
                 body: JSON.stringify({ base_url: connection.base_url, port: connection.port ?? "", model: connection.model, api_key: "" }) });
             window.app.graph.clear();
         }, originalConnection);
-        console.log("real ComfyUI native GPU settings persistence, prompt control, scoped POST policy, release-before-image and OFF compatibility passed");
+        console.log("real ComfyUI native GPU settings, scoped POST policy, release-before-image, OFF compatibility and failed-cleanup recovery before normal Queue passed");
     } finally { nativeGPUChecks = false; }
     if (process.env.COMFYUI_WORKFLOW_PNG) {
         const extracted = spawnSync(python, [

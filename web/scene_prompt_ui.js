@@ -8056,13 +8056,21 @@ function sceneScheduleMerge(left, right) {
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMergeを接続してください。");
     const boundary = left.boundary || right.boundary;
     const composite = sceneScheduleHasComposite(left) || sceneScheduleHasComposite(right);
-    if (!composite && left.units.length === 1 && right.units.length === 1) {
+    if (left.units.length === 1 && right.units.length === 1) {
         const run = (unit) => {
-            while (unit.kind === "fixed") unit = unit.unit;
+            while (["fixed", "count_hold"].includes(unit.kind)) unit = unit.unit;
+            if (unit.kind === "map") {
+                const child = run(unit.unit);
+                return child && unit.transform(child);
+            }
             return unit.kind === "run" ? unit.entry : null;
         };
         const first = run(left.units[0]), second = run(right.units[0]);
-        if (first && second) return sceneSchedulePlan([sceneScheduleRun(mergeScenePromptEntryPair(first, second))], boundary);
+        if (first && second) {
+            let result = sceneScheduleRun(mergeScenePromptEntryPair(first, second));
+            if (left.hasCountHold || right.hasCountHold) result = sceneScheduleWrapper("count_hold", result);
+            return sceneSchedulePlan([result], boundary);
+        }
     }
     const l = left.stats;
     const r = right.stats;

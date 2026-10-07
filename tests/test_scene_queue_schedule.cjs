@@ -195,10 +195,14 @@ function verifyCompactOrdinaryRows() {
     const last = ctx.sceneScheduleAt(compact, compact.stats.total - 1);
     assert.deepEqual(Array.from(last.parts), ["base", "29", "29", "29"]);
     assert.equal(last.repeatIndex, 100000000);
-    let scalar = leaf("same");
-    for (let depth = 0; depth < 40; depth += 1) scalar = ctx.sceneScheduleMerge(scalar, scalar);
-    assert.equal(scalar.units[0].kind, "run", "single-row shared Merge chains must not create exponentially traversed products");
-    assert.deepEqual(Array.from(scalar.units[0].entry.row.labels), ["same"]);
+    for (const held of [false, true]) {
+        let scalar = ctx.sceneScheduleCount(leaf("same"), 1, !held);
+        for (let depth = 0; depth < 40; depth += 1) scalar = ctx.sceneScheduleMerge(scalar, scalar);
+        assert.equal(scalar.units[0].kind, held ? "count_hold" : "run",
+            "single-row shared Merge chains must not create exponentially traversed products");
+        assert.deepEqual(Array.from(ctx.sceneScheduleAt(scalar, 0).row.labels), ["same"]);
+        assert.equal(ctx.sceneScheduleCount(scalar, 10).stats.total, held ? 1 : 10);
+    }
 }
 verifyCompactOrdinaryRows();
 
