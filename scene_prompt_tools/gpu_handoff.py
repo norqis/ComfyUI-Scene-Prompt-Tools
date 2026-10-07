@@ -248,11 +248,15 @@ class Coordinator:
                 raise HandoffError("The GPU policy client has disconnected.", 409)
             return policy
 
-    def retire_policy(self, policy_id):
+    def retire_policy(self, policy_id, user_id=None, *, client_id=None):
         with self.lock:
             policy = self.policies.get(policy_id)
             if policy is None:
                 return False
+            if user_id is not None and policy.user_id != user_id:
+                raise HandoffError("The GPU policy belongs to another client.", 403)
+            if client_id is not None and policy.client_id != client_id:
+                raise HandoffError("The GPU policy belongs to another client.", 403)
             policy.retired = True
             if not policy.prompts:
                 self.policies.pop(policy_id, None)

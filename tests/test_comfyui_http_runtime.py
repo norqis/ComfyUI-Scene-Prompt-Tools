@@ -1063,17 +1063,17 @@ NODE_CLASS_MAPPINGS = {
             status, _ = self._request_status("/prompt", {"prompt_id": prompt_id, "prompt": self._gpu_graph(marker, "duplicate")})
             self.assertEqual(status, 409)
             self.assertEqual(self._request_status("/queue", {"delete": [prompt_id]})[0], 200)
-            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": policy_id})[0], 404)
+            self.assertFalse(self._request("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": policy_id})["released"])
             wiped_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
             self._request("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "wiped"),
                 "extra_data": {"scene_gpu_policy": wiped_policy}})
             self.assertEqual(self._request_status("/queue", {"clear": True})[0], 200)
-            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": wiped_policy})[0], 404)
+            self.assertFalse(self._request("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": wiped_policy})["released"])
             invalid_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
             status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-b", "prompt": {},
                 "extra_data": {"scene_gpu_policy": invalid_policy}})
             self.assertEqual(status, 400)
-            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": invalid_policy})[0], 404)
+            self.assertFalse(self._request("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": invalid_policy})["released"])
             self.assertEqual(self._request_status("/interrupt", {})[0], 200)
             interrupted = self._wait_for_prompt_error(blocker["prompt_id"])
             self.assertTrue(any(message[0] == "execution_interrupted" for message in interrupted["status"]["messages"]))

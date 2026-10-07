@@ -632,8 +632,7 @@ def define_routes():
                     result = {"session_id": await gpu.begin_session(user_id, client_id, settings, state)}
             elif operation == "release":
                 policy_id = str(payload.get("policy_id") or "")
-                gpu.policy(policy_id, user_id, client_id)
-                result = {"released": gpu.retire_policy(policy_id)}
+                result = {"released": gpu.retire_policy(policy_id, user_id, client_id=client_id)}
             else:
                 result = {"ended": gpu.end_session(str(payload.get("session_id") or ""), user_id, client_id=client_id)}
             return web.json_response(result)
