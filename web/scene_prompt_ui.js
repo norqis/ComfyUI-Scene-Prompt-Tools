@@ -8100,6 +8100,8 @@ function sceneScheduleHasComposite(plan) {
 }
 
 function sceneScheduleMerge(left, right) {
+    if (left.stats.error) return left;
+    if (right.stats.error) return right;
     if (left.randomGuards?.length || right.randomGuards?.length)
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMergeを接続してください。");
     const boundary = left.boundary || right.boundary;
@@ -8226,7 +8228,7 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                     plan = sceneScheduleError("ランダム分岐の確率の合計を100%にしてください。");
                 } else {
                     const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-                plan = !weights[outputSlot] ? sceneSchedulePlan([], base.boundary,
+                    plan = base.stats.error ? base : !weights[outputSlot] ? sceneSchedulePlan([], base.boundary,
                         [...base.randomGuards, { gateId: `${instancePath}/${nodeId}`, armIndex: outputSlot, weights }])
                         : weights.filter((weight) => weight > 0).length === 1 && !apiInput(entry, "preserve_join") ? base
                             : sceneSchedulePlan(base.units, base.boundary,
@@ -8283,6 +8285,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         const weights = sceneRandomWeights(node);
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
             || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
+        if (base.stats.error) return finish(base);
         if (!weights[outputSlot]) return finish(sceneSchedulePlan([], base.boundary,
             [...base.randomGuards, { gateId: String(node.id), armIndex: outputSlot, weights }]));
         if (weights.filter((weight) => weight > 0).length === 1 && !findWidget(node, "preserve_join")?.value)

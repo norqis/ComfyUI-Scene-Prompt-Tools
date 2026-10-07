@@ -234,6 +234,16 @@ The existing run context now keeps the latest native evaluation's selections by 
 
 All 755 Python tests pass (2 opt-in native classes skipped). Focused cases cover different-length mapped inputs, cached outputs, blocked indices, shorter evaluations and weak-reference release. The native six-case regression covers linked index/seed lists and Scene-plan lists through To Text and Expand, with and without metadata. Actual pixels and per-consumer seeds survive save/replay. Opaque providers retain their original whole list on ordinary replay; this does not claim single-item contraction or continuous-generation static count support for arbitrary external providers. Two older cache assertions were updated after review to distinguish elided input from present input. The full native browser and exact-HEAD remediation review follow before the next fresh whole audit.
 
+The nineteenth auditor approved exact HEAD `e4e175f1ab45ca8c907a93f27fd7a3bbd728a0d3` after independently rerunning all six native cases. The complete native browser and every required CI check passed: Python 3.9/3.11 each 755 tests, 25 frontend suites and 52 native CPU/HTTP tests. A new twentieth auditor began another whole-repository audit.
+
+## Twentieth independent full audit
+
+The new GPT-6 Astra xhigh auditor reproduced one frontend error-propagation family. An incomplete positive-probability Random join correctly produced an error, but downstream Merge discarded it in its zero-row shortcut. A later Random Input also rebuilt an error-free empty plan, both on the live canvas and inside Presets. Expand therefore showed a plausible zero count instead of the upstream explanation. Root independently reproduced both Merge inputs before editing.
+
+The auditor agreed with the minimal three-site design. Merge and both Random reconstruction paths now preserve the incoming error plan, following the existing Count/Matrix/map behavior. There is no extra validation, traversal, cache or change to valid count arithmetic. Focused regressions cover either Merge input, later Count/Matrix, complete Random joins within Presets, valid zero-row plans and reconnection recovery. The new native browser case covers Queue and Random Output joins on both Merge sides, followed by another Random and Count 10. The actual Expand widget retains the original error/null count, then returns to 10 after the missing arm is connected, without invoking a test-side planner.
+
+All 25 frontend suites and the complete isolated native browser pass with the fix. The independent whole-audit semantic probe passed 250 composed plans / 1,078 selection, statistics and replay checks. Final coverage and exact-HEAD remediation review follow before a new whole audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation

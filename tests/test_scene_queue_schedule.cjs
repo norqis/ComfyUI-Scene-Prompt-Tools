@@ -93,6 +93,18 @@ assert.match(ctx.sceneScheduleMap(ctx.sceneScheduleError("不正な確率"), (en
     /不正な確率/u, "a downstream Prompt does not erase the random validation error");
 assert.match(queue([guarded(leaf("A"), 0)], controls()).stats.error, /ランダム分岐/u,
     "a missing positive arm is an error");
+const incompleteRandom = queue([guarded(leaf("A"), 0)], controls());
+for (const merge of [
+    ctx.sceneScheduleMerge(incompleteRandom, leaf("B")),
+    ctx.sceneScheduleMerge(leaf("B"), incompleteRandom),
+]) {
+    assert.equal(merge.stats.error, incompleteRandom.stats.error,
+        "Merge preserves an upstream error instead of presenting a valid zero count");
+    assert.equal(ctx.sceneScheduleCount(ctx.sceneScheduleMatrix(merge, [{ label: "X" }]), 10).stats.error,
+        incompleteRandom.stats.error, "later Matrix and Count preserve the original error");
+}
+assert.equal(ctx.sceneScheduleMerge(randomJoined, leaf("B")).stats.total, 1,
+    "connecting the missing arm restores a valid Merge count");
 const zeroArm = ctx.sceneSchedulePlan([], false, [{ gateId: "random-1", armIndex: 2, weights: randomWeights }]);
 assert.match(queue([zeroArm], controls()).stats.error, /0%を超える出力/u,
     "a Queue containing only zero-percent arms cannot close a missing positive-probability route");
@@ -319,6 +331,13 @@ const outputPreset = structuredClone(randomPreset);
 outputPreset.api_graph.output[5].class_type = "ScenePromptRandomRouteOutput";
 outputPreset.api_graph.output[2].inputs.preserve_join = true;
 const outputPlan = ctx.sceneScheduleForPreset("output-preset", leaf("X"), new Set(), outputPreset, "output-reference");
+for (const saved of [randomPreset, outputPreset]) {
+    assert.equal(ctx.sceneScheduleForPreset("invalid-upstream", incompleteRandom, new Set(), saved).stats.error,
+        incompleteRandom.stats.error, "a complete Random join inside a Preset preserves its upstream error");
+    const zero = ctx.sceneScheduleForPreset("valid-zero", ctx.sceneSchedulePlan(), new Set(), saved);
+    assert.equal(zero.stats.total, 0);
+    assert.equal(zero.stats.error, undefined, "legitimate zero-row inputs remain valid");
+}
 assert.equal(outputPlan.units[0].kind, "random_choice");
 assert.equal(ctx.sceneScheduleCount(outputPlan, 10).stats.total, 10);
 assert.equal(ctx.sceneScheduleCount(outputPlan, 1_000_000).units.length, 1);

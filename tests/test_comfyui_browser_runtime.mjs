@@ -1614,6 +1614,44 @@ window.__sceneSeedRuntimeTest = {
     assert(randomOutputRuntime.restoredInputs.includes('scene_prompt10'));
     assert(randomOutputRuntime.missingStatus>=400); assert.match(JSON.stringify(randomOutputRuntime.missing),/出力1|ランダム分岐/u);
     console.log('real ComfyUI nested 100% Input/Output UI, Count10, preflight and serialization passed');
+    const randomErrorPropagation = await page.evaluate(async () => {
+        const results = [];
+        for (const joinType of ['ScenePrompterQueue', 'ScenePromptRandomRouteOutput']) {
+            for (const invalidSide of [1, 2]) {
+                const app = window.app; app.graph.clear();
+                const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+                const link = (from, slot, to, name) => from.connect(slot, to, to.inputs.findIndex(input => input.name === name));
+                const random = add('ScenePromptRandomRoute'), join = add(joinType);
+                const valid = add('ScenePrompter'), merge = add('ScenePrompterMerge');
+                const nextRandom = add('ScenePromptRandomRoute'), nextOutput = add('ScenePromptRandomRouteOutput');
+                const count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+                for (const node of [random, nextRandom])
+                    node.widgets.find(widget => widget.name === 'weights_json').value = '[5000,5000,0,0,0,0,0,0,0,0]';
+                count.widgets.find(widget => widget.name === 'count').value = 10;
+                link(random, 0, join, 'scene_prompt1');
+                link(join, 0, merge, `scene_prompt${invalidSide}`);
+                link(valid, 0, merge, `scene_prompt${3 - invalidSide}`);
+                link(merge, 0, nextRandom, 'scene_prompt');
+                link(nextRandom, 0, nextOutput, 'scene_prompt1');
+                link(nextRandom, 1, nextOutput, 'scene_prompt2');
+                link(nextOutput, 0, count, 'scene_prompt'); link(count, 0, expand, 'scene_prompt');
+                await new Promise(done => setTimeout(done, 300));
+                const widget = expand.widgets.find(item => item.sceneRole === 'expand_total_count');
+                const before = { label: widget.value, total: widget.sceneTotalCount };
+                link(random, 1, join, 'scene_prompt2');
+                await new Promise(done => setTimeout(done, 300));
+                results.push({ joinType, invalidSide, before, after: { label: widget.value, total: widget.sceneTotalCount } });
+            }
+        }
+        return results;
+    });
+    for (const result of randomErrorPropagation) {
+        assert.match(result.before.label, /ランダム分岐.*0%/u, JSON.stringify(result));
+        assert.equal(result.before.total, null, 'invalid Random routes must not display a plausible zero');
+        assert.equal(result.after.total, 10, 'reconnecting the missing arm restores the visible count');
+        assert.doesNotMatch(result.after.label, /ランダム分岐/u);
+    }
+    console.log('real ComfyUI upstream Random errors survive both Merge sides and downstream Random; reconnection restores Count10');
     const queueModeRuntime = await page.evaluate(async () => {
         const app=window.app; app.graph.clear();
         const add=type=>{const node=window.LiteGraph.createNode(type);app.graph.add(node);return node;};
