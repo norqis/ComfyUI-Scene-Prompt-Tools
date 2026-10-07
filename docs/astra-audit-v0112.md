@@ -33,7 +33,13 @@ During regression work root also reproduced exponential growth of duplicate UI l
 
 Validation: the clean full Python run passed 713 tests (2 opt-in native classes skipped); npm syntax and all 25 frontend suites passed, including Chromium snapshot ownership races. Actual ComfyUI CPU/HTTP passed 44 existing tests, plus the new compact Matrix/Merge test: preparation count 120, selected boundary/interior events, saving only the selected graph, loading PNG metadata and executing the same prompt again. The complete isolated native Chromium suite passed, including normal/batch queue, physical Preset bypass, Count/Switch pointer edits, Undo/Redo, candidate/Matrix edits, LLM settings/resources, and multi-workflow behavior.
 
-The first fix review reproduced one remaining shared-Merge growth path in `row.labels`; root fixed it in `b172622` and replaced the old test stub with the actual row/prompt merge helpers from the start of the suite. The 40-stage scalar regression now checks row labels as well as the compact schedule. Final independent approval and a fresh whole-repository audit are pending.
+The first fix review reproduced one remaining shared-Merge growth path in `row.labels`; root fixed it in `b172622` and replaced the old test stub with the actual row/prompt merge helpers from the start of the suite. The 40-stage scalar regression now checks row labels as well as the compact schedule. It also found live Random validation after asynchronous batch capture; `789d84c` removes this redundant current-tab check and uses the existing backend preparation validation of captured probabilities/connections. A delayed same-graph/same-ID tab-change regression passes.
+
+## Independent review and second full audit
+
+The first Astra reviewer approved HEAD `789d84c`, covering all initial findings and follow-up fixes. Its independent comparison with `2a06f57` covered 1,496 graph compositions and 7,110 events: row payloads, count/repetition/order, serialization and replay rank after source pruning all matched. This included zero Counts, mixed fixed/strict policy, ordinary/alternating Queue, Matrix/Merge and latent maps. Full validation logs were also reviewed.
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round2`) is now auditing the entire current repository independently, including code outside this diff. Release remains pending its outcome.
 
 ## Sources
 
