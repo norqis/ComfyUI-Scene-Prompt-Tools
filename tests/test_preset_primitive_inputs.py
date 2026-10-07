@@ -17,9 +17,27 @@ class PresetPrimitiveInputs(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.module = load_presets_module(Path(self.temp.name))
 
-    def save(self, nodes):
+    def save(self, nodes, workflow=None):
         return self.module.save_preset({"preset_id": "linked", "name": "Linked", "output_node_id": "3",
-                                       "api_graph": {"output": nodes}, "workflow": {"version": 1, "nodes": []}})
+                                       "api_graph": {"output": nodes}, "workflow": workflow or {"version": 1, "nodes": []}})
+
+    def test_virtual_combo_primitive_is_preserved_only_as_workflow_metadata(self):
+        nodes = basic_nodes()
+        nodes["4"] = node("ScenePrompterQueue", scene_prompt1=["2", 0], order_mode="alternate")
+        nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
+        workflow = {"version": 1, "nodes": [
+            {"id": int(key), "type": entry["class_type"]} for key, entry in nodes.items()
+        ] + [{"id": 5, "type": "PrimitiveNode", "widgets_values": ["alternate"]}],
+            "links": [[1, 1, 0, 2, 0, "SCENE_PROMPT"], [2, 2, 0, 4, 0, "SCENE_PROMPT"],
+                      [3, 5, 0, 4, 1, "COMBO"], [4, 4, 0, 3, 0, "SCENE_PROMPT"]]}
+        saved = self.save(nodes, workflow)
+        provider = next(entry for entry in saved["workflow"]["nodes"] if entry["id"] == 5)
+        self.assertEqual(provider["widgets_values"], ["alternate"])
+        self.assertNotIn("5", saved["api_graph"]["output"])
+        nodes["5"] = node("PrimitiveNode", value="alternate")
+        nodes["4"]["inputs"]["order_mode"] = ["5", 0]
+        with self.assertRaisesRegex(ValueError, "Preset内で使えません"):
+            self.save(nodes)
 
     def test_all_literal_provider_types_survive_save_load_and_execute(self):
         nodes = basic_nodes()

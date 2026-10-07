@@ -111,9 +111,12 @@ export async function verifyLinkedInputSemantics(page) {
         await app.loadGraphData(app.graph.serialize(),true,true); const reloadedLayout = layout();
         app.graph.remove(app.graph.getNodeById(switchIds[0])); app.graph.remove(app.graph.getNodeById(switchIds[1]));
         const output = add('ScenePresetOutput'), id = add('PrimitiveString'), title = add('PrimitiveString');
+        const path = add('ScenePath'), order = add('PrimitiveNode'), mode = add('PrimitiveNode'), pathMode = add('PrimitiveNode');
+        link(order,current('queue'),'order_mode'); link(mode,current('queue'),'downstream_count_mode'); link(pathMode,path,'path_mode');
+        link(current('later'),path,'scene_prompt');
         edit(output,'preset_id','stale_id'); edit(output,'preset_name','stale title');
         edit(id,'value','linked_native'); edit(title,'value','Linked native title');
-        link(current('later'),output,'scene_prompt'); link(id,output,'preset_id'); link(title,output,'preset_name');
+        link(path,output,'scene_prompt'); link(id,output,'preset_id'); link(title,output,'preset_name');
         const saveResponse = new Promise(resolve => {
             const fetchApi = api.fetchApi;
             api.fetchApi = async function (url,options) {
@@ -126,6 +129,11 @@ export async function verifyLinkedInputSemantics(page) {
         const saved = await saveResponse;
         const response = await api.fetchApi('/scene_presets/load?preset_id=linked_native');
         const stored = await response.json();
+        if (response.ok) await app.loadGraphData(stored.workflow,true,true);
+        const comboReload = [order.id,mode.id,pathMode.id].map(id => {
+            const node = app.graph.getNodeById(id), edges = node?.outputs?.[0]?.links || [];
+            return node?.type === 'PrimitiveNode' && edges.length === 1 && !!app.graph.links[edges[0]];
+        });
         app.graph.clear();
         const llm = add('ScenePromptLLM'), description = add('PrimitiveStringMultiline'), llmExpand = add('ScenePrompterExpand');
         edit(llm,'description','stale fallback'); edit(description,'value','');
@@ -139,7 +147,7 @@ export async function verifyLinkedInputSemantics(page) {
         edit(description,'value',''); const llmCleared = await llmButtons();
         app.graph.clear();
         return {multiply,changed,fixed,rerouted,reloaded,initialLayout,resizedLayout,reloadedLayout,
-            llmEmpty,llmReady,llmCleared,
+            llmEmpty,llmReady,llmCleared,comboReload,
             save:{status:saved.status,id:saved.payload.preset_id,name:saved.payload.name,body:saved.body,storedStatus:response.status,stored}};
     });
     for (const [key,total] of [['multiply',18],['changed',12],['fixed',6],['rerouted',18],['reloaded',18]])
@@ -153,6 +161,7 @@ export async function verifyLinkedInputSemantics(page) {
     assert.equal(result.save.status,200,JSON.stringify(result.save));
     assert.equal(result.save.id,'linked_native'); assert.equal(result.save.name,'Linked native title');
     assert.equal(result.save.storedStatus,200,JSON.stringify(result.save));
+    assert.deepEqual(result.comboReload,[true,true,true], 'Queue and Path native COMBO providers survive Preset save/load');
     assert.deepEqual(result.llmEmpty,[true,true]); assert.deepEqual(result.llmReady,[false,false]);
     assert.deepEqual(result.llmCleared,[true,true]);
     console.log('real ComfyUI linked Queue counts, fixed/multiply, Reroute/reload, Preset output name save and switch layout/resize/hit-test compatibility passed');

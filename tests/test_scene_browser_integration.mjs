@@ -839,7 +839,7 @@ async function checkPresetSwitchModals(browser, url) {
             settingsAboveEdit: window.__switchReference.widgets.findIndex(widget => widget.sceneRole === "preset_switch_settings") < window.__switchReference.widgets.findIndex(widget => widget.sceneRole === "scene_preset_edit") };
     });
     assert.deepEqual(migrations, { clonedName: "光", clonedSlot: "switch_3", legacy: "[]", id: "legacy", handle: "handle", settingsAboveEdit: true,
-        legacyInput: { count: 12, slot0: { name: "scene_prompt", type: "SCENE_PROMPT", links: [42], preserved: "slot0 metadata" } } });
+        legacyInput: { count: 12, slot0: { name: "scene_prompt", type: "SCENE_PROMPT", links: [42], preserved: "slot0 metadata", pos: [391, 14] } } });
     await page.evaluate(() => {
         const input = window.__switchInput, graph = window.app.graph;
         window.__scenePromptPopupTestHooks.openScenePresetSwitchNames(input);
