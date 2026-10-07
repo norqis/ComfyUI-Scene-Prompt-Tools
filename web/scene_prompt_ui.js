@@ -1271,6 +1271,13 @@ function replacePromptItemInState(state, originalCategory, originalKey, updatedI
                 const replacement = itemForEditedState(updatedItem, item);
                 if (replacement) {
                     const replacementCategory = itemCategoryKey(replacement) || updatedCategory;
+                    if (replacementCategory === category && itemKey(item) === itemKey(replacement)
+                        && item.label === replacement.label && item.prompt === replacement.prompt
+                        && (item.description || "") === (replacement.description || "")
+                        && itemSelectionSignature(item) === itemSelectionSignature(replacement)) {
+                        nextItems.push(item);
+                        continue;
+                    }
                     if (replacementCategory === category) {
                         nextItems.push(replacement);
                     } else {
@@ -3477,14 +3484,16 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
             const currentNodes = new Set(ownerGraph?._nodes || []);
             const retainedNodes = ownerNodes.filter((target) => target.graph === ownerGraph && currentNodes.has(target));
             if (retainedNodes.includes(node)) {
-                const selectedChanged = replaceSelectedPromptItem(node, item, updated, { stateWidgetName });
-                const graphChanged = replacePromptItemEverywhere(item, updated, retainedNodes);
-                clearSceneComputedCaches(node);
-                refreshNode(node, { fitHeight: true });
-                if (selectedChanged || graphChanged) {
-                    refreshDownstreamSceneNodes(node);
-                    ownerGraph.change?.();
-                }
+                withSceneUserChange(node, () => {
+                    const selectedChanged = replaceSelectedPromptItem(node, item, updated, { stateWidgetName });
+                    const graphChanged = replacePromptItemEverywhere(item, updated, retainedNodes);
+                    if (selectedChanged || graphChanged) {
+                        clearSceneComputedCaches(node);
+                        refreshNode(node, { fitHeight: true });
+                        refreshDownstreamSceneNodes(node);
+                        ownerGraph.change?.();
+                    }
+                });
             }
             if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             if (backHandler) {

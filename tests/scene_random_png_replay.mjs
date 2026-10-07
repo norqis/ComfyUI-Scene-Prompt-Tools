@@ -46,6 +46,29 @@ export async function testRandomPngReplay(page) {
         };
 
         const switches = [];
+        const linkedText = [];
+        for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) {
+            for (const literal of [false, true]) {
+                app.graph.clear();
+                const prelude = add('ScenePrompter'), selected = add('ScenePrompter'), matrix = add('SceneMatrix'), queue = add('ScenePrompterQueue');
+                const text = add('ScenePromptToText'), image = add('TestSceneTextImage'), save = add('SceneSaveImage');
+                set(prelude, 'positive_base', 'PRUNED_A'); set(selected, 'positive_base', 'SAVED_B');
+                set(matrix, 'matrix_json', JSON.stringify({ version: 1, sets: [
+                    { row_id: 'red', name: 'Red', path_label: 'Red', positive_base: 'RED' }, { row_id: 'blue', name: 'Blue', path_label: 'Blue', positive_base: 'BLUE' },
+                ] }));
+                for (const [name, type, value] of [['current_index', 'INT', 1], ['seed_base', 'INT', 0], ['seed_base_literal', 'BOOLEAN', literal]]) {
+                    const provider = add(type === 'INT' ? 'PrimitiveInt' : 'PrimitiveBoolean'); set(provider, 'value', value);
+                    text.addInput(name, type, { widget: { name } }); connect(provider, text, name);
+                }
+                connect(prelude, queue, 'scene_prompt1'); connect(selected, matrix); connect(matrix, queue, 'scene_prompt2');
+                connect(queue, text); connect(text, image, 'positive'); connect(image, save, 'images'); set(save, 'metadata_mode', mode);
+                let execution = await execute(); const rows = [execution[image.id].text];
+                await reloadPng(execution[save.id].images[0]);
+                const reloaded = await app.graphToPrompt();
+                execution = await execute(); rows.push(execution[image.id].text);
+                linkedText.push({ mode, literal, rows, controls: reloaded.output[String(text.id)].inputs });
+            }
+        }
         const linkedRandom = [];
         for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) {
             app.graph.clear();
@@ -152,8 +175,19 @@ export async function testRandomPngReplay(page) {
                 index: captured.output[String(first.id)].inputs.current_index,
                 weights: captured.output[String(random.id)].inputs.weights_json });
         }
-        return { random: results, switches, linkedRandom };
+        return { random: results, switches, linkedRandom, linkedText };
     });
+    for (const entry of result.linkedText) {
+        assert.deepEqual(entry.rows.map(row => row[0]), ['SAVED_B, RED', 'SAVED_B, RED']);
+        if (entry.mode === '生成経路ノードのみ') {
+            assert.equal(entry.controls.current_index, 0);
+            assert.equal(typeof entry.controls.seed_base, 'number');
+            assert.equal(entry.controls.seed_base_literal, false);
+            if (entry.literal) assert.equal(entry.controls.seed_base, 1);
+        } else {
+            for (const name of ['current_index', 'seed_base', 'seed_base_literal']) assert(Array.isArray(entry.controls[name]));
+        }
+    }
     for (const entry of result.linkedRandom) {
         assert.equal(entry.total, 1);
         assert.deepEqual(entry.rows[0], entry.rows[1], `${entry.mode}: linked Random controls preserve the selected PNG output`);

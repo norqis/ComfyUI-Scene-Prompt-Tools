@@ -55,6 +55,7 @@ for (const name of [
     "itemForState",
     "itemForEditedState",
     "itemSelectionSignature",
+    "replacePromptItemInState",
     "pruneStateToData",
 ]) {
     vm.runInContext(functionSource(name), context);
@@ -79,6 +80,19 @@ function stateFor(item) {
             [category]: [item],
         },
     };
+}
+
+for (const extra of [{ weight: 1.4 }, { selected_parts: [{ index: 0, text: "alpha", weight: 1.2 }] }]) {
+    const item = { ...candidate("edit", "Edit", "alpha, beta"), ...extra };
+    const state = stateFor(item);
+    const noChange = context.replacePromptItemInState(state, category, context.itemKey(item), { ...candidate("edit", "Edit", "alpha, beta"), description: "" }, category);
+    assert.equal(noChange.changed, false);
+    assert.equal(noChange.state, state, "unchanged catalog saves retain selected state and avoid redundant layout writes");
+    const changed = context.replacePromptItemInState(state, category, context.itemKey(item), candidate("edit", "New label", "alpha, beta"), category);
+    assert.equal(changed.changed, true);
+    assert.equal(changed.state.categories[category][0].label, "New label");
+    assert.equal(context.itemSelectionSignature(changed.state.categories[category][0]), context.itemSelectionSignature(item));
+    assert.equal(state.categories[category][0], item);
 }
 
 const oldSelection = {

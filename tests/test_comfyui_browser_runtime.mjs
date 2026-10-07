@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { chromium } from "playwright";
 import { parseSelectionState } from "../web/scene_prompt_state.js";
-import { verifySceneModalHistory, verifyCandidateReloadSelections } from "./scene_modal_history.mjs";
+import { verifySceneModalHistory, verifyCandidateReloadSelections, verifyCandidateEditHistory } from "./scene_modal_history.mjs";
 
 if (process.env.RUN_REAL_COMFYUI_BROWSER_SMOKE !== "1") {
     console.log("real ComfyUI browser smoke skipped");
@@ -3254,6 +3254,7 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(nativeWeightedLine.negative_parts, ["(blocked:.1)"]);
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     await verifySceneModalHistory(page);
+    await verifyCandidateEditHistory(page);
     await verifyCandidateReloadSelections(page);
     await page.waitForTimeout(100);
     assert.deepEqual(pageErrors, []);

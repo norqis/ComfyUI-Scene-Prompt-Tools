@@ -345,6 +345,13 @@ def _prune_workflow_node_links(nodes, link_ids):
             output_slot["links"] = [link_id for link_id in output_slot["links"] if link_id in link_ids]
 
 
+def _remove_workflow_links(workflow, link_ids):
+    if link_ids:
+        workflow["links"] = [link for link in workflow.get("links", []) if _workflow_link_id(link) not in link_ids]
+        _prune_workflow_node_links(workflow["nodes"], {_workflow_link_id(link) for link in workflow["links"]})
+        _prune_workflow_reroutes(workflow)
+
+
 def _prune_workflow_reroutes(workflow):
     """Remove reroute metadata that refers to links excluded from a workflow slice."""
     link_ids = {_workflow_link_id(link) for link in workflow.get("links", [])}
@@ -708,10 +715,7 @@ def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
                             widgets.append(bool(node["inputs"].get("preserve_join", False)))
                         else:
                             widgets[1] = bool(node["inputs"].get("preserve_join", False))
-    if replaced_links:
-        workflow["links"] = [link for link in workflow.get("links", []) if _workflow_link_id(link) not in replaced_links]
-        _prune_workflow_node_links(workflow["nodes"], {_workflow_link_id(link) for link in workflow["links"]})
-        _prune_workflow_reroutes(workflow)
+    _remove_workflow_links(workflow, replaced_links)
 
 
 def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_aliases=None):
@@ -806,6 +810,7 @@ def _consumer_replay_items(prompt, save_id, scene_info):
 def _apply_consumer_replay_values(prompt, workflow, items, full_prompt, source_aliases=None, retained_sources=None):
     retained = _visible_scene_source_ids(prompt, source_aliases) if retained_sources is None else retained_sources
     workflow_nodes = {str(node.get("id")): node for node in (workflow or {}).get("nodes", [])}
+    replaced_links = set()
     for node_id, info in items.items():
         if node_id not in prompt:
             continue
@@ -818,6 +823,8 @@ def _apply_consumer_replay_values(prompt, workflow, items, full_prompt, source_a
             continue
         prompt[node_id].setdefault("inputs", {}).update(values)
         visual = workflow_nodes.get(node_id, {})
+        replaced_links.update(slot["link"] for slot in visual.get("inputs", [])
+                              if slot.get("name") in values and slot.get("link") is not None)
         named = visual.get("widgets_values_named")
         if isinstance(named, dict):
             named.update(values)
@@ -826,6 +833,7 @@ def _apply_consumer_replay_values(prompt, workflow, items, full_prompt, source_a
             for name, index in (("current_index", 1), ("seed_base", 2), ("seed_base_literal", 3)):
                 if index < len(widgets):
                     widgets[index] = values[name]
+    _remove_workflow_links(workflow, replaced_links)
 
 
 def _effective_model_source_ids(prompt, infos, source_aliases=None):

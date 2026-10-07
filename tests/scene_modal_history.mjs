@@ -1,5 +1,81 @@
 import assert from "node:assert/strict";
 
+export async function verifyCandidateEditHistory(page) {
+    const fixture = await page.evaluate(async () => {
+        const response = await fetch("/scene_prompt/items", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ category: "Native Candidate Edit", name: "Editable", prompt: "ORIGINAL_TAG", description: "" }) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(JSON.stringify(data));
+        const state = JSON.stringify({ version: 1, categories: { [data.item.category_key]: [{ ...data.item, weight: 1.4 }] } });
+        const app = window.app; app.graph.clear();
+        const fields = [];
+        for (const [type, names] of [["ScenePrompter", ["positive_json", "negative_json"]], ["SceneApplyLora", ["positive_json", "negative_json"]], ["SceneMatrix", ["matrix_json"]]]) {
+            const node = window.LiteGraph.createNode(type); app.graph.add(node);
+            node.pos = type === "ScenePrompter" ? [380, 80] : [1100, 80];
+            for (const name of names) {
+                node.widgets.find(widget => widget.name === name).value = name === "matrix_json"
+                    ? JSON.stringify({ version: 1, sets: [{ row_id: "copy", name: "Copy", path_label: "Copy", positive_json: state, negative_json: state }] }) : state;
+                fields.push({ id: node.id, name });
+            }
+        }
+        app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0];
+        await app.loadGraphData(JSON.parse(JSON.stringify(app.graph.serialize())), true, true);
+        await window.__sceneSeedRuntimeTest.reloadCandidateItems();
+        await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+        app.canvas.draw(true, true); window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
+        return { fields, item: data.item };
+    });
+    const snapshot = () => page.evaluate(fields => {
+        const tracker = window.__sceneSeedRuntimeTest.tracker();
+        return { values: fields.map(({ id, name }) => JSON.parse(window.app.graph.getNodeById(id).widgets.find(widget => widget.name === name).value)),
+            undo: tracker.undoQueue.length, redo: tracker.redoQueue.length };
+    }, fixture.fields);
+    const edit = async () => {
+        const point = await page.evaluate(id => {
+            const node = window.app.graph.getNodeById(id), canvas = window.app.canvas; canvas.draw(true, true);
+            const widget = node.widgets.find(widget => widget.sceneRole === "positive_open"), rect = canvas.canvas.getBoundingClientRect();
+            return { x: rect.left + (node.pos[0] + node.size[0] / 2 + canvas.ds.offset[0]) * canvas.ds.scale,
+                y: rect.top + (node.pos[1] + widget.last_y + window.LiteGraph.NODE_WIDGET_HEIGHT / 2 + canvas.ds.offset[1]) * canvas.ds.scale };
+        }, fixture.fields[0].id);
+        await page.mouse.click(point.x, point.y);
+        await page.locator(".pc-popup").getByRole("button", { name: /^Native Candidate Edit / }).click();
+        await page.locator(".pc-popup").getByRole("button", { name: "編集", exact: true }).click();
+        await page.locator(".pc-popup").getByLabel("プロンプト", { exact: true }).fill("EDITED_TAG");
+        const beforeSave = await snapshot();
+        const previous = await page.locator(".pc-popup").elementHandle();
+        await page.locator(".pc-popup").getByRole("button", { name: "保存", exact: true }).click();
+        await page.waitForFunction(popup => !popup.isConnected, previous); await previous.dispose();
+        await page.locator(".pc-popup").getByRole("button", { name: "閉じる", exact: true }).click();
+        return beforeSave;
+    };
+    const restore = direction => page.evaluate(async direction => {
+        await window.__sceneSeedRuntimeTest.tracker()[direction]();
+        await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+    }, direction);
+    const before = await snapshot();
+    await edit();
+    const edited = await snapshot();
+    assert.equal(edited.undo, before.undo + 1, "editing a shared candidate adds one workflow checkpoint");
+    for (const value of edited.values) {
+        const states = value.sets ? [JSON.parse(value.sets[0].positive_json), JSON.parse(value.sets[0].negative_json)] : [value];
+        for (const state of states) {
+            const item = state.categories[fixture.item.category_key][0];
+            assert.equal(item.prompt, "EDITED_TAG"); assert.equal(item.weight, 1.4);
+        }
+    }
+    await restore("undo");
+    assert.deepEqual((await snapshot()).values, before.values, "Undo restores every selected copy and weight without removing nodes");
+    await restore("redo");
+    assert.deepEqual((await snapshot()).values, edited.values);
+    const catalog = await page.evaluate(async () => (await (await fetch("/scene_prompt/items?reload=1")).json()).items);
+    assert.equal(catalog.find(item => item.id === fixture.item.id).prompt, "EDITED_TAG", "graph Undo does not revert the shared catalog write");
+    const beforeNoop = await edit();
+    assert.deepEqual(await snapshot(), beforeNoop, "saving unchanged candidate content adds no history");
+    await page.evaluate(async () => window.app.loadGraphData(JSON.parse(JSON.stringify(window.app.graph.serialize())), true, true));
+    assert.deepEqual((await snapshot()).values, edited.values);
+    console.log("real ComfyUI candidate editing checkpoints all weighted Prompt/LoRA/Matrix copies; Undo/Redo, no-op, catalog persistence and reload passed");
+}
+
 export async function verifyCandidateReloadSelections(page) {
     let candidate;
     const items = route => route.fulfill({ json: { items: [candidate] } });
@@ -23,6 +99,8 @@ export async function verifyCandidateReloadSelections(page) {
                 const app = window.app; app.graph.clear();
                 const source = window.LiteGraph.createNode("ScenePrompter"), text = window.LiteGraph.createNode("ScenePromptToText");
                 app.graph.add(source); app.graph.add(text); source.connect(0, text, text.inputs.findIndex(input => input.name === "scene_prompt"));
+                for (const name of ["positive_json", "negative_json"]) source.widgets.find(widget => widget.name === name).value = '{"version":1,"categories":{}}';
+                for (const name of ["positive_base", "negative_base"]) source.widgets.find(widget => widget.name === name).value = "";
                 source.widgets.find(widget => widget.name === side + "_json").value = JSON.stringify({ version: 1, categories: { "Modal Undo Runtime": [{ ...candidate, selected_parts: parts }] } });
                 await app.loadGraphData(app.graph.serialize(), true, true);
                 await window.__sceneSeedRuntimeTest.reloadCandidateItems();

@@ -1615,6 +1615,13 @@ NODE_CLASS_MAPPINGS = {
                     self.assertEqual(type(replay['2']['inputs']['seed_base']), int)
                     self.assertEqual(replay['4']['inputs']['color'], ['3', 0])
                     self.assertEqual(replay['3']['inputs']['value'], 0)
+                    if kind == 'ScenePromptToText':
+                        text_visual = next(node for node in visual['nodes'] if str(node['id']) == '2')
+                        controls = [slot for slot in text_visual['inputs'] if slot['name'] in {'current_index', 'seed_base', 'seed_base_literal'}]
+                        self.assertEqual(len(controls), 3)
+                        self.assertTrue(all(slot['link'] is None for slot in controls))
+                        image_visual = next(node for node in visual['nodes'] if str(node['id']) == '4')
+                        self.assertIsNotNone(next(slot['link'] for slot in image_visual['inputs'] if slot['name'] == 'color'))
                     replay_handle, visual = self._prepare_callback_run(replay, expand_id, visual)
                     try:
                         self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
