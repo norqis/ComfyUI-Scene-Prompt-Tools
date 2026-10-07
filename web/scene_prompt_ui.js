@@ -1894,6 +1894,8 @@ function pruneStateToData(node, state, items, options = {}) {
             const keptItem = itemForState(currentItem, item);
             kept.push(keptItem);
             if (itemKey(item) !== itemKey(keptItem)
+                || item.label !== keptItem.label || item.prompt !== keptItem.prompt
+                || (item.description || "") !== (keptItem.description || "")
                 || itemSelectionSignature(item) !== itemSelectionSignature(keptItem)) changed = true;
         }
 

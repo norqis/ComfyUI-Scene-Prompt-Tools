@@ -290,6 +290,14 @@ The completed audit found a second native history defect: local LoRA Trigger Wor
 
 Independent oracle checks passed 500 mixed Queue/Count/Matrix plans with 42,530 event/replay comparisons, plus 150 alternating Merge/latent/strict/free compositions with 4,443 comparisons. An actual 35-level shared Random/Merge DAG with a trillion-event schedule supported indexed selection in 0.0326 seconds, with a 293,552-byte traced peak, and was collected after release. Whole-source coverage completed with these two actionable findings and no third finding. Same-auditor remediation approval is still followed by a new whole audit, not treated as a fresh-zero result.
 
+The twenty-fourth auditor approved exact HEAD `7904cb5815d96e52cdb490d07555278419a9396d`. All required CI checks passed: Python 3.9/3.11 each 756 tests, 25 frontend suites and 53 native CPU/HTTP tests. Root's complete native browser passed, including the four modal history cases. A new twenty-fifth GPT-6 Astra xhigh auditor then began a whole-repository audit.
+
+## Twenty-fifth independent full audit
+
+The new auditor reproduced stale selected content after the documented candidate-file reload operation. With a stable explicit candidate ID, the popup showed the updated prompt and a checked selection, while the selected widget and serialized workflow still contained the old prompt. Root independently reproduced this in Chromium before editing. The existing normalization detected only identity or selection-weight changes, so it discarded refreshed candidate content.
+
+The auditor approved extending that existing change check with label, prompt and empty-default description comparisons. Candidate identity, whole/partial weighting and missing-part remapping remain unchanged. No cache, traversal or broader comparison framework is added. The focused regression first failed on old code; it covers individual content changes, preserved whole/partial weights, missing parts, repeated no-op reloads and equivalent omitted/empty descriptions. Four actual popup reload cases cover positive/negative ordinary selections, queued widget serialization and both Matrix draft sides. Full validation and exact-HEAD remediation review precede another new whole audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation

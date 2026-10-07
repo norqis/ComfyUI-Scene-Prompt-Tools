@@ -105,6 +105,39 @@ const currentSelection = { ...candidate("目無し_2"), weight: 1.3 };
 context.pruneStateToData({ sceneDefaultStateWidgetName: "positive_json" }, stateFor(currentSelection), [current]);
 assert.equal(writes.length, 0, "current IDs remain untouched");
 
+for (const changes of [
+    { label: "Updated label" },
+    { prompt: "updated prompt" },
+    { description: "Updated description" },
+]) {
+    const refreshed = { ...current, ...changes };
+    const state = stateFor(currentSelection);
+    writes.length = 0;
+    context.pruneStateToData(normalizedNode, state, [refreshed]);
+    assert.equal(writes.length, 1, "stable IDs still refresh changed candidate content");
+    assert.deepEqual(writes[0].value.categories[category][0], { ...refreshed, weight: 1.3 });
+    assert.equal(state.categories[category][0].prompt, refreshed.prompt);
+    context.pruneStateToData(normalizedNode, state, [refreshed]);
+    assert.equal(writes.length, 1, "unchanged reloaded content is a no-op");
+}
+for (const [prompt, expectedParts] of [
+    ["alpha, beta, added", [{ index: 0, text: "alpha", weight: 1.3 }]],
+    ["beta, added", [{ index: 0, text: "alpha", missing: true, weight: 1.3 }]],
+]) {
+    const selected = { ...candidate("stable", "Parts", "alpha, beta"), selected_parts: [{ index: 0, text: "alpha", weight: 1.3 }] };
+    const refreshed = candidate("stable", "Parts", prompt);
+    const state = stateFor(selected);
+    writes.length = 0;
+    context.pruneStateToData(normalizedNode, state, [refreshed]);
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0].value.categories[category][0], { ...refreshed, selected_parts: expectedParts });
+    context.pruneStateToData(normalizedNode, state, [refreshed]);
+    assert.equal(writes.length, 1, "reloaded partial selections remain stable");
+}
+writes.length = 0;
+context.pruneStateToData(normalizedNode, stateFor(currentSelection), [{ ...current, description: "" }]);
+assert.equal(writes.length, 0, "omitted and empty descriptions have the same meaning");
+
 assert.throws(
     () => context.pruneStateToData({}, stateFor(oldSelection), [candidate("other", "別の候補")]),
     /候補データにありません/u,

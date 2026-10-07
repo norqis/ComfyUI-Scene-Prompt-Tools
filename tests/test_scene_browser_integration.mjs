@@ -568,6 +568,53 @@ async function checkFavorites(browser, url) {
     console.log("Favorite persistence, failure recovery, navigation, Matrix draft, and responsive layout passed.");
 }
 
+async function checkCandidateContentReload(browser, url) {
+    for (const matrix of [false, true]) {
+        for (const side of ["positive", "negative"]) {
+            const page = await browser.newPage();
+            const errors = [];
+            page.on("pageerror", (error) => errors.push(error.message));
+            try {
+                await prepareFavoriteFixture(page, url);
+                await page.evaluate(async ({ matrix, side }) => {
+                    const node = window.__favoriteNode, item = window.__scenePromptItems[0];
+                    const selected = JSON.stringify({ version: 1, categories: { Outfit: [{ ...item, weight: 1.3 }] } });
+                    let stateWidgetName = `${side}_json`;
+                    if (matrix) {
+                        const draft = { row_id: "reload-row", positive_json: selected, negative_json: selected };
+                        window.__reloadDraft = draft;
+                        stateWidgetName = window.__scenePromptPopupTestHooks.setMatrixLineDraftContext(node, 0, draft, side, () => {}, () => {});
+                    } else {
+                        for (const widget of node.widgets) widget.value = selected;
+                        node.widgets_values = node.widgets.map((widget) => widget.value);
+                    }
+                    await window.__scenePromptPopupTestHooks.openPromptCandidatePopup(node, item.category_path, { stateWidgetName });
+                    Object.assign(item, { label: "Updated file label", prompt: "updated_file_prompt", description: "Updated file description" });
+                }, { matrix, side });
+                await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
+                const row = page.locator('.pc-candidate[title="updated_file_prompt"]');
+                await row.waitFor();
+                assert.equal(await row.locator('input[type="checkbox"]').isChecked(), true);
+                const state = await page.evaluate(({ matrix, side }) => {
+                    const node = window.__favoriteNode;
+                    const value = matrix ? window.__reloadDraft[`${side}_json`]
+                        : node.widgets.find((widget) => widget.name === `${side}_json`).value;
+                    return { selected: JSON.parse(value).categories.Outfit[0], widgets: node.widgets.map((widget) => widget.value), stored: node.widgets_values };
+                }, { matrix, side });
+                assert.deepEqual([state.selected.label, state.selected.prompt, state.selected.description, state.selected.weight],
+                    ["Updated file label", "updated_file_prompt", "Updated file description", 1.3]);
+                assert.deepEqual(state.stored, state.widgets, "reload updates the queued widget payload");
+                if (matrix) assert.ok(state.widgets.every((value) => value === '{"version":1,"categories":{}}'), "Matrix reload only updates its row draft");
+                else assert.ok(state.stored.every((value) => JSON.parse(value).categories.Outfit[0].prompt === "updated_file_prompt"), "both normal prompt sides refresh");
+                assert.deepEqual(errors, []);
+            } finally {
+                await page.close();
+            }
+        }
+    }
+    console.log("Candidate file reload preserves weights and updates positive/negative serialized selections and Matrix drafts.");
+}
+
 async function checkProgressiveCandidates(browser, url) {
     const page = await browser.newPage();
     const previousFavorites = storedFavorites;
@@ -2973,6 +3020,7 @@ try {
     assert.equal(await resources.count(), 0, "a late hash response cannot reopen a removed node's modal");
     await page.evaluate(() => { window.app.graphToPrompt = window.__originalResourceGraphToPrompt; });
     await checkFavorites(browser, `http://127.0.0.1:${address.port}/`);
+    await checkCandidateContentReload(browser, `http://127.0.0.1:${address.port}/`);
     await checkProgressiveCandidates(browser, `http://127.0.0.1:${address.port}/`);
     await checkPresetSwitchModals(browser, `http://127.0.0.1:${address.port}/`);
     await page.evaluate(async () => {
