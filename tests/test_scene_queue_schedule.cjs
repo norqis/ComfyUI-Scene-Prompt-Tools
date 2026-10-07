@@ -23,7 +23,6 @@ const ctx = {
     emptyMatrixRow: () => ({}),
     matrixLineLabel: (row) => row.label,
     sceneQueueDisplayPartsForEntry: (entry) => entry.parts,
-    mergeScenePromptRows: () => ({}),
 };
 require("./scene_switches_test_context.cjs").install(ctx);
 vm.createContext(ctx);
@@ -36,10 +35,11 @@ for (const name of [
     "sceneSchedulePrefix", "sceneScheduleCount", "sceneScheduleMap", "sceneScheduleMatrix", "sceneScheduleQueue",
     "sceneScheduleError", "sceneRandomGuard", "sceneRandomChoicePlan", "sceneRandomZeroArm", "sceneRandomJoinReady",
     "sceneScheduleHasComposite", "sceneScheduleMerge", "mergeScenePromptEntryPair",
+    "mergeScenePromptRows", "mergePositiveNegativeParts", "uniquePromptParts", "promptOverrideKeys", "promptOverrideKey", "promptIdentity",
 ]) vm.runInContext(functionSource(name), ctx);
 
 const leaf = (label, count = 1, latent = null) => ctx.sceneSchedulePlan([
-    ctx.sceneScheduleRun({ parts: [label], count, row: latent ? { latent: { batch_size: latent } } : {} }),
+    ctx.sceneScheduleRun({ parts: [label], count, row: { labels: [label], ...(latent ? { latent: { batch_size: latent } } : {}) } }),
 ]);
 const controls = (order_mode = "input_order", block = 1, repeats = "{}", downstream_count_mode = "multiply") =>
     ({ order_mode, alternate_block_size: block, input_repeats_json: repeats, downstream_count_mode });
@@ -198,6 +198,7 @@ function verifyCompactOrdinaryRows() {
     let scalar = leaf("same");
     for (let depth = 0; depth < 40; depth += 1) scalar = ctx.sceneScheduleMerge(scalar, scalar);
     assert.equal(scalar.units[0].kind, "run", "single-row shared Merge chains must not create exponentially traversed products");
+    assert.deepEqual(Array.from(scalar.units[0].entry.row.labels), ["same"]);
 }
 verifyCompactOrdinaryRows();
 
@@ -462,8 +463,6 @@ console.log("Strict Count preview composition, Random policy, compact huge acces
 
 function verifyPresetMatrixMergeParity() {
     ctx.parseMatrixStateValue = JSON.parse;
-    for (const name of ["mergeScenePromptRows", "mergePositiveNegativeParts", "uniquePromptParts", "promptOverrideKeys", "promptOverrideKey", "promptIdentity"])
-        vm.runInContext(functionSource(name), ctx);
     const labels = (plan) => Array.from(prefix(plan));
     const matrixRows = [{ label: "x", enabled: true }, { label: "y", enabled: true }];
     for (const factor of [0, 1, 2, 3]) {

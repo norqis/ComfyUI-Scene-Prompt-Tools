@@ -1135,7 +1135,7 @@ NODE_CLASS_MAPPINGS = {
             graph[str(node_id)] = {"class_type": "SceneMatrix", "inputs": {"scene_prompt": [str(upstream), 0], "run_handle": "",
                 "matrix_json": json.dumps({"version": 1, "sets": [{"row_id": name, "name": name, "path_label": name, "positive_base": name} for name in names]})}}
         graph.update({
-            "12": {"class_type": "ScenePromptMerge", "inputs": {"scene_prompt1": ["6", 0], "scene_prompt2": ["11", 0]}},
+            "12": {"class_type": "ScenePrompterMerge", "inputs": {"scene_prompt1": ["6", 0], "scene_prompt2": ["11", 0]}},
             "14": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["13", 0], "count": 2}},
             "15": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["14", 0], "current_index": 0, "seed_base": 123, "timestamp_dir": False}},
             "16": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},

@@ -8472,7 +8472,7 @@ function mergeScenePromptRows(firstRow, secondRow) {
     );
     const row = {
         ...left,
-        labels: [...(left.labels || []), ...(right.labels || [])],
+        labels: [...new Set([...(left.labels || []), ...(right.labels || [])])],
         positive_parts: merged.positiveParts,
         negative_parts: merged.negativeParts,
         path_parts: [...(left.path_parts || []), ...(right.path_parts || [])],
