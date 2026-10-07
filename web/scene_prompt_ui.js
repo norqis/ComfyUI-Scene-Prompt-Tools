@@ -6395,7 +6395,13 @@ function matrixLinesForNode(node) {
         if (rawSet.enabled === false) {
             continue;
         }
-        pushMatrixLine(normalizeMatrixLine(rawSet));
+        pushMatrixLine({
+            ...rawSet,
+            positive_parts: [...rawSet.positive_parts],
+            negative_parts: [...rawSet.negative_parts],
+            display_labels: [...rawSet.display_labels],
+            display_label_groups: rawSet.display_label_groups.map((group) => [...group]),
+        });
     }
 
     return sets;

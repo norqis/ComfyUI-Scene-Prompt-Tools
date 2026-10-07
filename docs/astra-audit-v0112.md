@@ -258,6 +258,14 @@ Root also measured redundant normalization of already-validated cached Matrix ro
 
 All 25 frontend suites and the complete native browser pass. New native cases compare the actual Expand widget before API capture against backend preparation for four invalid paths and two valid zero/passthrough controls. Focused tests include Preset/live overflow propagation, unconfigured/open and inert zero-probability Random arms, and enabled-row ownership after the performance change. Independent whole-audit probes passed 600 composed schedules / 10,330 selected events and a six-trillion-event schedule with five indexed replay checks (68,508-byte traced peak, 3,177-byte serialization). Final whole coverage and exact-HEAD remediation review precede another fresh audit.
 
+The twenty-first auditor approved exact HEAD `21dfa5043781c97ac21f21f477ee69edc6b97d9a`. All required CI checks passed (Python 3.9/3.11 each 755 tests, 25 frontend suites, 52 native CPU/HTTP tests), along with the full native browser. A new twenty-second GPT-6 Astra xhigh auditor then audited the entire repository.
+
+## Twenty-second independent full audit
+
+The new auditor independently compared 585 public-operation schedule compositions / 19,870 events against a materialized reference, including row order, image counts, strict/fixed/free count prefixes and all-source replay rank. Root identified a remaining Matrix performance path for its assessment: enabled rows were normalized again after `readMatrixState` had already validated them. The independent helper measurement averaged 14.60 ms for 100 enabled rows with 100 selections each (about 1.52 MB), compared with 0.012 ms when copying validated fields. The actual saved user workflow has only two enabled rows in each of two Matrix nodes; this optimization addresses larger Matrix data and is not claimed as that workflow's measured bottleneck.
+
+The auditor approved root's minimal design after checking the cache's sole writer and normalization contract. `matrixLinesForNode` now copies only the four mutable array fields, including each nested display-label group. Immutable strings and other scalar values are reused. Disabled filtering and row-ID deduplication are unchanged. No extra cache, cap or validation is introduced. The expanded existing regression first failed on the old implementation's two redundant reparses; it now requires zero reparses, identical normalized fields and weighted selection JSON, and independent ownership of every mutable array and nested group. Full frontend/native-browser validation and exact-HEAD remediation review precede a new whole audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
@@ -268,3 +276,4 @@ All 25 frontend suites and the complete native browser pass. New native cases co
 - https://docs.python.org/3/library/os.path.html#os.path.normcase
 - https://docs.comfy.org/custom-nodes/backend/more_on_inputs
 - https://docs.comfy.org/custom-nodes/backend/lists
+- https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax

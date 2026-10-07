@@ -448,12 +448,22 @@ async function testCurrentDisplayAndRasterOwnership() {
     }
     assert.equal(lineParses, 0, "counting validated rows and skipping disabled rows never reparses their large selections");
     cachedState.sets[0].enabled = true;
+    cachedState.sets[0].positive_parts = ["(positive:1.3)"];
+    cachedState.sets[0].negative_parts = ["(negative:1.2)"];
+    cachedState.sets[0].display_labels = ["weighted row"];
+    cachedState.sets[0].display_label_groups = [["first", "second"], ["third"]];
     cachedState.sets.push(cachedState.sets[0]);
     const enabled = countContext.matrixLinesForNode(matrix);
     assert.equal(enabled.length, 1, "enabled row IDs still deduplicate");
+    assert.equal(lineParses, 0, "reading enabled validated rows never reparses their large selections");
+    assert.equal(JSON.stringify(enabled[0]), JSON.stringify(cachedState.sets[0]), "all normalized fields and weighted selections survive unchanged");
     assert.notStrictEqual(enabled[0], cachedState.sets[0], "enabled rows remain independent editable copies");
-    enabled[0].positive_parts.push("local-edit");
-    assert.equal(cachedState.sets[0].positive_parts.length, 0, "editing an output copy never changes the cached state");
+    const originalRow = JSON.stringify(cachedState.sets[0]);
+    for (const field of ["positive_parts", "negative_parts", "display_labels"]) enabled[0][field].push("local-edit");
+    enabled[0].display_label_groups[0].push("local-group-edit");
+    enabled[0].display_label_groups.push(["new group"]);
+    enabled[0].positive_json = selection("local selection", 1.5);
+    assert.equal(JSON.stringify(cachedState.sets[0]), originalRow, "editing output fields and nested groups never changes cached state");
     ctx.drawMatrixList(outer, matrix, 340, 0, 200);
     const matrixWarm = ctx.matrixDisplayCache(matrix, 340), matrixRaster = matrix.sceneMatrixRenderCache.canvas;
     calls.stringify = calls.selectionParse = calls.matrixParse = 0;
