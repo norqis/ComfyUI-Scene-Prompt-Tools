@@ -70,6 +70,16 @@ A new GPT-6 Astra xhigh agent (`astra_audit_round4`) audited the entire reposito
 
 The review caught an incorrect scope constant in the new Reverse test; `5dccc3e` uses the actual previous-node Reverse option and the direct/nested tests pass. All frontend suites and the complete isolated native browser suite pass, including four actual LiteGraph Preset expansion/reload cases. The full Python run passed 722 tests (2 opt-in native classes skipped). Native CPU/HTTP initially passed 44 of 46 tests; two Random-plus-ToText PNG re-save cases exposed an obsolete source ID on the new boundary. Root removed that pinned ID in `dfa7805`, retaining source aliases for initial path slicing but using current graph IDs on replay. Both native cases then passed. The same auditor approved `dfa7805` after independent checks of 187 related Python tests, metadata 26 tests, five frontend suites and 24,008 Delete comparisons against the old implementation, plus depths 250/1,500/3,000. A fifth new agent is conducting the next whole-repository audit.
 
+## Fifth independent full audit
+
+The new GPT-6 Astra xhigh agent (`astra_audit_round5`) completed another whole-repository audit and reproduced three issues. Root fixed them in `fae0af3`:
+
+- A Preset placed inside an open Random branch failed when its runtime whole-prompt boundary was treated as an ordinary Count. Only the existing hidden whole boundary with integer Count 1 and downstream Count enabled now passes the schedule through unchanged. Normal Count restrictions remain. Live and Preset frontend planners agree, and compact Preset definitions retain the trace flag. Actual ComfyUI HTTP tests execute direct/nested Presets inside both Queue and Random Output joins, run each twice, save expanded PNG metadata and replay it.
+- Inputless Count and both-inputless Merge now retain their seed row in previews, matching execution. Count 0 and explicitly empty connected Matrix inputs retain their prior meanings.
+- Preset validation previously marked or cleared same-ID Reference nodes in the newly active tab after asynchronous capture/preparation/save. The operation now captures only its original Reference objects and checks ownership by object identity before changing errors. Preparation releases the captured list when settled. Eighteen deferred-response cases cover successful preparation, failed preparation and failed save, before capture or before response, with unchanged, separate and reused graph objects.
+
+Focused regressions and the new native HTTP test pass. Full Python passes 723 tests (2 opt-in native classes skipped), all 25 frontend suites pass, and the complete isolated native Chromium suite passes. The same auditor approved `fae0af3` after independently re-running four frontend suites and 23 Python tests and reviewing the full/native logs. A sixth new GPT-6 Astra xhigh agent is conducting the next whole-repository audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
