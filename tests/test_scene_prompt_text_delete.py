@@ -315,7 +315,8 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                             'seed': 100, 'source_node_ids': [*item['row']['source_node_ids'], '30']}
                 saved, _ = self.nodes._metadata_for_save_mode(
                     graph, {'workflow': self.workflow(graph)}, '33', self.nodes.SAVE_METADATA_EXECUTION_PATH, info)
-                self.assertNotIn('10', saved)
+                self.assertEqual(saved['10']['class_type'], 'ScenePromptCounter')
+                self.assertEqual(saved['10']['inputs']['count'], 1)
                 self.assertNotIn('20', saved)
                 self.assertEqual(saved['30']['inputs']['scene_prompt'], ['12' if shared_model else '11', 0])
                 self.assertEqual(saved['31']['inputs']['scene_prompt'], ['11' if shared_model else '12', 0])
@@ -323,6 +324,50 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                     self.assertEqual(saved[node_id]['inputs']['model'], [loader, 0])
                     self.assertIn(loader, saved)
                 self.assertEqual(saved['32']['inputs'], graph['32']['inputs'])
+
+    def test_png_superseded_root_model_keeps_empty_queue_unit(self):
+        for metadata in (False, True):
+            for index in range(4):
+                with self.subTest(metadata=metadata, index=index):
+                    handle = self.runs.create_run_context('default')
+                    graph = {
+                        '101': {'class_type': 'CheckpointLoaderSimple', 'inputs': {}},
+                        '102': {'class_type': 'CheckpointLoaderSimple', 'inputs': {}},
+                        '1': {'class_type': 'SceneApplyModel', 'inputs': {'model': ['101', 0], 'clip': ['101', 1], 'vae': ['101', 2], 'source_node_id': '1', 'source_node_name': 'first'}},
+                        '2': {'class_type': 'ScenePromptCounter', 'inputs': {'scene_prompt': ['1', 0], 'count': 3}},
+                        '3': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['2', 0]}},
+                        '4': {'class_type': 'SceneApplyModel', 'inputs': {'scene_prompt': ['3', 0], 'model': ['102', 0], 'clip': ['102', 1], 'vae': ['102', 2], 'source_node_id': '4'}},
+                        '5': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['4', 0], 'current_index': index, 'seed_base': 100, 'run_handle': handle}},
+                        '6': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['5', 4]}},
+                    }
+                    workflow = self.workflow(graph)
+                    for target in workflow['nodes']:
+                        target_id = str(target['id'])
+                        for slot, entry in enumerate(target['inputs']):
+                            value = graph[target_id]['inputs'][entry['name']]
+                            if isinstance(value, list):
+                                workflow['links'].append([len(workflow['links']) + 1, int(value[0]), value[1], int(target_id), slot, '*'])
+                    plan = self.presets._scene_node_value(graph, '4', {}, set())
+                    expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=plan, current_index=index,
+                        seed_base=100, unique_id='5', run_handle=handle, prompt=graph)['result']
+                    saved, extra = self.nodes._metadata_for_save_mode(graph, {'workflow': workflow}, '6',
+                        self.nodes.SAVE_METADATA_EXECUTION_PATH, expanded[2] if metadata else None)
+                    self.assertNotIn('101', saved)
+                    self.assertEqual(saved['1'], {'class_type': 'ScenePromptCounter', 'inputs': {
+                        'count': 1, 'enable_downstream_count': True, 'source_node_id': '1', 'source_node_name': 'first'}})
+                    replay = self.presets._scene_node_value(saved, '4', {}, set())
+                    inputs = saved['5']['inputs']
+                    actual = self.nodes.ScenePromptExpand().expand(scene_prompt=replay,
+                        **{name: inputs[name] for name in ('current_index', 'seed_base', 'seed_base_literal')})['result']
+                    self.assertEqual(actual[:2], expanded[:2])
+                    self.assertEqual(actual[3], expanded[3])
+                    self.assertEqual(actual[5:], expanded[5:])
+                    node = next(node for node in extra['workflow']['nodes'] if str(node['id']) == '1')
+                    self.assertEqual(node['type'], 'ScenePromptCounter')
+                    self.assertEqual(node['widgets_values'], [1, True])
+                    self.assertEqual(len(node['inputs']), 1)
+                    self.assertIsNone(node['inputs'][0]['link'])
+                    self.assertFalse(any(str(link[3]) == '1' for link in extra['workflow']['links']))
 
     def test_png_preserves_effective_model_in_shared_merge_and_preset(self):
         inner = {

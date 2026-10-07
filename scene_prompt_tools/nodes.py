@@ -950,6 +950,8 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
             switch_outputs[switch_id] = output
     replacements.update({node_id: link for node_id, link in switch_outputs.items() if link is not None})
 
+    empty_models = set()
+
     def upstream_link(node_id):
         current_id, path, seen = node_id, [], set()
         replacement = None
@@ -961,6 +963,10 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
             path.append(current_id)
             links = _scene_prompt_input_links(prompt, current_id)
             if not links:
+                # A root Model contributes one empty Scene, even if its model
+                # is superseded. Dropping that unit changes Queue positions.
+                empty_models.add(current_id)
+                replacement = [current_id, 0]
                 break
             _name, source_id, output_index = links[0]
             if source_id not in superseded:
@@ -973,6 +979,9 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
 
     for node_id in superseded:
         upstream_link(node_id)
+    for node_id in empty_models:
+        replacements.pop(node_id, None)
+    superseded.difference_update(empty_models)
 
     for node_id, replacement in list(replacements.items()):
         seen = {node_id}
@@ -982,6 +991,12 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
         replacements[node_id] = replacement
 
     contracted = copy.deepcopy(prompt)
+    for node_id in empty_models:
+        inputs = prompt[node_id].get("inputs", {})
+        contracted[node_id] = {"class_type": "ScenePromptCounter", "inputs": {
+            "count": 1, "enable_downstream_count": True,
+            **{name: inputs[name] for name in ("source_node_id", "source_node_name") if name in inputs},
+        }}
     for node_id, node in contracted.items():
         inputs = node.get("inputs") if isinstance(node, dict) else None
         if not isinstance(inputs, dict):
@@ -1024,13 +1039,26 @@ def _sync_workflow_node_links(workflow):
                 slot["links"] = list(sources.get((node_id, index), ()))
 
 
-def _contract_superseded_model_workflow(workflow, replacements):
-    if not replacements or not isinstance(workflow, dict):
+def _contract_superseded_model_workflow(workflow, replacements, prompt=None):
+    if not isinstance(workflow, dict):
+        return workflow
+    empty_models = {str(node.get("id")) for node in workflow.get("nodes", [])
+                    if node.get("type") == "SceneApplyModel"
+                    and (prompt or {}).get(str(node.get("id")), {}).get("class_type") == "ScenePromptCounter"}
+    if not replacements and not empty_models:
         return workflow
     contracted = copy.deepcopy(workflow)
+    for node in contracted.get("nodes", []):
+        if str(node.get("id")) in empty_models:
+            node.update(type="ScenePromptCounter", widgets_values=[1, True],
+                        inputs=[{"name": "scene_prompt", "type": SCENE_PROMPT_TYPE, "link": None}],
+                        outputs=[{"name": "scene_prompt", "type": SCENE_PROMPT_TYPE, "links": []}])
+            node.pop("widgets_values_named", None)
+            node.setdefault("properties", {})["Node name for S&R"] = "ScenePromptCounter"
     links = contracted.get("links")
     if not isinstance(links, list):
         return contracted
+    links[:] = [link for link in links if not (parts := _workflow_link_parts(link)) or parts[3] not in empty_models]
     for link in links:
         parts = _workflow_link_parts(link)
         if parts is None or parts[1] not in replacements:
@@ -1195,7 +1223,7 @@ def _metadata_for_save_mode(
             expanded_prompt, selected_ids, text_ids, consumer_items, effective_models,
         )
         selected_ids.update(text_ids)
-        contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements)
+        contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements, contracted_prompt)
         ancestor_ids = _selected_ancestor_ids(
             contracted_prompt, unique_id, scene_info, selected_ids
         )
@@ -1246,7 +1274,7 @@ def _metadata_for_save_mode(
         }
         if "workflow" in extra_pnginfo:
             saved_extra["workflow"] = _slice_workflow_for_output(
-                _contract_superseded_model_workflow(extra_pnginfo["workflow"], replacements), ancestor_ids, saved_prompt
+                _contract_superseded_model_workflow(extra_pnginfo["workflow"], replacements, contracted_prompt), ancestor_ids, saved_prompt
             )
     _apply_replay_expand_values(
         saved_prompt,
