@@ -792,19 +792,18 @@ function resetPopupForm(session, formName) {
 function bindPopupFormSubmit(button, session, formName, submit, disabled = false) {
     const pending = session.pendingForms ||= {};
     const refresh = () => { button.disabled = disabled || Boolean(pending[formName]); };
+    if (pending[formName]) pending[formName].refresh = refresh;
     refresh();
-    pending[formName]?.then(refresh);
     button.addEventListener("click", async () => {
         if (disabled || pending[formName]) return;
-        let finish;
-        pending[formName] = new Promise((resolve) => { finish = resolve; });
+        const submission = { refresh };
+        pending[formName] = submission;
         refresh();
         try {
             await submit();
         } finally {
             delete pending[formName];
-            finish();
-            refresh();
+            submission.refresh();
         }
     });
 }
