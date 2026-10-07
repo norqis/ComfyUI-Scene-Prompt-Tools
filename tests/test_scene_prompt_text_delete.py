@@ -193,7 +193,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             self.assertNotEqual(baseline, changed(**values))
         self.assertNotEqual(changed(positive='a|b', negative='c'), changed(positive='a', negative='b|c'))
 
-    def test_text_replay_uses_own_default_index_and_requires_reproducible_seed(self):
+    def test_text_replay_uses_last_executed_values_including_auto_and_linked_seeds(self):
         handle = self.runs.create_run_context('default')
         plan = self.build('{red|blue}', node_id='source')
         self.nodes.ScenePromptToText().to_text(plan, seed_base=17, run_handle=handle, unique_id='1')
@@ -203,13 +203,20 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         replay = self.nodes._consumer_replay_items(prompt, '2', info)['1']
         self.assertEqual((replay['row_index'], replay['repeat_index'], replay['seed']), (0, 1, 17))
         prompt['1']['inputs']['seed_base'] = 0
-        with self.assertRaisesRegex(ValueError, 'seed_base'):
-            self.nodes._consumer_replay_items(prompt, '2', info)
-        prompt['1']['inputs']['seed_base_literal'] = True
+        self.assertEqual(self.nodes._consumer_replay_items(prompt, '2', info)['1']['seed'], 17)
+        with mock.patch.object(self.nodes, '_auto_seed_base', return_value=42):
+            self.nodes.ScenePromptToText().to_text(plan, run_handle=handle, unique_id='1')
+        self.assertEqual(self.nodes._consumer_replay_items(prompt, '2', info)['1']['seed'], 42)
+        self.nodes.ScenePromptToText().to_text(plan, seed_base_literal=True, run_handle=handle, unique_id='1')
         self.assertEqual(self.nodes._consumer_replay_items(prompt, '2', info)['1']['seed'], 0)
-        prompt['1']['inputs']['current_index'] = 1
+        prompt['3'] = {'class_type': 'ArbitraryIntProvider', 'inputs': {}}
+        prompt['1']['inputs'].update(seed_base=['3', 0], current_index=['3', 1], seed_base_literal=['3', 2])
+        self.nodes.ScenePromptToText().to_text(plan, current_index=1, seed_base_literal=True, run_handle=handle, unique_id='1')
         cycled = self.nodes._consumer_replay_items(prompt, '2', info)['1']
         self.assertEqual((cycled['row_index'], cycled['repeat_index'], cycled['seed']), (0, 1, 1))
+        with self.assertRaises(ValueError):
+            self.nodes.ScenePromptToText().to_text(plan, current_index=-1, seed_base=99, run_handle=handle, unique_id='1')
+        self.assertEqual(self.runs.get_run_consumer_selection(handle, '1'), (1, 1))
 
     def test_v7_text_replay_uses_its_own_alternate_event_path(self):
         handle = self.runs.create_run_context('default')
@@ -239,6 +246,17 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         self.assertEqual(saved_prompt['text']['inputs']['current_index'], 1)
         self.assertEqual(saved_prompt['text']['inputs']['seed_base'], 12)
         self.assertFalse(saved_prompt['text']['inputs']['seed_base_literal'])
+
+    def test_expand_replay_records_last_successful_selection(self):
+        handle = self.runs.create_run_context('default', continuous=True)
+        plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=self.build('A'), scene_prompt2=self.build('B'))[0]
+        expand = self.nodes.ScenePromptExpand()
+        for index, seed in ((0, 7), (1, 11)):
+            expand.expand(scene_prompt=plan, current_index=index, seed_base=seed, run_handle=handle, unique_id='expand')
+        self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand'), (1, 12))
+        with self.assertRaises(IndexError):
+            expand.expand(scene_prompt=plan, current_index=2, seed_base=100, run_handle=handle, unique_id='expand')
+        self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand'), (1, 12))
 
     def test_text_replay_uses_its_executed_context_without_expand_metadata(self):
         handle = self.runs.create_run_context('default')
@@ -305,7 +323,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                     graph[node_id] = {'class_type': 'ScenePrompterExpand', 'inputs': {
                         'scene_prompt': [source, 0], 'seed_base': 100, 'run_handle': handle,
                     }}
-                    self.runs.set_run_plan_reference(handle, node_id, plans[source])
+                    self.nodes.ScenePromptExpand().expand(scene_prompt=plans[source], seed_base=100, run_handle=handle, unique_id=node_id)
                 graph['32'] = {'class_type': 'ImageWithTwoModels', 'inputs': {'model_a': ['30', 5], 'model_b': ['31', 5]}}
                 graph['33'] = {'class_type': 'SceneSaveImage', 'inputs': {'images': ['32', 0]}}
                 info = None
@@ -442,7 +460,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             graph[node_id] = {'class_type': 'ScenePrompterExpand', 'inputs': {
                 'scene_prompt': ['20', 0], 'current_index': index, 'seed_base': seed, 'run_handle': handle,
             }}
-            self.runs.set_run_plan_reference(handle, node_id, plan)
+            self.nodes.ScenePromptExpand().expand(scene_prompt=plan, current_index=index, seed_base=seed, run_handle=handle, unique_id=node_id)
         graph['32'] = {'class_type': 'ImageWithTwoTexts', 'inputs': {'positive': ['30', 0], 'negative': ['31', 0]}}
         graph['33'] = {'class_type': 'SceneSaveImage', 'inputs': {'images': ['32', 0]}}
         saved, extra = self.nodes._metadata_for_save_mode(

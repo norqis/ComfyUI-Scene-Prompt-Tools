@@ -1523,6 +1523,51 @@ NODE_CLASS_MAPPINGS = {
                     self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
                 self.assertFalse(loader_marker.exists(), 'retaining an unused arm must not load its model')
 
+    def test_selected_png_uses_executed_linked_index_seed_and_auto_seed(self):
+        from PIL import Image
+        for kind, metadata in (('ScenePromptToText', False), ('ScenePrompterExpand', False), ('ScenePrompterExpand', True)):
+            for literal in (False, True):
+                with self.subTest(kind=kind, metadata=metadata, literal=literal):
+                    folder = f'linked-replay-{kind}-{metadata}-{literal}'
+                    marker = self.base / f'{folder}.json'
+                    graph = {
+                        '1': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'A'}},
+                        '11': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'B, {red|blue|green}'}},
+                        '12': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['11', 0]}},
+                        '2': {'class_type': kind, 'inputs': {'scene_prompt': ['12', 0], 'seed_base': ['3', 0], 'current_index': ['13', 0], 'seed_base_literal': ['14', 0]}},
+                        '3': {'class_type': 'PrimitiveInt', 'inputs': {'value': 0}},
+                        '13': {'class_type': 'PrimitiveInt', 'inputs': {'value': 1}},
+                        '14': {'class_type': 'PrimitiveBoolean', 'inputs': {'value': literal}},
+                        '4': {'class_type': 'EmptyImage', 'inputs': {'width': 16, 'height': 16, 'batch_size': 1, 'color': ['3', 0]}},
+                        '5': {'class_type': 'TestSceneTextImage', 'inputs': {'image': ['4', 0], 'positive': ['2', 0], 'negative': ['2', 1], 'log_path': str(marker)}},
+                        '6': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['5', 0], 'path': folder, 'metadata_mode': '生成経路ノードのみ'}},
+                    }
+                    graph['2']['inputs'].update({'scope': '全てのノード'} if kind == 'ScenePromptToText' else {'run_id': '', 'timestamp_dir': False})
+                    if metadata:
+                        graph['6']['inputs']['scene_info'] = ['2', 2]
+                    expand_id = '2' if kind == 'ScenePrompterExpand' else None
+                    handle, workflow = self._prepare_callback_run(graph, expand_id)
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        expected = json.loads(marker.read_text(encoding='utf-8'))
+                        self.assertTrue(expected[0].startswith('B, '))
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': handle})
+                    file = next((self.base / 'output' / folder).rglob('*.png'))
+                    with Image.open(file) as image:
+                        replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
+                    self.assertNotIn('1', replay)
+                    self.assertEqual(replay['2']['inputs']['current_index'], 0)
+                    self.assertEqual(type(replay['2']['inputs']['seed_base']), int)
+                    self.assertEqual(replay['4']['inputs']['color'], ['3', 0])
+                    self.assertEqual(replay['3']['inputs']['value'], 0)
+                    replay_handle, visual = self._prepare_callback_run(replay, expand_id, visual)
+                    try:
+                        self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding='utf-8')), expected)
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+
     def test_model_specific_loras_execute_only_matching_loaders(self):
         for mode, include_illustrious, expected in (("Anima", True, ["lora:anima.safetensors"]),
                 ("Illustrious", True, ["lora:illustrious.safetensors"]), ("Illustrious", False, [])):

@@ -83,6 +83,7 @@ class RunContextStore:
             self._entries[handle] = {
                 "user_id": str(user_id),
                 "plans": {},
+                "consumer_selections": {},
                 "prompts": {},
                 "callback_attempts": set(),
                 "last_callbacks": {},
@@ -271,6 +272,14 @@ class RunContextStore:
         entry = self.require(handle)
         return entry["prompts"].get(key)
 
+    def get_consumer_selection(self, handle, node_id):
+        return self.require(handle)["consumer_selections"].get(str(node_id))
+
+    def set_consumer_selection(self, handle, node_id, index, seed):
+        entry = self.require(handle)
+        with self._lock:
+            entry["consumer_selections"][str(node_id)] = (index, seed)
+
     def get_delivery_context(self, handle):
         if not str(handle or "").strip():
             return None
@@ -431,6 +440,14 @@ def claim_callback_attempt(handle, callback_node_id):
 
 def get_run_prompt_reference(handle, expand_node_id):
     return RUN_CONTEXTS.get_prompt_reference(handle, expand_node_id)
+
+
+def get_run_consumer_selection(handle, node_id):
+    return RUN_CONTEXTS.get_consumer_selection(handle, node_id)
+
+
+def set_run_consumer_selection(handle, node_id, index, seed):
+    return RUN_CONTEXTS.set_consumer_selection(handle, node_id, index, seed)
 
 
 def get_run_delivery_context(handle):

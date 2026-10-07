@@ -66,11 +66,13 @@ from .plan import (
 from .runs import (
     claim_callback_attempt,
     get_run_plan_reference,
+    get_run_consumer_selection,
     get_run_delivery_context,
     get_run_prompt_reference,
     register_last_callback,
     require_run_context,
     set_run_plan_reference,
+    set_run_consumer_selection,
     set_run_prompt_reference,
 )
 from .callbacks import (
@@ -775,17 +777,12 @@ def _consumer_replay_items(prompt, save_id, scene_info):
         inputs = node.get("inputs", {})
         run_handle = str(inputs.get("run_handle") or (scene_info or {}).get("run_handle") or "")
         plan = get_run_plan_reference(run_handle, node_id) if run_handle else None
-        if plan is None:
+        selection = get_run_consumer_selection(run_handle, node_id) if run_handle else None
+        if plan is None or selection is None:
             if is_expand:
                 continue
             raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
-        requested_index = inputs.get("current_index", 0)
-        seed_base = int(inputs.get("seed_base") or 0)
-        literal = _scene_bool(inputs.get("seed_base_literal", False))
-        if not literal and seed_base <= 0:
-            raise ValueError(f"{kind} {node_id} の自動シードを再現できません。生成経路の保存には正の seed_base または seed_base_literal が必要です。")
-        base_seed = seed_base % SEED_MODULO if literal else _auto_seed_base(seed_base)
-        seed = (base_seed + requested_index) % SEED_MODULO
+        requested_index, seed = selection
         item = (_scene_prompt_item_for_index(None, requested_index, normalized=plan, strict=True, seed=seed)
                 if is_expand else _text_item_for_index(plan, requested_index, seed))
         result[node_id] = {
@@ -2437,6 +2434,8 @@ class ScenePromptToText:
                 else:
                     positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
         positive, negative = _resolve_prompt_parts(positive, negative, (), None, seed)
+        if run_handle and unique_id is not None:
+            set_run_consumer_selection(run_handle, unique_id, current_index, seed)
         return _join_unique(positive, ", "), _join_unique(negative, ", ")
 
 
@@ -3141,26 +3140,30 @@ class ScenePromptExpand:
 
         model_links = row.get("model_links")
         if model_links is None:
-            return (positive, negative, save_info, seed, latent, None, None, None)
-        model = model_links["model"]
-        clip = model_links["clip"]
-        graph = GraphBuilder()
-        selected_loras = [descriptor for descriptor in row.get("loras", []) if descriptor["model_mode"] == model_mode]
-        for descriptor in selected_loras:
-            loader = graph.node(
-                "LoraLoader",
-                model=model,
-                clip=clip,
-                lora_name=descriptor["name"],
-                strength_model=descriptor["strength_model"],
-                strength_clip=descriptor["strength_clip"],
-            )
-            model = loader.out(0)
-            clip = loader.out(1)
-        return {
-            "result": (positive, negative, save_info, seed, latent, model, clip, model_links["vae"]),
-            "expand": graph.finalize(),
-        }
+            result = (positive, negative, save_info, seed, latent, None, None, None)
+        else:
+            model = model_links["model"]
+            clip = model_links["clip"]
+            graph = GraphBuilder()
+            selected_loras = [descriptor for descriptor in row.get("loras", []) if descriptor["model_mode"] == model_mode]
+            for descriptor in selected_loras:
+                loader = graph.node(
+                    "LoraLoader",
+                    model=model,
+                    clip=clip,
+                    lora_name=descriptor["name"],
+                    strength_model=descriptor["strength_model"],
+                    strength_clip=descriptor["strength_clip"],
+                )
+                model = loader.out(0)
+                clip = loader.out(1)
+            result = {
+                "result": (positive, negative, save_info, seed, latent, model, clip, model_links["vae"]),
+                "expand": graph.finalize(),
+            }
+        if run_handle and unique_id is not None:
+            set_run_consumer_selection(run_handle, unique_id, current_index, seed)
+        return result
 
 
 

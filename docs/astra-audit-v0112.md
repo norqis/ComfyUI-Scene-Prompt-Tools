@@ -212,6 +212,18 @@ The auditor approved root's design: a small pure schedule traversal collects sou
 
 The focused 60 tests pass, including 3/10 active arms, both join types, an unused nested gate/model, retained seed/index/text identity, unrelated-row pruning, a shared DAG with trillion-event counts and weak-reference release. Native CPU saves and replays both join types with actual A/B outputs and confirms that retaining the unused model arm never loads its model. The full native browser passes with three-arm Preset PNG import and a second save, using differing consumer seeds and ordinary common-seed execution. Initial test-fixture omissions (required run ID and explicit synthetic Model identity) were corrected to match native execution; no product workaround was added for them. Full Python and exact-HEAD remediation review follow before another fresh audit.
 
+The seventeenth auditor approved exact HEAD `9fd80003e58ee1fce6b27043a217cee92880fa36` after independently checking 3/10 arms, both joins, two consecutive PNG replays, nested Preset aliases and model/lifetime behavior. All 750 Python tests, 25 frontend suites, 50 native CPU/HTTP tests and required CI passed. A new eighteenth auditor began another whole-repository audit.
+
+## Eighteenth independent full audit
+
+The new GPT-6 Astra xhigh auditor reproduced a native API save failure when To Text or an Expand without metadata received its generation index or seed through linked inputs. Consumers executed correctly, but PNG saving tried to convert the raw input link into a number. Root independently reproduced all three initial cases before editing.
+
+Each executed consumer now records only its latest requested index and actual seed in its existing run context. Saving reuses those values and the already-retained plan; it no longer evaluates raw input definitions or repeats automatic seed selection. The two-number tuple is replaced on successful evaluation and released with the context. There is no extra evaluator, plan copy, execution history or persistent cache. Existing missing-execution errors remain. Synthetic tests that previously only populated the plan cache now execute their consumer, matching native behavior.
+
+The focused checks cover automatic/zero seeds, arbitrary linked providers, successive evaluations, failed evaluation retaining the prior successful selection and release after 100 replacements. Full Python passes 752 tests (2 native opt-in skips). A new native six-case regression covers To Text and Expand with metadata disconnected/connected, linked index 1, linked automatic/literal-zero seed and Boolean flag. Every actual PNG replays the same chosen text after its unrelated first row is removed, and a shared seed provider remains unchanged. The initial regression's file search was corrected to include the existing timestamp subdirectory for metadata-disconnected saving. No product change was needed for that fixture issue.
+
+A suspected visual-link boundary was excluded: native frontend already removes these internal sockets on load, and no separate failure was demonstrated. The fix therefore only captures actual execution values. The complete browser run and exact-HEAD remediation review follow before another fresh whole audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation

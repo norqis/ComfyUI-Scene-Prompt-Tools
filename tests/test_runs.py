@@ -11,6 +11,19 @@ SPEC.loader.exec_module(RUNS)
 
 
 class RunContextTests(unittest.TestCase):
+    def test_consumer_selection_replaces_previous_and_is_released_with_run(self):
+        store = RUNS.RunContextStore()
+        handle = store.create("alice", continuous=True)
+        self.assertIsNone(store.get_consumer_selection(handle, "a"))
+        for index in range(100):
+            store.set_consumer_selection(handle, "a", index, index + 1000)
+        store.set_consumer_selection(handle, "b", 0, 0)
+        self.assertEqual(store.require(handle)["consumer_selections"], {"a": (99, 1099), "b": (0, 0)})
+        self.assertTrue(store.release(handle, "alice"))
+        self.assertNotIn(handle, store._entries)
+        with self.assertRaises(RUNS.SceneRunError):
+            store.get_consumer_selection(handle, "a")
+
     def test_handle_is_opaque_and_released_handles_are_rejected(self):
         store = RUNS.RunContextStore()
         handle = store.create("alice")
