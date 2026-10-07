@@ -99,6 +99,18 @@ Tests cover 28-stage direct and separately mapped shared branches, different see
 
 The same auditor approved exact HEAD `d2c67d7`. Its independent comparison against `47dba6e` matched 546 Python plans / 30,015 events / 8,963 prefixes / 9,378 replay positions and 426 JavaScript plans / 6,135 events / 1,274 prefixes. A 40-stage Random diamond with distinct source maps completed selection/replay in approximately 10.2/7.8 ms, with zero retained-memory increase after 100 operations and collection. Ten seeded 40-stage save-freeze probes and conflicting arms across multiple consumers also passed. A new eighth GPT-6 Astra xhigh agent is auditing the entire repository; release remains pending its independent verdict and final CI.
 
+
+## Eighth independent full audit
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round8`) completed another whole-repository audit and reproduced two groups. Root fixed them in `c6fdfe8`, `9e7d3dc` and `e1ada0d`:
+
+- Candidate creation and saved-prompt forms accepted repeated submissions. Navigating to another view and back within the same popup session while a POST was pending allowed its later success to erase a newly edited draft. Both forms now keep one pending operation per session/form, disable submission until it settles, and reset/navigate only while their original popup and submitted draft are still current. Reopened forms replace the pending operation's current button callback instead of retaining obsolete button subscriptions. Completion deletes the pending record; failures preserve input and allow retry. Explicit closing still discards the session as before. POST responses already provide complete lists, so normal success avoids a redundant forced GET. An older successful create/update/save invalidates catalog and in-flight read lineage, ensuring overlapping writes cannot leave a stale list or revert edited candidates.
+- Selected-path PNG metadata used recursive traversal when contracting overwritten Apply Model nodes. Valid long model chains could finish planning but fail saving with RecursionError. The traversal now walks iteratively, reuses already resolved links and preserves terminal output slots, inputless/cycle behavior and intervening non-model nodes. No depth or node-count limit was added.
+
+Real Chromium regressions cover both forms with normal completion, edits during submission, session-preserving navigation/reopen, failure/retry, independent nodes and independent forms. Read/write regressions cover create/create, update/create and save/save responses in reverse order, with and without an outstanding stale GET. A 1,501-node actual Apply Model chain reaches selected-path metadata with only the effective model retained, while existing LoRA/Queue/Merge/Switch cases continue passing. Full Python passes 731 tests (2 opt-in native classes skipped), all 25 frontend suites and the complete isolated native browser suite pass. The final callback simplification also passes the entire frontend suite.
+
+The same auditor approved exact HEAD `e1ada0d`. Its independent Chromium reproductions now issue one POST and retain new drafts; the reverse-order update/create case retains the edited candidate. Its 1,500-node actual model plan saves correctly in about 30 ms, and 3,000 randomized comparisons of the old and new contraction functions match, including Model/LoRA/Queue/Switch, shared links, output slots, protected sources, inputless nodes and cycles. A new ninth GPT-6 Astra xhigh agent is conducting the next independent whole-repository audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
