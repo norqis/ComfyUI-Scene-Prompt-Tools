@@ -318,6 +318,16 @@ A suspected linked-index PNG problem was dismissed for Expand: its existing fron
 
 Independent whole-audit checks passed 2,000 materialized Count/Queue oracle cases with 31,782 selected events. A mixed held/free schedule of 600,000,000,063 events supported indexed selection in 0.009 seconds with a 41,131-byte traced peak and was collected after release. Root's Python 759, frontend 25 suites and six-case native HTTP linked-index/seed replay regression passed. Final native-browser validation and exact-head remediation review precede a new whole audit.
 
+The twenty-seventh auditor approved exact HEAD `0ae3132efd5d635dca7d97cc032f40c82c1233c4`. All required CI checks passed: Python 3.9/3.11 each 759 tests, 25 frontend suites and 54 native CPU/HTTP tests. Root's complete native browser also passed with no page errors. A new twenty-eighth GPT-6 Astra xhigh auditor then inspected the entire repository.
+
+## Twenty-eighth independent full audit: release approval
+
+The new auditor completed all 20 production Python modules, the initializer, all eight web modules, the importer, API/storage boundaries and packaging/CI. It reviewed generation planning, Preset/Random/Count/Switch/Queue behavior, PNG replay, model/LoRA/LLM/GPU and callback lifetimes, frontend selection/history, rendering, multiple workflows, FIFO completion and cleanup. It found no additional actionable defect, demonstrated bottleneck or retained obsolete data, and issued a fresh whole-audit APPROVE at exact HEAD `0ae3132efd5d635dca7d97cc032f40c82c1233c4`.
+
+Independent frontend/backend parity passed 3,500 mixed Count/Queue/Matrix/Merge/latent cases with 20,381 selected events. Replay checks passed 1,315 plans with 10,058 independently ranked events. A held/free plan of 7,000,000,000,006 events supported indexed selection in 0.0216 seconds with a 24,380-byte measured peak and was collected after release. Across 5,000 consumer evaluations creating 12,500 plan objects, only the current four mapped slots remained, and all were released when the operation ended. These targeted checks supplement the already-green complete suites; they are not a claim that all possible workflows or GPU model combinations were executed.
+
+The requested release gate is satisfied: each earlier finding was fixed by root and approved by its auditor, then a new independent whole audit completed without an actionable finding. No production generation was interrupted and no capacity limit or persistent cache was introduced. The remaining release-record update changes this document only.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
