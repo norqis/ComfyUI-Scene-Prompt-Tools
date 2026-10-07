@@ -2742,20 +2742,21 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(primitiveQueueOffAgain.serialized, primitiveQueueOff.serialized);
     console.log('real ComfyUI PrimitiveBoolean canvas pointer toggle switches Queue boundary/controls/counts and preserves Queue settings');
 
-    const prepareAfterDisplay = async (id, total) => {
+    const prepareAfterDisplay = async (id, total, totalImages) => {
         // This is deliberately after the display-only wait: no test planner, redraw,
         // refresh or graphToPrompt call may repair the user's stale display first.
         await waitExpandDisplay(id, total);
-        const preparedTotal = await page.evaluate(async id => {
+        const preparedCounts = await page.evaluate(async id => {
             const app = window.app, { api } = await import('/scripts/api.js'), prompt = await app.graphToPrompt();
             const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST', body: JSON.stringify({
                 api_graph: prompt, workflow: prompt.workflow, expand_node_id: String(id),
             }) });
             const prepared = await response.json(); if (!response.ok) throw new Error(JSON.stringify(prepared));
             await api.fetchApi('/scene_prompt/runs/release', { method: 'POST', body: JSON.stringify({ run_handle: prepared.run_handle }) });
-            return prepared.total_batches;
+            return { total: prepared.total_batches, images: prepared.total_images };
         }, id);
-        assert.equal(preparedTotal, total, 'the already-updated display matches native prepare');
+        assert.equal(preparedCounts.total, total, 'the already-updated display matches native prepare');
+        if (totalImages !== undefined) assert.equal(preparedCounts.images, totalImages, 'native preparation preserves the latent batch size');
     };
     const clickCountWidget = async (id, name, expected, increment = false) => {
         const point = await page.evaluate(({ id, name, increment }) => {
@@ -2923,11 +2924,9 @@ window.__sceneSeedRuntimeTest = {
             await window.__sceneSeedRuntimeTest.refreshPresetReference(app.graph.getNodeById(ids.reference));
             return ids.expand;
         }, arm);
-        await prepareAfterDisplay(randomExpand, 24);
-        assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.sceneRole === 'expand_total_count').sceneTotalImages,
-            randomExpand), 72, 'nested 100% Random retains latent batch size in the visible Expand count');
+        await prepareAfterDisplay(randomExpand, 24, 72);
     }
-    console.log('real ComfyUI nested 100% Random slots 0/9 retain visible Count and latent totals before native prepare');
+    console.log('real ComfyUI nested 100% Random slots 0/9 show correct Count before native prepare and preserve latent totals');
     nativeRunChecks = false;
     console.log('real ComfyUI standard Switch MatchType, fixed slots, names/mapping DOM saves, siblings, count/selected preview, Undo/Redo, clone, legacy restore, reload and one settings category passed');
 
