@@ -7,6 +7,13 @@ export async function verifyCandidateReloadSelections(page) {
     await page.route("**/scene_prompt/items*", items);
     await page.route("**/scene_prompt/saved_prompts*", saved);
     try {
+        const reload = async (prompt) => {
+            const previous = await page.locator(".pc-popup").last().elementHandle();
+            await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
+            await page.waitForFunction(popup => !popup.isConnected, previous);
+            await previous.dispose();
+            await page.locator('.pc-candidate[title="' + prompt + '"]').waitFor();
+        };
         for (const [side, before, after, parts, expected] of [
             ["positive", "alpha, beta", "beta, gamma", [{ index: 0, text: "alpha", weight: 1.3 }, { index: 1, text: "beta", weight: 1.2 }], "(beta:1.2)"],
             ["negative", "alpha, alpha", "beta, alpha", [{ index: 1, text: "alpha", weight: 1.2 }], ""],
@@ -31,19 +38,16 @@ export async function verifyCandidateReloadSelections(page) {
             }, { ids, side });
             const original = await snapshot();
             candidate = { ...candidate, prompt: after };
-            await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
-            await page.locator('.pc-candidate[title="' + after + '"]').waitFor();
+            await reload(after);
             const edited = await snapshot();
             assert.equal(edited.text, expected);
             assert.equal(new Set(edited.parts.map(part => part.index)).size, parts.length);
             assert(edited.parts.some(part => part.missing));
             assert.deepEqual(edited.parts.map(part => part.weight), parts.map(part => part.weight));
-            await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
-            await page.locator('.pc-candidate[title="' + after + '"]').waitFor();
+            await reload(after);
             assert.deepEqual(await snapshot(), edited, "unchanged reload never revives a removed occurrence");
             candidate = { ...candidate, prompt: before };
-            await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
-            await page.locator('.pc-candidate[title="' + before + '"]').waitFor();
+            await reload(before);
             assert.deepEqual(await snapshot(), original, "restoring the candidate restores the selected occurrence weights");
             await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
         }
