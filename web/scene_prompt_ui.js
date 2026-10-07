@@ -5642,7 +5642,12 @@ async function openSceneLoraPicker(node) {
             }
             select.onclick = async () => {
                 closeSceneLoraDetails(node);
-                setWidgetValue(node, "lora_name", item.path);
+                if (findWidget(node, "lora_name")?.value !== item.path) {
+                    withSceneUserChange(node, () => {
+                        setWidgetValue(node, "lora_name", item.path);
+                        node.graph.change?.();
+                    });
+                }
                 closeSceneLoraPicker(node);
                 try { await resolveSceneLora(item); } catch (_error) {}
             };
@@ -12320,10 +12325,15 @@ async function openScenePresetPicker(node) {
             button.classList.add("pc-on");
         }
         button.addEventListener("click", () => {
-            setWidgetValue(node, "preset_id", preset.preset_id);
-            clearScenePresetReferenceErrors({ nodeIds: [node.id] });
-            refreshScenePresetReference(node, presets);
-            refreshAllScenePresetReferences(presets);
+            if (findWidget(node, "preset_id")?.value !== preset.preset_id) {
+                withSceneUserChange(node, () => {
+                    setWidgetValue(node, "preset_id", preset.preset_id);
+                    clearScenePresetReferenceErrors({ nodeIds: [node.id] });
+                    refreshScenePresetReference(node, presets);
+                    refreshAllScenePresetReferences(presets);
+                    node.graph.change?.();
+                });
+            }
             closePopup();
             node.setDirtyCanvas?.(true, true);
             app.graph?.setDirtyCanvas?.(true, true);
@@ -12927,12 +12937,15 @@ function openSceneRandomSettings(node) {
     document.body.append(overlay);
     const applyAndClose = () => {
         if (validFields) {
-            const next = inputs.map((input) => sceneRandomPercentToBasisPoints(input.value));
-            if (setWidgetValue(node, "weights_json", JSON.stringify(next))) {
-                syncSceneRandomRoute(node);
-                clearSceneComputedCaches(node);
-                refreshDownstreamSceneNodes(node);
-                markSceneNodeChanged(node);
+            const next = JSON.stringify(inputs.map((input) => sceneRandomPercentToBasisPoints(input.value)));
+            if (findWidget(node, "weights_json")?.value !== next) {
+                withSceneUserChange(node, () => {
+                    setWidgetValue(node, "weights_json", next);
+                    syncSceneRandomRoute(node);
+                    clearSceneComputedCaches(node);
+                    refreshDownstreamSceneNodes(node);
+                    markSceneNodeChanged(node);
+                });
             }
         }
         closeSceneRandomSettings(node);

@@ -910,7 +910,10 @@ async function testPresetSaveMarksOnlyTheReferenceReturnedByTheServer() {
 async function testPresetPickerClearsTheSelectedReferenceError() {
     const buttons = [];
     const cleared = [];
+    const history = [];
     const node = { id: 12, widgets: [{ name: "preset_id", value: "" }], setDirtyCanvas() {} };
+    node.graph = { getNodeById: id => id === node.id ? node : null, setDirtyCanvas() {},
+        beforeChange() { history.push("before"); }, afterChange() { history.push("after"); }, change() { history.push("change"); } };
     const createElement = (tagName) => ({
         tagName,
         children: [],
@@ -923,7 +926,8 @@ async function testPresetPickerClearsTheSelectedReferenceError() {
         String,
         document: { createElement },
         scenePresetListErrors: [],
-        app: { graph: { setDirtyCanvas() {} } },
+        app: { graph: node.graph, canvas: { graph: node.graph } },
+        findWidget: (target, name) => target.widgets.find(widget => widget.name === name),
         async loadPopupRequest() { return [{ preset_id: "chosen", name: "Chosen" }]; },
         refreshScenePresetReferenceList() { throw new Error("initial load is supplied by the test"); },
         openPopupShell() { return createElement("popup"); },
@@ -946,14 +950,21 @@ async function testPresetPickerClearsTheSelectedReferenceError() {
         closePopup() {},
     };
     vm.createContext(context);
-    vm.runInContext(functionSource("sortedScenePresetCandidates"), context);
-    vm.runInContext(functionSource("openScenePresetPicker"), context);
+    for (const name of ["beginSceneGraphChange", "endSceneGraphChange", "sceneNodeHasCurrentOwner", "withSceneUserChange",
+        "sortedScenePresetCandidates", "openScenePresetPicker"]) vm.runInContext(functionSource(name), context);
 
     await context.openScenePresetPicker(node);
     buttons.find((button) => button.label === "Chosen").click();
 
     assert.equal(node.widgets[0].value, "chosen");
     assert.deepEqual(cleared, [[12]]);
+    assert.deepEqual(history, ["before", "change", "after"]);
+    buttons.find(button => button.label === "Chosen").click();
+    assert.deepEqual(history, ["before", "change", "after"], "selecting the current Preset is a no-op");
+    node.graph = null; node.widgets[0].value = "";
+    buttons.find(button => button.label === "Chosen").click();
+    assert.equal(node.widgets[0].value, "", "a removed popup owner is not changed");
+    assert.deepEqual(history, ["before", "change", "after"]);
 }
 
 async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange() {

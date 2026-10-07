@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { chromium } from "playwright";
 import { parseSelectionState } from "../web/scene_prompt_state.js";
+import { verifySceneModalHistory } from "./scene_modal_history.mjs";
 
 if (process.env.RUN_REAL_COMFYUI_BROWSER_SMOKE !== "1") {
     console.log("real ComfyUI browser smoke skipped");
@@ -344,6 +345,7 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    await verifySceneModalHistory(page);
     const removedInitialization = await page.evaluate(async () => {
         const graph = window.app.graph, removed = [];
         graph.clear();

@@ -1,0 +1,107 @@
+import assert from "node:assert/strict";
+
+export async function verifySceneModalHistory(page) {
+    await page.evaluate(async () => {
+        const app = window.app;
+        app.graph.clear();
+        const input = window.LiteGraph.createNode("ScenePresetInput");
+        const output = window.LiteGraph.createNode("ScenePresetOutput");
+        app.graph.add(input); app.graph.add(output); input.connect(0, output, 0);
+        const graph = await app.graphToPrompt();
+        const response = await fetch("/scene_presets/save", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset_id: "native-history", name: "Native History", output_node_id: String(output.id),
+                api_graph: graph, workflow: graph.workflow }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+    });
+
+    const cases = [
+        { type: "ScenePresetReference", role: "scene_preset_select", field: "preset_id", before: "", after: "native-history" },
+        { type: "SceneApplyLora", role: "lora_select", field: "lora_name", before: "runtime-hat.safetensors", after: "runtime-local.safetensors" },
+        { type: "ScenePromptRandomRoute", role: "random_settings", field: "weights_json",
+            before: "[10000,0,0,0,0,0,0,0,0,0]", after: "[5000,5000,0,0,0,0,0,0,0,0]" },
+    ];
+    for (const scenario of cases) {
+        const id = await page.evaluate(async scenario => {
+            const app = window.app; app.graph.clear();
+            const node = window.LiteGraph.createNode(scenario.type); app.graph.add(node);
+            node.widgets.find(widget => widget.name === scenario.field).value = scenario.before;
+            node.pos = [380, 80]; app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0];
+            if (scenario.type === "ScenePresetReference") await window.__sceneSeedRuntimeTest.refreshPresetReference(node);
+            await app.loadGraphData(JSON.parse(JSON.stringify(app.graph.serialize())), true, true);
+            await new Promise(done => setTimeout(done, 150));
+            app.canvas.draw(true, true);
+            window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
+            return node.id;
+        }, scenario);
+        const snapshot = () => page.evaluate(({ id, field }) => {
+            const node = window.app.graph.getNodeById(id), tracker = window.__sceneSeedRuntimeTest.tracker();
+            const widget = node?.widgets?.find(widget => widget.name === field);
+            const serialized = node?.serialize();
+            return { exists: !!node, value: widget?.value, stored: serialized?.widgets_values_named?.[field] ?? serialized?.widgets_values[node.widgets.indexOf(widget)],
+                undo: tracker.undoQueue.length, redo: tracker.redoQueue.length };
+        }, { id, field: scenario.field });
+        const open = async () => {
+            await page.waitForFunction(({ id, role }) => window.app.graph.getNodeById(id)?.widgets.some(widget => widget.sceneRole === role), { id, role: scenario.role });
+            const point = await page.evaluate(async ({ id, role }) => {
+                await new Promise(requestAnimationFrame);
+                const node = window.app.graph.getNodeById(id), canvas = window.app.canvas;
+                canvas.draw(true, true);
+                const widget = node.widgets.find(widget => widget.sceneRole === role), rect = canvas.canvas.getBoundingClientRect();
+                return { x: rect.left + (node.pos[0] + node.size[0] / 2 + canvas.ds.offset[0]) * canvas.ds.scale,
+                    y: rect.top + (node.pos[1] + widget.last_y + window.LiteGraph.NODE_WIDGET_HEIGHT / 2 + canvas.ds.offset[1]) * canvas.ds.scale };
+            }, { id, role: scenario.role });
+            await page.mouse.click(point.x, point.y);
+        };
+        const choose = async changed => {
+            await open();
+            if (scenario.type === "ScenePresetReference") {
+                await page.locator(".pc-popup").getByRole("button", { name: "Native History", exact: true }).click();
+            } else if (scenario.type === "SceneApplyLora") {
+                await page.locator(".pc-lora-picker .pc-lora-row").filter({ hasText: changed ? scenario.after : scenario.before }).locator(".pc-lora-select").click();
+            } else {
+                const dialog = page.locator(".pc-random-dialog");
+                if (changed) {
+                    await dialog.locator("input").nth(0).fill("50");
+                    await dialog.locator("input").nth(1).fill("50");
+                }
+                await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
+            }
+        };
+        const restore = async direction => {
+            await page.evaluate(async direction => {
+                await window.__sceneSeedRuntimeTest.tracker()[direction]();
+                await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+            }, direction);
+        };
+        const before = await snapshot();
+        await choose(true);
+        const selected = await snapshot();
+        assert.equal(selected.value, scenario.after, scenario.type);
+        assert.equal(selected.undo, before.undo + 1, `${scenario.type} adds one native checkpoint`);
+        await restore("undo");
+        const undone = await snapshot();
+        assert(undone.exists, `${scenario.type} Undo keeps the node`);
+        assert.equal(undone.value, scenario.before);
+        assert.equal(undone.redo, 1);
+        if (scenario.type !== "ScenePresetReference") {
+            await choose(false);
+            assert.deepEqual(await snapshot(), undone, `${scenario.type} unchanged close/selection preserves Redo`);
+        }
+        await restore("redo");
+        const redone = await snapshot();
+        assert.equal(redone.value, scenario.after);
+        assert.equal(redone.stored, scenario.after);
+        await choose(true);
+        assert.deepEqual(await snapshot(), redone, `${scenario.type} selecting current values adds no history`);
+        await page.evaluate(async () => {
+            const workflow = JSON.parse(JSON.stringify(window.app.graph.serialize()));
+            await window.app.loadGraphData(workflow, true, true);
+        });
+        const reloaded = await snapshot();
+        assert.equal(reloaded.value, scenario.after);
+        assert.equal(reloaded.stored, scenario.after);
+    }
+    console.log("real ComfyUI Preset/local-LoRA selection and Random probability DOM edits preserve Undo/Redo, no-op history and reload");
+}

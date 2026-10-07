@@ -268,6 +268,16 @@ The auditor approved root's minimal design after checking the cache's sole write
 
 The auditor's isolated native browser measured actual `matrix_connected_list.draw` width-change rebuilds for 100 enabled rows with 100 weighted selections each (1,668,792 bytes). Across 30 rebuilds, the old code averaged 10.757 ms and parsed selection JSON 3,000 times; the reviewed copy averaged 0.553 ms with zero parses. Unchanged warm draws remained about 0.033 ms for both. Both native pages had zero errors, and the temporary CPU server/browser were cleaned up. This round therefore found a substantiated large-Matrix responsiveness issue and does not satisfy the fresh-zero release gate.
 
+The twenty-second auditor approved exact HEAD `41ab196274ad2f41d0308cf55902c14b35732fd3`; all required CI checks and the complete native browser passed. A new twenty-third auditor then reviewed the entire repository.
+
+## Twenty-third independent full audit
+
+The new auditor found one native Undo family across three DOM commits: Preset selection, local LoRA selection and Random probability settings. Actual canvas-pointer opening followed by DOM selection changed each value without a checkpoint. Undo consequently removed the newly created Preset/LoRA node or returned to the graph operation preceding Random's probability edit. Root independently reproduced all three before editing. Trigger Word injection correctly undid in the native probe and was left unchanged.
+
+Only those three user commits now use the existing `withSceneUserChange` checkpoint helper, with same-value no-op checks. Existing selection refresh, dialog close and metadata-fetch behavior remain. Programmatic widget updates are unchanged; there is no new history system or cache. The existing Preset VM regression now exercises the actual checkpoint helper, unchanged selection and a removed popup owner. A focused native module exercises all three dialogs using canvas pointers and DOM controls, then native Undo/Redo, unchanged selection and workflow reload, without capturing history after the action. The fixture is first loaded through the ordinary frontend path before initial history capture, and Undo/Redo completion and rendering are awaited. Full serialized equality is not required: native loading normalizes workflow IDs and viewport state. The auditor independently confirmed that normalization against the installed and pinned frontend source; it is not a product defect.
+
+Independent whole-audit probes passed 1,992 materialized-reference cases / 31,752 event and replay projections. An eight-trillion-event selection/store-lifetime probe took 0.0052 seconds with a 29,385-byte traced peak; the released plan was collected. The auditor completed all 20 Python modules, eight frontend modules, importer, packaging and CI, and independently passed Python 755, frontend 25 suites and the full native browser on the pre-fix audit head. Final fixed-head native validation and remediation review precede a new whole audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
@@ -279,3 +289,5 @@ The auditor's isolated native browser measured actual `matrix_connected_list.dra
 - https://docs.comfy.org/custom-nodes/backend/more_on_inputs
 - https://docs.comfy.org/custom-nodes/backend/lists
 - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax
+- https://raw.githubusercontent.com/Comfy-Org/ComfyUI_frontend/v1.49.6/src/scripts/changeTracker.ts
+- https://raw.githubusercontent.com/Comfy-Org/ComfyUI_frontend/v1.49.6/src/lib/litegraph/src/LGraph.ts
