@@ -56,6 +56,20 @@ Another new GPT-6 Astra xhigh agent (`astra_audit_round3`) found three further i
 
 The fixes are committed as `1900c5f` and `c9fcfd9`. The auditor independently reviewed all three fixes. Python 715 tests and all frontend suites passed before the final two Windows regressions, which also passed. Native CPU/HTTP verification covers 45 existing tests plus a new test with six PNG save/replay combinations; its fixture was corrected to include the required Reverse scope and to expect one retained Save node in selected-path metadata. The complete isolated native browser suite passed, including actual OFF LLM cleanup recovery. Release still requires a clean audit by a subsequent new agent.
 
+## Fourth independent full audit
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round4`) audited the entire repository and reproduced seven more issues. Root implemented the fixes in `634998a`:
+
+- Candidate/category/saved-prompt names and Preset IDs now report Windows reserved names before attempting a write. The filesystem-specific validation preserves existing Linux names. Image/import paths retain their sanitizing behavior.
+- A named-switch passthrough Preset no longer replaces an external Scene input with its retained switch seed when saving expanded workflow metadata.
+- Expanded Presets retain their whole-prompt boundary for subsequent To Text/Reverse previous-node scope. Each saved Preset Output becomes the existing Count 1 boundary used by runtime expansion; a workflow property restores the hidden trace flag on native graph serialization. Nested, bypassed and inputless paths, shared fanout, workflow-only references, and older internal-only source lineage are covered. Normal Preset Output behavior is unchanged.
+- Selection dictionaries no longer inherit Object prototype keys. Categories named `__proto__`, `constructor` or `toString` survive editing, cloning, pruning and JSON round trips without renaming.
+- A zero-row Merge product is normalized immediately after Random validation. Queue provenance is preserved; Count 0 rows retain their existing meaning. Forty shared empty merges retain no recursive product. Before the fix, the independent probes visited over one million units at Python depth 19 and over four million at JavaScript depth 21.
+- Inputless Path, Empty Latent, unconfigured Matrix and Delete previews now retain the seed row, matching the backend. A connected all-disabled Matrix remains empty. Queue labels and image counts are tested together.
+- Delete traverses nested prompt choices with an explicit work stack. It preserves option positions, unchanged whitespace and incomplete braces. A 1,500-level choice can pass through Delete and To Text without a recursion error; no depth limit is added.
+
+The review caught an incorrect scope constant in the new Reverse test; `5dccc3e` uses the actual previous-node Reverse option and the direct/nested tests pass. All frontend suites and the complete isolated native browser suite pass, including four actual LiteGraph Preset expansion/reload cases. Final Python/native CPU runs and the same auditor's approval are still pending. A new whole-repository audit is required after approval.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
