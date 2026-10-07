@@ -1256,8 +1256,7 @@ def _metadata_for_save_mode(
         saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
         retained_sources = _visible_scene_source_ids(saved_prompt, source_aliases)
         retained_sources.update(source_aliases.get(node_id, node_id) for node_id in replacements)
-        replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases,
-            retained_sources if consumer_items else None)
+        replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases, retained_sources)
         saved_extra = {
             key: value
             for key, value in expanded_extra.items()
@@ -1289,8 +1288,7 @@ def _metadata_for_save_mode(
     saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
     # Contracted passthrough nodes still belong to the selected event's lineage.
     retained_sources = _visible_scene_source_ids(saved_prompt) | set(replacements)
-    replay_values = _replay_expand_values(scene_info, prompt, retained_source_ids=
-        retained_sources if consumer_items else None)
+    replay_values = _replay_expand_values(scene_info, prompt, retained_source_ids=retained_sources)
     saved_extra = None
     if extra_pnginfo is not None:
         saved_extra = {

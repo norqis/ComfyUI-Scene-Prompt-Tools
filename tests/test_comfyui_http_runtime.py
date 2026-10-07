@@ -1439,11 +1439,16 @@ NODE_CLASS_MAPPINGS = {
                     folder = f'generic-switch-{mode}-{selected}-{literal_data}'
                     graph = _save_graph(mode)
                     graph.pop('7')
-                    graph['4']['inputs']['seed_base'] = 123
+                    graph['4']['inputs'].update(seed_base=123, current_index=1)
+                    graph['1']['inputs'].update(positive_base='A', negative_base=folder)
+                    graph['2'] = {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['8', 0]}}
+                    marker = self.base / f'{folder}.json'
+                    graph['14'] = graph['5']
+                    graph['5'] = {'class_type': 'TestSceneTextImage', 'inputs': {'image': ['14', 0], 'positive': ['4', 0], 'negative': ['4', 1], 'log_path': str(marker)}}
                     graph['3']['inputs'].update(width=16, height=16)
                     graph.update({
-                        '8': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'text-positive', 'negative_base': folder}},
-                        '9': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['8', 0], 'scope': '全てのノード', 'seed_base': 123}},
+                        '8': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'B', 'negative_base': folder}},
+                        '9': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['2', 0], 'scope': '全てのノード', 'seed_base': 123}},
                         '10': {'class_type': 'PrimitiveString', 'inputs': {'value': folder}},
                         '11': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': ['12', 0], 'on_true': ['10', 0], 'on_false': ['9', 1]}},
                         '12': {'class_type': 'PrimitiveBoolean', 'inputs': {'value': selected}},
@@ -1455,6 +1460,7 @@ NODE_CLASS_MAPPINGS = {
                     handle, workflow = self._prepare_callback_run(graph, '4')
                     try:
                         self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding='utf-8'))[0], 'B')
                     finally:
                         self._request('/scene_prompt/runs/release', {'run_handle': handle})
                     files = list((self.base / 'output' / folder).glob('*.png'))
@@ -1473,6 +1479,7 @@ NODE_CLASS_MAPPINGS = {
                     replay_handle, visual = self._prepare_callback_run(replay, '4', visual)
                     try:
                         self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding='utf-8'))[0], 'B')
                     finally:
                         self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
                     self.assertEqual(len(list((self.base / 'output' / folder).glob('*.png'))), 2)

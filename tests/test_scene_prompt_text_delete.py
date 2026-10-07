@@ -594,7 +594,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         prompt = {
             '1': scene_prompt('selected'), '2': scene_prompt('other'),
             '3': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['2', 0]}},
-            '4': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['3', 0]}},
+            '4': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['3', 0], 'current_index': 1, 'seed_base': 123}},
             '5': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['3', 0]}},
             '6': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': True, 'on_true': 'path', 'on_false': ['5', 0]}},
             '7': {'class_type': 'Save', 'inputs': {'path': ['6', 0], 'info': ['4', 2]}},
@@ -603,6 +603,17 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         included = self.nodes._selected_ancestor_ids(prompt, '7', {}, {'1', '3', '4'})
         self.assertEqual(included, set(prompt))
         self.assertEqual(self.nodes._slice_prompt_to_ids(prompt, included), prompt)
+        handle = self.runs.create_run_context('default')
+        plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=self.build('selected', node_id='1'),
+            scene_prompt2=self.build('other', node_id='2'), unique_id='3')[0]
+        result = self.nodes.ScenePromptExpand().expand(scene_prompt=plan, current_index=1, seed_base=123,
+            unique_id='4', run_handle=handle, prompt=prompt)
+        saved, _ = self.nodes._metadata_for_save_mode(prompt, None, '7', self.nodes.SAVE_METADATA_EXECUTION_PATH, result[2])
+        self.assertEqual(saved['4']['inputs']['current_index'], 1, 'the preserved first Queue branch still occupies index zero')
+        replay_plan = self.presets._scene_node_value(saved, '3', {}, set())
+        replay = self.nodes.ScenePromptExpand().expand(scene_prompt=replay_plan,
+            **{key: saved['4']['inputs'][key] for key in ('current_index', 'seed_base')})
+        self.assertEqual(replay[:2], result[:2])
         # Saving without an executed Scene consumer still keeps required inputs.
         prompt.pop('4')
         prompt['7']['inputs'].pop('info')
