@@ -51,6 +51,22 @@ class ImportSceneHtmlTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     self.module.parse_args()
 
+    def test_truncated_headings_preserve_categories_at_windows_alias_boundary(self):
+        prefix = 'a' * 99
+        for separator in ('.', ' '):
+            for level in ('main', 'sub'):
+                with self.subTest(separator=separator, level=level):
+                    names = (prefix, prefix + separator + 'tail')
+                    entries = {name: [{'label': name, 'prompt': name}] for name in names}
+                    grouped = ({name: {'same': items} for name, items in entries.items()}
+                               if level == 'main' else {'same': entries})
+                    destination = self.root / f'{ord(separator)}-{level}'
+                    self.assertEqual(self.module.write_data(grouped, destination), (2 if level == 'main' else 1, 2, 2))
+                    files = list(destination.rglob('prompt.json'))
+                    self.assertEqual(len(files), 2)
+                    self.assertEqual({item['prompt'] for path in files for item in json.loads(path.read_text(encoding='utf-8'))}, set(names))
+                    self.assertTrue(all(not part.endswith(('.', ' ')) for path in files for part in path.relative_to(destination).parts))
+
     def test_case_collisions_preserve_all_html_entries_on_disk(self):
         source = self.root / "html"
         source.mkdir()

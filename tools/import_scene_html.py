@@ -53,7 +53,7 @@ def safe_dir_name(value: str, default_name: str) -> str:
     name = re.sub(r"\s+", " ", name).strip(" .")
     if WINDOWS_RESERVED_NAME_RE.match(name.split(".", 1)[0].rstrip(" ")):
         name = f"_{name}"
-    return name[:100] or default_name
+    return name[:100].rstrip(" .") or default_name
 
 
 def stable_suffix(value: str) -> str:
