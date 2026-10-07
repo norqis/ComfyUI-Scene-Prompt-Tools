@@ -500,7 +500,11 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                         plans['22'] = self.presets._scene_node_value(graph, source, snapshots, set())
                     expected_text = self.nodes.ScenePromptToText().to_text(plans['22'], current_index=2, seed_base=100, run_handle=handle, unique_id='31')
                     expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=plans['21'], current_index=expand_index, seed_base=100, run_handle=handle, unique_id='30', prompt=prompt)
-                    saved, extra = self.nodes._metadata_for_save_mode(prompt, {'workflow': self.workflow(prompt)}, '33', self.nodes.SAVE_METADATA_EXECUTION_PATH, expanded[2], expand_preset_contents=expand_contents)
+                    workflow = self.workflow(prompt)
+                    for node in workflow['nodes']:
+                        if str(node['id']) in ('30', '31'):
+                            node['widgets_values_named'] = {'current_index': 2, 'seed_base': 100, 'seed_base_literal': False}
+                    saved, extra = self.nodes._metadata_for_save_mode(prompt, {'workflow': workflow}, '33', self.nodes.SAVE_METADATA_EXECUTION_PATH, expanded[2], expand_preset_contents=expand_contents)
                     self.assertNotIn('1', saved)
                     self.assertNotIn('99', saved)
                     self.assertEqual(saved['30']['inputs']['current_index'], expand_index - 2)
@@ -515,6 +519,8 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                         inputs = saved[consumer_id]['inputs']
                         plan = self.presets._scene_node_value(saved, inputs['scene_prompt'][0], replay_plans, set())
                         values = {name: inputs[name] for name in ('current_index', 'seed_base', 'seed_base_literal')}
+                        visual = next(node for node in extra['workflow']['nodes'] if str(node['id']) == consumer_id)
+                        self.assertEqual(visual['widgets_values_named'], values)
                         if consumer_id == '31': self.assertEqual(self.nodes.ScenePromptToText().to_text(plan, **values), expected_text)
                         else: self.assertEqual(self.nodes.ScenePromptExpand().expand(scene_prompt=plan, **values)[:2], expanded[:2])
 
@@ -793,9 +799,12 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         self.nodes._freeze_random_routes(graph, None, [first, first])
         self.assertEqual(json.loads(graph['route']['inputs']['weights_json']), [10000] + [0] * 9)
         self.assertTrue(graph['route']['inputs']['preserve_join'])
-        visual = {'nodes': [{'id': 'route', 'type': 'ScenePromptRandomRoute', 'widgets_values': [original]}]}
+        visual = {'nodes': [{'id': 'route', 'type': 'ScenePromptRandomRoute', 'widgets_values': [original],
+                             'widgets_values_named': {'weights_json': original, 'preserve_join': False}}]}
         self.nodes._freeze_random_routes(graph, visual, [first])
         self.assertEqual(visual['nodes'][0]['widgets_values'], [graph['route']['inputs']['weights_json'], True])
+        self.assertEqual(visual['nodes'][0]['widgets_values_named'], {
+            'weights_json': graph['route']['inputs']['weights_json'], 'preserve_join': True})
 
 
 if __name__ == '__main__':

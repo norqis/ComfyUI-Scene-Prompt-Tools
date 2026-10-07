@@ -184,8 +184,9 @@ def _preset_physical_boundaries(preset, mapping, input_id, output_id):
     return entries, output
 
 
-def _clone_preset_workflow_nodes(preset, mapping, reference_node):
+def _clone_preset_workflow_nodes(preset, mapping, reference_node, reference_source):
     templates = _workflow_template_index(_workflow_nodes(preset))
+    api_nodes = _nodes(preset)
     internal_ids = list(mapping)
 
     positions = [_position(templates[node_id]) for node_id in internal_ids]
@@ -198,6 +199,11 @@ def _clone_preset_workflow_nodes(preset, mapping, reference_node):
         x, y = _position(copied)
         copied["id"] = int(mapping[node_id])
         copied["pos"] = [x - min_x + ref_x, y - min_y + ref_y]
+        if copied.get("type") == "ScenePromptRandomRoute":
+            seed_source = api_nodes.get(node_id, {}).get("inputs", {}).get("seed_source_id") or node_id
+            copied.setdefault("properties", {})["scene_random_seed"] = {
+                "node_id": str(copied["id"]), "seed_source_id": f"{reference_source}/{seed_source}",
+            }
         if copied.get("type") == PRESET_OUTPUT:
             # Preserve the Reference's whole-prompt boundary after PNG import.
             copied["type"] = "ScenePromptCounter"
@@ -266,7 +272,10 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
                 remapped[name] = [mapping[str(value[0])], value[1]]
         if copied.get("class_type") == PRESET_INPUT:
             remapped["switch_values"] = {"values": list(vector)}
-        if copied.get("class_type") in {"ScenePromptRandomRoute", "SceneApplyLora"}:
+        if copied.get("class_type") == "ScenePromptRandomRoute":
+            remapped.pop("source_node_id", None)
+            remapped["seed_source_id"] = f"{reference_source}/{remapped.get('seed_source_id') or original_id}"
+        if copied.get("class_type") == "SceneApplyLora":
             remapped["source_node_id"] = f"{reference_source}/{original_id}"
         copied["inputs"] = remapped
         prompt[mapping[original_id]] = copied
@@ -281,7 +290,7 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
     if not isinstance(workflow_reference, dict):
         raise ValueError(f"workflow にPreset参照ノード #{reference_id} がありません。")
     workflow["nodes"] = [node for node in outer_nodes if str(node.get("id")) != reference_id]
-    copied_workflow_nodes = _clone_preset_workflow_nodes(preset, mapping, workflow_reference)
+    copied_workflow_nodes = _clone_preset_workflow_nodes(preset, mapping, workflow_reference, reference_source)
     if input_id in mapping:
         for copied_node in copied_workflow_nodes:
             if str(copied_node["id"]) == mapping[input_id]:
@@ -554,7 +563,7 @@ def _workflow_reference_preset_id(node):
     return preset_id
 
 
-def _expand_workflow_only_reference(workflow, reference_id, preset, frozen_vector=None):
+def _expand_workflow_only_reference(workflow, reference_id, preset, frozen_vector=None, reference_path=None):
     nodes = workflow.get("nodes")
     links = workflow.get("links")
     if not isinstance(nodes, list) or not isinstance(links, list):
@@ -633,7 +642,7 @@ def _expand_workflow_only_reference(workflow, reference_id, preset, frozen_vecto
         {parts[0] for link in removed if (parts := _workflow_link_parts(link)) is not None},
     )
     workflow["nodes"] = [node for node in nodes if str(node.get("id")) != reference_id]
-    copied_nodes = _clone_preset_workflow_nodes(preset, mapping, reference)
+    copied_nodes = _clone_preset_workflow_nodes(preset, mapping, reference, reference_path or reference_id)
     if input_id in mapping:
         for copied in copied_nodes:
             if str(copied["id"]) == mapping[input_id]:
@@ -710,7 +719,7 @@ def _expand_workflow_only_references(workflow, preset_snapshots, display_only_re
             raise ValueError(f"Preset「{preset_id}」の実行開始時スナップショットがありません。")
         reference_id = str(reference.get("id"))
         mapping = _expand_workflow_only_reference(workflow, reference_id, preset,
-                    preset_snapshots.get("__switch_values__", {}).get(reference_path))
+                    preset_snapshots.get("__switch_values__", {}).get(reference_path), reference_path)
         templates = _workflow_template_index(_workflow_nodes(preset))
         api_nodes = _nodes(preset)
         for original_id, copied_id in mapping.items():

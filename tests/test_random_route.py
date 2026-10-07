@@ -13,6 +13,25 @@ def add(plan, label):
 
 
 class RandomRouteScheduleTests(unittest.TestCase):
+    def test_preserved_draw_identity_keeps_current_gate_and_legacy_fingerprint(self):
+        weights = [5000, 5000] + [0] * 8
+        original = random_route(seed_plan(), weights, 'preset/gate')
+        explicit = random_route(seed_plan(), weights, 'preset/gate', seed_id='preset/gate')
+        self.assertEqual(original, explicit)
+        moved = random_route(seed_plan(), weights, 'current', seed_id='preset/gate')
+        normalized_arms = [normalize_plan(json.loads(json.dumps(arm))) for arm in moved]
+        plans = [queue([add(arms[0], 'A'), add(arms[1], 'B')]) for arms in (original, normalized_arms)]
+        restored = normalize_plan(json.loads(json.dumps(plans[1])))
+        for seed in range(100):
+            expected = item_for_normalized_plan(plans[0], 0, seed)
+            actual = item_for_normalized_plan(restored, 0, seed)
+            self.assertEqual(actual['row']['positive_parts'], expected['row']['positive_parts'])
+            self.assertEqual(next(part[1] for part in actual['event_ref'] if part[0] == 'random_choice'), 'current')
+            self.assertEqual(replay_index_for_event(restored, actual['event_ref'], set(), set()), 0)
+        changed = random_route(seed_plan(), weights, 'current', seed_id='another')
+        with self.assertRaisesRegex(ScenePlanError, '交差'):
+            queue([moved[0], changed[1]])
+
     def route(self, plan=None, weights=None, gate="gate"):
         return random_route(plan if plan is not None else seed_plan(), weights or [5000, 5000] + [0] * 8, gate)
 

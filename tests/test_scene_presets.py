@@ -1434,6 +1434,27 @@ class ScenePresetTests(unittest.TestCase):
         )
         self.assertEqual([item["preset_id"] for item in result["presets"]], ["workflow_only"])
 
+    def test_batch_full_save_snapshots_canvas_presets_through_image_ancestry(self):
+        self.save("canvas_only", basic_nodes("frozen canvas"))
+        workflow = {"nodes": [{"id": 50, "type": "ScenePresetReference", "widgets_values": ["canvas_only"]}], "links": []}
+        prompt_inputs = {name: value for name, value in basic_nodes("outer")["2"]["inputs"].items() if name != "scene_prompt"}
+        for target, info, second_save, expected in (("2", None, False, True), ("5", None, False, False),
+                                                    ("5", "2", False, True), ("5", None, True, True)):
+            with self.subTest(target=target, info=info, second=second_save):
+                nodes = {
+                    "1": {"class_type": "ScenePrompter", "inputs": prompt_inputs},
+                    "2": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
+                    "5": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
+                    "3": {"class_type": "ImageFromLatent", "inputs": {"samples": [target, 4]}},
+                    "4": {"class_type": "SceneSaveImage", "inputs": {"images": ["3", 0], "metadata_mode": "ワークフロー全体", "expand_preset_contents": True}},
+                }
+                if info:
+                    nodes["4"]["inputs"]["scene_info"] = [info, 2]
+                if second_save:
+                    nodes["6"] = {"class_type": "SceneSaveImage", "inputs": {"images": ["2", 4], "metadata_mode": "ワークフロー全体", "expand_preset_contents": True}}
+                result = self.module.snapshot_presets_for_run(f"canvas-{target}-{info}-{second_save}", graph(nodes), "2", workflow=workflow)
+                self.assertEqual([item["preset_id"] for item in result["presets"]], ["canvas_only"] if expected else [])
+
     def test_snapshot_ignores_disconnected_workflow_references_without_connected_full_save(self):
         workflow = {
             "nodes": [

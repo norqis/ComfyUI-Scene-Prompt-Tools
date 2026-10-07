@@ -147,6 +147,22 @@ ctx.applyScenePresetSwitchBindings(bindingPrompt, g);
 input.properties.scene_switch_values[0] = false;
 assert.equal(bindingPrompt.output[input.id].inputs.switch_values.values[0], true, "captured API binding is independent of later widget/property edits");
 input.properties.scene_switch_values[0] = true;
+{
+    const random = add(g, "ScenePromptRandomRoute", {});
+    random.properties.scene_random_seed = { node_id: String(random.id), seed_source_id: "preset/2" };
+    const prompt = { output: { [random.id]: { class_type: "ScenePromptRandomRoute", inputs: {} } } };
+    ctx.applyScenePresetSwitchBindings(prompt, g);
+    assert.equal(prompt.output[random.id].inputs.seed_source_id, "preset/2");
+    const clone = add(g, "ScenePromptRandomRoute", {});
+    clone.properties.scene_random_seed = { ...random.properties.scene_random_seed };
+    const clonedPrompt = { output: { [clone.id]: { class_type: "ScenePromptRandomRoute", inputs: {} } } };
+    ctx.applyScenePresetSwitchBindings(clonedPrompt, g);
+    assert.equal(clonedPrompt.output[clone.id].inputs.seed_source_id, undefined, "a clone has its own draw identity");
+    const captured = { output: { [random.id]: { class_type: "ScenePromptRandomRoute", inputs: {} } },
+        workflow: { nodes: [{ id: random.id, properties: { scene_random_seed: { node_id: String(random.id), seed_source_id: "snapshot/2" } } }] } };
+    ctx.applyScenePresetSwitchBindings(captured, g);
+    assert.equal(captured.output[random.id].inputs.seed_source_id, "snapshot/2", "use the captured workflow rather than a changed live graph");
+}
 for (let slot = 1; slot <= 10; slot++) {
     const holder = add(g, "ComfySwitchNode", { switch: false }); connect(input, holder, "switch", slot, "BOOLEAN");
     assert.equal(switches.sceneLiveSwitchValue(holder, "switch", "boolean"), vector(1, 3, 10)[slot - 1]);

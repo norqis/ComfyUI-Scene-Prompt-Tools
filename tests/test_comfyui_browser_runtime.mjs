@@ -176,7 +176,16 @@ async def civitai_lookup(request):
                 "trainedWords": ["native_metadata_trigger"], "private_upstream_field": "omitted"}
     civitai.api_get = api_get
     return web.json_response({"calls": lookup_calls})
-NODE_CLASS_MAPPINGS = {}
+class TestSceneTextImage:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"positive": ("STRING",), "negative": ("STRING",)}}
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "render"
+    CATEGORY = "test"
+    def render(self, positive, negative):
+        return {"ui": {"text": [positive, negative]}, "result": nodes.EmptyImage().generate(16, 16, 1, 0)}
+NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage}
 `);
     child = spawn(python, [
         "main.py",
@@ -776,6 +785,16 @@ window.__sceneSeedRuntimeTest = {
         assert.equal(result.boundaries, result.chainLength * (result.nested ? 2 : 1));
     }
     console.log("real ComfyUI expanded Preset workflow reload preserves serial references, named-switch passthrough, nested boundaries and previous-scope text");
+    const allowPngReplayQueue = route => route.continue();
+    await page.route('**/prompt', allowPngReplayQueue);
+    nativeRunChecks = true;
+    try {
+        await (await import('./scene_random_png_replay.mjs')).testRandomPngReplay(page);
+    } finally {
+        nativeRunChecks = false;
+        await page.unroute('**/prompt', allowPngReplayQueue);
+    }
+
     if (process.env.COMFYUI_WORKFLOW_PNG) {
         const extracted = spawnSync(python, [
             "-c",

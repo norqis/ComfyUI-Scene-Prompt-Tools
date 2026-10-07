@@ -9588,6 +9588,11 @@ function applyScenePresetSwitchBindings(apiGraph, graph) {
             promptNode.inputs ||= {};
             promptNode.inputs.prompt_trace_kind = "whole";
         }
+        const randomSeed = properties?.scene_random_seed;
+        if (promptNode?.class_type === "ScenePromptRandomRoute" && String(randomSeed?.node_id) === nodeId) {
+            promptNode.inputs ||= {};
+            promptNode.inputs.seed_source_id = randomSeed.seed_source_id;
+        }
     }
     return apiGraph;
 }
@@ -9598,10 +9603,11 @@ function installScenePresetSwitchBindings() {
     app.graphToPrompt = async function (...args) {
         commitActiveMatrixLineDraft();
         const bindings = new Map((this.graph?._nodes || [])
-            .filter((node) => nodeClassName(node) === "ScenePresetInput" || nodeClassName(node) === "ScenePromptCounter")
+            .filter((node) => ["ScenePresetInput", "ScenePromptCounter", "ScenePromptRandomRoute"].includes(nodeClassName(node)))
             .map((node) => [String(node.id), { properties: {
                 scene_switch_values: node.properties?.scene_switch_values?.slice(),
                 scene_prompt_trace_kind: node.properties?.scene_prompt_trace_kind,
+                scene_random_seed: node.properties?.scene_random_seed ? { ...node.properties.scene_random_seed } : undefined,
             } }]));
         return applyScenePresetSwitchBindings(await original.apply(this, args), { getNodeById: (id) => bindings.get(String(id)) });
     };

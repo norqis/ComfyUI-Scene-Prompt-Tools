@@ -899,6 +899,7 @@ def _workflow_references(workflow):
 
 def _needs_workflow_preset_snapshots(nodes, expand_node_id):
     """Only full-workflow saves connected to this run need canvas-only Presets."""
+    pending = []
     for node in nodes.values():
         if not isinstance(node, dict) or node.get("class_type") != "SceneSaveImage":
             continue
@@ -911,9 +912,16 @@ def _needs_workflow_preset_snapshots(nodes, expand_node_id):
             continue
         if expand_node_id is None:
             return True
-        scene_info = inputs.get("scene_info")
-        if is_link(scene_info) and str(scene_info[0]) == str(expand_node_id):
+        pending.extend(_linked_nodes(node))
+    visited = set()
+    while pending:
+        node_id = str(pending.pop())
+        if node_id == str(expand_node_id):
             return True
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        pending.extend(_linked_nodes(nodes.get(node_id, {})))
     return False
 
 
@@ -1207,6 +1215,8 @@ def _scene_node_value_impl(
     if class_type == "ScenePromptRandomRoute":
         path = "/".join(part.split("@", 1)[1] for part in preset_stack)
         kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
+        if path:
+            kwargs["seed_source_id"] = f"{path}/{kwargs.get('seed_source_id') or node_id}"
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     memo[node_id] = result if class_type == "ScenePromptRandomRoute" else result[0]
     return memo[node_id]
@@ -1619,6 +1629,9 @@ def expand_preset_reference(
                 target.set_input("source_node_name", _source_node_name(node))
         if class_type in {"ScenePrompter", "SceneMatrix"}:
             target.set_input("run_handle", str(run_handle))
+        if class_type == "ScenePromptRandomRoute":
+            seed_source = _node_inputs(node).get("seed_source_id") or node_id
+            target.set_input("seed_source_id", f"{reference_source_id}/{seed_source}" if reference_source_id else str(seed_source))
         if class_type == "ScenePresetReference":
             target.set_input("run_handle", str(run_handle))
             if not run_handle:

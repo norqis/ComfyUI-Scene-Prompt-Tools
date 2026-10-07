@@ -342,7 +342,8 @@ def _validate_unit(value, depth, ancestors):
     kind = value.get("kind")
     if kind not in UNIT_KEYS:
         raise ScenePlanError("Scene Prompt schedule unit kind is invalid.")
-    _old._require_exact_keys(value, {"kind", "stats"} | UNIT_KEYS[kind], "Scene Prompt schedule unit")
+    optional = {"seed_id"} if kind == "random_choice" and "seed_id" in value else set()
+    _old._require_exact_keys(value, {"kind", "stats"} | UNIT_KEYS[kind] | optional, "Scene Prompt schedule unit")
     _validate_stats(value["stats"])
     if id(value) in ancestors:
         raise ScenePlanError("Scene Prompt schedule contains a cycle.")
@@ -359,6 +360,8 @@ def _validate_unit(value, depth, ancestors):
         data["inputs"] = [_validate_plan(plan, depth + 1, ancestors) for plan in data["inputs"]]
     elif kind == "random_choice":
         _old._require_string(data["gate_id"], "Scene Prompt Random Route ID", allow_empty=False)
+        if "seed_id" in data:
+            _old._require_string(data["seed_id"], "Scene Prompt Random Route seed ID", allow_empty=False)
         data["weights"] = validate_random_weights(data["weights"])
         if not isinstance(data["inputs"], list) or len(data["inputs"]) != 10:
             raise ScenePlanError("Scene Prompt Random Route の出力が不正です。")
@@ -440,12 +443,13 @@ def _validate_guards(guards):
         raise ScenePlanError("Scene Prompt Random Route の分岐状態が不正です。")
     result = []
     for guard in guards:
-        if not isinstance(guard, dict) or set(guard) != {"gate_id", "arm_index", "weights"}:
+        if not isinstance(guard, dict) or set(guard) - {"seed_id"} != {"gate_id", "arm_index", "weights"}:
             raise ScenePlanError("Scene Prompt Random Route の分岐状態が不正です。")
         gate_id = _old._require_string(guard["gate_id"], "Scene Prompt Random Route ID", allow_empty=False)
         arm = _old._require_int(guard["arm_index"], "Scene Prompt Random Route output", 0, 9)
         weights = validate_random_weights(guard["weights"])
-        result.append({"gate_id": gate_id, "arm_index": arm, "weights": weights})
+        seed = {"seed_id": _old._require_string(guard["seed_id"], "Scene Prompt Random Route seed ID", allow_empty=False)} if "seed_id" in guard else {}
+        result.append({"gate_id": gate_id, "arm_index": arm, "weights": weights, **seed})
     return result
 
 
@@ -789,6 +793,7 @@ def queue(values, *, order_mode="input_order", alternate_block_size=1, input_rep
         gate = stack[-1]
         if any(plan["random_guards"][:-1] != stack[:-1] or
                plan["random_guards"][-1]["gate_id"] != gate["gate_id"] or
+               plan["random_guards"][-1].get("seed_id") != gate.get("seed_id") or
                plan["random_guards"][-1]["weights"] != gate["weights"] for _, plan in guarded):
             raise ScenePlanError("Scene Prompt Random Route の分岐を交差させず、同じOutputまたはQueueへ合流してください。")
         inputs = [None] * 10
@@ -802,7 +807,8 @@ def queue(values, *, order_mode="input_order", alternate_block_size=1, input_rep
             raise ScenePlanError(f"Scene Prompt Random Route Input {gate['gate_id']} の出力{', '.join(missing)}が合流OutputまたはQueueに接続されていません。")
         empty = _plan([])
         inputs = [plan if plan is not None else empty for plan in inputs]
-        unit = _unit("random_choice", gate_id=gate["gate_id"], weights=gate["weights"], inputs=inputs, selected_arm=None)
+        unit = _unit("random_choice", gate_id=gate["gate_id"], weights=gate["weights"], inputs=inputs, selected_arm=None,
+                     **({"seed_id": gate["seed_id"]} if "seed_id" in gate else {}))
         return mark_prompt_whole(_plan([unit], boundary=True, guards=stack[:-1]))
     locked = any(plan["contains_queue_boundary"] for _, plan in slots)
     sources = [{
@@ -874,15 +880,16 @@ def matrix_product(plan, matrix_rows, configured):
     return _plan(units, boundary=source["contains_queue_boundary"], guards=source["random_guards"])
 
 
-def random_route(plan, weights, gate_id, *, preserve_join=False):
+def random_route(plan, weights, gate_id, *, preserve_join=False, seed_id=None):
     source = normalize_plan(plan)
     weights = validate_random_weights(weights)
     gate_id = _old._require_string(str(gate_id or "").strip(), "Scene Prompt Random Route ID", allow_empty=False)
+    seed = {"seed_id": _old._require_string(seed_id, "Scene Prompt Random Route seed ID", allow_empty=False)} if seed_id and seed_id != gate_id else {}
     if any(guard["gate_id"] == gate_id for guard in source["random_guards"]):
         raise ScenePlanError("Scene Prompt Random Route の分岐が閉じる前に同じノードを再利用できません。")
     outputs = []
     for arm, weight in enumerate(weights):
-        guard = {"gate_id": gate_id, "arm_index": arm, "weights": weights}
+        guard = {"gate_id": gate_id, "arm_index": arm, "weights": weights, **seed}
         outputs.append(_plan(source["units"] if weight else [], source["sources"] if weight else [], source["contains_queue_boundary"] if weight else False, [*source["random_guards"], guard]))
     if sum(bool(weight) for weight in weights) == 1 and not preserve_join:
         arm = next(index for index, weight in enumerate(weights) if weight)
@@ -947,7 +954,7 @@ def _prefix_unit_policy_uncached(unit, end, seed=0, memo=None):
     if kind == "random_choice":
         arm = unit["selected_arm"]
         if arm is None:
-            arm = _random_arm(unit["weights"], unit["gate_id"], seed)
+            arm = _random_arm(unit["weights"], unit.get("seed_id", unit["gate_id"]), seed)
         return _prefix_plan_policy(unit["inputs"][arm], end, seed, memo=memo)
     if kind == "alternate":
         lengths = [plan["stats"]["total_batches"] for plan in unit["inputs"]]
@@ -1175,7 +1182,7 @@ def _select_unit_uncached(unit, index, seed=0, memo=None):
     if kind == "random_choice":
         arm = unit["selected_arm"]
         if arm is None:
-            arm = _random_arm(unit["weights"], unit["gate_id"], seed)
+            arm = _random_arm(unit["weights"], unit.get("seed_id", unit["gate_id"]), seed)
         item = _select_plan(unit["inputs"][arm], index, seed, memo=memo)
         item["event_ref"] = (("random_choice", unit["gate_id"], arm), *item["event_ref"])
         return item
@@ -1294,11 +1301,12 @@ def _prune_unit_uncached(unit, selected_sources, visible_sources, blocked=False,
         return _unit("alternate", inputs=[_prune_plan(plan, selected_sources, visible_sources, blocked, selected_arms, memo=memo) for plan in unit["inputs"]], block_size=unit["block_size"])
     if kind == "random_choice":
         arm = selected_arms.get(unit["gate_id"]) if selected_arms else None
+        identity = {"seed_id": unit["seed_id"]} if "seed_id" in unit else {}
         if arm is None:
-            return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=[_plan([]) for _ in range(10)], selected_arm=0)
+            return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=[_plan([]) for _ in range(10)], selected_arm=0, **identity)
         inputs = [_plan([]) for _ in range(10)]
         inputs[arm] = _prune_plan(unit["inputs"][arm], selected_sources, visible_sources, blocked, selected_arms, memo=memo)
-        return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=inputs, selected_arm=arm)
+        return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=inputs, selected_arm=arm, **identity)
     if kind in {"product", "row_product"}:
         return _unit(kind,
                      left=_prune_plan(unit["left"], selected_sources, visible_sources, blocked, selected_arms, memo=memo),
