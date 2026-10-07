@@ -80,6 +80,14 @@ The new GPT-6 Astra xhigh agent (`astra_audit_round5`) completed another whole-r
 
 Focused regressions and the new native HTTP test pass. Full Python passes 723 tests (2 opt-in native classes skipped), all 25 frontend suites pass, and the complete isolated native Chromium suite passes. The same auditor approved `fae0af3` after independently re-running four frontend suites and 23 Python tests and reviewing the full/native logs. A sixth new GPT-6 Astra xhigh agent is conducting the next whole-repository audit.
 
+## Sixth independent full audit
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round6`) audited every backend/frontend module, the complete node execution paths, Presets/PNG, API/storage, callback/FIFO, GPU/LLM, downloads/import and packaging. It independently passed Python 723 tests and 25 frontend suites, and checked 878 synthetic plans / 6,507 events for statistics, latent counts, serialization and source-pruned replay position. It reproduced one further lifetime issue with two triggers: completion before the HTTP queue response reinserted a finished submission and retained its closed workflow; deleting an unstarted native queue item had no terminal event to clear browser ownership records.
+
+Root fixed this in `cea9654`. Submission registration consults the existing terminal-event map. The existing native queue-edit hook notifies only the owner client of IDs actually removed from the pending queue; it does not broadcast headless items or disturb running work. Deleting the last native item internally calls wipe, so one reentrancy flag under the native mutex keeps this a single removal notification. All terminal events share existing cleanup. Unused history polling and its timer map were removed; no cache, limit or periodic polling was added.
+
+Regression checks cover 180 normal/Scene submissions with success/error/interruption before response, before claim or after claim, individual and complete pending removal, running-item retention and cleanup of workflow references. The auditor independently repeated the original large-workflow leak probe 100 times for each of three orderings with zero retained submissions/handles. A real two-client ComfyUI WebSocket test verifies removal delivery, single notification for native last-item deletion, policy release and preservation of the running job. Full Python passes 724 tests (2 opt-in native classes skipped), all 25 frontend suites and complete isolated native Chromium pass. The same auditor approved exact HEAD `cea9654` after independently verifying the complete product diff, seven worker-hook tests, the 180-case queue suite and its original 300-run lifetime probe. A seventh new GPT-6 Astra xhigh agent is now auditing the entire repository again.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
