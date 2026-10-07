@@ -7,6 +7,15 @@ export async function verifyPublicWidgetInputs(page) {
         app.graph.clear();
         const types = Object.keys(definitions).filter(type => definitions[type].category?.startsWith('Scene/'));
         const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+        const legacyFields = {ScenePrompter:['positive_base','negative_base','filename_enabled'],
+            ScenePath:['path_mode'], ScenePrompterQueue:['order_mode','alternate_block_size','downstream_count_mode']};
+        for (const type of Object.keys(legacyFields)) add(type);
+        const legacy = app.graph.serialize();
+        for (const node of legacy.nodes) node.inputs = node.inputs.filter(input=>!legacyFields[node.type]?.includes(input.name));
+        await app.loadGraphData(legacy,true,true);
+        const legacyMissing = app.graph._nodes.flatMap(node=>(legacyFields[node.type] || [])
+            .filter(name=>!node.inputs.some(input=>input.name===name && input.widget?.name===name)).map(name=>`${node.type}.${name}`));
+        app.graph.clear();
         const fields = [], missing = [], failedLinks = [];
         for (const type of types) {
             const node = add(type);
@@ -46,9 +55,10 @@ export async function verifyPublicWidgetInputs(page) {
         await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
         const reloaded = await check();
         app.graph.clear();
-        return { types: types.length, fields: fields.length, missing, failedLinks, before, reloaded };
+        return { types: types.length, fields: fields.length, legacyMissing, missing, failedLinks, before, reloaded };
     });
     assert.deepEqual(result.missing, [], `public input sockets missing: ${JSON.stringify(result)}`);
+    assert.deepEqual(result.legacyMissing, [], `old workflows restore widget inputs: ${JSON.stringify(result)}`);
     assert.deepEqual(result.failedLinks, [], JSON.stringify(result));
     assert.deepEqual(result.before, [], JSON.stringify(result));
     assert.deepEqual(result.reloaded, [], JSON.stringify(result));
