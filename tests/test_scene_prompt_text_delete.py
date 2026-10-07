@@ -199,15 +199,15 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         prompt = {'1': {'class_type': 'ScenePromptToText', 'inputs': {'seed_base': 17}},
                   '2': {'class_type': 'Save', 'inputs': {'text': ['1', 0]}}}
         info = {'run_handle': handle, 'file_index': 4, 'seed': 999}
-        replay = self.nodes._text_replay_items(prompt, '2', info)['1']
+        replay = self.nodes._consumer_replay_items(prompt, '2', info)['1']
         self.assertEqual((replay['row_index'], replay['repeat_index'], replay['seed']), (0, 1, 17))
         prompt['1']['inputs']['seed_base'] = 0
         with self.assertRaisesRegex(ValueError, 'seed_base'):
-            self.nodes._text_replay_items(prompt, '2', info)
+            self.nodes._consumer_replay_items(prompt, '2', info)
         prompt['1']['inputs']['seed_base_literal'] = True
-        self.assertEqual(self.nodes._text_replay_items(prompt, '2', info)['1']['seed'], 0)
+        self.assertEqual(self.nodes._consumer_replay_items(prompt, '2', info)['1']['seed'], 0)
         prompt['1']['inputs']['current_index'] = 1
-        cycled = self.nodes._text_replay_items(prompt, '2', info)['1']
+        cycled = self.nodes._consumer_replay_items(prompt, '2', info)['1']
         self.assertEqual((cycled['row_index'], cycled['repeat_index'], cycled['seed']), (0, 1, 1))
 
     def test_v7_text_replay_uses_its_own_alternate_event_path(self):
@@ -230,14 +230,31 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             }},
             'save': {'class_type': 'Save', 'inputs': {'text': ['text', 0]}},
         }
-        info = self.nodes._text_replay_items(full_prompt, 'save', {'run_handle': handle})['text']
+        info = self.nodes._consumer_replay_items(full_prompt, 'save', {'run_handle': handle})['text']
         self.assertIn('_event_ref', info)
         saved_prompt = {key: copy.deepcopy(full_prompt[key]) for key in ('b', 'queue', 'text', 'save')}
         saved_prompt['queue']['inputs'].pop('scene_prompt1')
-        self.nodes._apply_text_replay_values(saved_prompt, None, {'text': info}, full_prompt)
+        self.nodes._apply_consumer_replay_values(saved_prompt, None, {'text': info}, full_prompt)
         self.assertEqual(saved_prompt['text']['inputs']['current_index'], 1)
         self.assertEqual(saved_prompt['text']['inputs']['seed_base'], 12)
         self.assertFalse(saved_prompt['text']['inputs']['seed_base_literal'])
+
+    def test_text_replay_uses_its_executed_context_without_expand_metadata(self):
+        handle = self.runs.create_run_context('default')
+        plan = self.build('{red|blue}, coat', node_id='source')
+        self.nodes.ScenePromptToText().to_text(plan, seed_base=17, run_handle=handle, unique_id='text')
+        prompt = {
+            'source': scene_prompt('{red|blue}, coat'),
+            'text': {'class_type': 'ScenePromptToText', 'inputs': {
+                'scene_prompt': ['source', 0], 'seed_base': 17, 'run_handle': handle,
+            }},
+            'save': {'class_type': 'SceneSaveImage', 'inputs': {'text': ['text', 0]}},
+        }
+        for scene_info in (None, {}, {'run_handle': 'unrelated'}):
+            with self.subTest(scene_info=scene_info):
+                replay = self.nodes._consumer_replay_items(prompt, 'save', scene_info)['text']
+                self.assertEqual(replay['source_node_ids'], ['source'])
+                self.assertEqual(replay['seed'], 17)
 
     def test_delete_choice_slots_nested_and_empty_choices(self):
         examples = {
@@ -268,6 +285,72 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             if node['type'] == 'ScenePromptToText': node['widgets_values'] = [self.nodes.TEXT_SCOPE_ALL, 2, 100, False]
             if node['type'] == 'ScenePrompterExpand': node['widgets_values'] = [2, '', 100, False, '', '最後', 'Illustrious', False, False, '停止', False]
         return workflow
+
+    def test_png_without_metadata_rebases_each_expand_and_keeps_consumed_models(self):
+        for shared_model, metadata_connected in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(shared_model=shared_model, metadata=metadata_connected):
+                handle = self.runs.create_run_context('default')
+                graph, plans = {}, {}
+                for node_id, loader, upstream in [('10', '20', None), ('11', '21', '10'),
+                                                  ('12', '22', '11' if shared_model else '10')]:
+                    links = dict(zip(('model', 'clip', 'vae'), ([loader, 0], [loader, 1], [loader, 2])))
+                    graph[loader] = {'class_type': 'CheckpointLoaderSimple', 'inputs': {'ckpt_name': f'{loader}.safetensors'}}
+                    graph[node_id] = {'class_type': 'SceneApplyModel', 'inputs': {
+                        **links, **({'scene_prompt': [upstream, 0]} if upstream else {}),
+                    }}
+                    plans[node_id] = self.nodes.SceneApplyModel().apply_model(
+                        **links, scene_prompt=plans.get(upstream), unique_id=node_id)[0]
+                for node_id, source in [('30', '12' if shared_model else '11'), ('31', '11' if shared_model else '12')]:
+                    graph[node_id] = {'class_type': 'ScenePrompterExpand', 'inputs': {
+                        'scene_prompt': [source, 0], 'seed_base': 100, 'run_handle': handle,
+                    }}
+                    self.runs.set_run_plan_reference(handle, node_id, plans[source])
+                graph['32'] = {'class_type': 'ImageWithTwoModels', 'inputs': {'model_a': ['30', 5], 'model_b': ['31', 5]}}
+                graph['33'] = {'class_type': 'SceneSaveImage', 'inputs': {'images': ['32', 0]}}
+                info = None
+                if metadata_connected:
+                    first_plan = plans['12' if shared_model else '11']
+                    item = self.plan.item_for_normalized_plan(first_plan, 0, 100)
+                    info = {'run_handle': handle, '_plan_ref': first_plan, '_event_ref': item['event_ref'],
+                            'seed': 100, 'source_node_ids': [*item['row']['source_node_ids'], '30']}
+                saved, _ = self.nodes._metadata_for_save_mode(
+                    graph, {'workflow': self.workflow(graph)}, '33', self.nodes.SAVE_METADATA_EXECUTION_PATH, info)
+                self.assertNotIn('10', saved)
+                self.assertNotIn('20', saved)
+                self.assertEqual(saved['30']['inputs']['scene_prompt'], ['12' if shared_model else '11', 0])
+                self.assertEqual(saved['31']['inputs']['scene_prompt'], ['11' if shared_model else '12', 0])
+                for node_id, loader in [('11', '21'), ('12', '22')]:
+                    self.assertEqual(saved[node_id]['inputs']['model'], [loader, 0])
+                    self.assertIn(loader, saved)
+                self.assertEqual(saved['32']['inputs'], graph['32']['inputs'])
+
+    def test_png_without_metadata_preserves_distinct_expand_indices_and_seeds(self):
+        handle = self.runs.create_run_context('default')
+        graph, branches = {}, []
+        for index, label in enumerate(('unused', 'alpha', 'beta'), start=1):
+            source, counter = str(index), str(index + 10)
+            graph[source] = scene_prompt(label)
+            graph[counter] = {'class_type': 'ScenePromptCounter', 'inputs': {'scene_prompt': [source, 0], 'count': 2}}
+            branches.append(self.nodes.ScenePromptCounter().count(self.build(label, node_id=source), 2, unique_id=counter)[0])
+        graph['20'] = {'class_type': 'ScenePrompterQueue', 'inputs': {
+            f'scene_prompt{index}': [str(index + 10), 0] for index in range(1, 4)}}
+        plan = self.nodes.ScenePromptQueue().queue(**{f'scene_prompt{index}': branch for index, branch in enumerate(branches, start=1)}, unique_id='20')[0]
+        for node_id, index, seed in [('30', 3, 100), ('31', 5, 300)]:
+            graph[node_id] = {'class_type': 'ScenePrompterExpand', 'inputs': {
+                'scene_prompt': ['20', 0], 'current_index': index, 'seed_base': seed, 'run_handle': handle,
+            }}
+            self.runs.set_run_plan_reference(handle, node_id, plan)
+        graph['32'] = {'class_type': 'ImageWithTwoTexts', 'inputs': {'positive': ['30', 0], 'negative': ['31', 0]}}
+        graph['33'] = {'class_type': 'SceneSaveImage', 'inputs': {'images': ['32', 0]}}
+        saved, extra = self.nodes._metadata_for_save_mode(
+            graph, {'workflow': self.workflow(graph)}, '33', self.nodes.SAVE_METADATA_EXECUTION_PATH)
+        self.assertNotIn('1', saved)
+        self.assertNotIn('11', saved)
+        for node_id, index, seed in [('30', 1, 102), ('31', 3, 302)]:
+            self.assertEqual((saved[node_id]['inputs']['current_index'], saved[node_id]['inputs']['seed_base']), (index, seed))
+            widgets = next(node['widgets_values'] for node in extra['workflow']['nodes'] if str(node['id']) == node_id)
+            self.assertEqual((widgets[0], widgets[2]), (index, seed))
+        self.assertEqual(saved['32']['inputs'], graph['32']['inputs'])
 
     def test_png_rebases_each_plan_independently_with_and_without_preset_expansion(self):
         for expand_index in (2, 3):

@@ -2515,45 +2515,121 @@ NODE_CLASS_MAPPINGS = {
 
     def test_http_to_text_delete_cached_plan_and_execution_png_replay(self):
         from PIL import Image
-        marker = self.base / "text-result.json"
-        graph = {
-            "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "{bald|hair}, coat", "negative_base": "{coat|bad}"}},
-            "2": {"class_type": "ScenePromptDelete", "inputs": {"scene_prompt": ["1", 0], "positive": "bald", "negative": ""}},
-            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 4}},
-            "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0], "current_index": 3, "run_id": "", "seed_base": 100, "timestamp_dir": False}},
-            "5": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["3", 0], "scope": "全てのノード", "current_index": 2, "seed_base": 100}},
-            "6": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
-            "7": {"class_type": "TestSceneTextImage", "inputs": {"image": ["6", 0], "positive": ["5", 0], "negative": ["5", 1], "log_path": str(marker)}},
-            "8": {"class_type": "SceneSaveImage", "inputs": {"images": ["7", 0], "scene_info": ["4", 2], "path": "text-runtime", "metadata_mode": "生成経路ノードのみ"}},
+        for metadata_connected in (False, True):
+            for mode in ("ワークフロー全体", "生成経路ノードのみ"):
+                with self.subTest(metadata=metadata_connected, mode=mode):
+                    case = f"cached-text-{int(metadata_connected)}-{int(mode == '生成経路ノードのみ')}"
+                    marker = self.base / f"{case}.json"
+                    graph = {
+                        "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "{bald|hair}, coat", "negative_base": "{coat|bad}"}},
+                        "2": {"class_type": "ScenePromptDelete", "inputs": {"scene_prompt": ["1", 0], "positive": "bald", "negative": ""}},
+                        "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 4}},
+                        "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0], "current_index": 3, "run_id": "", "seed_base": 100, "timestamp_dir": False}},
+                        "5": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["3", 0], "scope": "全てのノード", "current_index": 2, "seed_base": 100}},
+                        "6": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+                        "7": {"class_type": "TestSceneTextImage", "inputs": {"image": ["6", 0], "positive": ["4", 0], "negative": ["5", 1], "log_path": str(marker)}},
+                        "8": {"class_type": "SceneSaveImage", "inputs": {"images": ["7", 0], "path": case, "metadata_mode": mode}},
+                    }
+                    if metadata_connected:
+                        graph["8"]["inputs"]["scene_info"] = ["4", 2]
+                    handle, workflow = self._prepare_callback_run(graph, "4")
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        expected = [json.loads(marker.read_text(encoding="utf-8"))]
+                        cached = copy.deepcopy(graph)
+                        for node_id in ("1", "2", "3"):
+                            del cached[node_id]
+                        for node_id in ("4", "5"):
+                            cached[node_id]["inputs"].pop("scene_prompt")
+                            cached[node_id]["inputs"]["seed_base"] = 200
+                        self._queue_callback_graph(cached, handle, workflow)
+                        expected.append(json.loads(marker.read_text(encoding="utf-8")))
+                        files = sorted((self.base / "output" / case).rglob("*.png"), key=lambda path: path.stat().st_mtime_ns)
+                        self.assertEqual(len(files), 2)
+                        for index, file in enumerate(files):
+                            self.assertNotIn("bald", expected[index][0])
+                            with Image.open(file) as image:
+                                replay = json.loads(image.text["prompt"])
+                                replay_workflow = json.loads(image.text["workflow"])
+                            self.assertIn("2", replay, "cached PNG restores the Delete ancestor")
+                            self.assertEqual(replay["4"]["inputs"]["scene_prompt"], ["3", 0])
+                            self.assertEqual(replay["5"]["inputs"]["scene_prompt"], ["3", 0])
+                            self.assertEqual(replay["5"]["inputs"]["current_index"], 2)
+                            self.assertEqual(replay["5"]["inputs"]["seed_base"], 100 + 100 * index)
+                            replay["8"]["inputs"]["path"] = f"{case}-replay-{index}"
+                            replay_handle, replay_workflow = self._prepare_callback_run(replay, "4", replay_workflow)
+                            try:
+                                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected[index])
+                            finally:
+                                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
+    def test_http_to_text_only_save_and_preset_expansion_replay(self):
+        from PIL import Image
+        inner = {
+            "11": {"class_type": "ScenePresetInput", "inputs": {}},
+            "12": {"class_type": "ScenePrompter", "inputs": {
+                **_scene_prompt_inputs(), "scene_prompt": ["11", 0],
+                "positive_base": "{red|blue}, coat", "negative_base": "{bad|worse}",
+            }},
+            "13": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["12", 0], "count": 4}},
+            "14": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["13", 0]}},
         }
-        handle, workflow = self._prepare_callback_run(graph, "4")
-        try:
-            self._queue_callback_graph(graph, handle, workflow, claim_run=True)
-            cached = copy.deepcopy(graph)
-            for node_id in ("1", "2", "3"): del cached[node_id]
-            for node_id in ("4", "5"):
-                cached[node_id]["inputs"].pop("scene_prompt")
-                cached[node_id]["inputs"].update(current_index=3 if node_id == "4" else 2, seed_base=200)
-            self._queue_callback_graph(cached, handle, workflow)
-            expected = json.loads(marker.read_text(encoding="utf-8"))
-            self.assertNotIn("bald", expected[0])
-            files = list((self.base / "output" / "text-runtime").glob("*.png"))
-            self.assertEqual(len(files), 2)
-            with Image.open(max(files, key=lambda path: path.stat().st_mtime_ns)) as image:
-                replay = json.loads(image.text["prompt"])
-                replay_workflow = json.loads(image.text["workflow"])
-            self.assertIn("2", replay, "cached PNG restores the Delete ancestor")
-            self.assertEqual(replay["5"]["inputs"]["current_index"], 2)
-            self.assertEqual(replay["5"]["inputs"]["seed_base"], 200)
-            replay["8"]["inputs"]["path"] = "text-replay"
-            replay_handle, replay_workflow = self._prepare_callback_run(replay, "4", replay_workflow)
-            try:
-                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
-                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected)
-            finally:
-                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
-        finally:
-            self._request("/scene_prompt/runs/release", {"run_handle": handle})
+        self._request("/scene_presets/save", {
+            "preset_id": "text-only-save", "name": "text-only-save", "output_node_id": "14",
+            "api_graph": {"output": inner}, "workflow": _workflow_for_graph(inner),
+        })
+        for in_preset in (False, True):
+            for expand_contents in (False, True):
+                for mode in ("ワークフロー全体", "生成経路ノードのみ"):
+                    with self.subTest(preset=in_preset, expand=expand_contents, mode=mode):
+                        case = f"text-only-{int(in_preset)}-{int(expand_contents)}-{int(mode == '生成経路ノードのみ')}"
+                        marker = self.base / f"{case}.json"
+                        graph = {
+                            "0": {"class_type": "ScenePrompter", "inputs": {
+                                **_scene_prompt_inputs(), "positive_base": "{red|blue}, coat", "negative_base": "{bad|worse}",
+                            }},
+                            "1": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["0", 0], "count": 4}},
+                            "2": {"class_type": "ScenePromptToText", "inputs": {
+                                "scene_prompt": ["1", 0], "scope": "全てのノード", "current_index": 2, "seed_base": 100,
+                            }},
+                            "3": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+                            "4": {"class_type": "TestSceneTextImage", "inputs": {
+                                "image": ["3", 0], "positive": ["2", 0], "negative": ["2", 1], "log_path": str(marker),
+                            }},
+                            "5": {"class_type": "SceneSaveImage", "inputs": {
+                                "images": ["4", 0], "path": case, "metadata_mode": mode, "expand_preset_contents": expand_contents,
+                            }},
+                        }
+                        if in_preset:
+                            del graph["0"]
+                            graph["1"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "text-only-save"}}
+                        handle, workflow = self._prepare_callback_run(graph, None)
+                        try:
+                            self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                            expected = json.loads(marker.read_text(encoding="utf-8"))
+                            self.assertIn("coat", expected[0])
+                            self.assertIn(expected[1], ("bad", "worse"))
+                            files = list((self.base / "output" / case).rglob("*.png"))
+                            self.assertEqual(len(files), 1)
+                            with Image.open(files[0]) as image:
+                                replay = json.loads(image.text["prompt"])
+                                replay_workflow = json.loads(image.text["workflow"])
+                            kinds = {node["class_type"] for node in replay.values()}
+                            self.assertNotIn("ScenePrompterExpand", kinds)
+                            self.assertEqual("ScenePresetReference" in kinds, in_preset and not expand_contents)
+                            replay["5"]["inputs"]["path"] = f"{case}-replay"
+                            replay_handle, replay_workflow = self._prepare_callback_run(replay, None, replay_workflow)
+                            try:
+                                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected)
+                                self.assertEqual(len(list((self.base / "output" / f"{case}-replay").rglob("*.png"))), 1)
+                            finally:
+                                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+                        finally:
+                            self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_http_prompt_history_two_outputs_and_metadata_modes(self):
         for index, mode in enumerate(("ワークフロー全体", "生成経路ノードのみ", "プロンプトのみ"), start=1):
