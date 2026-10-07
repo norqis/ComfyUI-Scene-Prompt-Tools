@@ -78,8 +78,7 @@ SAFE_NODE_CLASSES = {
     "ScenePresetReference": None,
 }
 # ComfyUI serializes widget-input Primitive nodes as executable API nodes.  They
-# are literal value sources for safe Scene inputs. Only PrimitiveBoolean is
-# additionally allowed inside a saved Preset, for standard Switch controls.
+# are literal value sources for safe Scene inputs, including saved Presets.
 SAFE_VALUE_NODE_CLASSES = {
     "PrimitiveInt": int,
     "PrimitiveFloat": float,
@@ -87,6 +86,8 @@ SAFE_VALUE_NODE_CLASSES = {
     "PrimitiveStringMultiline": str,
     "PrimitiveBoolean": bool,
 }
+SAFE_VALUE_TYPES = {name: {int: "INT", float: "FLOAT", str: "STRING", bool: "BOOLEAN"}[kind]
+                    for name, kind in SAFE_VALUE_NODE_CLASSES.items()}
 BOUNDARY_INPUT = "ScenePresetInput"
 BOUNDARY_OUTPUT = "ScenePresetOutput"
 BOUNDARY_CLASSES = {BOUNDARY_INPUT, BOUNDARY_OUTPUT}
@@ -258,6 +259,10 @@ def _compact_preset_list_graph(api_graph, local_memo=None):
         "weights_json", "preserve_join", "llm_presets_json",
         "switch_names_json", "switch_settings_json", "switch_values", "switch",
     }
+    # Keep only control strings needed by the compact list. Prompt bodies stay
+    # in full definitions even when supplied through a String node.
+    scalar_sources = {str(value[0]) for node in nodes.values() if isinstance(node, dict)
+                      for name, value in _node_inputs(node).items() if name in scalar_inputs and is_link(value)}
     for node_id, node in nodes.items():
         if not isinstance(node, dict):
             continue
@@ -265,7 +270,8 @@ def _compact_preset_list_graph(api_graph, local_memo=None):
         for name, value in _node_inputs(node).items():
             if is_link(value):
                 inputs[name] = copy.deepcopy(value)
-            elif name in scalar_inputs or (name == "value" and node.get("class_type") == "PrimitiveBoolean"):
+            elif name in scalar_inputs or (name == "value" and node.get("class_type") in SAFE_VALUE_NODE_CLASSES
+                                           and (SAFE_VALUE_NODE_CLASSES[node["class_type"]] is not str or str(node_id) in scalar_sources)):
                 if name == "matrix_json":
                     inputs[name] = _compact_matrix_json(value)
                 elif name == "llm_presets_json":
@@ -274,7 +280,11 @@ def _compact_preset_list_graph(api_graph, local_memo=None):
                     inputs[name] = copy.deepcopy(value)
         compact_nodes[str(node_id)] = {"class_type": node.get("class_type"), "inputs": inputs}
         if node.get("class_type") == "ScenePromptLLM":
-            compact_nodes[str(node_id)]["has_llm_input"] = bool(str(_node_inputs(node).get("description") or "").strip())
+            description = _node_inputs(node).get("description")
+            if is_link(description):
+                provider = nodes.get(str(description[0]), {})
+                description = _node_inputs(provider).get("value") if description[1] == 0 and SAFE_VALUE_NODE_CLASSES.get(provider.get("class_type")) is str else None
+            compact_nodes[str(node_id)]["has_llm_input"] = isinstance(description, str) and bool(description.strip())
     return {"output": compact_nodes}
 
 
@@ -379,7 +389,7 @@ def _validate_workflow_nodes(workflow, api_nodes):
             raise ScenePresetError(f"編集用ワークフローのノードID #{normalized_id} が重複しています。")
         workflow_by_id.add(normalized_id)
         if normalized_id not in api_by_id:
-            if node_type not in SAFE_NODE_CLASSES and node_type not in BOUNDARY_CLASSES and node_type not in {"ComfySwitchNode", "PrimitiveBoolean"}:
+            if node_type not in SAFE_NODE_CLASSES and node_type not in BOUNDARY_CLASSES and node_type not in SAFE_VALUE_NODE_CLASSES and node_type != "ComfySwitchNode":
                 raise ScenePresetError(
                     f"編集用ワークフローの {node_type} #{node_id} はPreset内で使えません。"
                 )
@@ -505,7 +515,7 @@ def _validate_preset_graph(nodes):
         if not isinstance(node, dict):
             raise ScenePresetError(f"ノード #{node_id} の形式が不正です。")
         class_type = node.get("class_type")
-        if class_type not in SAFE_NODE_CLASSES and class_type not in BOUNDARY_CLASSES and class_type not in {"ComfySwitchNode", "PrimitiveBoolean"}:
+        if class_type not in SAFE_NODE_CLASSES and class_type not in BOUNDARY_CLASSES and class_type not in SAFE_VALUE_NODE_CLASSES and class_type != "ComfySwitchNode":
             raise ScenePresetError(f"{_node_label(node_id, node)} はPreset内で使えません。")
         for input_name, input_value in _node_inputs(node).items():
             if not is_link(input_value):
@@ -513,7 +523,7 @@ def _validate_preset_graph(nodes):
             source_id = str(input_value[0])
             source_type = nodes.get(source_id, {}).get("class_type")
             source_cls = ScenePresetInput if source_type == BOUNDARY_INPUT else SAFE_NODE_CLASSES.get(source_type)
-            source_types = source_cls.RETURN_TYPES if source_cls else ("BOOLEAN",) if source_type == "PrimitiveBoolean" else (SCENE_PROMPT_TYPE,)
+            source_types = source_cls.RETURN_TYPES if source_cls else (SAFE_VALUE_TYPES.get(source_type, SCENE_PROMPT_TYPE),)
             allowed_slots = range(len(source_types))
             if type(input_value[1]) is not int or input_value[1] not in allowed_slots:
                 message = "出力番号が不正です。" if nodes.get(source_id, {}).get("class_type") == "ScenePromptRandomRoute" else "出力0だけを接続してください。"
@@ -523,15 +533,15 @@ def _validate_preset_graph(nodes):
             if source_id not in nodes:
                 raise ScenePresetError(f"{_node_label(node_id, node)} の接続先 #{source_id} がありません。")
             source_kind = source_types[input_value[1]]
-            if source_kind in {"BOOLEAN", SCENE_SWITCHES_TYPE} or class_type == "ComfySwitchNode" or input_name == "enable_downstream_count" or class_type == "ScenePresetReference" and input_name == "switches":
-                target_cls = ScenePresetReference if class_type == "ScenePresetReference" else SAFE_NODE_CLASSES.get(class_type)
-                if target_cls and class_type != "SceneApplyLora":
+            if source_kind in {"INT", "FLOAT", "STRING", "BOOLEAN", SCENE_SWITCHES_TYPE} or class_type == "ComfySwitchNode" or input_name == "enable_downstream_count" or class_type == "ScenePresetReference" and input_name == "switches":
+                target_cls = ScenePresetReference if class_type == "ScenePresetReference" else ScenePresetOutput if class_type == BOUNDARY_OUTPUT else SAFE_NODE_CLASSES.get(class_type)
+                if target_cls:
                     schema = target_cls.INPUT_TYPES()
                     definition = next((fields[input_name] for fields in schema.values() if input_name in fields), (None,))
                     expected = definition[0] if isinstance(definition, tuple) else definition
                 else:
                     expected = "BOOLEAN" if class_type == "ComfySwitchNode" and input_name == "switch" else SCENE_PROMPT_TYPE
-                if source_kind != expected:
+                if source_kind != expected and not (source_kind == "STRING" and isinstance(expected, (list, tuple))):
                     raise ScenePresetError(f"{_node_label(node_id, node)} の {input_name} の接続型が不正です。")
 
     ancestors = set()
@@ -599,10 +609,10 @@ def _validate_literal_input(node_id, node, input_name, value, definition):
 def _validate_preset_input_values(nodes):
     for node_id, node in nodes.items():
         class_type = node.get("class_type") if isinstance(node, dict) else None
-        if class_type in {BOUNDARY_INPUT, "ComfySwitchNode", "PrimitiveBoolean"}:
+        if class_type in {BOUNDARY_INPUT, "ComfySwitchNode"} or class_type in SAFE_VALUE_NODE_CLASSES:
             definitions = ({"switch_names_json": ("STRING",), "switch_values": (SCENE_SWITCHES_TYPE,)} if class_type == BOUNDARY_INPUT
                            else {"switch": ("BOOLEAN",), "on_true": (SCENE_PROMPT_TYPE,), "on_false": (SCENE_PROMPT_TYPE,)} if class_type == "ComfySwitchNode"
-                           else {"value": ("BOOLEAN",)})
+                           else {"value": (SAFE_VALUE_TYPES[class_type],)})
         else:
             definitions = None
         cls = (
@@ -624,6 +634,8 @@ def _validate_preset_input_values(nodes):
                     node_id,
                 )
             if is_link(value):
+                if class_type in SAFE_VALUE_NODE_CLASSES:
+                    raise ScenePresetResolutionError(f"{_node_label(node_id, node)} の value は直接入力してください。", node_id)
                 continue
             _validate_literal_input(node_id, node, input_name, value, definitions[input_name])
             try:

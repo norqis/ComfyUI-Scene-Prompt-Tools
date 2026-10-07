@@ -988,6 +988,7 @@ async function testPresetErrorsRetainCapturedNodeOwners() {
             refreshSceneBatchRunNode() {}, sceneBatchRunStatus: () => "active", releaseCancelledSceneBatchRun() {},
             prepareSceneRunContext: () => request.promise,
             findWidget: (node, name) => node.widgets.find(widget => widget.name === name),
+            sceneLLMValue: (node, name) => node.widgets.find(widget => widget.name === name)?.value ?? "",
             syncAllScenePromptNames() {}, commitActiveMatrixLineDraft() {}, applySceneSourceNodeNames() {},
             api: { fetchApi: () => request.promise }, readApiJson: async response => response.payload,
             showSceneBatchError() {},

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
-import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity, hasLLMTargets, compactCandidates, requestJSON } from "../web/scene_prompt_llm.js";
+import { collectLLMTargets, createLLMController, insertLoras, applyCandidate, identity, hasLLMTargets, compactCandidates, requestJSON, captureTarget, value } from "../web/scene_prompt_llm.js";
 import { createPresetOperation, preparePresetReference, hydratePresetReference, collectPresetLLMTargets, presetReferenceHasLLM } from "../web/scene_llm_presets.js";
 import { createGPUController } from "../web/scene_prompt_gpu.js";
 
@@ -23,6 +23,30 @@ function fixture() {
 }
 const field = (node, name) => node.widgets.find((widget) => widget.name === name);
 const candidate = (id) => ({ model_id: id, version_id: id + 10, file_id: id + 20, lora_name: `llm/${id}.safetensors`, triggers: [`trigger${id}`] });
+{
+    const { graph, node } = fixture();
+    const input = node("PrimitiveStringMultiline"), llm = node("ScenePromptLLM", "stale fallback");
+    input.widgets = [{ name: "value", value: "" }];
+    input.outputs[0].type = "STRING";
+    llm.inputs.push({ name: "description", type: "STRING" }); input.connect(0, llm, 1);
+    assert.equal(hasLLMTargets(graph, llm), false, "empty linked description overrides stale widget text");
+    field(input, "value").value = "linked scene";
+    assert.equal(hasLLMTargets(graph, llm), true);
+    assert.equal(value(llm, "description"), "linked scene");
+    assert.equal(collectLLMTargets(graph, llm).length, 1);
+    const current = captureTarget({ node: llm, graph, ownerGraph: graph }, () => graph);
+    assert.equal(current(), true);
+    field(input, "value").value = "changed while generating";
+    assert.equal(current(), false, "provider edits invalidate in-flight LLM output");
+    let request;
+    const controller = createLLMController({ app: { graph }, api: { async fetchApi(_path, options) {
+        request = JSON.parse(options.body);
+        return reply({positive:"generated linked scene", negative:"", lora_queries:[], template_version:"scene-llm-v1"});
+    } } });
+    await controller.generate(llm, true);
+    assert.equal(request.description, "changed while generating", "LLM receives the connected input");
+    assert.equal(field(llm, "positive").value, "generated linked scene");
+}
 {
     const { graph, node, create } = fixture();
     const a = node("ScenePromptLLM", "A"), b = node("ScenePromptLLM", "B"), output = node("ScenePromptRandomRouteOutput"), expand = node("ScenePrompterExpand");

@@ -151,6 +151,8 @@ Within a branch, Prompt, Path, Delete, Reverse, Apply Model/LoRA, and Callback p
 
 **Scene Prompt Queue** accepts up to ten connected Scene plans. **並び順** selects **入力順** (finish each input in socket order) or **交互** (take turns between inputs). **1行の回数** repeats each generated row before moving on. For example, two single-row inputs A and B with a value of 2 produce `A,A,B,B`. With multiple rows per input, **交互** moves to the next input after the repeated row. The default value of 1 preserves the order and count behavior of older workflows. The former per-input repeat setting is no longer used.
 
+Visible Scene node settings accept standard ComfyUI widget inputs, including Queue repetitions from an Integer node. Connected values are preserved on workflow reload and inside saved Presets; changing a count source updates Expand's displayed total. Presets support standard literal Integer, Float, String and Boolean providers. Linked LLM descriptions and Preset Output IDs/names also use their connected values.
+
 **後続Count** applies to the whole configurable Queue: **乗算** (the default) lets a later Scene Prompt Count multiply its output; **固定** keeps that Queue's batches at their specified counts. Count 0 still cancels these Queue batches unless a preceding Count has protected their path with the option below. A Count placed *before* Queue has already changed its incoming plan and is unaffected by this setting.
 
 Scene Prompt Count has **後続Countを有効化**, enabled by default. Turn it off to apply this Count and then ignore subsequent Counts on that path, including Count 0. Count 10 with this option off followed by Count 10 stays at 10 batches; leaving it on produces 100. Existing workflows and Presets without the option keep it enabled.
@@ -187,7 +189,7 @@ In a regular workflow, add **Scene Preset Reference**, choose the saved Preset, 
 
 Use ComfyUI's standard **If/Else Switch** (Japanese **スイッチ**, marked BETA) to choose a Scene path. Connect the path with the optional Prompt, Matrix or LoRA to **on_true**, and its original upstream Scene to **on_false** to bypass that addition when false. Both sides should supply a Scene plan. Expand's plan, counts and connected-resource information follow the selected Scene side.
 
-**Scene Preset Input** provides ten Boolean outputs and one **スイッチ一式** output in addition to its existing `scene_prompt`. Open **スイッチ名設定** to name each switch. Names appear on its output sockets and in Reference settings; changing a name does not change the connection or its number. The ten output positions remain fixed.
+**Scene Preset Input** provides ten Boolean outputs and one **スイッチ一式** output in addition to its existing `scene_prompt`. The bundle appears above Switch 1. Open **スイッチ名設定** to name each switch. Names appear on its output sockets and in Reference settings; changing a name does not change the connection or its number. Saved output slot numbers remain unchanged.
 
 On **Scene Preset Reference**, open **スイッチ設定** above **Preset編集**. Each destination switch can be ON, OFF, or use any incoming switch 1–10. For example, destination 3 can use incoming 1, and several destinations can use that same incoming value. Destination labels come from the selected Preset; incoming labels describe the connected source. A missing incoming bundle supplies OFF values. New or legacy settings forward matching incoming numbers until changed.
 

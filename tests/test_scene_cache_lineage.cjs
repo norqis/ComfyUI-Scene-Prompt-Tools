@@ -90,6 +90,36 @@ const set = (node, name, value) => { ctx.findWidget(node, name).value = value; }
 const key = node => ctx.scenePromptSourceCacheKey(node);
 const snapshot = node => JSON.parse(JSON.stringify(ctx.scenePromptStats(node)));
 
+// Converted Queue repetition inputs participate in both planning and cache identity.
+{
+    const queueGraph = graph();
+    const a = add(queueGraph, "ScenePrompter"), b = add(queueGraph, "ScenePrompter");
+    const q = add(queueGraph, "ScenePrompterQueue", { order_mode: "alternate", alternate_block_size: 7, downstream_count_mode: "multiply" });
+    const count = add(queueGraph, "ScenePromptCounter", { count: 3, enable_downstream_count: false });
+    const later = add(queueGraph, "ScenePromptCounter", { count: 10 });
+    const integer = add(queueGraph, "PrimitiveInt", { value: 3 });
+    connect(a, q, "scene_prompt1"); connect(b, q, "scene_prompt2");
+    connect(integer, q, "alternate_block_size", "INT"); connect(q, count, "scene_prompt"); connect(count, later, "scene_prompt");
+    assert.equal(snapshot(later).total, 18, "Queue uses the connected repetition value, not its literal widget");
+    const firstKey = key(later);
+    set(integer, "value", 2);
+    assert.notEqual(key(later), firstKey, "upstream integer edits invalidate the cached plan");
+    assert.equal(snapshot(later).total, 12);
+    set(integer, "value", 0);
+    assert.match(snapshot(later).error, /Queue|回数/u, "zero cannot silently become one");
+    set(integer, "value", 3);
+    assert.equal(snapshot(later).total, 18, "valid input recovers from the invalid value");
+    const mode = add(queueGraph, "PrimitiveString", { value: "fixed" });
+    connect(mode, q, "downstream_count_mode", "STRING");
+    assert.equal(snapshot(later).total, 6, "fixed Queue ignores downstream Counts");
+    set(mode, "value", "multiply");
+    assert.equal(snapshot(later).total, 18, "linked mode changes invalidate the preview");
+    integer.type = "UnknownIntProvider";
+    assert.match(snapshot(later).error, /Queue|確定/u, "unknown providers never use stale literal values");
+    q.inputs.find(input => input.name === "alternate_block_size").link = null;
+    assert.equal(snapshot(later).total, 42, "disconnect restores the saved literal value");
+}
+
 // Exercise the real preview path, including optional Scene input seed semantics.
 {
     const stubPreview = ctx.scenePromptPreviewEntries;

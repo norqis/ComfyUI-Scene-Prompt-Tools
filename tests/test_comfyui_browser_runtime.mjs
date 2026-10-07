@@ -345,6 +345,10 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    await (await import('./scene_public_widget_inputs.mjs')).verifyPublicWidgetInputs(page);
+    nativeRunChecks = true;
+    try { await (await import('./scene_public_widget_inputs.mjs')).verifyLinkedInputSemantics(page); }
+    finally { nativeRunChecks = false; }
     const removedInitialization = await page.evaluate(async () => {
         const graph = window.app.graph, removed = [];
         graph.clear();

@@ -1,7 +1,11 @@
 // Explicit, sequential prompt generation. Importing this module never makes requests.
+import { sceneLiveSwitchValue } from "./scene_prompt_switches.js";
 export const LLM_TYPE = "ScenePromptLLM";
 export const widget = (node, name) => node?.widgets?.find((entry) => entry.name === name);
-export const value = (node, name) => widget(node, name)?.value ?? "";
+export const value = (node, name) => {
+    const linked = sceneLiveSwitchValue(node, name, "string");
+    return linked === undefined ? widget(node, name)?.value ?? "" : linked ?? "";
+};
 export const className = (node) => node?.comfyClass || node?.type || node?.class_type;
 export function readState(node) {
     try { return JSON.parse(String(value(node, "generation_state_json") || "{}")); }

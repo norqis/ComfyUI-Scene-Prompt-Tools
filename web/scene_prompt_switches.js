@@ -74,10 +74,12 @@ export function sceneLiveSwitchValue(node, inputName, kind) {
         return null;
     }
     const supported = kind === "boolean" ? ["PrimitiveBoolean", "PrimitiveNode"]
-        : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"];
+        : kind === "string" ? ["PrimitiveString", "PrimitiveStringMultiline", "PrimitiveNode"]
+            : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"];
     if (slot !== 0 || !supported.includes(type) || (source.inputs || []).some((entry) => entry.name === "value" && entry.link != null)) return null;
     const value = field(source, "value");
     if (kind === "boolean") return typeof value === "boolean" ? value : null;
+    if (kind === "string") return typeof value === "string" ? value : null;
     return kind === "number" && typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
@@ -111,7 +113,8 @@ export function createScenePresetSwitchContext(nodes, incoming) {
             if (kind === "bundle" && slot === 11) result = bound;
             else if (kind === "boolean" && slot >= 1 && slot <= switchCount) result = bound[slot - 1];
         } else if (slot === 0 && (kind === "boolean" ? ["PrimitiveBoolean", "PrimitiveNode"]
-            : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"]).includes(node?.class_type)) {
+            : kind === "string" ? ["PrimitiveString", "PrimitiveStringMultiline", "PrimitiveNode"]
+                : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"]).includes(node?.class_type)) {
             result = node.inputs?.value;
         }
         visiting.delete(key);
@@ -121,7 +124,7 @@ export function createScenePresetSwitchContext(nodes, incoming) {
     }
     function scalar(node, name, kind, fallback) {
         const result = value(node.inputs?.[name] ?? fallback, kind);
-        if (kind === "boolean" ? typeof result !== "boolean" : typeof result !== "number" || !Number.isFinite(result))
+        if (kind === "number" ? typeof result !== "number" || !Number.isFinite(result) : typeof result !== kind)
             throw new Error(`接続された${name}の値を確定できません。`);
         return result;
     }

@@ -831,6 +831,7 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
     node.graph = context.app.graph;
     vm.createContext(context);
     vm.runInContext(functionSource("commitActiveMatrixLineDraft"), context);
+    context.sceneLLMValue = (await import("../web/scene_prompt_llm.js")).value;
     vm.runInContext(functionSource("saveScenePreset"), context);
     await context.saveScenePreset(node);
     assert.deepEqual(captureOrder, ["commit", "graphToPrompt"]);
@@ -895,6 +896,7 @@ async function testPresetSaveMarksOnlyTheReferenceReturnedByTheServer() {
     node.graph = context.app.graph;
     vm.createContext(context);
     vm.runInContext(functionSource("markScenePresetReferenceErrors"), context);
+    context.sceneLLMValue = (await import("../web/scene_prompt_llm.js")).value;
     vm.runInContext(functionSource("saveScenePreset"), context);
 
     await context.saveScenePreset(node);
@@ -1041,6 +1043,7 @@ async function testPopupRequestsUseOneIntentAcrossNodes() {
 
 function testLLMSettingsAlwaysLeadWithoutChangingStoredWidgets() {
     const context = vm.createContext({ String,
+        sceneLLMValue: (node, name) => node.widgets.find(widget => widget.name === name)?.value ?? "",
         injectStyle() {}, installSceneConnectionWatcher() {}, hideWidget(widget) { widget.hidden = true; }, showWidget() {},
         findWidget: (node, name) => node.widgets.find(widget => widget.name === name),
         findSceneWidget: (node, role) => node.widgets.find(widget => widget.sceneRole === role),
