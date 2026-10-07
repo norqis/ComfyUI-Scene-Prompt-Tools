@@ -456,6 +456,49 @@ class PresetMetadataTests(unittest.TestCase):
         _prompt, expanded, _aliases = self.metadata_module.expand_preset_references(prompt, workflow, {"pass": passthrough})
         self.assertIn([4, 4, 0, 3, after_slot, "SCENE_PROMPT"], expanded["links"])
 
+    def test_starting_reference_keeps_seed_and_physical_paths_when_expanded(self):
+        passthrough = preset("pass", {
+            "10": {"class_type": "ScenePresetInput", "inputs": {}},
+            "12": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["10", 0]}},
+        }, [workflow_node("10", "ScenePresetInput", [0, 0]),
+            workflow_node("12", "ScenePresetOutput", [120, 0], ("scene_prompt",))])
+        passthrough["workflow"]["links"] = [[1, 10, 0, 12, 0, "SCENE_PROMPT"]]
+        required = simple_preset("required")
+        required["api_graph"]["output"]["11"] = {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["10", 0]}}
+        required["workflow"]["nodes"][1]["type"] = "ScenePromptReverse"
+        nested = copy.deepcopy(required)
+        nested["metadata"]["preset_id"] = "nested"
+        nested["api_graph"]["output"]["11"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "pass", "scene_prompt": ["10", 0]}}
+        nested["workflow"]["nodes"][1].update(type="ScenePresetReference", widgets_values=["pass"])
+        for source in (passthrough, required, nested, bypassed_preset("bypass", "all")):
+            preset_id = source["metadata"]["preset_id"]
+            snapshots = {"pass": passthrough, preset_id: source}
+            for workflow_only in (False, True):
+                with self.subTest(preset=preset_id, workflow_only=workflow_only):
+                    prompt = {"2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": preset_id}},
+                        "3": {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["2", 0]}}}
+                    workflow = outer_workflow(prompt)
+                    workflow["nodes"][0]["widgets_values"] = [preset_id]
+                    workflow["links"] = [[1, 2, 0, 3, 0, "SCENE_PROMPT"]]
+                    replay, expanded, _ = self.metadata_module.expand_preset_references(
+                        {} if workflow_only else prompt, workflow, snapshots, workflow_only)
+                    nodes = {str(node["id"]): node for node in expanded["nodes"]}
+                    self.assertFalse(any(node["type"] in {"ScenePresetReference", "ScenePresetOutput"} for node in nodes.values()))
+                    seeds = [node_id for node_id, node in nodes.items() if node["type"] == "ScenePresetInput"]
+                    self.assertEqual(len(seeds), 1)
+                    edges = {str(link[3]): str(link[1]) for link in expanded["links"]}
+                    current, visited = "3", set()
+                    while current != seeds[0]:
+                        self.assertNotIn(current, visited)
+                        visited.add(current)
+                        self.assertIn(current, edges, "the required downstream Scene input must stay connected to the seed")
+                        current = edges[current]
+                    bypasses = [node for node in nodes.values() if node.get("mode") == 4]
+                    self.assertEqual(len(bypasses), 2 if preset_id == "bypass" else 0)
+                    if not workflow_only:
+                        result = self.presets._scene_node_value(replay, "3", {}, set())
+                        self.assertEqual(result["stats"]["total_batches"], 1)
+
     def test_full_expansion_preserves_unrelated_workflow_branch_byte_for_byte(self):
         self.put_snapshots({"one": simple_preset("one")})
         prompt = {
@@ -592,7 +635,7 @@ class PresetMetadataTests(unittest.TestCase):
         )
         types = {node["type"] for node in saved_extra["workflow"]["nodes"]}
         self.assertNotIn("ScenePresetReference", types)
-        self.assertNotIn("ScenePresetInput", types)
+        self.assertEqual(sum(node["type"] == "ScenePresetInput" for node in saved_extra["workflow"]["nodes"]), 1)
         self.assertNotIn("ScenePresetOutput", types)
         self.assertIn("ScenePrompter", types)
 

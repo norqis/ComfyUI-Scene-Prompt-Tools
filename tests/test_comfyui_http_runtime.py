@@ -2605,7 +2605,7 @@ NODE_CLASS_MAPPINGS = {
         reloaded_workflow = json.loads(metadata["workflow"])
         self.assertNotIn("ScenePresetReference", {node["class_type"] for node in reloaded_prompt.values()})
         self.assertNotIn("ScenePresetReference", {node["type"] for node in reloaded_workflow["nodes"]})
-        self.assertNotIn("ScenePresetInput", {node["type"] for node in reloaded_workflow["nodes"]})
+        self.assertIn("ScenePresetInput", {node["type"] for node in reloaded_workflow["nodes"]})
         self.assertNotIn("ScenePresetOutput", {node["type"] for node in reloaded_workflow["nodes"]})
 
         self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
@@ -2627,6 +2627,56 @@ NODE_CLASS_MAPPINGS = {
         replay = self._wait_for_prompt(replay_queued["prompt_id"])
         self.assertEqual(set(replay["outputs"]).intersection({"6", "7"}), {"6", "7"})
         self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})["released"])
+
+    def test_starting_passthrough_and_required_preset_save_and_png_replay(self):
+        from PIL import Image
+        for kind in ("pass", "required", "bypass"):
+            preset_id = f"seed-{kind}"
+            preset_nodes = {
+                "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                "2": {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["1", 0]}},
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"preset_id": preset_id, "preset_name": preset_id, "scene_prompt": ["2", 0]}},
+            }
+            preset_workflow = _workflow_for_graph(preset_nodes)
+            if kind != "required":
+                preset_nodes.pop("2")
+                preset_nodes["3"]["inputs"]["scene_prompt"] = ["1", 0]
+                if kind == "pass":
+                    preset_workflow = _workflow_for_graph(preset_nodes)
+                else:
+                    next(node for node in preset_workflow["nodes"] if node["id"] == 2)["mode"] = 4
+            self._request("/scene_presets/save", {"preset_id": preset_id, "name": preset_id, "output_node_id": "3",
+                "api_graph": {"output": preset_nodes}, "workflow": preset_workflow})
+            for mode in ("ワークフロー全体", "生成経路ノードのみ"):
+                with self.subTest(kind=kind, mode=mode):
+                    path = f"seed-preset-{kind}-{mode}"
+                    graph = _save_graph(mode, path, expand_presets=True)
+                    graph["1"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": preset_id}}
+                    graph["2"] = {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["1", 0]}}
+                    handle, workflow = self._prepare_callback_run(graph, "4")
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        files = list((self.base / "output" / path).glob("*.png"))
+                        self.assertEqual(len(files), 2)
+                        with Image.open(files[0]) as image:
+                            replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                        self.assertIn("ScenePresetInput", {node["class_type"] for node in replay.values()})
+                        self.assertNotIn("ScenePresetReference", {node["class_type"] for node in replay.values()})
+                        if kind == "bypass":
+                            bypass = next(node for node in replay_workflow["nodes"] if node.get("mode") == 4)
+                            self.assertTrue(any(link[3] == bypass["id"] for link in replay_workflow["links"]))
+                            self.assertTrue(any(link[1] == bypass["id"] for link in replay_workflow["links"]))
+                        for node in replay.values():
+                            if node["class_type"] == "SceneSaveImage":
+                                node["inputs"]["path"] = path + "-replay"
+                        replay_handle, replay_workflow = self._prepare_callback_run(replay, "4", replay_workflow)
+                        try:
+                            self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                            self.assertEqual(len(list((self.base / "output" / (path + "-replay")).glob("*.png"))), 2)
+                        finally:
+                            self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_preset_http_lifecycle_and_save_failure_recovery(self):
         preset_graph = {

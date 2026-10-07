@@ -348,4 +348,43 @@ for (const outcome of ["success", "partial-error", "stale", "stale-begin", "retr
     assert.doesNotMatch(JSON.stringify(graph._nodes.map(({ widgets, properties }) => ({ widgets, properties }))), /session-\d|session_id/,
         "private sessions never enter node state");
 }
-console.log("LLM controller traversal, insertion, reuse and GPU operation ownership tests passed.");
+for (const explicit of [false, true]) {
+    const { graph, node, create } = fixture();
+    const first = node("ScenePromptLLM", "first"), second = node("ScenePromptLLM", "second"), expand = node("ScenePrompterExpand");
+    first.connect(0, second, 0); second.connect(0, expand, 0);
+    let release = true, held = false, dropEnd = true, preparations = 0;
+    const calls = [], errors = [], cleanupErrors = [];
+    const app = { graph, extensionManager: { setting: { get: () => release } } };
+    const api = { clientId: "cleanup-client", async fetchApi(path, options) {
+        const body = JSON.parse(options.body || "{}"); calls.push(path);
+        if (path.endsWith("/begin")) { held = true; return reply({ session_id: "held-session" }); }
+        if (path.endsWith("/end")) {
+            if (dropEnd) { dropEnd = false; throw new Error("lost end request"); }
+            held = false; return reply({ ended: true });
+        }
+        assert(path.endsWith("/generate"));
+        assert(!held || body.session_id === "held-session", "sessionless inference must not enter a held exclusive gate");
+        return reply({ positive: body.description, negative: "", lora_queries: [], template_version: "scene-llm-v1" });
+    } };
+    const resources = createGPUController({ app, api, onCleanupError: (error) => cleanupErrors.push(error) });
+    const begin = resources.beginLLM;
+    resources.beginLLM = (...args) => { preparations++; return begin(...args); };
+    const controller = createLLMController({ app, api, resources, createNode: create, onError: (error) => errors.push(error) });
+    await controller.generate(expand);
+    assert.equal(cleanupErrors.length, 1);
+    assert(held);
+    release = false;
+    const before = calls.length;
+    await controller.generate(expand);
+    assert.equal(calls.length, before, "fully reusable targets still require no resource or inference requests");
+    field(first, "description").value = "changed first";
+    field(second, "description").value = "changed second";
+    await controller.generate(explicit ? first : expand, explicit);
+    assert.equal(preparations, 2, "prepare resources once per operation with actual pending inference, also when OFF");
+    assert.deepEqual(calls.slice(before), ["/scene_prompt/llm/end", ...Array(explicit ? 1 : 2).fill("/scene_prompt/llm/generate")]);
+    assert.equal(errors.length, 0);
+    assert.equal(held, false);
+    assert.equal(field(first, "positive").value, "changed first");
+    assert.equal(field(second, "positive").value, explicit ? "second" : "changed second");
+}
+console.log("LLM controller traversal, insertion, reuse, OFF cleanup recovery and GPU operation ownership tests passed.");
