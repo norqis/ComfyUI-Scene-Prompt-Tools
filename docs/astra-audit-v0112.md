@@ -266,6 +266,8 @@ The new auditor independently compared 585 public-operation schedule composition
 
 The auditor approved root's minimal design after checking the cache's sole writer and normalization contract. `matrixLinesForNode` now copies only the four mutable array fields, including each nested display-label group. Immutable strings and other scalar values are reused. Disabled filtering and row-ID deduplication are unchanged. No extra cache, cap or validation is introduced. The expanded existing regression first failed on the old implementation's two redundant reparses; it now requires zero reparses, identical normalized fields and weighted selection JSON, and independent ownership of every mutable array and nested group. Full frontend/native-browser validation and exact-HEAD remediation review precede a new whole audit.
 
+The auditor's isolated native browser measured actual `matrix_connected_list.draw` width-change rebuilds for 100 enabled rows with 100 weighted selections each (1,668,792 bytes). Across 30 rebuilds, the old code averaged 10.757 ms and parsed selection JSON 3,000 times; the reviewed copy averaged 0.553 ms with zero parses. Unchanged warm draws remained about 0.033 ms for both. Both native pages had zero errors, and the temporary CPU server/browser were cleaned up. This round therefore found a substantiated large-Matrix responsiveness issue and does not satisfy the fresh-zero release gate.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
