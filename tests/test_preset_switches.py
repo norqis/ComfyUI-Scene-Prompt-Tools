@@ -114,6 +114,21 @@ class PresetSwitchTests(unittest.TestCase):
         with self.assertRaises(self.module.ScenePresetError):
             self.module._validate_preset_runtime(nodes)
 
+    def test_selected_switch_literals_preserve_values_and_missing_branch_errors(self):
+        for selected in (True, False):
+            branch, other = ("on_true", "on_false") if selected else ("on_false", "on_true")
+            for literal in ("tag", "", 0, False):
+                with self.subTest(selected=selected, literal=literal):
+                    nodes = {"1": node("ComfySwitchNode", switch=selected,
+                                       **{branch: literal, other: ["2", 0]}),
+                             "2": node("UnknownModelProvider")}
+                    result = self.module._scene_node_value(nodes, "1", {}, set())
+                    self.assertEqual(result, literal)
+                    self.assertIs(type(result), type(literal))
+            del nodes["1"]["inputs"][branch]
+            with self.assertRaisesRegex(self.module.ScenePresetError, f"{branch} が未接続"):
+                self.module._scene_node_value(nodes, "1", {}, set())
+
     def test_bundle_only_three_levels_and_siblings_do_not_implicitly_inherit(self):
         child = self.preset("child", switched_nodes())
         middle_nodes = {"1": node("ScenePresetInput"), "2": node("ScenePresetReference", preset_id="child", switches=["1", 11]),

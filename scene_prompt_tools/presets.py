@@ -1153,10 +1153,10 @@ def _scene_node_value_impl(
         return result
     if class_type == "ComfySwitchNode":
         branch = selected_switch_input(nodes, node, _switch_bindings(input_values))
-        raw = _node_inputs(node).get(branch)
-        if not is_link(raw):
+        inputs = _node_inputs(node)
+        if branch not in inputs:
             raise ScenePresetError(f"Switch の {branch} が未接続です。")
-        memo[node_id] = value(raw)
+        memo[node_id] = value(inputs[branch])
         return memo[node_id]
     if class_type == "ScenePresetReference":
         preset_id = _clean_preset_id(_node_inputs(node).get("preset_id"))

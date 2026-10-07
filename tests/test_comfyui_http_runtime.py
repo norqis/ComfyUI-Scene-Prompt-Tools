@@ -1460,6 +1460,30 @@ NODE_CLASS_MAPPINGS = {
                     finally:
                         self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
 
+    def test_literal_switch_scene_input_preparation_matches_native_execution(self):
+        for selected, on_true, on_false in ((True, "TRUE_TAG", "FALSE_TAG"),
+                                            (False, "TRUE_TAG", "FALSE_TAG"),
+                                            (True, "", "UNUSED"), (False, "UNUSED", "")):
+            with self.subTest(selected=selected, on_true=on_true, on_false=on_false):
+                graph = {
+                    "1": {"class_type": "ScenePrompter", "inputs": {
+                        **_scene_prompt_inputs(), "positive_base": ["2", 0]}},
+                    "2": {"class_type": "ComfySwitchNode", "inputs": {
+                        "switch": selected, "on_true": on_true, "on_false": on_false}},
+                    "3": {"class_type": "ScenePrompterExpand", "inputs": {
+                        "scene_prompt": ["1", 0], "seed_base": 123, "current_index": 0, "run_id": "", "timestamp_dir": False}},
+                    "4": {"class_type": "PreviewAny", "inputs": {"source": ["3", 0]}},
+                }
+                expected = [on_true if selected else on_false]
+                ordinary = self._queue_and_wait(graph)
+                self.assertEqual(ordinary["outputs"]["4"]["text"], expected)
+                handle, workflow = self._prepare_callback_run(graph, "3")
+                try:
+                    prepared = self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                    self.assertEqual(prepared["outputs"]["4"]["text"], expected)
+                finally:
+                    self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
     def test_generic_switch_selected_png_skips_inactive_text_and_replays(self):
         import itertools
         from PIL import Image

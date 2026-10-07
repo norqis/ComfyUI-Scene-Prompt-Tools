@@ -278,6 +278,14 @@ Only those three user commits now use the existing `withSceneUserChange` checkpo
 
 Independent whole-audit probes passed 1,992 materialized-reference cases / 31,752 event and replay projections. An eight-trillion-event selection/store-lifetime probe took 0.0052 seconds with a 29,385-byte traced peak; the released plan was collected. The auditor completed all 20 Python modules, eight frontend modules, importer, packaging and CI, and independently passed Python 755, frontend 25 suites and the full native browser on the pre-fix audit head. Final fixed-head native validation and remediation review precede a new whole audit.
 
+The twenty-third auditor approved exact HEAD `d2213da91a6e4c67fe391b1b9ed59da42b9e3a5f`. The complete native browser and all required CI checks passed. The history module runs after the existing local metadata fixture has been established, avoiding interference with earlier metadata assertions. A new twenty-fourth GPT-6 Astra xhigh auditor then began another whole-repository audit.
+
+## Twenty-fourth independent full audit
+
+The new auditor found a mismatch between native execution and continuous preparation. A standard Switch selecting literal text for a Scene Prompt scalar input executed successfully, while preparation rejected the same selected value as an unconnected input. Root independently reproduced both Boolean selections in an isolated native CPU server.
+
+The safe evaluator now checks whether the selected input is present, then uses its existing literal/link value resolver. It does not execute arbitrary providers or introduce a second evaluator. The regression initially failed all eight combinations of Boolean selection and text, empty text, zero or false values. All cases now preserve value and type, leave the unselected provider unevaluated, and retain the missing-input error. Four native text/empty-text cases now produce identical output with and without continuous-run preparation; the existing full/selected PNG Switch replay regression also passes. Complete current-head validation and same-auditor review are required before another fresh whole audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
