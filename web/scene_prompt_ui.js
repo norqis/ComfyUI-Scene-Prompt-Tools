@@ -7322,7 +7322,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
     const memo = new Map();
     const visiting = new Set();
     const switches = createScenePresetSwitchContext(nodes, switchValues);
-    let hasCountHold = false;
+    let requiresSchedule = false;
     const statsForNode = (nodeId, outputSlot = 0) => {
         const key = `${nodeId}:${outputSlot}`;
         if (memo.has(key)) {
@@ -7358,10 +7358,12 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             } else if (node.class_type === "ScenePromptReverse") {
                 result = source("scene_prompt") || emptyScenePromptStats();
             } else if (node.class_type === "ScenePromptCounter") {
-                if (!switches.scalar(node, "enable_downstream_count", "boolean", true)) hasCountHold = true;
+                if (!switches.scalar(node, "enable_downstream_count", "boolean", true)) requiresSchedule = true;
                 const base = source("scene_prompt") || sceneStatsSeed();
                 const count = clampSceneCount(switches.scalar(node, "count", "number", 1), 1);
                 result = sceneStatsCount(base, count);
+            } else if (node.class_type === "ScenePromptRandomRoute") {
+                requiresSchedule = true;
             } else if (node.class_type === "ScenePrompterMerge") {
                 const first = source("scene_prompt1") || sceneStatsSeed();
                 const second = source("scene_prompt2") || sceneStatsSeed();
@@ -7386,14 +7388,14 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
                 result = source("scene_prompt") || sceneStatsSeed();
             }
         } catch (error) { result = { ...emptyScenePromptStats(), error: error.message }; }
-        if (result.hasCountHold) hasCountHold = true;
+        if (result.hasCountHold) requiresSchedule = true;
         result = sceneStatsResult(result);
         visiting.delete(key);
         memo.set(key, result);
         return result;
     };
     const result = statsForNode(outputSource, Number(apiInput(outputEntry[1], "scene_prompt")[1]) || 0);
-    if (!hasCountHold) return result;
+    if (!requiresSchedule) return result;
     const base = upstream ? sceneSchedulePlan([{ kind: "tail", ...upstream }]) : null;
     return sceneScheduleForPreset(presetId, base, stack, preferredPreset, String(presetId), switchValues).stats;
 }

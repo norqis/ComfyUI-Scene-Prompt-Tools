@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
+from itertools import chain
 from .switches import safe_control, resolve_switches
 
 
@@ -516,30 +517,9 @@ def _rebuild_expanded_workflow_links(prompt, workflow, state):
                 links, by_id, next_link_id, source_id, source_slot, target_id, target_slot, None, added
             )
 
-    for link in removed:
-        parts = _workflow_link_parts(link)
-        if parts is None:
-            continue
-        _link_id, source_id, source_slot, target_id, target_slot, link_type = parts
-        if source_id in reference_ids and target_id in by_id:
-            output_id, output_slot = _resolve_reference_physical_output(source_id, state)
-            next_link_id = _add_workflow_link(
-                links, by_id, next_link_id, output_id, output_slot, target_id, target_slot, link_type, added
-            )
-        if target_id in reference_ids and source_id in by_id and target_slot == state["references"][target_id].get("scene_input_slot", 0):
-            for entry_id, entry_slot in _resolve_reference_entry_slots(target_id, state, by_id):
-                next_link_id = _add_workflow_link(
-                    links,
-                    by_id,
-                    next_link_id,
-                    source_id,
-                    source_slot,
-                    entry_id,
-                    entry_slot,
-                    link_type,
-                    added,
-                )
-    for source_id, source_slot, target_id, target_slot, link_type in state["physical_links"]:
+    # Resolve both ends, including an original Reference -> Reference link.
+    physical_links = chain((_workflow_link_parts(link)[1:] for link in removed), state["physical_links"])
+    for source_id, source_slot, target_id, target_slot, link_type in physical_links:
         source_ids = [(source_id, source_slot)]
         if str(source_id) in reference_ids:
             source_ids = [_resolve_reference_physical_output(str(source_id), state)]

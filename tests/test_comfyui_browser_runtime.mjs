@@ -600,7 +600,7 @@ window.__sceneSeedRuntimeTest = {
             if (!response.ok) throw new Error(await response.text());
             return response.json();
         };
-        for (const nested of [false, true]) for (const passthrough of [false, true]) {
+        for (const nested of [false, true]) for (const passthrough of [false, true]) for (const chainLength of [1, 2, 3]) {
             const presets = {};
             app.graph.clear();
             const input = create("ScenePresetInput"), inner = create(passthrough ? "ScenePromptCounter" : "ScenePrompter"), output = create("ScenePresetOutput");
@@ -624,15 +624,20 @@ window.__sceneSeedRuntimeTest = {
                 presets[presetId] = await (await fetch(`/scene_presets/load?preset_id=${presetId}&include_api_graph=1`)).json();
             }
             app.graph.clear();
-            const outside = create("ScenePrompter"), ref = create("ScenePresetReference"), text = create("ScenePromptToText");
-            set(outside, "positive_base", "OUTSIDE"); set(ref, "preset_id", presetId); set(text, "scope", "直前のノードのみ");
-            connect(outside, ref); connect(ref, text);
+            const outside = create("ScenePrompter"), text = create("ScenePromptToText");
+            set(outside, "positive_base", "OUTSIDE"); set(text, "scope", "直前のノードのみ");
+            let previous = outside;
+            for (let index = 0; index < chainLength; index++) {
+                const ref = create("ScenePresetReference");
+                set(ref, "preset_id", presetId); connect(previous, ref); previous = ref;
+            }
+            connect(previous, text);
             graph = await app.graphToPrompt();
             const expanded = await post("/scene_test/preset_metadata", { graph, presets, expand: true, text_id: String(text.id) });
             await app.loadGraphData(expanded.workflow, true, true);
             const replay = await app.graphToPrompt();
             const reloaded = await post("/scene_test/preset_metadata", { graph: replay, text_id: String(text.id) });
-            results.push({ nested, passthrough, before: expanded.text, after: reloaded.text,
+            results.push({ nested, passthrough, chainLength, before: expanded.text, after: reloaded.text,
                 boundaries: Object.values(replay.output).filter(node => node.inputs?.prompt_trace_kind === "whole").length });
         }
         app.graph.clear(); return results;
@@ -641,9 +646,9 @@ window.__sceneSeedRuntimeTest = {
         const expected = [result.passthrough ? "OUTSIDE" : "OUTSIDE, INSIDE", ""];
         assert.deepEqual(result.before, expected);
         assert.deepEqual(result.after, expected, "native LiteGraph reload preserves named-switch input and previous-scope Preset boundary");
-        assert.equal(result.boundaries, result.nested ? 2 : 1);
+        assert.equal(result.boundaries, result.chainLength * (result.nested ? 2 : 1));
     }
-    console.log("real ComfyUI expanded Preset workflow reload preserves named-switch passthrough, nested boundaries and previous-scope text");
+    console.log("real ComfyUI expanded Preset workflow reload preserves serial references, named-switch passthrough, nested boundaries and previous-scope text");
     if (process.env.COMFYUI_WORKFLOW_PNG) {
         const extracted = spawnSync(python, [
             "-c",
@@ -2884,6 +2889,45 @@ window.__sceneSeedRuntimeTest = {
         await prepareAfterDisplay(mappedCountLive.expand, total);
     }
     console.log('real ComfyUI Count number/Boolean pointer edits and mapped Preset Count ON/OFF update the visible Expand count before any test planner/refresh/API capture');
+    for (const arm of [0, 9]) {
+        const randomExpand = await page.evaluate(async arm => {
+            const app = window.app;
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const set = (node, name, value) => { node.widgets.find(widget => widget.name === name).value = value; };
+            const connect = (from, to, slot = 0) => from.connect(slot, to, to.inputs.findIndex(input => input.name === 'scene_prompt'));
+            let presetId = '';
+            for (let level = 0; level < 3; level++) {
+                app.graph.clear();
+                const input = add('ScenePresetInput'), inner = add(level ? 'ScenePresetReference' : 'ScenePromptRandomRoute');
+                const output = add('ScenePresetOutput');
+                if (level) set(inner, 'preset_id', presetId);
+                else {
+                    set(inner, 'weights_json', JSON.stringify(Array.from({ length: 10 }, (_, index) => index === arm ? 10000 : 0)));
+                    set(inner, 'preserve_join', false); // Legacy 100% routes do not require a join.
+                }
+                connect(input, inner); connect(inner, output, level ? 0 : arm);
+                presetId = `native-random-count-${arm}-${level}`; set(output, 'preset_id', presetId);
+                const graph = await app.graphToPrompt();
+                const response = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                    preset_id: presetId, output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow,
+                }) });
+                if (!response.ok) throw new Error(await response.text());
+            }
+            app.graph.clear();
+            const first = add('ScenePromptCounter'), latent = add('SceneEmptyLatent'), reference = add('ScenePresetReference');
+            const last = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+            set(first, 'count', 4); set(latent, 'batch_size', 3); set(reference, 'preset_id', presetId); set(last, 'count', 6);
+            connect(first, latent); connect(latent, reference); connect(reference, last); connect(last, expand);
+            const ids = { reference: reference.id, expand: expand.id };
+            await app.loadGraphData(app.graph.serialize(), true, true);
+            await window.__sceneSeedRuntimeTest.refreshPresetReference(app.graph.getNodeById(ids.reference));
+            return ids.expand;
+        }, arm);
+        await prepareAfterDisplay(randomExpand, 24);
+        assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.sceneRole === 'expand_total_count').sceneTotalImages,
+            randomExpand), 72, 'nested 100% Random retains latent batch size in the visible Expand count');
+    }
+    console.log('real ComfyUI nested 100% Random slots 0/9 retain visible Count and latent totals before native prepare');
     nativeRunChecks = false;
     console.log('real ComfyUI standard Switch MatchType, fixed slots, names/mapping DOM saves, siblings, count/selected preview, Undo/Redo, clone, legacy restore, reload and one settings category passed');
 

@@ -389,6 +389,68 @@ class ScenePresetTests(unittest.TestCase):
         on_disk = json.loads(self.module._preset_path("compact-api-graph").read_text(encoding="utf-8"))
         self.assertEqual(set(on_disk["api_graph"]), {"output"})
 
+    def test_case_distinct_preset_ids_respect_filesystem_identity(self):
+        self.save("CasePreset", basic_nodes("original"))
+        path = self.module._preset_path("CasePreset")
+        before = path.read_bytes()
+        if self.module._preset_path("casepreset").exists():
+            with self.assertRaisesRegex(self.module.ScenePresetError, "casepreset.*CasePreset"):
+                self.save("casepreset", basic_nodes("replacement"))
+            self.assertEqual(path.read_bytes(), before)
+            with self.assertRaisesRegex(self.module.ScenePresetError, "casepreset.*CasePreset"):
+                self.module.load_preset("casepreset")
+        else:
+            self.save("casepreset", basic_nodes("separate"))
+            self.assertEqual(self.module.load_preset("casepreset")["metadata"]["preset_id"], "casepreset")
+            self.assertEqual(path.read_bytes(), before)
+        references = {"10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "CasePreset"}}}
+        occurrences = self.module.prepare_preset_occurrences(references)
+        self.assertEqual(occurrences["10"]["api_graph"]["output"]["2"]["inputs"]["positive_base"], "original")
+        self.save("CasePreset", basic_nodes("edited"))
+        self.assertEqual(self.module.load_preset("CasePreset")["api_graph"]["output"]["2"]["inputs"]["positive_base"], "edited")
+        self.assertFalse(list(path.parent.glob("*.tmp")))
+
+    def test_load_reports_preset_file_identity_mismatch(self):
+        self.save("expected", basic_nodes())
+        path = self.module._preset_path("expected")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["metadata"]["preset_id"] = "different"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(self.module.ScenePresetError, "expected.*different"):
+            self.module.load_preset("expected")
+
+    def test_concurrent_case_distinct_saves_preserve_preset_identity(self):
+        probe = self.root / "CaseProbe"
+        probe.touch()
+        case_sensitive = not (self.root / "caseprobe").exists()
+        probe.unlink()
+        barrier = threading.Barrier(2)
+        saved, errors = [], []
+
+        def save(preset_id):
+            barrier.wait()
+            try:
+                saved.append(self.save(preset_id, basic_nodes(preset_id)))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=save, args=(preset_id,)) for preset_id in ("RacePreset", "racepreset")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(saved), 2 if case_sensitive else 1)
+        self.assertEqual(len(errors), 0 if case_sensitive else 1)
+        for error in errors:
+            self.assertIsInstance(error, self.module.ScenePresetError)
+            self.assertIn("RacePreset", str(error))
+            self.assertIn("racepreset", str(error))
+        for result in saved:
+            preset_id = result["metadata"]["preset_id"]
+            self.assertEqual(self.module.load_preset(preset_id), result)
+        self.assertFalse(list(self.module.preset_directory().glob("*.tmp")))
+
     def test_load_normalizes_legacy_embedded_workflow_after_hash_validation_without_rewriting(self):
         saved = self.save("legacy-heavy", basic_nodes("legacy"))
         path = self.module._preset_path("legacy-heavy")

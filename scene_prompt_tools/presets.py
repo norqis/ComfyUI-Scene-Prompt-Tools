@@ -720,10 +720,17 @@ def _validate_preset_payload(preset):
         raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
 
 
+def _require_preset_identity(stored_id, preset_id):
+    if stored_id != preset_id:
+        raise ScenePresetError(f"Preset ID「{preset_id}」の保存先は既存Preset「{stored_id}」と同じです。IDを「{stored_id}」に合わせるか、別のIDを指定してください。")
+
+
 def load_preset(preset_id, user_id="default"):
     """Return an owned definition; callers share it only within their operation."""
+    preset_id = _clean_preset_id(preset_id)
     preset = _read_json(_preset_path(preset_id, user_id))
     _validate_preset_payload(preset)
+    _require_preset_identity(preset["metadata"]["preset_id"], preset_id)
     return preset
 
 
@@ -778,6 +785,9 @@ def save_preset(payload, user_id="default"):
             os.fsync(handle.fileno())
         _validate_preset_payload(_read_json(Path(temp_name)))
         with _PRESET_LOCK:
+            # A case-insensitive filesystem can map distinct IDs to one file.
+            if path.exists():
+                _require_preset_identity(path.resolve().stem, preset_id)
             try:
                 # Serialize the dependency check with publication, so two
                 # concurrent saves cannot create a reference cycle.

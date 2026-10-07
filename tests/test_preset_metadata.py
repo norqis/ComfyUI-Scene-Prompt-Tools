@@ -225,6 +225,67 @@ class PresetMetadataTests(unittest.TestCase):
         self.assertIs(saved_prompt, prompt)
         self.assertIs(saved_extra, extra)
 
+    def test_serial_references_keep_physical_connections_after_png_reload(self):
+        def physical_workflow(nodes):
+            workflow = outer_workflow(nodes)
+            by_id = {str(node["id"]): node for node in workflow["nodes"]}
+            for node_id, node in by_id.items():
+                node["inputs"] = [slot for slot in node["inputs"] if isinstance(nodes[node_id]["inputs"][slot["name"]], list)]
+            for target_id, node in nodes.items():
+                for name, value in node["inputs"].items():
+                    if not isinstance(value, list):
+                        continue
+                    source_id, source_slot = value
+                    slot = next(index for index, item in enumerate(by_id[target_id]["inputs"]) if item["name"] == name)
+                    link_id = len(workflow["links"]) + 1
+                    workflow["links"].append([link_id, int(source_id), source_slot, int(target_id), slot, "SCENE_PROMPT"])
+                    by_id[source_id]["outputs"][source_slot]["links"].append(link_id)
+                    by_id[target_id]["inputs"][slot]["link"] = link_id
+            workflow["last_link_id"] = len(workflow["links"])
+            return workflow
+
+        for count in (2, 3):
+            for fanout in (False, True):
+                with self.subTest(count=count, fanout=fanout):
+                    snapshots, prompt = {}, {"1": scene_prompt("outside")}
+                    previous = "1"
+                    for index in range(count):
+                        name = f"preset-{index}"
+                        snapshot = simple_preset(name, name=name)
+                        nodes = snapshot["api_graph"]["output"]
+                        if fanout:
+                            nodes["13"] = scene_prompt(f"{name}-right", ["10", 0])
+                            nodes["14"] = {"class_type": "ScenePrompterMerge", "inputs": {
+                                "scene_prompt1": ["11", 0], "scene_prompt2": ["13", 0]}}
+                            nodes["12"]["inputs"]["scene_prompt"] = ["14", 0]
+                        snapshot["workflow"] = physical_workflow(nodes)
+                        snapshots[name] = snapshot
+                        current = str(index + 2)
+                        prompt[current] = {"class_type": "ScenePresetReference", "inputs": {
+                            "preset_id": name, "scene_prompt": [previous, 0]}}
+                        previous = current
+                    prompt["9"] = scene_prompt("after", [previous, 0])
+                    workflow = physical_workflow(prompt)
+                    original = copy.deepcopy((prompt, workflow, snapshots))
+                    expanded, visual, _aliases = self.metadata_module.expand_preset_references(prompt, workflow, snapshots)
+                    replay = copy.deepcopy(expanded)
+                    visual_nodes = {str(node["id"]): node for node in visual["nodes"]}
+                    for node in replay.values():
+                        node["inputs"] = {key: value for key, value in node["inputs"].items() if not isinstance(value, list)}
+                    for link_id, source_id, source_slot, target_id, target_slot, _link_type in visual["links"]:
+                        target = visual_nodes[str(target_id)]["inputs"][target_slot]
+                        self.assertEqual(target["link"], link_id)
+                        replay[str(target_id)]["inputs"][target["name"]] = [str(source_id), source_slot]
+                    expected = self.presets._scene_node_value(expanded, "9", {}, set())
+                    actual = self.presets._scene_node_value(replay, "9", {}, set())
+                    self.assertEqual(actual, expected)
+                    parts = actual["rows"][0]["row"]["positive_parts"]
+                    self.assertEqual(parts[0], "outside")
+                    self.assertEqual(parts[-1], "after")
+                    for index in range(count):
+                        self.assertIn(f"preset-{index}", parts)
+                    self.assertEqual((prompt, workflow, snapshots), original)
+
     def test_full_expansion_rewires_graph_preserves_layout_and_rebuilds_links(self):
         self.put_snapshots({"one": simple_preset("one")})
         prompt = {
