@@ -419,4 +419,35 @@ for (const depth of [1, 8, 32, 128]) {
     measurements.push({ nodes: dag.nodes.size, keyLookups, chars: encoded.length, warm100Lookups: lookups, warmStringifies, warm100ms: Number((performance.now() - start).toFixed(2)) });
 }
 console.log("Preset switch values, selected live lineage/counts, full/compact nested mappings, Queue boundaries and LLM physical slot/type preservation passed.");
+{
+    const live = graph(); ctx.app.graph = live;
+    ctx.scenePresetDisplayGraphs.set("maker_leaf",structuredClone(fullLeaf));
+    const maker = add(live, "ScenePromptMakeSwitch", {switch_names_json:'["背景"]',switch_values_json:"[]"});
+    maker.outputs = [{name:"switches",type:"SCENE_SWITCHES",links:[]}];
+    const ref = add(live, "ScenePresetReference", {preset_id:"maker_leaf",switch_settings_json:"[]"});
+    connect(maker,ref,"switches",0,"SCENE_SWITCHES");
+    assert.equal(ctx.scenePromptStats(ref).total,5);
+    const beforeKey = ctx.scenePromptSourceCacheKey(ref);
+    set(maker,"switch_values_json",JSON.stringify(vector(3)));
+    assert.notEqual(ctx.scenePromptSourceCacheKey(ref),beforeKey);
+    assert.equal(ctx.scenePromptStats(ref).total,2,"changing Maker refreshes a cached Reference plan");
+    assert.deepEqual(switches.sceneLiveReferenceSwitchValues(ref),vector(3));
+    assert.equal(maker.outputs.length,1);
+    const nested = preset({
+        1:{class_type:"ScenePresetInput",inputs:{}},
+        2:{class_type:"ScenePromptMakeSwitch",inputs:{switch_names_json:'["背景"]',switch_values_json:JSON.stringify(vector(3))}},
+        3:{class_type:"ScenePresetReference",inputs:{preset_id:"maker_leaf",switches:["2",0]}},
+        4:{class_type:"ScenePresetOutput",inputs:{scene_prompt:["3",0]}},
+    });
+    ctx.scenePresetDisplayGraphs.set("maker_nested",nested);
+    const outerRef=add(live,"ScenePresetReference",{preset_id:"maker_nested",switch_settings_json:"[]"});
+    assert.equal(ctx.scenePromptStats(outerRef).total,2);
+    nested.workflow={nodes:[],links:[]};
+    const facade=createPresetGraph(nested,{});
+    assert.equal(facade.getNodeById(2).outputs[0].type,"SCENE_SWITCHES");
+    assert.deepEqual(switches.sceneLiveReferenceSwitchValues(facade.getNodeById(3)),vector(3));
+    facade.dispose();
+    for(const bad of ['{','{}','[true]',JSON.stringify(Array(10).fill(1)),JSON.stringify(Array(11).fill(false))])
+        assert.throws(()=>switches.sceneMakeSwitchValues(bad));
+}
 console.log("Selected Switch lineage retains linear node/edge storage independently of 100 million generated rows", JSON.stringify(measurements));

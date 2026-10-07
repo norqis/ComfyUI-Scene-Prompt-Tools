@@ -22,6 +22,11 @@ export function sceneSwitchNames(raw) {
     return Array.from({ length: switchCount }, (_, index) => names[index]?.trim() || `スイッチ${index + 1}`);
 }
 
+export function sceneMakeSwitchValues(raw) {
+    const values = parseArray(raw);
+    return sceneSwitchValues(values.length ? values : undefined);
+}
+
 export function sceneSwitchSettings(raw) {
     const settings = parseArray(raw);
     if (!settings.length) return Array.from({ length: switchCount }, (_, index) => index + 1);
@@ -66,6 +71,8 @@ export function sceneLiveSwitchValue(node, inputName, kind) {
     const resolved = sceneLiveSwitchSource(node, inputName);
     if (!resolved) return null;
     const { source, slot } = resolved, type = className(source);
+    if (type === "ScenePromptMakeSwitch" && kind === "bundle" && slot === 0)
+        return sceneMakeSwitchValues(field(source, "switch_values_json"));
     if (["ScenePresetInput", "Scene Preset Input"].includes(type)) {
         const binding = field(source, "switch_values");
         const values = sceneSwitchValues(binding?.values ?? binding ?? source.properties?.scene_switch_values);
@@ -74,10 +81,12 @@ export function sceneLiveSwitchValue(node, inputName, kind) {
         return null;
     }
     const supported = kind === "boolean" ? ["PrimitiveBoolean", "PrimitiveNode"]
-        : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"];
+        : kind === "string" ? ["PrimitiveString", "PrimitiveStringMultiline", "PrimitiveNode"]
+            : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"];
     if (slot !== 0 || !supported.includes(type) || (source.inputs || []).some((entry) => entry.name === "value" && entry.link != null)) return null;
     const value = field(source, "value");
     if (kind === "boolean") return typeof value === "boolean" ? value : null;
+    if (kind === "string") return typeof value === "string" ? value : null;
     return kind === "number" && typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
@@ -90,7 +99,7 @@ export function sceneLiveSwitchSelection(node) {
 
 export function sceneLiveReferenceSwitchValues(node) {
     const incoming = sceneLiveSwitchValue(node, "switches", "bundle");
-    if (incoming === null) throw new Error("接続されたスイッチ入力を確定できません。Preset Inputのswitchesを接続してください。");
+    if (incoming === null) throw new Error("接続されたスイッチ入力を確定できません。Preset InputまたはMake Switchのスイッチ一式を接続してください。");
     return resolveSceneSwitchSettings(incoming, field(node, "switch_settings_json"));
 }
 
@@ -105,13 +114,16 @@ export function createScenePresetSwitchContext(nodes, incoming) {
         visiting.add(key);
         const node = nodes[String(id)];
         let result;
-        if (node?.class_type === "ScenePresetInput") {
+        if (node?.class_type === "ScenePromptMakeSwitch" && kind === "bundle" && slot === 0) {
+            result = sceneMakeSwitchValues(node.inputs?.switch_values_json);
+        } else if (node?.class_type === "ScenePresetInput") {
             const binding = node.inputs?.switch_values;
             const bound = incoming === undefined && binding != null ? sceneSwitchValues(binding.values ?? binding) : values;
             if (kind === "bundle" && slot === 11) result = bound;
             else if (kind === "boolean" && slot >= 1 && slot <= switchCount) result = bound[slot - 1];
         } else if (slot === 0 && (kind === "boolean" ? ["PrimitiveBoolean", "PrimitiveNode"]
-            : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"]).includes(node?.class_type)) {
+            : kind === "string" ? ["PrimitiveString", "PrimitiveStringMultiline", "PrimitiveNode"]
+                : ["PrimitiveInt", "PrimitiveFloat", "PrimitiveNode"]).includes(node?.class_type)) {
             result = node.inputs?.value;
         }
         visiting.delete(key);
@@ -121,7 +133,7 @@ export function createScenePresetSwitchContext(nodes, incoming) {
     }
     function scalar(node, name, kind, fallback) {
         const result = value(node.inputs?.[name] ?? fallback, kind);
-        if (kind === "boolean" ? typeof result !== "boolean" : typeof result !== "number" || !Number.isFinite(result))
+        if (kind === "number" ? typeof result !== "number" || !Number.isFinite(result) : typeof result !== kind)
             throw new Error(`接続された${name}の値を確定できません。`);
         return result;
     }

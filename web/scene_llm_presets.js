@@ -1,4 +1,6 @@
 // Instance-local Preset definitions. Preparation happens on load/change, never in draw.
+import { value as llmValue } from "./scene_prompt_llm.js";
+import { createScenePresetSwitchContext } from "./scene_prompt_switches.js";
 const cache = new WeakMap();
 const contexts = new WeakMap();
 const operations = new WeakMap();
@@ -105,12 +107,14 @@ export function preparePresetReference(reference, definitions) {
         }
         const modes = new Map((definition.workflow?.nodes || []).map((node) => [String(node.id), Number(node.mode) || 0]));
         const visited = new Set();
+        const controls = createScenePresetSwitchContext(definition.api_graph.output);
         function hasLLM(nodeId) {
             if (visited.has(nodeId) || modes.get(nodeId) === 2) return false;
             visited.add(nodeId);
             const entry = definition.api_graph.output[nodeId];
             if (!entry) return false;
-            if (modes.get(nodeId) !== 4 && ((entry.class_type === "ScenePromptLLM" && (entry.has_llm_input === true || String(entry.inputs.description || "").trim()))
+            if (modes.get(nodeId) !== 4 && ((entry.class_type === "ScenePromptLLM" && (entry.has_llm_input
+                ?? !!controls.scalar(entry, "description", "string", "").trim()))
                 || (entry.class_type === "ScenePresetReference" && children.get(nodeId)?.scenePresetHasLLM))) return true;
             return Object.entries(entry.inputs || {}).some(([name, value]) => (/^scene_prompt\d*$/u.test(name)
                 || (entry.class_type === "ComfySwitchNode" && ["on_true", "on_false"].includes(name)))
@@ -337,7 +341,8 @@ export function createPresetGraph(definition, ownerGraph) {
                 ? [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] },
                     ...Array.from({ length: 10 }, (_, index) => ({ name: `switch_${index + 1}`, type: "BOOLEAN", links: [] })),
                     { name: "switches", type: "SCENE_SWITCHES", links: [] }]
-                : [{ name: "scene_prompt", type: entry.class_type === "PrimitiveBoolean" ? "BOOLEAN" : "SCENE_PROMPT", links: [] }])) };
+                : entry.class_type === "ScenePromptMakeSwitch" ? [{ name: "switches", type: "SCENE_SWITCHES", links: [] }]
+                    : [{ name: "scene_prompt", type: entry.class_type === "PrimitiveBoolean" ? "BOOLEAN" : "SCENE_PROMPT", links: [] }])) };
         if (entry.class_type === "ScenePresetInput") {
             node.outputs = Array.from({ length: 12 }, (_, slot) => ({ ...node.outputs[slot],
                 name: slot === 0 ? "scene_prompt" : slot === 11 ? "switches" : `switch_${slot}`,
@@ -475,7 +480,7 @@ export function collectPresetLLMTargets(reference, definitions, { refresh } = {}
                 if (link) visit(String(link.origin_id));
             }
             if (node.class_type === "ScenePresetReference" && Number(node.mode) !== 4) visitPreset(presetOccurrenceChild(preset, id));
-            if (node.class_type !== "ScenePromptLLM" || Number(node.mode) === 4 || !String(field(node, "description")?.value || "").trim()) return;
+            if (node.class_type !== "ScenePromptLLM" || Number(node.mode) === 4 || !String(llmValue(node, "description")).trim()) return;
             targets.push({ node, graph, reference,
                 identity: { ownerGraph, outerReference: reference, path, presetId: preset.metadata.preset_id, nodeId: String(id) },
                 current: () => reference.graph === ownerGraph && ownerGraph?.getNodeById?.(reference.id) === reference

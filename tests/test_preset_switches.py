@@ -79,6 +79,65 @@ class PresetSwitchTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 self.switches.switch_settings(json.dumps(invalid))
 
+    def test_make_switch_single_bundle_and_safe_control(self):
+        cls = self.switches.ScenePromptMakeSwitch
+        self.assertEqual(cls.RETURN_TYPES, (self.switches.SCENE_SWITCHES_TYPE,))
+        self.assertEqual(cls.RETURN_NAMES, ("switches",))
+        self.assertEqual(cls().build(), ((False,) * 10,))
+        vector = [index in (0, 2, 9) for index in range(10)]
+        inputs = dict(switch_names_json='["背景", "人物"]', switch_values_json=json.dumps(vector))
+        self.assertEqual(cls().build(**inputs), (tuple(vector),))
+        nodes = {"10": node("ScenePromptMakeSwitch", **inputs)}
+        self.assertEqual(self.switches.safe_control(nodes, ["10", 0]), tuple(vector))
+        self.assertEqual(self.module._scene_node_value(nodes, "10", {}, set()), tuple(vector))
+        for invalid in ("{", "{}", "[true]", json.dumps([False] * 11), json.dumps([1] * 10)):
+            nodes["10"]["inputs"]["switch_values_json"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.module._validate_preset_input_values(nodes)
+
+    def test_make_switch_nested_save_compact_and_expansion(self):
+        child = self.preset("choice", switched_nodes())
+        self.module.save_preset({"preset_id": "choice", "output_node_id": "3",
+                                "api_graph": child["api_graph"], "workflow": child["workflow"]})
+        for enabled, total in ((False, 3), (True, 7)):
+            values = json.dumps([enabled] + [False] * 9)
+            nodes = basic_nodes()
+            nodes["8"] = node("ScenePromptMakeSwitch", switch_names_json='["背景"]', switch_values_json=values)
+            nodes["9"] = node("ScenePresetReference", preset_id="choice", scene_prompt=["2", 0], switches=["8", 0])
+            nodes["3"]["inputs"]["scene_prompt"] = ["9", 0]
+            parent = self.preset("parent", nodes)
+            visual = next(item for item in parent["workflow"]["nodes"] if item["id"] == 8)
+            visual["outputs"][0].update(name="switches", type="SCENE_SWITCHES")
+            visual["widgets_values"] = ['["背景"]', values]
+            self.module.save_preset({"preset_id": "parent", "output_node_id": "3",
+                                    "api_graph": parent["api_graph"], "workflow": parent["workflow"]})
+            loaded = self.module.load_preset("parent")
+            self.assertEqual(self.evaluate(loaded, resolved={"choice": child})["stats"]["total_images"], total)
+            compact = self.module._compact_preset_list_graph(loaded["api_graph"])
+            self.assertEqual(compact["output"]["8"]["inputs"]["switch_values_json"], values)
+            self.assertEqual(compact["output"]["8"]["inputs"]["switch_names_json"], '["背景"]')
+            with mock.patch.object(self.module, "prepare_preset_occurrences", return_value={"ref": loaded, "ref/9": child}):
+                expanded = self.module.expand_preset_reference("parent", source_node_id="ref")
+            maker = next(item for item in expanded["expand"].values() if item["class_type"] == "ScenePromptMakeSwitch")
+            self.assertEqual(set(maker["inputs"]), {"switch_names_json", "switch_values_json"})
+
+    def test_make_switch_reference_mapping_and_run_snapshot(self):
+        choice = self.preset("choice", switched_nodes())
+        vector = [False, False, True] + [False] * 7
+        nodes = {"10": node("ScenePromptMakeSwitch", switch_values_json=json.dumps(vector)),
+                 "20": node("ScenePresetReference", preset_id="choice", switches=["10", 0],
+                            switch_settings_json=json.dumps([3] + [False] * 9)),
+                 "21": node("ScenePrompterExpand", scene_prompt=["20", 0])}
+        with mock.patch.object(self.module, "prepare_preset_occurrences", return_value={"20": choice}):
+            response = self.module.snapshot_presets_for_run("maker-frozen", {"output": nodes}, "21")
+        self.assertEqual(response["total_images"], 7)
+        nodes["10"]["inputs"]["switch_values_json"] = "[]"
+        self.assertEqual(self.module._scene_node_value(nodes, "20", {"choice": choice}, set())["stats"]["total_images"], 3)
+        expanded = self.module.expand_preset_reference("choice", run_handle="maker-frozen", source_node_id="20", switches=[False] * 10)
+        values = next(item["inputs"]["switch_values"] for item in expanded["expand"].values() if item["class_type"] == "ScenePresetInput")
+        self.assertEqual(values["values"], [True] + [False] * 9)
+        self.module.release_scene_preset_snapshot("maker-frozen")
+
     def test_all_ten_input_slots_choose_only_one_branch_and_memo_distinguishes_vectors(self):
         memo = {}
         for slot in range(1, 11):

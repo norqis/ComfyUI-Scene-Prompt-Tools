@@ -2509,6 +2509,106 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(payload["exec_current_count"], "1")
             self.assertEqual(payload["exec_total_count"], "1")
 
+    def test_http_linked_queue_controls_match_preset_execution_order(self):
+        marker = self.base / "linked-queue-text.json"
+        for in_preset in (False, True):
+            for mode, expected in (("multiply", ["A"] * 3 + ["B"] * 3), ("fixed", ["A"] * 3 + ["B"] * 3)):
+                expected = expected * (3 if mode == "multiply" else 1)
+                with self.subTest(preset=in_preset, mode=mode):
+                    path = f"linked-queue-{in_preset}-{mode}"
+                    inner = {
+                        "100": {"class_type": "ScenePresetInput", "inputs": {}},
+                        "101": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["100", 0], "positive_base": ["105", 0]}},
+                        "102": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["100", 0], "positive_base": "B"}},
+                        "103": {"class_type": "ScenePrompterQueue", "inputs": {
+                            "scene_prompt1": ["101", 0], "scene_prompt2": ["102", 0], "order_mode": "alternate",
+                            "alternate_block_size": ["104", 0], "downstream_count_mode": mode}},
+                        "104": {"class_type": "PrimitiveInt", "inputs": {"value": 3}},
+                        "105": {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "A"}},
+                        "106": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["103", 0], "preset_id": path, "preset_name": path}},
+                    }
+                    graph = _save_graph("ワークフロー全体", path)
+                    graph.pop("7")
+                    if in_preset:
+                        self._request("/scene_presets/save", {"preset_id": path, "name": path, "output_node_id": "106",
+                            "api_graph": {"output": inner}, "workflow": _workflow_for_graph(inner)})
+                        graph["1"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": path}}
+                    else:
+                        graph.pop("1")
+                        inner.pop("106")
+                        graph.update(inner)
+                        graph["2"]["inputs"]["scene_prompt"] = ["103", 0]
+                    graph["2"]["inputs"].update(count=3, enable_downstream_count=False)
+                    graph["20"] = {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 10}}
+                    graph["3"]["inputs"]["scene_prompt"] = ["20", 0]
+                    graph["21"] = {"class_type": "TestSceneTextImage", "inputs": {
+                        "image": ["5", 0], "positive": ["4", 0], "negative": ["4", 1], "log_path": str(marker)}}
+                    graph["6"]["inputs"]["images"] = ["21", 0]
+                    workflow = _workflow_for_graph(graph)
+                    prepared = self._request("/scene_prompt/runs/prepare", {
+                        "api_graph": {"output": graph}, "workflow": workflow, "expand_node_id": "4"})
+                    self.assertEqual(prepared["total_batches"], len(expected))
+                    handle = prepared["run_handle"]
+                    _apply_run_handle(graph, handle)
+                    try:
+                        for index, positive in enumerate(expected):
+                            graph["4"]["inputs"]["current_index"] = index
+                            self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                            self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], positive)
+                        self.assertEqual(len(list((self.base / "output" / path).glob("*.png"))), len(expected))
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
+    def test_http_make_switch_top_level_and_nested_native_execution(self):
+        child = {
+            "100": {"class_type": "ScenePresetInput", "inputs": {}},
+            "101": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["100", 0], "positive_base": "maker_off"}},
+            "102": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["100", 0], "positive_base": "maker_on"}},
+            "103": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["101", 0], "count": 3}},
+            "104": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["102", 0], "count": 7}},
+            "105": {"class_type": "ComfySwitchNode", "inputs": {"switch": ["100", 1], "on_false": ["103", 0], "on_true": ["104", 0]}},
+            "106": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["105", 0], "preset_id": "maker-child", "preset_name": "Maker child"}},
+        }
+        self._request("/scene_presets/save", {"preset_id": "maker-child", "output_node_id": "106",
+            "api_graph": {"output": child}, "workflow": _switch_workflow_for_graph(child)})
+        marker = self.base / "maker-text.json"
+        for nested in (False, True):
+            for enabled, total, positive in ((False, 3, "maker_off"), (True, 7, "maker_on")):
+                with self.subTest(nested=nested, enabled=enabled):
+                    maker = {"class_type": "ScenePromptMakeSwitch", "inputs": {
+                        "switch_names_json": '["Branch"]', "switch_values_json": json.dumps([enabled] + [False] * 9)}}
+                    parent = {
+                        "100": {"class_type": "ScenePresetInput", "inputs": {}}, "108": maker,
+                        "107": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "maker-child", "scene_prompt": ["100", 0], "switches": ["108", 0]}},
+                        "106": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["107", 0], "preset_id": "maker-parent", "preset_name": "Maker parent"}},
+                    }
+                    graph = _save_graph("ワークフロー全体", f"maker-{nested}-{enabled}", expand_presets=True)
+                    graph.pop("7"); graph["2"]["inputs"]["count"] = 1
+                    graph["1"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "maker-parent" if nested else "maker-child"}}
+                    if nested:
+                        self._request("/scene_presets/save", {"preset_id": "maker-parent", "output_node_id": "106",
+                            "api_graph": {"output": parent}, "workflow": _switch_workflow_for_graph(parent)})
+                    else:
+                        graph["10"] = maker; graph["1"]["inputs"]["switches"] = ["10", 0]
+                    graph["21"] = {"class_type": "TestSceneTextImage", "inputs": {
+                        "image": ["5", 0], "positive": ["4", 0], "negative": ["4", 1], "log_path": str(marker)}}
+                    graph["6"]["inputs"]["images"] = ["21", 0]
+                    workflow = _switch_workflow_for_graph(graph)
+                    prepared = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "workflow": workflow, "expand_node_id": "4"})
+                    self.assertEqual(prepared["total_batches"], total)
+                    handle = prepared["run_handle"]; _apply_run_handle(graph, handle)
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], positive)
+                        if not nested:
+                            graph["10"]["inputs"]["switch_values_json"] = json.dumps([not enabled] + [False] * 9)
+                        graph["4"]["inputs"]["current_index"] = 1
+                        self._queue_callback_graph(graph, handle, workflow)
+                        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], positive,
+                                         "prepared switch values remain fixed during native execution")
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
     def test_http_prepare_resolves_to_text_into_delete(self):
         from PIL import Image
         marker = self.base / "text-delete-cycle.json"

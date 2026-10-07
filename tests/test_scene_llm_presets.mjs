@@ -5,7 +5,7 @@ import vm from "node:vm";
 import * as switches from "../web/scene_prompt_switches.js";
 import { preparePresetReference, presetOccurrenceChild, collectPresetLLMTargets,
     presetEditorDefinition, parsePresetOverrides, hydratePresetReference, presetReferenceHasLLM, createPresetOperation, createPresetGraph } from "../web/scene_llm_presets.js";
-import { insertLoras } from "../web/scene_prompt_llm.js";
+import { insertLoras, value as llmValue } from "../web/scene_prompt_llm.js";
 
 function definition(id, output) {
     return { metadata: { preset_id: id, sha256: "shared" }, api_graph: { output }, workflow: {
@@ -34,6 +34,28 @@ const reference = (id, state = "") => {
     references.set(id, node); return node;
 };
 const a = reference(40), b = reference(41);
+{
+    const linked = definition("linked-description", {
+        1: { class_type: "PrimitiveStringMultiline", inputs: { value: "linked scene" } },
+        2: { class_type: "ScenePromptLLM", inputs: { description: ["1", 0], positive: "", negative: "" } },
+        3: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+    });
+    const ref = reference(42); ref.widgets[0].value = "linked-description";
+    const sources = new Map([["linked-description", linked]]);
+    const targets = collectPresetLLMTargets(ref, sources);
+    assert.equal(targets.length, 1);
+    assert.equal(llmValue(targets[0].node, "description"), "linked scene");
+    const empty = structuredClone(linked);
+    empty.api_graph.output[1].inputs.value = "";
+    sources.set("linked-description", empty);
+    assert.equal(collectPresetLLMTargets(ref, sources).length, 0);
+    assert.equal(presetReferenceHasLLM(ref, sources), false);
+    const compact = structuredClone(empty);
+    delete compact.api_graph.output[1].inputs.value;
+    compact.api_graph.output[2].has_llm_input = false;
+    sources.set("linked-description", compact);
+    assert.equal(presetReferenceHasLLM(ref, sources), false, "compact false is authoritative even with a description link");
+}
 assert.deepEqual(parsePresetOverrides("{}"), {}, "backend default empty widget value is accepted");
 const preparedA = preparePresetReference(a, definitions);
 assert.strictEqual(preparePresetReference(a, definitions), preparedA);
