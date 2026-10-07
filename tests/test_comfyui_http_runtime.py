@@ -105,9 +105,10 @@ class _CallbackReceiver:
 class _DesktopCallbackClient:
     """A loopback WebSocket client standing in for one ComfyUI browser tab."""
 
-    def __init__(self, port, client_id):
+    def __init__(self, port, client_id, event_type="scene_prompt_desktop_notification"):
         self.port = port
         self.client_id = client_id
+        self.event_type = event_type
         self._lock = Lock()
         self._connected = Event()
         self._loop = None
@@ -155,7 +156,7 @@ class _DesktopCallbackClient:
                 if message.type != aiohttp.WSMsgType.TEXT:
                     continue
                 payload = json.loads(message.data)
-                if payload.get("type") != "scene_prompt_desktop_notification":
+                if payload.get("type") != self.event_type:
                     continue
                 with self._lock:
                     self.notifications.append({
@@ -1037,7 +1038,9 @@ NODE_CLASS_MAPPINGS = {
             self.assertIn("after-done", marker.read_text(encoding="utf-8"))
 
     def test_gpu_prompt_admission_queue_removal_interrupt_and_two_client_ownership(self):
-        with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-tab-a"), _DesktopCallbackClient(self.port, "gpu-tab-b"):
+        with _GpuProvider() as provider, \
+                _DesktopCallbackClient(self.port, "gpu-tab-a", "scene_prompt_queue_removed") as tab_a, \
+                _DesktopCallbackClient(self.port, "gpu-tab-b", "scene_prompt_queue_removed") as tab_b:
             self._gpu_settings(provider)
             marker = provider.marker = self.base / "gpu-ownership.log"
             session_id = self._request("/scene_prompt/llm/begin", {"client_id": "gpu-tab-a"})["session_id"]
@@ -1063,11 +1066,16 @@ NODE_CLASS_MAPPINGS = {
             status, _ = self._request_status("/prompt", {"prompt_id": prompt_id, "prompt": self._gpu_graph(marker, "duplicate")})
             self.assertEqual(status, 409)
             self.assertEqual(self._request_status("/queue", {"delete": [prompt_id]})[0], 200)
+            self.assertEqual([item["prompt_id"] for item in tab_b.wait_for(1)], [prompt_id])
+            self.assertEqual(tab_a.notifications, [])
             self.assertFalse(self._request("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": policy_id})["released"])
             wiped_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
-            self._request("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "wiped"),
+            wiped = self._request("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "wiped"),
                 "extra_data": {"scene_gpu_policy": wiped_policy}})
             self.assertEqual(self._request_status("/queue", {"clear": True})[0], 200)
+            self.assertEqual([item["prompt_id"] for item in tab_b.wait_for(2)], [prompt_id, wiped["prompt_id"]])
+            self.assertEqual(tab_a.notifications, [])
+            self.assertEqual(self._request("/queue")["queue_running"][0][1], blocker["prompt_id"])
             self.assertFalse(self._request("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": wiped_policy})["released"])
             invalid_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
             status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-b", "prompt": {},

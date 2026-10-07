@@ -40,7 +40,6 @@ const context = {
     sceneRunHandlesByPromptId: new Map(),
     sceneRunTerminalPromptIds: new Map(),
     sceneBatchTerminalEvents: new Map(),
-    sceneRunHandleReconcileTimers: new Map(),
     SCENE_RUN_TERMINAL_RETENTION_MS: 10 * 60 * 1000,
     prepared: 0,
     queued: 0,
@@ -113,8 +112,6 @@ for (const name of [
     "rememberSceneBatchTerminalEvent",
     "rememberSceneRunTerminalPromptId",
     "consumeSceneRunTerminalPromptId",
-    "clearQueuedSceneRunReconcile",
-    "reconcileQueuedSceneRunHandle",
     "claimSceneRunHandle",
     "registerQueuedSceneRunHandle",
     "releaseCompletedSceneRun",
@@ -293,8 +290,68 @@ context.installSceneBatchPromptCapture();
     assert.ok(cachedWithCallback.output["6"], "cached Expand keeps its each Callback configuration");
     assert.ok(cachedWithCallback.output["7"], "cached Expand keeps its last Callback configuration");
     assert.equal(cachedWithCallback.output["99"], undefined, "unrelated plan nodes remain stripped from cached loop prompts");
-    console.log("Scene Prompt queue wrapper wiring tests passed.");
+    await testSubmissionLifetime();
+    console.log("Scene Prompt queue wrapper wiring and terminal/removal lifetime tests passed.");
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });
+
+async function testSubmissionLifetime() {
+    const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+    for (const scene of [false, true]) for (const type of ["success", "error", "interrupted"])
+    for (const order of ["before-response", "before-claim", "after-claim"]) {
+        const workflow = { activeState: { nodes: [{ widgets_values: ["large workflow"] }] } };
+        let next = 0;
+        const ctx = {
+            sceneBatchRun: null, sceneBatchDetachedRuns: new Map(), sceneBatchTerminalEvents: new Map(),
+            scenePromptSubmissionsById: new Map(), sceneRunHandlesByPromptId: new Map(), sceneRunTerminalPromptIds: new Map(),
+            sceneProgressNodeIdsByPromptId: new Map(), sceneExecutingPromptId: "", SCENE_RUN_TERMINAL_RETENTION_MS: 600000,
+            setTimeout, clearTimeout, console,
+            sceneGPUController: { snapshot: () => ({}), prepareImage: async () => "", applyImagePolicy() {},
+                queueClient: () => ctx.api, acceptImage() {}, releaseImage: async () => {}, onCleanupError() {} },
+            syncSceneMatrixPromptInputs() {}, scenePromptSamplerSeedTargets: () => [], applySceneSourceNodeNames() {},
+            randomizeStandardSceneSeeds() {}, applyRandomizedSamplerSeeds() {}, sceneWorkflowFromPrompt: () => workflow,
+            sceneRunTargetNodes: () => scene ? [{}] : [],
+            prepareSceneRunContext: async () => ({ run_handle: `handle-${next + 1}` }),
+            scenePromptIdFromValue: value => value?.prompt_id || "",
+            claimSceneRunHandle: async (_handle, promptId) => {
+                if (order === "before-claim") { ctx.receiveScenePromptTerminal(type, { prompt_id: promptId }); await tick(); }
+            },
+            released: [], releaseSceneRunHandle: handle => ctx.released.push(handle),
+            continueSceneBatchRun() {}, failSceneBatchRun() {}, releasePendingSceneBatchPlan() {},
+            api: { async queuePrompt() {
+                const prompt_id = `id-${++next}`;
+                if (order === "before-response" || (!scene && order === "before-claim")) {
+                    ctx.receiveScenePromptTerminal(type, { prompt_id }); await tick();
+                }
+                return { prompt_id };
+            } },
+        };
+        vm.createContext(ctx);
+        for (const name of ["installSceneBatchPromptCapture", "rememberSceneBatchTerminalEvent", "pruneSceneBatchTerminalEvents",
+            "pruneSceneRunTerminalPromptIds", "rememberSceneRunTerminalPromptId", "consumeSceneRunTerminalPromptId",
+            "registerQueuedSceneRunHandle", "releaseCompletedSceneRun", "forgetScenePromptSubmission", "receiveScenePromptTerminal"])
+            vm.runInContext(functionSource(name), ctx);
+        ctx.installSceneBatchPromptCapture();
+        for (let index = 0; index < 10; index++) {
+            const result = await ctx.api.queuePrompt(0, { output: {} });
+            await tick();
+            if (order === "after-claim") ctx.receiveScenePromptTerminal(type, result);
+            await tick();
+            assert.equal(ctx.scenePromptSubmissionsById.size, 0, `${scene}/${type}/${order}: no closed workflow references remain`);
+            assert.equal(ctx.sceneRunHandlesByPromptId.size, 0);
+            assert.equal(ctx.sceneProgressNodeIdsByPromptId.size, 0);
+        }
+        assert.equal(ctx.released.length, scene ? 10 : 0, "release each claimed handle once");
+        for (const id of ["running", "pending-a", "pending-b"]) {
+            ctx.scenePromptSubmissionsById.set(id, { workflow });
+            ctx.sceneRunHandlesByPromptId.set(id, id);
+        }
+        ctx.receiveScenePromptTerminal("interrupted", { prompt_id: "pending-a" }); await tick();
+        assert.deepEqual([...ctx.scenePromptSubmissionsById.keys()], ["running", "pending-b"]);
+        ctx.receiveScenePromptTerminal("interrupted", { prompt_id: "pending-b" }); await tick();
+        assert.deepEqual([...ctx.scenePromptSubmissionsById.keys()], ["running"]);
+        assert.deepEqual([...ctx.sceneRunHandlesByPromptId.keys()], ["running"]);
+    }
+}

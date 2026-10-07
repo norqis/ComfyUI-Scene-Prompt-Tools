@@ -324,7 +324,6 @@ let scenePresetListCacheCurrent = false;
 let scenePresetNotificationTimer = null;
 const sceneRunHandlesByPromptId = new Map();
 const sceneRunTerminalPromptIds = new Map();
-const sceneRunHandleReconcileTimers = new Map();
 const sceneRunReleaseStates = new Map();
 const SCENE_RUN_TERMINAL_RETENTION_MS = 10 * 60 * 1000;
 const SCENE_CALLBACK_FINALIZE_POLL_MS = 250;
@@ -10179,7 +10178,7 @@ function installSceneBatchPromptCapture() {
         } else if (sceneBatchRun !== submissionRun) {
             releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
         }
-        if (promptId && typeof scenePromptSubmissionsById !== "undefined") {
+        if (promptId && typeof scenePromptSubmissionsById !== "undefined" && !sceneBatchTerminalEvents.has(promptId)) {
             scenePromptSubmissionsById.set(promptId, {
                 workflow: submissionWorkflow,
                 runId: submissionRun?.runId || "",
@@ -10301,46 +10300,6 @@ function consumeSceneRunTerminalPromptId(promptId, now = Date.now()) {
     return found;
 }
 
-function clearQueuedSceneRunReconcile(promptId) {
-    const timer = sceneRunHandleReconcileTimers.get(promptId);
-    if (timer) {
-        clearTimeout(timer);
-    }
-    sceneRunHandleReconcileTimers.delete(promptId);
-}
-
-async function reconcileQueuedSceneRunHandle(promptId, runHandle, attempt = 0) {
-    if (sceneRunHandlesByPromptId.get(promptId) !== runHandle) {
-        clearQueuedSceneRunReconcile(promptId);
-        return;
-    }
-    try {
-        const response = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
-        const history = await readApiJson(response, "Scene Promptの実行状態を確認できませんでした");
-        if (
-            response.ok
-            && sceneHistoryStatus(history, promptId)
-            && sceneRunHandlesByPromptId.get(promptId) === runHandle
-        ) {
-            sceneRunHandlesByPromptId.delete(promptId);
-            clearQueuedSceneRunReconcile(promptId);
-            releaseSceneRunHandle(runHandle);
-            return;
-        }
-    } catch (error) {
-        console.warn("[Scene Prompt] 生成計画の完了確認に失敗しました。", error);
-    }
-    if (attempt >= 5 || sceneRunHandlesByPromptId.get(promptId) !== runHandle) {
-        clearQueuedSceneRunReconcile(promptId);
-        return;
-    }
-    const timer = setTimeout(() => {
-        sceneRunHandleReconcileTimers.delete(promptId);
-        reconcileQueuedSceneRunHandle(promptId, runHandle, attempt + 1);
-    }, 10 * 1000);
-    sceneRunHandleReconcileTimers.set(promptId, timer);
-}
-
 function releaseCompletedSceneRun(detail) {
     const promptId = scenePromptIdFromValue(detail);
     const runHandle = promptId ? sceneRunHandlesByPromptId.get(promptId) : "";
@@ -10350,7 +10309,6 @@ function releaseCompletedSceneRun(detail) {
     }
     sceneRunHandlesByPromptId.delete(promptId);
     sceneRunTerminalPromptIds.delete(promptId);
-    clearQueuedSceneRunReconcile(promptId);
     releaseSceneRunHandle(runHandle);
 }
 
@@ -13454,6 +13412,15 @@ function forgetScenePromptSubmission(detail) {
     setTimeout(() => scenePromptSubmissionsById.delete(promptId), 0);
 }
 
+function receiveScenePromptTerminal(type, detail) {
+    rememberSceneBatchTerminalEvent(type, detail);
+    if (type === "success") continueSceneBatchRun(detail);
+    else failSceneBatchRun(detail);
+    releasePendingSceneBatchPlan(detail);
+    releaseCompletedSceneRun(detail);
+    forgetScenePromptSubmission(detail);
+}
+
 function acknowledgeSceneDesktopNotification(requestId, success, error = "") {
     return api.fetchApi("/scene_prompt/callbacks/desktop/ack", {
         method: "POST",
@@ -13579,27 +13546,10 @@ app.registerExtension({
         });
         api.addEventListener("progress_state", ({ detail }) => receiveSceneProgressState(detail));
         api.addEventListener("executed", ({ detail }) => appendSceneSavePreview(detail));
-        api.addEventListener("execution_success", ({ detail }) => {
-            rememberSceneBatchTerminalEvent("success", detail);
-            continueSceneBatchRun(detail);
-            releasePendingSceneBatchPlan(detail);
-            releaseCompletedSceneRun(detail);
-            forgetScenePromptSubmission(detail);
-        });
-        api.addEventListener("execution_error", ({ detail }) => {
-            rememberSceneBatchTerminalEvent("error", detail);
-            failSceneBatchRun(detail);
-            releasePendingSceneBatchPlan(detail);
-            releaseCompletedSceneRun(detail);
-            forgetScenePromptSubmission(detail);
-        });
-        api.addEventListener("execution_interrupted", ({ detail }) => {
-            rememberSceneBatchTerminalEvent("interrupted", detail);
-            failSceneBatchRun(detail);
-            releasePendingSceneBatchPlan(detail);
-            releaseCompletedSceneRun(detail);
-            forgetScenePromptSubmission(detail);
-        });
+        api.addEventListener("execution_success", ({ detail }) => receiveScenePromptTerminal("success", detail));
+        api.addEventListener("execution_error", ({ detail }) => receiveScenePromptTerminal("error", detail));
+        api.addEventListener("execution_interrupted", ({ detail }) => receiveScenePromptTerminal("interrupted", detail));
+        api.addEventListener("scene_prompt_queue_removed", ({ detail }) => receiveScenePromptTerminal("interrupted", detail));
     },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {

@@ -323,6 +323,8 @@ class WorkerHookTests(unittest.TestCase):
         self.owner = coordinator()
         self.execution = types.ModuleType("execution")
         events = self.events = []
+        self.messages = []
+        self.owner.server.send_sync = lambda event, data, sid: self.messages.append((event, data, sid))
         class Executor:
             def __init__(self, server):
                 self.server = server
@@ -355,7 +357,10 @@ class WorkerHookTests(unittest.TestCase):
             def delete_queue_item(self, function):
                 for index, item in enumerate(self.queue):
                     if function(item):
-                        self.queue.pop(index)
+                        if len(self.queue) == 1:
+                            self.wipe_queue()
+                        else:
+                            self.queue.pop(index)
                         return True
                 return False
         self.execution.PromptExecutor = Executor
@@ -446,6 +451,25 @@ class WorkerHookTests(unittest.TestCase):
                 self.queue.wipe_queue()
             self.assertFalse(self.owner.policies)
             self.assertFalse(self.owner.prompt_policies)
+
+    def test_queue_removal_notifies_only_removed_pending_item_owners(self):
+        running = (0, "running", {}, {"client_id": "a"}, [])
+        self.queue.currently_running = {1: running}
+        self.queue.put((1, "first", {}, {"client_id": "a"}, []))
+        self.queue.put((2, "second", {}, {"client_id": "b"}, []))
+        self.queue.put((3, "headless", {}, {}, []))
+        self.assertFalse(self.queue.delete_queue_item(lambda item: item[1] == "absent"))
+        self.assertEqual(self.messages, [])
+        self.queue.delete_queue_item(lambda item: item[1] == "first")
+        self.assertEqual(self.messages, [("scene_prompt_queue_removed", {"prompt_id": "first"}, "a")])
+        self.queue.wipe_queue()
+        self.assertEqual(self.messages[-1], ("scene_prompt_queue_removed", {"prompt_id": "second"}, "b"))
+        self.assertEqual(len(self.messages), 2, "headless items must not broadcast to other clients")
+        self.assertEqual(self.queue.currently_running, {1: running})
+        self.queue.put((1, "last", {}, {"client_id": "a"}, []))
+        self.queue.delete_queue_item(lambda item: item[1] == "last")
+        self.assertEqual(self.messages[-1], ("scene_prompt_queue_removed", {"prompt_id": "last"}, "a"))
+        self.assertEqual(len(self.messages), 3, "native delete calls wipe internally but notifies only once")
 
     def test_failure_writes_status_without_nodes_and_next_worker_job_succeeds(self):
         self.owner.failures["bad"] = "busy"

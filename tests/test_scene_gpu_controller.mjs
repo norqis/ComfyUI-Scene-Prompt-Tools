@@ -53,6 +53,7 @@ function fixture({ on = false, bound = false } = {}) {
         app, api, sceneGPUController: resources,
         sceneBatchRun: null, sceneBatchRunsById: new Map(), sceneBatchDetachedRuns: new Map(),
         scenePromptSubmissionsById: new Map(),
+        sceneBatchTerminalEvents: new Map(),
         syncSceneMatrixPromptInputs() {}, scenePromptSamplerSeedTargets: () => [], applySceneSourceNodeNames() {},
         randomizeStandardSceneSeeds() {}, sceneRunTargetNodes: () => [], applyRandomizedSamplerSeeds() {},
         scenePromptIdFromValue: (value) => value?.prompt_id || "", releaseSceneRunHandle: () => Promise.resolve(),
