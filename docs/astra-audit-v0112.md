@@ -129,9 +129,20 @@ Focused tests cover stale, mixed and identical handles, two executions of the sa
 
 The same auditor approved exact HEAD `0a28d439298b7f04510266ea3138c5d6eff7ac00`. Its independent whole-audit probes matched 12,000 frontend comparisons and 2,475 backend plans / 35,143 events. A new eleventh GPT-6 Astra xhigh agent will audit the entire repository again before release.
 
+## Eleventh independent full audit
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round11`) completed another whole-repository audit and reproduced two further issues. Root fixed both in `2621400`:
+
+- Native ComfyUI replaces the Save node's image array with its own image objects. The extension's separate preview maps then retained all earlier images because trimming that native array could no longer identify their keys. The auditor reproduced 25 retained images from 25 events and then 12 retained images from an actual 12-generation CPU batch. The existing latest-only display now releases map/set entries outside the selected current image references, independently of native array replacement, and detaches obsolete load callbacks. There is no new cache, display limit or rendering redesign. The unit regression uses the real trim helper and covers replacement, duplicate events and clearing. The complete native suite executes Count 12 through Expand and Scene Save Image, verifies every backend history succeeded, confirms the final visible image loaded, and checks the maps retain one image at each event.
+- Resource summaries used Unicode case folding to deduplicate filenames, merging genuinely distinct models and LoRAs. Windows permits both `Straße.safetensors` and `STRASSE.safetensors`; POSIX also permits ordinary case distinctions. Separator normalization now uses the platform's standard filename case normalization. Actual distinct-file tests retain both models and LoRAs; ordinary Windows case/slash aliases still deduplicate, while POSIX case distinctions remain visible. No filesystem scan or new cache is added.
+
+Full Python passes 736 tests (2 opt-in native classes skipped), all 25 frontend suites pass, and the complete isolated native browser suite passes. The same auditor approved exact HEAD `26214009cd184475a244e55e2e31494e668e9ad6` after independently repeating the actual 12-image batch with one retained preview at every event and the Windows resource-file reproduction. Its independent scheduling checks matched 1,482 plans, 28,418 events and 1,636 source-pruned replay positions. A new twelfth GPT-6 Astra xhigh agent will audit the entire repository again before release.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
 - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakMap
 - https://github.com/Comfy-Org/ComfyUI_frontend/blob/main/src/scripts/app.ts
 - https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+
+- https://docs.python.org/3/library/os.path.html#os.path.normcase
