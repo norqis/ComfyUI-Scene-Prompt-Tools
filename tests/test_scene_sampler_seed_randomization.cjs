@@ -126,6 +126,7 @@ async function testSubmissionWrapper() {
         },
         app: { graph: graphA },
         sceneBatchRun: null,
+        sceneBatchRunsById: new Map(),
         sceneBatchDetachedRuns: new Map(),
         sceneBatchSeedBase() { return nextSeed++; },
         applySceneSourceNodeNames() {},
@@ -135,6 +136,8 @@ async function testSubmissionWrapper() {
         buildSceneBatchCachedPrompt(value) { return structuredClone(value); },
         acceptSceneBatchPrompt() {},
         releaseSceneRunHandle() {},
+        prepareSceneBatchGPU: async () => "",
+        releaseSceneBatchGPU: async () => {},
         showPromptValidationErrorFromThrown() {},
         api: {
             async queuePrompt(_number, value) {
@@ -147,7 +150,7 @@ async function testSubmissionWrapper() {
             },
         },
     });
-    for (const name of ["randomizeStandardSceneSeeds", "scenePromptSamplerSeedTargets", "installSceneBatchPromptCapture"]) {
+    for (const name of ["randomizeStandardSceneSeeds", "sceneBatchRunFromPrompt", "scenePromptSamplerSeedTargets", "installSceneBatchPromptCapture"]) {
         vm.runInContext(functionSource(name), context);
     }
     context.installSceneBatchPromptCapture();
@@ -163,8 +166,10 @@ async function testSubmissionWrapper() {
     firstBatch.output["1"].inputs.run_id = "batch-a";
     context.sceneBatchRun = {
         runId: "batch-a", nodeId: "1", nextIndex: 0, firstApiPending: true,
+        firstPromptSnapshot: firstBatch,
         samplerSeedTargets: runATargets,
     };
+    context.sceneBatchRunsById.set("batch-a", context.sceneBatchRun);
     context.app.graph = { get _nodes() { throw new Error("batch must not inspect the active tab"); } };
     await context.api.queuePrompt(0, firstBatch);
     const cachedBatch = context.sceneBatchRun.cachedPrompt;
@@ -181,6 +186,7 @@ async function testSubmissionWrapper() {
     assert.notEqual(sent.at(-1).output["10"].inputs.seed, sent.at(-2).output["10"].inputs.seed,
         "detached submissions also retain their captured targets");
     context.sceneBatchDetachedRuns.clear();
+    context.sceneBatchRunsById.clear();
     context.app.graph = graphA;
     for (const control of ["fixed", "increment", "decrement"]) {
         await context.api.queuePrompt(0, prompt(77, 88, control));

@@ -387,6 +387,80 @@ window.__sceneSeedRuntimeTest = {
         nativeRunChecks = false;
         await page.unroute('**/prompt', allowPreviewQueue);
     }
+    let releaseBatchPost;
+    const batchPostGate = new Promise(resolveGate => { releaseBatchPost = resolveGate; });
+    const collisionRequests = [];
+    const allowCollisionQueue = async route => {
+        collisionRequests.push(route.request().postDataJSON());
+        if (collisionRequests.length === 1) await batchPostGate;
+        await route.continue();
+    };
+    await page.route('**/prompt', allowCollisionQueue);
+    nativeRunChecks = true;
+    try {
+        const ids = await page.evaluate(async () => {
+            const app = window.app; app.graph.clear();
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const set = (node, name, value) => { node.widgets.find(widget => widget.name === name).value = value; };
+            const connect = (source, slot, target, name) => source.connect(slot, target, target.inputs.findIndex(input => input.name === name));
+            const input = add('ScenePresetInput'), prompt = add('ScenePrompter'), output = add('ScenePresetOutput');
+            set(prompt, 'positive_base', 'independent_execution');
+            connect(input, 0, prompt, 'scene_prompt'); connect(prompt, 0, output, 'scene_prompt');
+            const graph = await app.graphToPrompt();
+            const response = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ preset_id: 'native-normal-during-batch', output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow }) });
+            if (!response.ok) throw new Error(await response.text());
+            app.graph.clear();
+            const reference = add('ScenePresetReference'), count = add('ScenePromptCounter');
+            const expand = add('ScenePrompterExpand'), preview = add('PreviewAny');
+            set(reference, 'preset_id', 'native-normal-during-batch'); set(count, 'count', 2);
+            await window.__sceneSeedRuntimeTest.refreshPresetReference(reference);
+            connect(reference, 0, count, 'scene_prompt'); connect(count, 0, expand, 'scene_prompt'); connect(expand, 0, preview, 'source');
+            expand.widgets.find(widget => widget.sceneRole === 'expand_run_all').callback();
+            return { reference: reference.id, expand: expand.id, preview: preview.id };
+        });
+        const deadline = Date.now() + 30_000;
+        while (!collisionRequests.length && Date.now() < deadline) await new Promise(resolveTimer => setTimeout(resolveTimer, 50));
+        assert.equal(collisionRequests.length, 1, 'the first batch POST is held before normal Queue');
+        const ownedRunId = collisionRequests[0].prompt[String(ids.expand)].inputs.run_id;
+        const ownedHandle = collisionRequests[0].prompt[String(ids.reference)].inputs.run_handle;
+        const before = runRequests.length;
+        const ordinary = await page.evaluate(async () => {
+            const { api } = await import('/scripts/api.js');
+            return api.queuePrompt(0, await window.app.graphToPrompt());
+        });
+        assert.equal(runRequests.slice(before).filter(path => path.endsWith('/prepare')).length, 1);
+        const ordinaryPrompt = collisionRequests[1].prompt;
+        assert.equal(ordinaryPrompt[String(ids.expand)].inputs.run_id, '');
+        assert(ordinaryPrompt[String(ids.reference)].inputs.run_handle);
+        assert.notEqual(ordinaryPrompt[String(ids.reference)].inputs.run_handle, ownedHandle);
+        assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'run_id').value, ids.expand), ownedRunId);
+        let ordinaryHistory;
+        const ordinaryDeadline = Date.now() + 30_000;
+        while (Date.now() < ordinaryDeadline) {
+            ordinaryHistory = (await (await fetch(`${url}/history/${ordinary.prompt_id}`)).json())[ordinary.prompt_id];
+            if (ordinaryHistory?.status) break;
+            await new Promise(resolveTimer => setTimeout(resolveTimer, 50));
+        }
+        assert.equal(ordinaryHistory?.status?.status_str, 'success', JSON.stringify(ordinaryHistory?.status));
+        assert.deepEqual(ordinaryHistory.outputs[String(ids.preview)].text, ['independent_execution']);
+        releaseBatchPost();
+        await page.waitForFunction(id => !window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'run_id').value,
+            ids.expand, { timeout: 30_000 });
+        assert.equal(collisionRequests.length, 3, 'ordinary Queue does not consume either batch iteration');
+        assert.equal(collisionRequests[2].prompt[String(ids.expand)].inputs.run_id, ownedRunId);
+        assert.equal(collisionRequests[2].prompt[String(ids.expand)].inputs.run_handle, ownedHandle);
+        const histories = await (await fetch(`${url}/history`)).json();
+        const batchHistories = Object.values(histories).filter(history => history.prompt[2][String(ids.expand)]?.inputs?.run_id === ownedRunId);
+        assert.equal(batchHistories.length, 2);
+        assert(batchHistories.every(history => history.status.status_str === 'success'));
+        assert(batchHistories.every(history => history.outputs[String(ids.preview)].text[0] === 'independent_execution'));
+        console.log('real ComfyUI ordinary Queue during an active batch prepares independently and both Preset batch iterations still succeed');
+    } finally {
+        releaseBatchPost();
+        nativeRunChecks = false;
+        await page.unroute('**/prompt', allowCollisionQueue);
+    }
     const screenshotDirectory = process.env.SCENE_BROWSER_SCREENSHOTS_DIR || resolve(tmpdir(), 'scene-prompt-civitai-review');
     await mkdir(screenshotDirectory, { recursive: true });
     const nativeCanvasCache = await page.evaluate(() => {

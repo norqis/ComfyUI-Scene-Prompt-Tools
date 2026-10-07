@@ -9213,7 +9213,7 @@ function sceneBatchRunFromPrompt(prompt) {
         }
         const runId = String(promptNode.inputs?.run_id || "");
         const run = sceneBatchRunsById.get(runId) || sceneBatchDetachedRuns.get(runId);
-        if (run) {
+        if (run && (prompt === run.firstPromptSnapshot || prompt === run.cachedPrompt)) {
             return run;
         }
     }
@@ -10172,6 +10172,9 @@ function installSceneBatchPromptCapture() {
             || (typeof sceneWorkflowFromPrompt === "function" ? sceneWorkflowFromPrompt(prompt) : null);
         if (!submissionRun) {
             syncSceneMatrixPromptInputs(prompt);
+            for (const node of Object.values(prompt?.output || {})) {
+                if (node?.class_type === "ScenePrompterExpand" && node.inputs) node.inputs.run_id = "";
+            }
         }
         const samplerSeedTargets = scenePromptSamplerSeedTargets(prompt);
         applySceneSourceNodeNames(prompt, { onlyMissing: true });
@@ -10181,19 +10184,8 @@ function installSceneBatchPromptCapture() {
             const prepared = await prepareSceneRunContext(prompt);
             preparedRunHandle = String(prepared?.run_handle || "");
         }
-        let run = sceneBatchRun;
-        let expandPrompt = prompt?.output?.[String(run?.nodeId)];
-        const matchesActivePlan = !!run?.firstApiPending
-            && String(expandPrompt?.inputs?.run_id || "") === run.runId;
-        if (!matchesActivePlan) {
-            const detachedEntry = Object.values(prompt?.output || {}).find((promptNode) => (
-                promptNode?.class_type === "ScenePrompterExpand"
-                && sceneBatchDetachedRuns.has(String(promptNode.inputs?.run_id || ""))
-            ));
-            const detachedRunId = String(detachedEntry?.inputs?.run_id || "");
-            run = sceneBatchDetachedRuns.get(detachedRunId) || run;
-            expandPrompt = detachedEntry || expandPrompt;
-        }
+        const run = submissionRun;
+        const expandPrompt = prompt?.output?.[String(run?.nodeId)];
         const matchesFirstBatchPrompt = !!run?.firstApiPending
             && run.nextIndex === 0
             && expandPrompt?.class_type === "ScenePrompterExpand"

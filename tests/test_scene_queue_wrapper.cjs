@@ -41,6 +41,7 @@ const context = {
     sceneRunHandlesByPromptId: new Map(),
     sceneRunTerminalPromptIds: new Map(),
     sceneBatchTerminalEvents: new Map(),
+    scenePromptSubmissionsById: new Map(),
     SCENE_RUN_TERMINAL_RETENTION_MS: 10 * 60 * 1000,
     prepared: 0,
     queued: 0,
@@ -235,12 +236,13 @@ context.installSceneBatchPromptCapture();
     assert.equal(standardScene.received.output["5"].inputs.seed_base, 123456, "normal Queue shares a fresh positive seed");
     assert.equal(standardScene.received.output["5"].inputs.seed_base_literal, false);
 
-    const continuousScene = await context.api.queuePrompt(0, { output: {
+    const importedScene = await context.api.queuePrompt(0, { output: {
         "6": { class_type: "ScenePrompterExpand", inputs: {
             current_index: 3, run_id: "continuous-run", seed_base: 42, seed_base_literal: false,
         } },
     } });
-    assert.equal(continuousScene.received.output["6"].inputs.seed_base, 42, "continuous runs keep their per-batch seed");
+    assert.equal(importedScene.received.output["6"].inputs.run_id, "", "a serialized run ID does not establish batch ownership");
+    assert.equal(importedScene.received.output["6"].inputs.seed_base, 123456, "imported run IDs do not freeze ordinary seeds");
 
     for (const name of ["applySceneRunHandle", "prepareSceneRunContext"]) {
         vm.runInContext(functionSource(name), context);
@@ -319,17 +321,41 @@ context.installSceneBatchPromptCapture();
         }
     }
     for (const detached of [false, true]) {
-        const run = { runId: "owned-run", runHandle: "owned-snapshot", samplerSeedTargets: [], firstApiPending: false };
+        const run = { runId: "owned-run", nodeId: 20, runHandle: "owned-snapshot", samplerSeedTargets: [], firstApiPending: true, nextIndex: 0 };
+        run.firstPromptSnapshot = { output: {
+            10: { class_type: "ScenePresetReference", inputs: { preset_id: "saved", run_handle: run.runHandle } },
+            20: { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["10", 0], run_id: run.runId, current_index: 0, seed_base: 11, run_handle: run.runHandle } },
+        } };
         (detached ? context.sceneBatchDetachedRuns : context.sceneBatchRunsById).set(run.runId, run);
         context.sceneBatchRun = detached ? null : run;
+        const normal = structuredClone(run.firstPromptSnapshot);
+        normal.output["10"].inputs.run_handle = "";
+        normal.output["20"].inputs.run_handle = "";
+        normal.output["20"].inputs.current_index = 2;
+        const ownedBefore = JSON.stringify(run.firstPromptSnapshot), beforeNormal = preparations;
+        const normalResult = await context.api.queuePrompt(0, normal);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(preparations, beforeNormal + 1, "a fresh normal prompt cannot borrow a live batch merely by run_id");
+        assert.equal(normalResult.received.output["20"].inputs.run_id, "");
+        assert.equal(normalResult.received.output["20"].inputs.current_index, 2, "normal generation keeps its selected index");
+        assert.notEqual(normalResult.received.output["20"].inputs.seed_base, 11);
+        assert(Object.values(normalResult.received.output).every(node => node.inputs.run_handle === `fresh-${preparations}`));
+        assert.equal(context.sceneRunHandlesByPromptId.get(normalResult.prompt_id), `fresh-${preparations}`);
+        assert.equal(context.scenePromptSubmissionsById.get(normalResult.prompt_id).runId, "");
+        context.releaseCompletedSceneRun(normalResult);
+        assert.equal(context.released.at(-1), `fresh-${preparations}`);
+        assert.equal(run.firstApiPending, true, "normal Queue does not consume the batch's first submission");
+        assert.equal(run.cachedPrompt, undefined);
+        assert.equal(JSON.stringify(run.firstPromptSnapshot), ownedBefore);
         const before = preparations;
         for (let index = 0; index < 3; index++) {
-            const queued = await context.api.queuePrompt(0, { output: {
-                10: { class_type: "ScenePresetReference", inputs: { preset_id: "saved", run_handle: run.runHandle } },
-                20: { class_type: "ScenePrompterExpand", inputs: { run_id: run.runId, current_index: index, run_handle: run.runHandle } },
-            } });
+            run.nextIndex = index;
+            const prompt = index ? run.cachedPrompt : run.firstPromptSnapshot;
+            prompt.output["20"].inputs.current_index = index;
+            const queued = await context.api.queuePrompt(0, prompt);
             assert.equal(preparations, before, "owned batch iterations reuse their captured preparation");
-            assert.deepEqual(Object.values(queued.received.output).map(node => node.inputs.run_handle), [run.runHandle, run.runHandle]);
+            assert(Object.values(queued.received.output).every(node => node.inputs.run_handle === run.runHandle));
+            assert.equal(queued.received.output["20"].inputs.run_id, run.runId);
         }
         context.sceneBatchRun = null; context.sceneBatchRunsById.clear(); context.sceneBatchDetachedRuns.clear();
     }

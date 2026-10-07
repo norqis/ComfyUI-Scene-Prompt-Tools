@@ -139,7 +139,8 @@ for (const initial of [false, true]) {
     // Its settings are captured at the click, before a FIFO wait in another tab.
     settings["ScenePrompt.ReleaseLLMBeforeImage"] = !initial;
     context.sceneBatchRun = run;
-    await api.queuePrompt(0, continuousPrompt(run));
+    run.firstPromptSnapshot = continuousPrompt(run);
+    await api.queuePrompt(0, run.firstPromptSnapshot);
     assert.equal(calls.filter(({ path }) => path.endsWith("gpu/prepare")).length, initial ? 1 : 0);
     if (initial) {
         assert.equal(run.cachedPrompt.extra_data.scene_gpu_policy, "policy-1", "first cached snapshot carries the policy");
