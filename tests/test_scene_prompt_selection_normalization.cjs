@@ -4,16 +4,18 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "web", "scene_prompt_ui.js"), "utf8");
+const stateSource = fs.readFileSync(path.join(__dirname, "..", "web", "scene_prompt_state.js"), "utf8");
 
 function functionSource(name) {
-    const start = source.indexOf(`function ${name}(`);
+    const code = name === "normalizeMissingPartIndexes" ? stateSource : source;
+    const start = code.indexOf(`function ${name}(`);
     assert.notEqual(start, -1, `Missing function: ${name}`);
-    const bodyStart = source.indexOf(") {", start);
+    const bodyStart = code.indexOf(") {", start);
     assert.notEqual(bodyStart, -1, `Missing function body: ${name}`);
     let depth = 0;
-    for (let index = bodyStart + 2; index < source.length; index += 1) {
-        if (source[index] === "{") depth += 1;
-        if (source[index] === "}" && --depth === 0) return source.slice(start, index + 1);
+    for (let index = bodyStart + 2; index < code.length; index += 1) {
+        if (code[index] === "{") depth += 1;
+        if (code[index] === "}" && --depth === 0) return code.slice(start, index + 1);
     }
     throw new Error(`Unclosed function: ${name}`);
 }
@@ -48,6 +50,7 @@ for (const name of [
     "weightForStorage",
     "splitPromptParts",
     "itemPromptParts",
+    "normalizeMissingPartIndexes",
     "normalizedSelectedParts",
     "itemForState",
     "itemForEditedState",
@@ -191,6 +194,32 @@ assert.deepEqual(
     "reordering and additions preserve selected parts",
 );
 
+for (const [before, after, expected] of [
+    ["alpha, beta", "beta, gamma", [{ index: 2, text: "alpha", missing: true, weight: 1.3 }, { index: 0, text: "beta", weight: 1.2 }]],
+    ["alpha, alpha", "beta, alpha", [{ index: 1, text: "alpha", weight: 1.3 }, { index: 2, text: "alpha", missing: true, weight: 1.2 }]],
+]) {
+    const previous = { ...candidate("colliding", "Parts", before), selected_parts: before.split(", ").map((text, index) => ({ index, text, weight: index ? 1.2 : 1.3 })) };
+    const edited = context.itemForEditedState(candidate("colliding", "Parts", after), previous);
+    assert.deepEqual(JSON.parse(JSON.stringify(edited.selected_parts)), expected, "missing and current occurrences keep independent identities");
+    assert.deepEqual(JSON.parse(JSON.stringify(context.itemForState(edited).selected_parts)), expected, "unchanged reads preserve missing occurrences");
+    const restored = context.itemForEditedState(candidate("colliding", "Parts", before), edited);
+    assert.deepEqual(JSON.parse(JSON.stringify(restored.selected_parts)), previous.selected_parts, "restoring removed repeated words preserves occurrence weights");
+}
+for (const parts of [
+    [{ index: 1, text: "alpha", weight: 1.2 }],
+    [{ index: 1, text: "alpha", weight: 1.2 }, { index: 0, text: "alpha", weight: 1.3 }],
+]) {
+    const previous = { ...candidate("occurrences", "Parts", "alpha, alpha"), selected_parts: parts };
+    const edited = context.itemForEditedState(candidate("occurrences", "Parts", "beta, alpha"), previous);
+    assert.equal(edited.selected_parts[0].missing, true);
+    const unchanged = context.itemForState(edited);
+    assert.deepEqual(JSON.parse(JSON.stringify(unchanged.selected_parts)), JSON.parse(JSON.stringify(edited.selected_parts)));
+    const unrelated = context.itemForEditedState(candidate("occurrences", "Parts", "gamma, alpha"), edited);
+    assert.equal(unrelated.selected_parts[0].missing, true, "an unrelated edit does not restore an absent occurrence");
+    const restored = context.itemForEditedState(candidate("occurrences", "Parts", "alpha, alpha"), unrelated);
+    assert.deepEqual(JSON.parse(JSON.stringify(restored.selected_parts)), parts);
+}
+
 const partWrites = [];
 const partContext = {
     Number,
@@ -222,6 +251,7 @@ for (const name of [
     "splitPromptParts",
     "itemPromptParts",
     "partKey",
+    "normalizeMissingPartIndexes",
     "normalizedSelectedParts",
     "itemForState",
     "selectedItems",

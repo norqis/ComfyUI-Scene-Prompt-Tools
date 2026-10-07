@@ -382,6 +382,17 @@ def _validate_selection_item(item, category, label):
             _validate_selected_part(part, prompt_parts, f"{label} selected_parts[{index}]")
             for index, part in enumerate(item["selected_parts"])
         ]
+        used = {part["index"] for part in parts if not part.get("missing")}
+        next_index = len(prompt_parts)
+        for part in parts:
+            if not part.get("missing"):
+                continue
+            if part["index"] in used:
+                while next_index in used:
+                    next_index += 1
+                part["index"] = next_index
+                next_index += 1
+            used.add(part["index"])
         if len({part["index"] for part in parts}) != len(parts):
             raise ValueError(f"{label} selected_parts must not repeat an index.")
         result["selected_parts"] = parts

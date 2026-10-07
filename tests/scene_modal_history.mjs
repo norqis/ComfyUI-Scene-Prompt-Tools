@@ -1,5 +1,59 @@
 import assert from "node:assert/strict";
 
+export async function verifyCandidateReloadSelections(page) {
+    let candidate;
+    const items = route => route.fulfill({ json: { items: [candidate] } });
+    const saved = route => route.fulfill({ json: { saved_prompts: [] } });
+    await page.route("**/scene_prompt/items*", items);
+    await page.route("**/scene_prompt/saved_prompts*", saved);
+    try {
+        for (const [side, before, after, parts, expected] of [
+            ["positive", "alpha, beta", "beta, gamma", [{ index: 0, text: "alpha", weight: 1.3 }, { index: 1, text: "beta", weight: 1.2 }], "(beta:1.2)"],
+            ["negative", "alpha, alpha", "beta, alpha", [{ index: 1, text: "alpha", weight: 1.2 }], ""],
+        ]) {
+            candidate = { id: "reload-parts", label: "Reload Parts", prompt: before, category_path: ["Modal Undo Runtime"], category_key: "Modal Undo Runtime", category_label: "Modal Undo Runtime" };
+            const ids = await page.evaluate(async ({ candidate, parts, side }) => {
+                const app = window.app; app.graph.clear();
+                const source = window.LiteGraph.createNode("ScenePrompter"), text = window.LiteGraph.createNode("ScenePromptToText");
+                app.graph.add(source); app.graph.add(text); source.connect(0, text, text.inputs.findIndex(input => input.name === "scene_prompt"));
+                source.widgets.find(widget => widget.name === side + "_json").value = JSON.stringify({ version: 1, categories: { "Modal Undo Runtime": [{ ...candidate, selected_parts: parts }] } });
+                await app.loadGraphData(app.graph.serialize(), true, true);
+                await window.__sceneSeedRuntimeTest.reloadCandidateItems();
+                await window.__sceneSeedRuntimeTest.openCandidatePicker(source.id, side);
+                return { source: source.id, text: text.id };
+            }, { candidate, parts, side });
+            const snapshot = () => page.evaluate(async ({ ids, side }) => {
+                const graph = await window.app.graphToPrompt();
+                const response = await fetch("/scene_test/preset_metadata", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph, text_id: String(ids.text) }) });
+                if (!response.ok) throw new Error(await response.text());
+                const state = JSON.parse(graph.output[String(ids.source)].inputs[side + "_json"]);
+                return { parts: state.categories["Modal Undo Runtime"][0].selected_parts, text: (await response.json()).text[side === "positive" ? 0 : 1] };
+            }, { ids, side });
+            const original = await snapshot();
+            candidate = { ...candidate, prompt: after };
+            await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
+            await page.locator('.pc-candidate[title="' + after + '"]').waitFor();
+            const edited = await snapshot();
+            assert.equal(edited.text, expected);
+            assert.equal(new Set(edited.parts.map(part => part.index)).size, parts.length);
+            assert(edited.parts.some(part => part.missing));
+            assert.deepEqual(edited.parts.map(part => part.weight), parts.map(part => part.weight));
+            await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
+            await page.locator('.pc-candidate[title="' + after + '"]').waitFor();
+            assert.deepEqual(await snapshot(), edited, "unchanged reload never revives a removed occurrence");
+            candidate = { ...candidate, prompt: before };
+            await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
+            await page.locator('.pc-candidate[title="' + before + '"]').waitFor();
+            assert.deepEqual(await snapshot(), original, "restoring the candidate restores the selected occurrence weights");
+            await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+        }
+    } finally {
+        await page.unroute("**/scene_prompt/items*", items);
+        await page.unroute("**/scene_prompt/saved_prompts*", saved);
+    }
+    console.log("real ComfyUI candidate reload preserves partial occurrence identities through deletion, repeated reload, restoration and backend ToText");
+}
+
 export async function verifySceneModalHistory(page) {
     await page.evaluate(async () => {
         const app = window.app;

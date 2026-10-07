@@ -30,6 +30,20 @@ for (const name of ["__proto__", "constructor", "toString"]) {
     assert.deepEqual(Object.keys(restored.categories), [name]);
 }
 assert.equal(parseSelectionState({ version: 1, categories: { Category: [selectionItem] } }).categories.Category[0].label, "A");
+for (const [prompt, parts] of [
+    ["beta, gamma", [{ index: 0, text: "alpha", missing: true, weight: 1.3 }, { index: 0, text: "beta", weight: 1.2 }]],
+    ["beta, alpha", [{ index: 1, text: "alpha", weight: 1.3 }, { index: 1, text: "alpha", missing: true, weight: 1.2 }]],
+]) {
+    const value = { version: 1, categories: { Category: [{ ...selectionItem, prompt, selected_parts: parts }] } };
+    const parsed = parseSelectionState(value);
+    const result = parsed.categories.Category[0].selected_parts;
+    assert.equal(result.find((part) => part.missing).index, 2);
+    assert.deepEqual(result.map(({ text, weight }) => [text, weight]), parts.map(({ text, weight }) => [text, weight]));
+    assert.deepEqual(parseSelectionState(serializeSelectionState(parsed)), parsed, "repaired stored selections remain stable");
+}
+assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{ ...selectionItem,
+    selected_parts: [selectionItem.selected_parts[0], selectionItem.selected_parts[0]],
+}] } }), /repeat an index/u, "repeated active selections remain invalid");
 for (const weight of [-20, 50]) {
     const weighted = { ...selectionItem, selected_parts: [{ index: 0, text: "alpha", weight }] };
     assert.equal(parseSelectionState({ version: 1, categories: { Category: [weighted] } }).categories.Category[0].selected_parts[0].weight, weight);

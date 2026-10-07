@@ -2567,10 +2567,15 @@ NODE_CLASS_MAPPINGS = {
     def test_http_random_output_nested_hundred_percent_count_and_png_replay(self):
         self._assert_random_route_count_and_png("ScenePromptRandomRouteOutput")
 
-    def _assert_random_route_count_and_png(self, join_type):
+    def test_http_linked_random_controls_prepare_and_replay_selected_png(self):
+        self._assert_random_route_count_and_png("ScenePromptRandomRouteOutput", linked=True)
+
+    def _assert_random_route_count_and_png(self, join_type, linked=False):
         from PIL import Image
         import hashlib
         image_path = "random-output" if join_type == "ScenePromptRandomRouteOutput" else "random-route"
+        if linked:
+            image_path += "-linked"
         marker = self.base / (image_path + "-result.json")
         graph = {
             "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "base"}},
@@ -2594,6 +2599,10 @@ NODE_CLASS_MAPPINGS = {
                 "scene_prompt": ["2", 0], "weights_json": json.dumps([10000] + [0] * 9), "preserve_join": True}}
             graph["13"] = {"class_type": "ScenePromptRandomRouteOutput", "inputs": {"scene_prompt1": ["12", 0]}}
             graph["3"]["inputs"]["scene_prompt"] = ["13", 0]
+        if linked:
+            graph["14"] = {"class_type": "PrimitiveString", "inputs": {"value": graph["2"]["inputs"]["weights_json"]}}
+            graph["15"] = {"class_type": "PrimitiveBoolean", "inputs": {"value": False}}
+            graph["2"]["inputs"].update(weights_json=["14", 0], preserve_join=["15", 0])
         workflow = _workflow_for_graph(graph)
         next(node for node in workflow["nodes"] if node["id"] == 2)["widgets_values"] = [graph["2"]["inputs"]["weights_json"]] + ([True] if join_type == "ScenePromptRandomRouteOutput" else [])
         handle, workflow = self._prepare_callback_run(graph, "7", workflow)
@@ -2626,6 +2635,9 @@ NODE_CLASS_MAPPINGS = {
                 self.assertEqual("13" in replay, labels[-1] == "route_A", "Only the selected inner Output remains in the PNG route")
             route_visual = next(node for node in replay_workflow["nodes"] if node["id"] == 2)
             self.assertEqual(route_visual["widgets_values"], [replay["2"]["inputs"]["weights_json"], True])
+            if linked:
+                self.assertTrue(all(slot["link"] is None for slot in route_visual["inputs"]
+                                    if slot["name"] in {"weights_json", "preserve_join"}))
             replay["10"]["inputs"]["path"] = image_path + "-replay"
             replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
             try:

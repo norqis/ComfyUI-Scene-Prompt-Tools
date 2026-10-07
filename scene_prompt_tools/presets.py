@@ -669,7 +669,6 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
     output_link = validation["output_link"]
     result = _scene_node_value(nodes, output_link[0], resolved, set(), user_id=user_id)
     result = _output_value(nodes, output_link, result)
-    _validate_random_route_connections(nodes, _effective_scene_closure(nodes, output_link[0]))
     if isinstance(result, dict) and result.get("random_guards"):
         raise ScenePresetError("Scene Prompt Random Route Input の分岐をPreset内のOutputまたはQueueで合流してください。")
 
@@ -1014,27 +1013,6 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     return _scene_prompt_closure(nodes, source[0]), source
 
 
-def _validate_random_route_connections(nodes, scene_nodes):
-    for node_id, node in scene_nodes.items():
-        if node.get("class_type") != "ScenePromptRandomRoute":
-            continue
-        weights = ScenePromptRandomRoute.INPUT_TYPES()["required"]["weights_json"][1]["default"]
-        raw = _node_inputs(node).get("weights_json", weights)
-        from .nodes import _random_weights_json
-        values = _random_weights_json(raw)
-        connected = {
-            value[1] for other in nodes.values() if isinstance(other, dict)
-            for value in _node_inputs(other).values()
-            if is_link(value) and str(value[0]) == str(node_id)
-        }
-        missing = [str(index + 1) for index, weight in enumerate(values) if weight and index not in connected]
-        if missing:
-            raise ScenePresetResolutionError(
-                f"Scene Prompt Random Route Input #{node_id}: 出力{', '.join(missing)}が未接続です。",
-                str(node_id),
-            )
-
-
 def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
     """Resolve an arbitrarily large Preset DAG without Python recursion limits."""
     root_id = _clean_preset_id(preset_id)
@@ -1213,6 +1191,8 @@ def _scene_node_value_impl(
         if class_type != "ScenePromptCallback":
             kwargs.setdefault("source_node_name", _source_node_name(node))
     if class_type == "ScenePromptRandomRoute":
+        kwargs["unique_id"] = node_id
+        kwargs["prompt"] = nodes
         path = "/".join(part.split("@", 1)[1] for part in preset_stack)
         kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
         if path:
@@ -1321,7 +1301,6 @@ def _evaluate_preset_scene(
     input_id = validation["input_id"]
     output_link = validation["output_link"]
     input_values = {input_id: (upstream if upstream is not None else seed_plan(), *vector, vector)}
-    _validate_random_route_connections(nodes, _effective_scene_closure(nodes, output_link[0], {input_id: vector}))
     result = _scene_node_value(
         nodes,
         output_link[0],
@@ -1387,8 +1366,6 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
         )
         if source is not None:
             plan = _output_value(scene_nodes, source, plan)
-        effective_nodes = _effective_scene_closure(nodes, source[0]) if source is not None else {}
-        _validate_random_route_connections(nodes, effective_nodes)
         if plan["random_guards"]:
             guard = plan["random_guards"][-1]
             raise ScenePresetError(f"Scene Prompt Random Route Input {guard['gate_id']} の分岐をOutputまたはQueueで合流してください。")

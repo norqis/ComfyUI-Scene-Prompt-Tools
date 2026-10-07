@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { chromium } from "playwright";
 import { parseSelectionState } from "../web/scene_prompt_state.js";
-import { verifySceneModalHistory } from "./scene_modal_history.mjs";
+import { verifySceneModalHistory, verifyCandidateReloadSelections } from "./scene_modal_history.mjs";
 
 if (process.env.RUN_REAL_COMFYUI_BROWSER_SMOKE !== "1") {
     console.log("real ComfyUI browser smoke skipped");
@@ -299,7 +299,7 @@ window.__sceneSeedRuntimeTest = {
     countPreview(node) { return sceneSchedulePrefix(sceneScheduleForNode(node), 40).map(entry => entry.parts.join("")); },
     presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
-    openCandidatePicker(id) { return openPromptCandidatePopup(app.graph.getNodeById(id), ["Modal Undo Runtime"], { stateWidgetName: "positive_json" }); },
+    openCandidatePicker(id, side = "positive") { return openPromptCandidatePopup(app.graph.getNodeById(id), ["Modal Undo Runtime"], { stateWidgetName: side + "_json" }); },
     reloadCandidateItems() { return loadPromptItems(true); },
     writeSelection(node, state) { return writeState(node, state, { stateWidgetName: "positive_json" }); },
     async refreshPresetReference(node) { await loadScenePresetList(true); refreshScenePresetReference(node); },
@@ -3254,6 +3254,7 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(nativeWeightedLine.negative_parts, ["(blocked:.1)"]);
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
     await verifySceneModalHistory(page);
+    await verifyCandidateReloadSelections(page);
     await page.waitForTimeout(100);
     assert.deepEqual(pageErrors, []);
     console.log("real ComfyUI local metadata HTTP, model/LoRA dialogs, retry, red links and weighted Matrix input preservation passed");

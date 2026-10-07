@@ -13,6 +13,7 @@ import {
     createMatrixState,
     createSelectionState,
     formatSceneExpandCounts,
+    normalizeMissingPartIndexes,
     parseMatrixLine,
     parseMatrixState,
     parseSelectionState,
@@ -1156,9 +1157,10 @@ function normalizedSelectedParts(item, source = item) {
         throw new Error("選択済みのプロンプト要素が空です。");
     }
     const sourceParts = itemPromptParts(source);
+    const samePrompt = item.prompt === source.prompt;
     const used = new Set();
     const fallbackOccurrences = new Map();
-    return source.selected_parts.map((raw) => {
+    return normalizeMissingPartIndexes(source.selected_parts.map((raw) => {
         if (!raw || typeof raw !== "object" || !Number.isInteger(raw.index) || raw.index < 0
             || typeof raw.text !== "string" || !raw.text.trim()) {
             throw new Error("選択済みのプロンプト要素が不正です。");
@@ -1175,13 +1177,14 @@ function normalizedSelectedParts(item, source = item) {
                 .length - 1;
         }
         if (occurrence === null) {
-            occurrence = fallbackOccurrences.get(text) || 0;
+            const missingOccurrence = fallbackOccurrences.get(text) || 0;
+            occurrence = sourceParts.filter((part) => part.text === text).length + missingOccurrence;
+            fallbackOccurrences.set(text, missingOccurrence + 1);
         }
-        fallbackOccurrences.set(text, occurrence + 1);
 
-        let matched = null;
+        let matched = samePrompt && !raw.missing && parts[raw.index]?.text === text && !used.has(raw.index) ? parts[raw.index] : null;
         let seen = -1;
-        for (const part of parts) {
+        for (const part of samePrompt ? [] : parts) {
             if (part.text !== text) {
                 continue;
             }
@@ -1201,7 +1204,7 @@ function normalizedSelectedParts(item, source = item) {
         const stored = weightForStorage(raw.weight ?? 1);
         if (stored !== null) selectedPart.weight = stored;
         return selectedPart;
-    });
+    }), parts.length);
 }
 
 function itemHasPartSelection(item) {

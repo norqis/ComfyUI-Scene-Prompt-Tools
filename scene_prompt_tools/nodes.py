@@ -681,6 +681,7 @@ def _selected_random_routes(infos):
 def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
     selected = _selected_random_routes(infos)
     aliases = source_aliases if isinstance(source_aliases, dict) else {}
+    replaced_links = set()
     for node_id, node in prompt.items():
         if not isinstance(node, dict) or node.get("class_type") != "ScenePromptRandomRoute":
             continue
@@ -688,15 +689,15 @@ def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
         if not arms or len(arms) != 1:
             continue
         arm = next(iter(arms))
-        original_weights = _random_weights_json(node.get("inputs", {}).get("weights_json", DEFAULT_RANDOM_WEIGHTS_JSON))
         weights = [10000 if index == arm else 0 for index in range(10)]
         encoded = json.dumps(weights, separators=(",", ":"))
         node.setdefault("inputs", {})["weights_json"] = encoded
-        if sum(bool(weight) for weight in original_weights) > 1:
-            node["inputs"]["preserve_join"] = True
+        node["inputs"]["preserve_join"] = True
         if isinstance(workflow, dict):
             for visual in workflow.get("nodes", []):
                 if isinstance(visual, dict) and str(visual.get("id")) == str(node_id):
+                    replaced_links.update(slot["link"] for slot in visual.get("inputs", [])
+                                          if slot.get("name") in {"weights_json", "preserve_join"} and slot.get("link") is not None)
                     named = visual.get("widgets_values_named")
                     if isinstance(named, dict):
                         named.update(weights_json=encoded, preserve_join=bool(node["inputs"].get("preserve_join", False)))
@@ -707,6 +708,10 @@ def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
                             widgets.append(bool(node["inputs"].get("preserve_join", False)))
                         else:
                             widgets[1] = bool(node["inputs"].get("preserve_join", False))
+    if replaced_links:
+        workflow["links"] = [link for link in workflow.get("links", []) if _workflow_link_id(link) not in replaced_links]
+        _prune_workflow_node_links(workflow["nodes"], {_workflow_link_id(link) for link in workflow["links"]})
+        _prune_workflow_reroutes(workflow)
 
 
 def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_aliases=None):

@@ -118,6 +118,20 @@ function parseSelectedPart(value, promptParts, label) {
     return result;
 }
 
+export function normalizeMissingPartIndexes(parts, promptPartCount) {
+    const used = new Set(parts.filter((part) => !part.missing).map((part) => part.index));
+    let nextIndex = promptPartCount;
+    for (const part of parts) {
+        if (!part.missing) continue;
+        if (used.has(part.index)) {
+            while (used.has(nextIndex)) nextIndex += 1;
+            part.index = nextIndex++;
+        }
+        used.add(part.index);
+    }
+    return parts;
+}
+
 function parseSelectionItem(value, category, label) {
     if (!isPlainObject(value)) {
         throw new Error(`${label} must be an object.`);
@@ -168,7 +182,7 @@ function parseSelectionItem(value, category, label) {
             throw new Error(`${label} selected_parts must be a non-empty list.`);
         }
         const promptParts = splitPromptParts(prompt);
-        const parts = value.selected_parts.map((part, index) => parseSelectedPart(part, promptParts, `${label} selected_parts[${index}]`));
+        const parts = normalizeMissingPartIndexes(value.selected_parts.map((part, index) => parseSelectedPart(part, promptParts, `${label} selected_parts[${index}]`)), promptParts.length);
         if (new Set(parts.map((part) => part.index)).size !== parts.length) {
             throw new Error(`${label} selected_parts must not repeat an index.`);
         }

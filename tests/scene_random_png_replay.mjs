@@ -46,6 +46,31 @@ export async function testRandomPngReplay(page) {
         };
 
         const switches = [];
+        const linkedRandom = [];
+        for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) {
+            app.graph.clear();
+            const weights = add('PrimitiveString'), preserve = add('PrimitiveBoolean'), random = add('ScenePromptRandomRoute');
+            const a = add('ScenePrompter'), b = add('ScenePrompter'), join = add('ScenePromptRandomRouteOutput');
+            const expand = add('ScenePrompterExpand'), image = add('TestSceneTextImage'), save = add('SceneSaveImage');
+            set(weights, 'value', JSON.stringify([5000, 5000, ...Array(8).fill(0)])); set(preserve, 'value', false);
+            for (const [source, name, type] of [[weights, 'weights_json', 'STRING'], [preserve, 'preserve_join', 'BOOLEAN']]) {
+                random.addInput(name, type, { widget: { name } }); connect(source, random, name);
+            }
+            set(a, 'positive_base', 'LINKED_RANDOM_A'); set(b, 'positive_base', 'LINKED_RANDOM_B');
+            set(expand, 'seed_base', 123); set(expand, 'timestamp_dir', false); set(save, 'metadata_mode', mode);
+            connect(random, a); connect(random, b, 'scene_prompt', 1);
+            connect(a, join, 'scene_prompt1'); connect(b, join, 'scene_prompt2'); connect(join, expand);
+            connect(expand, image, 'positive'); connect(expand, save, 'scene_info', 2); connect(image, save, 'images');
+            const graph = await app.graphToPrompt();
+            const prepared = await post('/scene_prompt/runs/prepare', { api_graph: graph, workflow: graph.workflow, expand_node_id: String(expand.id) });
+            await post('/scene_prompt/runs/release', { run_handle: prepared.run_handle });
+            let execution = await execute();
+            const rows = [execution[image.id].text];
+            await reloadPng(execution[save.id].images[0]);
+            const reloaded = await app.graphToPrompt();
+            execution = await execute(); rows.push(execution[image.id].text);
+            linkedRandom.push({ mode, rows, controls: reloaded.output[String(random.id)].inputs, total: prepared.total_batches });
+        }
         for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) {
             for (const selected of [true, false]) {
                 app.graph.clear();
@@ -127,8 +152,20 @@ export async function testRandomPngReplay(page) {
                 index: captured.output[String(first.id)].inputs.current_index,
                 weights: captured.output[String(random.id)].inputs.weights_json });
         }
-        return { random: results, switches };
+        return { random: results, switches, linkedRandom };
     });
+    for (const entry of result.linkedRandom) {
+        assert.equal(entry.total, 1);
+        assert.deepEqual(entry.rows[0], entry.rows[1], `${entry.mode}: linked Random controls preserve the selected PNG output`);
+        if (entry.mode === '生成経路ノードのみ') {
+            assert.equal(typeof entry.controls.weights_json, 'string');
+            assert.equal(JSON.parse(entry.controls.weights_json).filter(Boolean).length, 1);
+            assert.equal(entry.controls.preserve_join, true);
+        } else {
+            assert(Array.isArray(entry.controls.weights_json));
+            assert(Array.isArray(entry.controls.preserve_join));
+        }
+    }
     for (const entry of result.switches) {
         const expected = entry.selected ? 'LITERAL_SELECTED' : 'TEXT_SELECTED';
         assert.deepEqual(entry.rows.map(row => row[0]), [expected, expected], 'native PNG import preserves the actual generic Switch branch');
