@@ -246,6 +246,18 @@ All 25 frontend suites and the complete isolated native browser pass with the fi
 
 The final boundary pass found a fourth site in the same family: the Preset statistics-to-schedule bridge dropped an unresolved linked Count error when a Preset contained a strict Count. Root reproduced the failing assertion before fixing only that conversion. The error becomes a schedule error at the bridge, allowing a Preset Switch to ignore unused upstream input normally. Regression checks cover selected/ignored upstream errors, known values recovering to 12 and legitimate zero counts. The auditor completed all 20 Python modules, eight frontend modules, importer and packaging/CI with no separate additional issue; its 2.1-billion-event schedule probe retained compact memory (about 260 KB traced peak) and selected boundary/interior events successfully.
 
+The twentieth auditor approved exact HEAD `4c749d2ceda160bf01abc09d62fdeaccce6d8b49`. The final native browser and all required CI checks passed. A new twenty-first auditor then began a whole-repository audit.
+
+## Twenty-first independent full audit
+
+The new auditor confirmed another Matrix boundary in an isolated native browser: an incomplete Random join, an open positive-probability Random arm, or overflowing upstream Count followed by an all-disabled Matrix could display a plausible one-generation Queue while backend preparation failed. An unconfigured Matrix could also hide the open-arm restriction when the other Random arm joined downstream. Valid disabled Matrix controls prepared successfully.
+
+Root routes empty configured matrices through the existing statistics/schedule helpers. The schedule helper distinguishes unconfigured passthrough only after its existing upstream-error and Random checks, matching backend order. Live and Preset paths share this behavior. Preset statistics now parse Matrix data once; two unused helpers that separately reparsed the same payload were removed.
+
+Root also measured redundant normalization of already-validated cached Matrix rows. With 30 disabled rows and 500 selected items per row (about 2.54 MB), ten configured-count lookups took 310.8 ms and ten disabled-row lookups took 323.8 ms; each reparsed 300 rows. Counting now reads the cached length and disabled rows are skipped before normalization. Actual patched functions took 0.097 ms and 0.083 ms respectively, with zero row reparses and identical results. Enabled rows still return independent copies and deduplicate by ID. No cache or cap is added. The auditor independently reproduced this cost reduction with a different 1.63 MB fixture.
+
+All 25 frontend suites and the complete native browser pass. New native cases compare the actual Expand widget before API capture against backend preparation for four invalid paths and two valid zero/passthrough controls. Focused tests include Preset/live overflow propagation, unconfigured/open and inert zero-probability Random arms, and enabled-row ownership after the performance change. Independent whole-audit probes passed 600 composed schedules / 10,330 selected events and a six-trillion-event schedule with five indexed replay checks (68,508-byte traced peak, 3,177-byte serialization). Final whole coverage and exact-HEAD remediation review precede another fresh audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation

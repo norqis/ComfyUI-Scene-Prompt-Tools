@@ -88,6 +88,12 @@ for (const mapped of [false, true]) {
 }
 assert.match(ctx.sceneScheduleCount(guarded(leaf("A"), 0), 2).stats.error, /Queueで合流/u);
 assert.match(ctx.sceneScheduleMatrix(guarded(leaf("A"), 0), [{ label: "single" }]).stats.error, /Queueで合流/u);
+for (const configured of [false, true]) {
+    assert.match(ctx.sceneScheduleMatrix(guarded(leaf("A"), 0), [], configured).stats.error, /Queueで合流/u,
+        "empty and all-disabled Matrix nodes still require Random arms to be joined first");
+}
+assert.equal(ctx.sceneScheduleMatrix(leaf("A", 3), [], false).stats.total, 3, "unconfigured Matrix passes a valid plan through");
+assert.equal(ctx.sceneScheduleMatrix(leaf("A", 3), []).stats.total, 0, "all-disabled Matrix has a valid zero count");
 assert.match(ctx.sceneScheduleMerge(guarded(leaf("A"), 0), leaf("B")).stats.error, /Queueで合流/u);
 assert.match(ctx.sceneScheduleMap(ctx.sceneScheduleError("不正な確率"), (entry) => entry).stats.error,
     /不正な確率/u, "a downstream Prompt does not erase the random validation error");
@@ -106,6 +112,7 @@ for (const merge of [
 assert.equal(ctx.sceneScheduleMerge(randomJoined, leaf("B")).stats.total, 1,
     "connecting the missing arm restores a valid Merge count");
 const zeroArm = ctx.sceneSchedulePlan([], false, [{ gateId: "random-1", armIndex: 2, weights: randomWeights }]);
+assert.equal(ctx.sceneScheduleMatrix(zeroArm, [], false).stats.error, undefined, "an inert zero-probability arm stays valid");
 assert.match(queue([zeroArm], controls()).stats.error, /0%を超える出力/u,
     "a Queue containing only zero-percent arms cannot close a missing positive-probability route");
 assert.equal(queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1), zeroArm], controls()).stats.total, 1,

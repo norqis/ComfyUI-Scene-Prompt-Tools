@@ -363,8 +363,6 @@ async function testScenePresetResolution() {
         "scenePresetGraphNodes",
         "apiLink",
         "apiInput",
-        "apiMatrixEnabledCount",
-        "apiMatrixConfigured",
         "emptyScenePromptStats",
         "sceneStatNumber",
         "sceneStatProduct",

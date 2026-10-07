@@ -1652,6 +1652,69 @@ window.__sceneSeedRuntimeTest = {
         assert.doesNotMatch(result.after.label, /ランダム分岐/u);
     }
     console.log('real ComfyUI upstream Random errors survive both Merge sides and downstream Random; reconnection restores Count10');
+    nativeRunChecks = true;
+    const matrixValidation = await page.evaluate(async () => {
+        const { api } = await import('/scripts/api.js');
+        const results = [];
+        for (const mode of ['missing-disabled', 'open-disabled', 'open-unconfigured', 'overflow-disabled', 'valid-disabled', 'valid-unconfigured']) {
+            const app = window.app; app.graph.clear();
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const link = (from, slot, to, name) => from.connect(slot, to, to.inputs.findIndex(input => input.name === name));
+            const matrix = add('SceneMatrix'), queue = add('ScenePrompterQueue');
+            const valid = add('ScenePrompter'), expand = add('ScenePrompterExpand');
+            matrix.widgets.find(widget => widget.name === 'matrix_json').value = JSON.stringify({ version: 1,
+                sets: mode.endsWith('unconfigured') ? [] : [{ row_id: 'off', name: 'off', path_label: 'off', enabled: false }] });
+            let tail = matrix;
+            if (mode.startsWith('missing') || mode.startsWith('open')) {
+                const random = add('ScenePromptRandomRoute');
+                random.widgets.find(widget => widget.name === 'weights_json').value = '[5000,5000,0,0,0,0,0,0,0,0]';
+                if (mode.startsWith('missing')) {
+                    const output = add('ScenePromptRandomRouteOutput');
+                    link(random, 0, output, 'scene_prompt1'); link(output, 0, matrix, 'scene_prompt');
+                } else {
+                    link(random, 0, matrix, 'scene_prompt');
+                    if (mode.endsWith('unconfigured')) {
+                        tail = add('ScenePromptRandomRouteOutput');
+                        link(matrix, 0, tail, 'scene_prompt1'); link(random, 1, tail, 'scene_prompt2');
+                    }
+                }
+            } else {
+                const count = add('ScenePromptCounter');
+                count.widgets.find(widget => widget.name === 'count').value = mode.startsWith('overflow') ? 100_000_000 : 2;
+                if (mode.startsWith('overflow')) {
+                    const upstream = add('ScenePromptCounter');
+                    upstream.widgets.find(widget => widget.name === 'count').value = 100_000_000;
+                    link(upstream, 0, count, 'scene_prompt');
+                }
+                link(count, 0, matrix, 'scene_prompt');
+            }
+            link(tail, 0, queue, 'scene_prompt1'); link(valid, 0, queue, 'scene_prompt2'); link(queue, 0, expand, 'scene_prompt');
+            await new Promise(done => setTimeout(done, 300));
+            const widget = expand.widgets.find(item => item.sceneRole === 'expand_total_count');
+            const preview = { total: widget.sceneTotalCount, label: widget.value };
+            const prompt = await app.graphToPrompt();
+            const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST',
+                body: JSON.stringify({ api_graph: prompt, workflow: prompt.workflow, expand_node_id: String(expand.id) }) });
+            const body = await response.json();
+            if (body.run_handle) await api.fetchApi('/scene_prompt/runs/release', { method: 'POST', body: JSON.stringify({ run_handle: body.run_handle }) });
+            results.push({ mode, preview, status: response.status, body });
+        }
+        return results;
+    });
+    nativeRunChecks = false;
+    for (const result of matrixValidation) {
+        if (result.mode.startsWith('valid')) {
+            const expected = result.mode.endsWith('unconfigured') ? 3 : 1;
+            assert.equal(result.preview.total, expected, JSON.stringify(result));
+            assert.equal(result.status, 200, JSON.stringify(result));
+            assert.equal(result.body.total_batches, expected);
+        } else {
+            assert.equal(result.preview.total, null, JSON.stringify(result));
+            assert.match(result.preview.label, /ランダム分岐|Matrix|大きすぎ/u);
+            assert(result.status >= 400, JSON.stringify(result));
+        }
+    }
+    console.log('real ComfyUI empty/disabled Matrix preserves upstream errors and Random restrictions; valid zero/passthrough counts match preparation');
     const queueModeRuntime = await page.evaluate(async () => {
         const app=window.app; app.graph.clear();
         const add=type=>{const node=window.LiteGraph.createNode(type);app.graph.add(node);return node;};

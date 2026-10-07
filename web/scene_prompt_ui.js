@@ -6392,20 +6392,17 @@ function matrixLinesForNode(node) {
     };
 
     for (const rawSet of state.sets || []) {
-        const matrixLine = normalizeMatrixLine(rawSet);
-        if (matrixLine.enabled === false) {
+        if (rawSet.enabled === false) {
             continue;
         }
-        pushMatrixLine(matrixLine);
+        pushMatrixLine(normalizeMatrixLine(rawSet));
     }
 
     return sets;
 }
 
 function matrixConfiguredLineCount(node) {
-    return (readMatrixState(node).sets || [])
-        .map(normalizeMatrixLine)
-        .length;
+    return readMatrixState(node).sets.length;
 }
 
 function matrixDisplayCacheKey(node, width = null) {
@@ -7289,16 +7286,6 @@ function apiInput(node, name) {
     return node?.inputs?.[name];
 }
 
-function apiMatrixEnabledCount(node) {
-    return parseMatrixStateValue(apiInput(node, "matrix_json")).sets
-        .filter((set) => set.enabled)
-        .length;
-}
-
-function apiMatrixConfigured(node) {
-    return parseMatrixStateValue(apiInput(node, "matrix_json")).sets.length > 0;
-}
-
 function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset = null, switchValues) {
     const preset = preferredPreset || scenePresetDisplayGraphs.get(String(presetId || ""));
     const nodes = scenePresetGraphNodes(preset);
@@ -7342,9 +7329,9 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
                 result = source("scene_prompt") || sceneStatsSeed();
             } else if (node.class_type === "SceneMatrix") {
                 const base = source("scene_prompt") || sceneStatsSeed();
-                const count = apiMatrixEnabledCount(node);
-                const configured = apiMatrixConfigured(node);
-                result = count ? sceneStatsMatrix(base, count) : (configured ? emptyScenePromptStats() : base);
+                const sets = parseMatrixStateValue(apiInput(node, "matrix_json")).sets;
+                const count = sets.filter((set) => set.enabled).length;
+                result = sets.length ? sceneStatsMatrix(base, count) : base;
             } else if (node.class_type === "ScenePath") {
                 result = source("scene_prompt") || sceneStatsSeed();
             } else if (node.class_type === "SceneEmptyLatent") {
@@ -7546,13 +7533,8 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
     }
     if (isPromptMatrixNode(node)) {
         const matrixCount = matrixLinesForNode(node).length;
-        if (!matrixCount) {
-            return finish(matrixConfiguredLineCount(node) > 0
-                ? emptyScenePromptStats()
-                : (upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed()));
-        }
         const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
-        return finish(sceneStatsMatrix(base, matrixCount));
+        return finish(matrixCount || matrixConfiguredLineCount(node) ? sceneStatsMatrix(base, matrixCount) : base);
     }
     if (isScenePathNode(node)) {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
@@ -8064,10 +8046,11 @@ function sceneScheduleMap(plan, transform, latentSize = null) {
     return sceneSchedulePlan(plan.units.map(mapUnit), plan.boundary, plan.randomGuards);
 }
 
-function sceneScheduleMatrix(plan, matrixRows) {
+function sceneScheduleMatrix(plan, matrixRows, configured = true) {
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMatrixを接続してください。");
+    if (!configured) return plan;
     if (!matrixRows.length) return sceneSchedulePlan([], plan.boundary, plan.randomGuards);
     const matrixEntry = (entry, matrixRow) => {
         const label = matrixLineLabel(matrixRow);
@@ -8242,7 +8225,7 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 const configured = parseMatrixStateValue(apiInput(entry, "matrix_json")).sets;
                 const enabled = configured.filter((row) => row.enabled);
-                plan = configured.length ? sceneScheduleMatrix(base, enabled) : base;
+                plan = sceneScheduleMatrix(base, enabled, configured.length > 0);
             } else if (entry.class_type === "ScenePrompter") {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 const title = String(apiInput(entry, "prompt_name") || "Scene Prompt");
@@ -8325,8 +8308,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
     if (isPromptMatrixNode(node) && upstream && (heldUpstream || sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
         const matrixRows = matrixLinesForNode(node);
-        if (!matrixRows.length) return finish(matrixConfiguredLineCount(node) ? sceneSchedulePlan([], base.boundary) : base);
-        return finish(sceneScheduleMatrix(base, matrixRows));
+        return finish(sceneScheduleMatrix(base, matrixRows, matrixRows.length > 0 || matrixConfiguredLineCount(node) > 0));
     }
     if (upstream && (heldUpstream || sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));

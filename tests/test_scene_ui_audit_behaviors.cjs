@@ -435,6 +435,25 @@ async function testCurrentDisplayAndRasterOwnership() {
     })) });
     const matrix = { size: [340, 900], mode: 0, scenePromptRevision: 0, inputLink: "link-a", inputSource: { id: 1, mode: 0, scenePromptRevision: 0, title: "Source A" },
         widgets: [{ name: "matrix_json", value: rawMatrix("before") }], properties: {} };
+    const cachedState = stateModule.parseMatrixState(matrix.widgets[0].value);
+    cachedState.sets.forEach(row => { row.enabled = false; });
+    let lineParses = 0;
+    const countContext = { Set, readMatrixState: () => cachedState,
+        normalizeMatrixLine(value) { lineParses++; return stateModule.parseMatrixLine(value); } };
+    vm.createContext(countContext);
+    for (const name of ["matrixConfiguredLineCount", "matrixLinesForNode"]) vm.runInContext(functionSource(name), countContext);
+    for (let index = 0; index < 10; index++) {
+        assert.equal(countContext.matrixConfiguredLineCount(matrix), 30);
+        assert.equal(countContext.matrixLinesForNode(matrix).length, 0);
+    }
+    assert.equal(lineParses, 0, "counting validated rows and skipping disabled rows never reparses their large selections");
+    cachedState.sets[0].enabled = true;
+    cachedState.sets.push(cachedState.sets[0]);
+    const enabled = countContext.matrixLinesForNode(matrix);
+    assert.equal(enabled.length, 1, "enabled row IDs still deduplicate");
+    assert.notStrictEqual(enabled[0], cachedState.sets[0], "enabled rows remain independent editable copies");
+    enabled[0].positive_parts.push("local-edit");
+    assert.equal(cachedState.sets[0].positive_parts.length, 0, "editing an output copy never changes the cached state");
     ctx.drawMatrixList(outer, matrix, 340, 0, 200);
     const matrixWarm = ctx.matrixDisplayCache(matrix, 340), matrixRaster = matrix.sceneMatrixRenderCache.canvas;
     calls.stringify = calls.selectionParse = calls.matrixParse = 0;

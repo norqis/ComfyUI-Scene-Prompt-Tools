@@ -52,7 +52,7 @@ const funcs = ["nodeClassName", "nodeClassNames", "isRerouteNode", "isScenePromp
     "linkedInput", "graphLink", "firstLinkedInput", "linkKey", "resolveLinkedSourceFromLink", "resolveLinkedSourceFromInput", "linkedSourceNode",
     "scenePromptInputSource", "sceneBypassInputSource", "scenePromptSourceLocalCacheKey", "scenePromptLineageKey", "scenePromptSourceCacheKey",
     "clampSceneCount", "scenePrimitiveInputValue", "scenePromptCounterCount", "scenePromptCounterDownstreamEnabled", "sceneEmptyLatentConfig", "scenePromptSettingsError",
-    "scenePresetGraphNodes", "apiLink", "apiInput", "apiMatrixEnabledCount", "apiMatrixConfigured", "parseMatrixStateValue", "scenePresetStats",
+    "scenePresetGraphNodes", "apiLink", "apiInput", "parseMatrixStateValue", "scenePresetStats",
     "sceneQueueBoundaryInPreset", "sceneQueueBoundaryInNode", "sceneRandomRouteInNode", "sceneQueuePendingInNode", "scenePromptStats",
     "scenePromptInputNumber", "scenePromptQueueInputIndexes", "connectedScenePromptSourcesForQueue", "connectedScenePromptSourcesForMerge", "scenePromptPreviewEntries", "mergeScenePromptEntryPair",
     "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry", "sceneRandomJoinReady", "sceneRandomChoicePlan", "applyScenePresetSwitchBindings",
@@ -90,6 +90,30 @@ function connect(from, to, name, slot = 0, type = "SCENE_PROMPT") {
 }
 function set(node, name, value) { ctx.findWidget(node, name).value = value; }
 const matrix = count => JSON.stringify({ version: 1, sets: Array.from({ length: count }, (_, i) => ({ ...createMatrixLine(`row${i}`), positive_base: `tag${i}` })) });
+for (const configured of [false, true]) {
+    const raw = JSON.stringify({ version: 1, sets: configured ? [{ ...createMatrixLine("disabled"), enabled: false }] : [] });
+    const live = graph(); ctx.app.graph = live;
+    const first = add(live, "ScenePromptCounter", { count: 100_000_000, enable_downstream_count: true });
+    const second = add(live, "ScenePromptCounter", { count: 100_000_000, enable_downstream_count: true });
+    const rows = add(live, "SceneMatrix", { matrix_json: raw });
+    const valid = add(live, "ScenePrompter"), join = add(live, "ScenePrompterQueue");
+    connect(first, second, "scene_prompt"); connect(second, rows, "scene_prompt");
+    connect(rows, join, "scene_prompt1"); connect(valid, join, "scene_prompt2");
+    const error = ctx.scenePromptStats(second).error;
+    assert.match(error, /大きすぎ/u);
+    assert.equal(ctx.scenePromptStats(join).error, error, "Matrix never turns upstream overflow into a plausible Queue count");
+    const definition = { api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "SceneMatrix", inputs: { scene_prompt: ["1", 0], matrix_json: raw } },
+        3: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+    } } };
+    const upstream = ctx.sceneStatsCount(ctx.sceneStatsSeed(), 3);
+    assert.equal(ctx.scenePresetStats("matrix-error", { ...upstream, error }, new Set(), definition).error, error);
+    assert.equal(ctx.scenePresetStats("matrix-valid", upstream, new Set(), definition).total, configured ? 0 : 3);
+    const guarded = ctx.sceneSchedulePlan([], false, [{ gateId: "random", armIndex: 0, weights: [5000, 5000, 0, 0, 0, 0, 0, 0, 0, 0] }]);
+    assert.match(ctx.sceneScheduleForPreset("matrix-arm", guarded, new Set(), definition).stats.error, /Queueで合流/u,
+        "Preset Matrix uses the same open-arm rule even without enabled rows");
+}
 for (const arm of [0, 9]) for (const depth of [1, 3]) for (const upstreamKind of ["none", "counted", "held"]) {
     const childId = `random-stats-${arm}`;
     const child = { api_graph: { output: {
