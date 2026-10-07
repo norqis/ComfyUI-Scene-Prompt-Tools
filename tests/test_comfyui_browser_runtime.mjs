@@ -277,6 +277,7 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage}
         const sourceUI = (await response.text()).replace("onError: showAPIError,", "onError: (error, query, retry) => { window.__sceneLLMRuntimeError = error.stack; showAPIError(error, query, retry); },");
         await route.fulfill({ response, body: `${sourceUI}
 window.__sceneSeedRuntimeTest = {
+    titleNodes() { return [...sceneTitleSyncNodes]; },
     llmWidgets(node) {
         const names = ["model_mode", "description", "positive", "negative", "generation_state_json"];
         return { firstRole: node.widgets[0]?.sceneRole, settingsCount: node.widgets.filter(widget => widget.sceneRole === "llm_settings").length,
@@ -343,6 +344,23 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    const removedInitialization = await page.evaluate(async () => {
+        const graph = window.app.graph, removed = [];
+        graph.clear();
+        for (let index = 0; index < 20; index++) {
+            const node = window.LiteGraph.createNode('SceneMatrix'); graph.add(node);
+            node.configure(node.serialize()); graph.remove(node); removed.push(node);
+        }
+        const live = window.LiteGraph.createNode('SceneMatrix');
+        live.configure(live.serialize()); graph.add(live);
+        await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+        const titles = window.__sceneSeedRuntimeTest.titleNodes();
+        const result = { retained: titles.filter(node => removed.includes(node)).length,
+            liveRetained: titles.includes(live), pending: removed.some(node => node.scenePromptAttachScheduled != null) };
+        graph.clear(); return result;
+    });
+    assert.deepEqual(removedInitialization, { retained: 0, liveRetained: true, pending: false });
+    console.log('real ComfyUI configure/remove cancels deferred initialization without retaining deleted nodes; configure-before-add remains active');
     const allowPreviewQueue = route => route.continue();
     await page.route('**/prompt', allowPreviewQueue);
     nativeRunChecks = true;

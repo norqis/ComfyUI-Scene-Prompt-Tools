@@ -314,6 +314,30 @@ layoutContext.installSceneNodeRemovalCleanup(layoutNode, "ScenePrompter");
 layoutNode.onRemoved();
 assert.equal(layoutNode.sceneSelectedListLayoutCache, null, "node removal releases its widget layouts");
 
+{
+    const frames = new Map(), attached = [];
+    let nextFrame = 0;
+    layoutContext.requestAnimationFrame = callback => { const id = nextFrame++; frames.set(id, callback); return id; };
+    layoutContext.cancelAnimationFrame = id => frames.delete(id);
+    layoutContext.attachSceneNode = node => { attached.push(node); layoutContext.sceneTitleSyncNodes.add(node); };
+    vm.runInContext(functionSource('scheduleAttachSceneNode'), layoutContext);
+    const node = { widgets: [] };
+    layoutContext.installSceneNodeRemovalCleanup(node, 'SceneMatrix');
+    layoutContext.scheduleAttachSceneNode(node, 'SceneMatrix');
+    layoutContext.scheduleAttachSceneNode(node, 'SceneMatrix');
+    assert.equal(frames.size, 1, 'configuration coalesces into one pending frame');
+    node.onRemoved();
+    for (const callback of frames.values()) callback();
+    assert.equal(attached.length, 0, 'a removed node must not be reattached by its old frame');
+    assert.equal(frames.size, 0, 'removal releases the pending callback and node reference');
+    layoutContext.scheduleAttachSceneNode(node, 'SceneMatrix');
+    for (const callback of [...frames.values()]) callback();
+    frames.clear();
+    assert.deepEqual(attached, [node], 'later configuration still attaches without requiring graph membership');
+    node.onRemoved();
+    assert.equal(layoutContext.sceneTitleSyncNodes.size, 0);
+}
+
 console.log("Scene Prompt UI audit behavior tests passed.");
 
 async function testCurrentDisplayAndRasterOwnership() {

@@ -13109,6 +13109,10 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
     const previousOnRemoved = node.onRemoved;
     node.onRemoved = function (...args) {
         const isWorkflowLoad = sceneWorkflowLoadDepth > 0;
+        if (this.scenePromptAttachScheduled != null) {
+            cancelAnimationFrame(this.scenePromptAttachScheduled);
+            this.scenePromptAttachScheduled = null;
+        }
         sceneTitleSyncNodes.delete(this);
         sceneLoadedRefreshNodes.delete(this);
         sceneDownstreamRefreshSources.delete(this);
@@ -13209,12 +13213,11 @@ function attachSceneNode(node, nodeName) {
 }
 
 function scheduleAttachSceneNode(node, nodeName) {
-    if (!node || node.scenePromptAttachScheduled) {
+    if (!node || node.scenePromptAttachScheduled != null) {
         return;
     }
-    node.scenePromptAttachScheduled = true;
-    requestAnimationFrame(() => {
-        node.scenePromptAttachScheduled = false;
+    node.scenePromptAttachScheduled = requestAnimationFrame(() => {
+        node.scenePromptAttachScheduled = null;
         if (node.scenePresetDetachedSnapshot) return;
         try {
             attachSceneNode(node, nodeName);
