@@ -7392,7 +7392,8 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
     };
     const result = statsForNode(outputSource, Number(apiInput(outputEntry[1], "scene_prompt")[1]) || 0);
     if (!requiresSchedule) return result;
-    const base = upstream ? sceneSchedulePlan([{ kind: "tail", ...upstream }]) : null;
+    const base = upstream?.error ? sceneScheduleError(upstream.error)
+        : upstream ? sceneSchedulePlan([{ kind: "tail", ...upstream }]) : null;
     return sceneScheduleForPreset(presetId, base, stack, preferredPreset, String(presetId), switchValues).stats;
 }
 

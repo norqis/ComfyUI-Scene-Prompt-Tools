@@ -244,6 +244,8 @@ The auditor agreed with the minimal three-site design. Merge and both Random rec
 
 All 25 frontend suites and the complete isolated native browser pass with the fix. The independent whole-audit semantic probe passed 250 composed plans / 1,078 selection, statistics and replay checks. Final coverage and exact-HEAD remediation review follow before a new whole audit.
 
+The final boundary pass found a fourth site in the same family: the Preset statistics-to-schedule bridge dropped an unresolved linked Count error when a Preset contained a strict Count. Root reproduced the failing assertion before fixing only that conversion. The error becomes a schedule error at the bridge, allowing a Preset Switch to ignore unused upstream input normally. Regression checks cover selected/ignored upstream errors, known values recovering to 12 and legitimate zero counts. The auditor completed all 20 Python modules, eight frontend modules, importer and packaging/CI with no separate additional issue; its 2.1-billion-event schedule probe retained compact memory (about 260 KB traced peak) and selected boundary/interior events successfully.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation

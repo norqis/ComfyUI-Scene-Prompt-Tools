@@ -140,6 +140,30 @@ for (const arm of [0, 9]) for (const depth of [1, 3]) for (const upstreamKind of
     assert.equal(schedules, 0, "an unselected Random arm does not trigger schedule fallback");
     ctx.sceneScheduleForPreset = originalSchedule;
 }
+{
+    const live = graph(); ctx.app.graph = live;
+    const size = add(live, "GetImageSize"); size.outputs[0].type = "INT";
+    const count = add(live, "ScenePromptCounter", { count: 4, enable_downstream_count: true });
+    connect(size, count, "count", 0, "INT");
+    const unresolved = ctx.scenePromptStats(count);
+    assert.match(unresolved.error, /Count.*確定/u);
+    const definition = { api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePromptCounter", inputs: { count: 2 } },
+        3: { class_type: "ComfySwitchNode", inputs: { switch: true, on_true: ["1", 0], on_false: ["2", 0] } },
+        4: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["3", 0], count: 3, enable_downstream_count: false } },
+        5: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
+    } } };
+    const stats = upstream => ctx.scenePresetStats("upstream-count-error", upstream, new Set(), definition);
+    assert.equal(stats(unresolved).error, unresolved.error, "Preset schedule fallback preserves the selected upstream error");
+    definition.api_graph.output[3].inputs.switch = false;
+    assert.equal(stats(unresolved).total, 6, "an independent selected branch ignores an unused upstream error");
+    assert.equal(stats(unresolved).error, undefined);
+    definition.api_graph.output[3].inputs.switch = true;
+    assert.equal(stats(ctx.sceneStatsCount(ctx.sceneStatsSeed(), 4)).total, 12, "known upstream values recover the count");
+    assert.equal(stats(ctx.emptyScenePromptStats()).total, 0);
+    assert.equal(stats(ctx.emptyScenePromptStats()).error, undefined, "a valid zero upstream remains valid");
+}
 const g = graph(), input = add(g, "ScenePresetInput", { switch_names_json: "[]" }), bool = add(g, "PrimitiveBoolean", { value: false });
 input.properties.scene_switch_values = vector(1, 3, 10);
 const bindingPrompt = { output: { [input.id]: { class_type: "ScenePresetInput", inputs: {} } } };
