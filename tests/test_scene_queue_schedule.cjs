@@ -210,6 +210,22 @@ function verifyCompactOrdinaryRows() {
     }
 }
 verifyCompactOrdinaryRows();
+for (const kind of ["alternate", "sequence"]) for (const held of [false, true]) for (const fixed of [false, true]) {
+    let singleton = queue([ctx.sceneScheduleCount(leaf("same"), 1, !held)], controls("alternate", 1, "{}", fixed ? "fixed" : "multiply"));
+    if (kind === "sequence") singleton = ctx.sceneSchedulePlan([ctx.sceneScheduleSequence(singleton)], true);
+    singleton = ctx.sceneScheduleMap(singleton, entry => entry, 3);
+    for (let depth = 0; depth < 40; depth++) singleton = ctx.sceneScheduleMerge(singleton, singleton);
+    assert.equal(singleton.units[0].kind, held ? "count_hold" : "run");
+    assert.deepEqual(Array.from(ctx.sceneScheduleAt(singleton, 0).parts), ["same"]);
+    assert.equal(singleton.stats.total, 1); assert.equal(singleton.stats.totalImages, 3);
+    assert.equal(singleton.boundary, true);
+    assert.equal(ctx.sceneScheduleCount(singleton, 10).stats.total, held ? 1 : 10);
+}
+for (const plan of [queue([leaf("repeat", 2)], controls("alternate")), queue([leaf("a"), leaf("b")], controls("alternate")), randomJoined]) {
+    const merged = ctx.sceneScheduleMerge(plan, plan);
+    assert.equal(merged.units[0].kind, "product", "multi-event and Random plans must keep their composition");
+    assert.equal(merged.stats.total, plan.stats.total ** 2);
+}
 for (const boundary of [false, true]) {
     let empty = ctx.sceneSchedulePlan([], boundary);
     for (let depth = 0; depth < 40; depth += 1) empty = ctx.sceneScheduleMerge(empty, empty);

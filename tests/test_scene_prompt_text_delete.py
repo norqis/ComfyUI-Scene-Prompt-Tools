@@ -40,6 +40,15 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
             with self.subTest(count=count, downstream=downstream, kind=kind), self.assertRaises(ValueError):
                 counter.count(arm, count, prompt_trace_kind=kind, enable_downstream_count=downstream)
 
+    def test_singleton_alternate_queue_shared_merge_uses_compact_actual_node_path(self):
+        plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=self.build('cat'), order_mode='alternate')[0]
+        merge = self.nodes.ScenePromptMerge()
+        for index in range(40):
+            plan = merge.merge(plan, plan, unique_id=str(index))[0]
+        self.assertLess(plan.depth, 4)
+        self.assertEqual(self.text(plan), ('cat', ''))
+        self.assertEqual(plan['stats']['total_batches'], 1)
+
     def test_delete_deep_choices_preserves_slots_without_recursion(self):
         value = "{" * 1500 + "tag" + "}" * 1500
         plan = self.build(value)

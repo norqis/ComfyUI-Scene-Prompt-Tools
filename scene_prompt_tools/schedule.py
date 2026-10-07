@@ -752,6 +752,11 @@ def _unwrap_run(unit):
                 row = _apply_operation(row, operation)
             return _unit("run", row=row, count=child["count"])
         unit = unit["unit"]
+    if unit["stats"]["total_batches"] == 1:
+        if unit["kind"] == "sequence" and len(unit["plan"]["units"]) == 1:
+            return _unwrap_run(unit["plan"]["units"][0])
+        if unit["kind"] == "alternate" and len(unit["inputs"]) == 1 and len(unit["inputs"][0]["units"]) == 1:
+            return _unwrap_run(unit["inputs"][0]["units"][0])
     return unit if unit["kind"] == "run" else None
 
 

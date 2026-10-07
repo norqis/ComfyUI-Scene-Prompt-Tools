@@ -8064,6 +8064,11 @@ function sceneScheduleMerge(left, right) {
                 const child = run(unit.unit);
                 return child && unit.transform(child);
             }
+            if (unit.total === 1) {
+                if (unit.kind === "sequence" && unit.plan.units.length === 1) return run(unit.plan.units[0]);
+                if (unit.kind === "alternate" && unit.plans.length === 1 && unit.plans[0].units.length === 1)
+                    return run(unit.plans[0].units[0]);
+            }
             return unit.kind === "run" ? unit.entry : null;
         };
         const first = run(left.units[0]), second = run(right.units[0]);

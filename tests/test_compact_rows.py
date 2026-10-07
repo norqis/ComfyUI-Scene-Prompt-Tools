@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from scene_prompt_tools import plan as p
+from scene_prompt_tools import schedule as s
 
 
 def row(name, batch=None):
@@ -169,6 +170,41 @@ class CompactRowTests(unittest.TestCase):
             self.assertEqual(empty["stats"]["total_batches"], 0)
             self.assertEqual(empty["contains_queue_boundary"], boundary)
             self.assertEqual(empty["units"], [])
+
+    def test_single_event_queue_wrappers_fold_shared_merge_without_changing_events(self):
+        for kind in ("alternate", "sequence"):
+            for held in (False, True):
+                for fixed in (False, True):
+                    base = p.make_plan([{"row": row("a", 3), "count": 1}])
+                    base = p.multiply_count(base, 1, not held)
+                    base = p.queue([base], order_mode="alternate", downstream_count_mode="fixed" if fixed else "multiply")
+                    if kind == "sequence":
+                        base = s._plan([s._unit("sequence", plan=base)], boundary=True)
+                    base = p.transform(base, operation={"kind": "prompt_add", "payload": ["tail", ["detail"], [], False]})
+                    base = p.append_callback(base, "callback", {"text": "{current_positive}"}, "毎回", 10, "続行")
+                    with mock.patch.object(s, "_unwrap_run", return_value=None):
+                        reference = p.merge(base, base)
+                    expected = p.item_for_index(reference, 0)
+                    expected.pop("event_ref")
+                    compact = base
+                    for _ in range(40):
+                        compact = p.merge(compact, compact)
+                    actual = p.item_for_index(compact, 0)
+                    event = actual.pop("event_ref")
+                    self.assertEqual(actual, expected)
+                    self.assertLess(compact.depth, 3)
+                    self.assertTrue(compact["contains_queue_boundary"])
+                    self.assertEqual(p.replay_index_for_event(compact, event, {"a"}, {"a"}), 0)
+                    self.assertEqual(p.multiply_count(compact, 10)["stats"]["total_batches"], 1 if held else 10)
+                    restored = p.normalize_plan(json.loads(json.dumps(compact)))
+                    self.assertEqual(restored["stats"], compact["stats"])
+        # Real repetitions, distinct rows and Random alternatives retain their schedules.
+        for plan in (p.queue([p.make_plan([{"row": row("a"), "count": 2}])], order_mode="alternate"),
+                     p.queue([p.make_plan([{"row": row("a"), "count": 1}]), p.make_plan([{"row": row("b"), "count": 1}])], order_mode="alternate"),
+                     p.queue(p.random_route(p.make_plan([{"row": row("a"), "count": 1}]), [5000, 5000] + [0] * 8, "gate")[:2])):
+            merged = p.merge(plan, plan)
+            self.assertIsNone(s._unwrap_run(merged["units"][0]))
+            self.assertEqual(merged["stats"]["total_batches"], plan["stats"]["total_batches"] ** 2)
 
     def test_scalar_merge_preserves_strict_count_union_and_zero_counts(self):
         for left_held, right_held in ((True, False), (False, True), (True, True)):
