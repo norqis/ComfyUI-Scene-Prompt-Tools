@@ -1137,7 +1137,7 @@ NODE_CLASS_MAPPINGS = {
         graph.update({
             "12": {"class_type": "ScenePrompterMerge", "inputs": {"scene_prompt1": ["6", 0], "scene_prompt2": ["11", 0]}},
             "14": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["13", 0], "count": 2}},
-            "15": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["14", 0], "current_index": 0, "seed_base": 123, "timestamp_dir": False}},
+            "15": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["14", 0], "current_index": 0, "run_id": "compact-rows", "seed_base": 123, "timestamp_dir": False}},
             "16": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
             "17": {"class_type": "TestSceneTextImage", "inputs": {"image": ["16", 0], "positive": ["15", 0], "negative": ["15", 1], "log_path": str(marker)}},
             "18": {"class_type": "SceneSaveImage", "inputs": {"images": ["17", 0], "scene_info": ["15", 2], "path": "compact-rows", "metadata_mode": "生成経路ノードのみ"}},

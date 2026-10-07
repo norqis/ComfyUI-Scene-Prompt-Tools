@@ -31,7 +31,9 @@ The same actual SceneMatrix.build benchmark now reports:
 
 During regression work root also reproduced exponential growth of duplicate UI labels in shared Merge chains. Backend Merge already removes duplicate labels; frontend Merge now follows the same behavior. Forty shared scalar merges stay a single run. The previous frontend terminated with a V8 invalid-size error in this probe.
 
-Validation in progress: npm syntax and all 25 frontend suites passed, including Chromium snapshot ownership races. The 713-test Python run passed except the Count policy suite that executed the shared-Merge probe just before its UI fix landed; its focused 24 tests pass after the fix. Final clean full validation, independent diff approval, and fresh whole-repository audit remain pending.
+Validation: the clean full Python run passed 713 tests (2 opt-in native classes skipped); npm syntax and all 25 frontend suites passed, including Chromium snapshot ownership races. Actual ComfyUI CPU/HTTP passed 44 existing tests, plus the new compact Matrix/Merge test: preparation count 120, selected boundary/interior events, saving only the selected graph, loading PNG metadata and executing the same prompt again. The complete isolated native Chromium suite passed, including normal/batch queue, physical Preset bypass, Count/Switch pointer edits, Undo/Redo, candidate/Matrix edits, LLM settings/resources, and multi-workflow behavior.
+
+The first fix review reproduced one remaining shared-Merge growth path in `row.labels`; root fixed it in `b172622` and replaced the old test stub with the actual row/prompt merge helpers from the start of the suite. The 40-stage scalar regression now checks row labels as well as the compact schedule. Final independent approval and a fresh whole-repository audit are pending.
 
 ## Sources
 
