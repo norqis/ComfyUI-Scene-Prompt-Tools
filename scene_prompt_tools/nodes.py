@@ -647,7 +647,11 @@ def _replay_expand_values(scene_info, full_prompt, source_aliases=None, retained
 
 def _selected_random_routes(infos):
     selected = {}
+    visited = set()
     def read(path):
+        if id(path) in visited:
+            return
+        visited.add(id(path))
         for part in path:
             if isinstance(part, (tuple, list)) and len(part) == 3 and part[0] == "random_choice":
                 selected.setdefault(str(part[1]), set()).add(part[2])

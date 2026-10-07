@@ -60,6 +60,13 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         selected = self.plan.item_for_normalized_plan(plan, 0, 123)
         sources = set(selected['row']['source_node_ids'])
         self.assertEqual(self.plan.replay_index_for_event(plan, selected['event_ref'], sources, sources), 0)
+        graph = {'gate': {'class_type': 'ScenePromptRandomRoute', 'inputs': {'weights_json': json.dumps([5000, 5000] + [0] * 8)}}}
+        infos = [{'_event_ref': selected['event_ref']}]
+        choices = self.nodes._selected_random_routes(infos)
+        self.nodes._freeze_random_routes(graph, None, infos)
+        weights = json.loads(graph['gate']['inputs']['weights_json'])
+        self.assertEqual(weights[next(iter(choices['gate']))], 10000)
+        self.assertTrue(graph['gate']['inputs']['preserve_join'])
 
     def test_delete_deep_choices_preserves_slots_without_recursion(self):
         value = "{" * 1500 + "tag" + "}" * 1500
