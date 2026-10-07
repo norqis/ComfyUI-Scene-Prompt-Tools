@@ -791,6 +791,24 @@ async function testSelectedExpandBranchOnlyQueues() {
         () => branchContext.createSceneBatchPromptSnapshot("2"),
         /複数の Scene Prompt Expand/,
     );
+
+    const captured = structuredClone(fullPrompt);
+    const validWeights = "[10000,0,0,0,0,0,0,0,0,0]";
+    captured.output["1"] = { class_type: "ScenePromptRandomRoute", inputs: { weights_json: validWeights } };
+    let release;
+    const graph = { _nodes: [{ id: 1, type: "ScenePromptRandomRoute", properties: { owner: "A" } }] };
+    branchContext.sceneNodeById = () => { throw new Error("captured Random must not read or update the current tab"); };
+    branchContext.app = { graph, async graphToPrompt() {
+        const snapshot = structuredClone(captured);
+        await new Promise((resolve) => { release = resolve; });
+        return snapshot;
+    } };
+    const pending = branchContext.createSceneBatchPromptSnapshot("2");
+    graph._nodes = [{ id: 1, type: "ScenePromptRandomRoute", widgets: [{ name: "weights_json", value: "[0,0,0,0,0,0,0,0,0,0]" }] }];
+    release();
+    const randomSnapshot = await pending;
+    assert.equal(randomSnapshot.output["1"].inputs.weights_json, validWeights);
+    assert.equal(graph._nodes[0].sceneRandomError, undefined);
 }
 
 async function testCancelledPresetResolutionReleasesOnce() {

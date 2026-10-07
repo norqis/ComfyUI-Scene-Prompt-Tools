@@ -9483,13 +9483,8 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
     if (!snapshot?.output || !expandPrompt?.inputs) {
         throw new Error("Scene Prompt Expand のプロンプトを取得できませんでした。");
     }
-    for (const [nodeId, promptNode] of Object.entries(snapshot.output)) {
-        if (promptNode?.class_type !== "ScenePromptRandomRoute") continue;
-        const graphNode = sceneNodeById(nodeId);
-        if (!graphNode) continue;
-        syncSceneRandomRoute(graphNode);
-        if (graphNode.sceneRandomError) throw new Error(`Scene Prompt Random Route Input #${nodeId}: ${graphNode.sceneRandomError}`);
-    }
+    // Run preparation validates Random probabilities and connections against
+    // this snapshot; the active tab may already contain a different workflow.
     return snapshot;
 }
 
