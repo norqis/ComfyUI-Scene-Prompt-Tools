@@ -205,6 +205,7 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
         let currentNode = root;
         const gpuSettings = resources?.snapshot();
         let sessionId = "";
+        let resourcesPrepared = false;
         try {
             if (!explicit) preparation = await prepareTargets?.(root);
             if (!initialRoot()) return;
@@ -227,8 +228,9 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                 const saved = readState(node);
                 const reusable = !explicit && saved.description === description && saved.model_mode === model_mode && saved.template_version === "scene-llm-v1";
                 if (reusable) { node.sceneLLMStatus = "生成済み"; continue; }
-                if (!sessionId && gpuSettings?.releaseComfyBeforeLLM) {
+                if (resources && !resourcesPrepared) {
                     sessionId = await resources.beginLLM(gpuSettings);
+                    resourcesPrepared = true;
                     if (!current()) { node.sceneLLMStatus = "変更を検出したため適用しませんでした"; break; }
                 }
                 const session = sessionId ? { session_id: sessionId, client_id: api.clientId || "" } : {};

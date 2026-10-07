@@ -84,6 +84,40 @@ class PromptDataRouteTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_windows_reserved_names_are_reported_before_candidate_and_preset_writes(self):
+        class Request:
+            user_id = "default"
+            def __init__(self, payload):
+                self.payload = payload
+            async def json(self):
+                return self.payload
+
+        presets = importlib.import_module(self.routes.__package__ + ".presets")
+        item = {"label": "neutral", "prompt": "neutral", "category_key": "neutral"}
+        with mock.patch.object(self.routes, "os", types.SimpleNamespace(name="nt")), \
+                mock.patch.object(presets, "os", types.SimpleNamespace(name="nt")):
+            for name in ("CON", "AUX.preview", "LPT9 .txt", "COM¹.view"):
+                for endpoint, payload in (
+                    ("/scene_prompt/items", {"category": name, "label": "neutral", "prompt": "neutral"}),
+                    ("/scene_prompt/items", {"category": "neutral", "subcategory": name, "label": "neutral", "prompt": "neutral"}),
+                    ("/scene_prompt/saved_prompts", {"name": name, "items": [item]}),
+                ):
+                    with self.subTest(name=name, endpoint=endpoint):
+                        result = asyncio.run(self.routes._test_routes[("POST", endpoint)](Request(payload)))
+                        self.assertEqual(result["status"], 400)
+                        self.assertIn(f"予約名「{name}」", result["payload"]["error"])
+            for name in ("CON", "AUX", "LPT1"):
+                result = asyncio.run(self.routes._test_routes[("POST", "/scene_presets/save")](Request({"preset_id": name})))
+                self.assertEqual(result["status"], 400)
+                self.assertIn(f"予約名「{name}」", result["payload"]["error"])
+            self.assertEqual(self.routes._folder_component("CON_ok", "category"), "CON_ok")
+            self.assertEqual(presets._clean_preset_id("CON_ok"), "CON_ok")
+        self.assertFalse(list(Path(self.temp.name).rglob("*.json")), "invalid names must not leave partial files")
+        with mock.patch.object(self.routes, "os", types.SimpleNamespace(name="posix")), \
+                mock.patch.object(presets, "os", types.SimpleNamespace(name="posix")):
+            self.assertEqual(self.routes._folder_component("AUX.preview", "category"), "AUX.preview")
+            self.assertEqual(presets._clean_preset_id("CON"), "CON")
+
     def catalog_fixture(self, kind):
         item = {"label": "Cached", "prompt": "cached"}
         if kind == "items":

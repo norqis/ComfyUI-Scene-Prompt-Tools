@@ -105,9 +105,10 @@ class _CallbackReceiver:
 class _DesktopCallbackClient:
     """A loopback WebSocket client standing in for one ComfyUI browser tab."""
 
-    def __init__(self, port, client_id):
+    def __init__(self, port, client_id, event_type="scene_prompt_desktop_notification"):
         self.port = port
         self.client_id = client_id
+        self.event_type = event_type
         self._lock = Lock()
         self._connected = Event()
         self._loop = None
@@ -155,7 +156,7 @@ class _DesktopCallbackClient:
                 if message.type != aiohttp.WSMsgType.TEXT:
                     continue
                 payload = json.loads(message.data)
-                if payload.get("type") != "scene_prompt_desktop_notification":
+                if payload.get("type") != self.event_type:
                     continue
                 with self._lock:
                     self.notifications.append({
@@ -728,6 +729,33 @@ class TestSceneTextImage:
         Path(log_path).write_text(json.dumps([positive, negative]), encoding="utf-8")
         return (image,)
 
+class TestSceneIntList:
+    @classmethod
+    def INPUT_TYPES(cls): return {"required": {"values": ("STRING",)}}
+    RETURN_TYPES = ("INT",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "run"
+    def run(self, values): return (json.loads(values),)
+
+class TestScenePlanList:
+    @classmethod
+    def INPUT_TYPES(cls): return {"required": {"a": ("SCENE_PROMPT",), "b": ("SCENE_PROMPT",)}}
+    RETURN_TYPES = ("SCENE_PROMPT",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "run"
+    def run(self, a, b): return ([a, b],)
+
+class TestSceneTextPixels:
+    @classmethod
+    def INPUT_TYPES(cls): return {"required": {"image": ("IMAGE",), "positive": ("STRING",), "negative": ("STRING",)}}
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    def run(self, image, positive, negative):
+        result = image.clone().fill_(0)
+        result[..., 0] = 0.1 if positive == "A" else 0.9
+        result[..., 1] = 0.25 if negative == "A" else 0.75
+        return (result,)
+
 class TestSceneModelSink:
     @classmethod
     def INPUT_TYPES(cls):
@@ -802,6 +830,9 @@ NODE_CLASS_MAPPINGS = {
     "TestSceneModelBundle": TestSceneModelBundle,
     "TestSceneModelSink": TestSceneModelSink,
     "TestSceneTextImage": TestSceneTextImage,
+    "TestSceneIntList": TestSceneIntList,
+    "TestScenePlanList": TestScenePlanList,
+    "TestSceneTextPixels": TestSceneTextPixels,
     "TestSceneGPUImage": TestSceneGPUImage,
 }
 ''',
@@ -1037,7 +1068,9 @@ NODE_CLASS_MAPPINGS = {
             self.assertIn("after-done", marker.read_text(encoding="utf-8"))
 
     def test_gpu_prompt_admission_queue_removal_interrupt_and_two_client_ownership(self):
-        with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-tab-a"), _DesktopCallbackClient(self.port, "gpu-tab-b"):
+        with _GpuProvider() as provider, \
+                _DesktopCallbackClient(self.port, "gpu-tab-a", "scene_prompt_queue_removed") as tab_a, \
+                _DesktopCallbackClient(self.port, "gpu-tab-b", "scene_prompt_queue_removed") as tab_b:
             self._gpu_settings(provider)
             marker = provider.marker = self.base / "gpu-ownership.log"
             session_id = self._request("/scene_prompt/llm/begin", {"client_id": "gpu-tab-a"})["session_id"]
@@ -1063,17 +1096,22 @@ NODE_CLASS_MAPPINGS = {
             status, _ = self._request_status("/prompt", {"prompt_id": prompt_id, "prompt": self._gpu_graph(marker, "duplicate")})
             self.assertEqual(status, 409)
             self.assertEqual(self._request_status("/queue", {"delete": [prompt_id]})[0], 200)
-            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": policy_id})[0], 404)
+            self.assertEqual([item["prompt_id"] for item in tab_b.wait_for(1)], [prompt_id])
+            self.assertEqual(tab_a.notifications, [])
+            self.assertFalse(self._request("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": policy_id})["released"])
             wiped_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
-            self._request("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "wiped"),
+            wiped = self._request("/prompt", {"client_id": "gpu-tab-b", "prompt": self._gpu_graph(marker, "wiped"),
                 "extra_data": {"scene_gpu_policy": wiped_policy}})
             self.assertEqual(self._request_status("/queue", {"clear": True})[0], 200)
-            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": wiped_policy})[0], 404)
+            self.assertEqual([item["prompt_id"] for item in tab_b.wait_for(2)], [prompt_id, wiped["prompt_id"]])
+            self.assertEqual(tab_a.notifications, [])
+            self.assertEqual(self._request("/queue")["queue_running"][0][1], blocker["prompt_id"])
+            self.assertFalse(self._request("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": wiped_policy})["released"])
             invalid_policy = self._request("/scene_prompt/gpu/prepare", {"client_id": "gpu-tab-b"})["policy_id"]
             status, _ = self._request_status("/prompt", {"client_id": "gpu-tab-b", "prompt": {},
                 "extra_data": {"scene_gpu_policy": invalid_policy}})
             self.assertEqual(status, 400)
-            self.assertEqual(self._request_status("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": invalid_policy})[0], 404)
+            self.assertFalse(self._request("/scene_prompt/gpu/release", {"client_id": "gpu-tab-b", "policy_id": invalid_policy})["released"])
             self.assertEqual(self._request_status("/interrupt", {})[0], 200)
             interrupted = self._wait_for_prompt_error(blocker["prompt_id"])
             self.assertTrue(any(message[0] == "execution_interrupted" for message in interrupted["status"]["messages"]))
@@ -1121,6 +1159,53 @@ NODE_CLASS_MAPPINGS = {
                     }
                     self._queue_and_wait(graph)
                     self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], prompt_text)
+
+    def test_compact_matrix_merge_counts_and_selected_png_replay(self):
+        from PIL import Image
+        marker = self.base / "compact-row-results.json"
+        graph = {}
+        for node_id, name, count in ((1, "alpha", 2), (3, "beta", 3), (7, "gamma", 2), (9, "delta", 1)):
+            graph[str(node_id)] = {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": name}}
+            graph[str(node_id + 1)] = {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": [str(node_id), 0], "count": count}}
+        for node_id, first, second in ((5, 2, 4), (11, 8, 10)):
+            graph[str(node_id)] = {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": [str(first), 0], "scene_prompt2": [str(second), 0]}}
+        for node_id, upstream, names in ((6, 5, ("x", "y")), (13, 12, ("u", "v"))):
+            graph[str(node_id)] = {"class_type": "SceneMatrix", "inputs": {"scene_prompt": [str(upstream), 0], "run_handle": "",
+                "matrix_json": json.dumps({"version": 1, "sets": [{"row_id": name, "name": name, "path_label": name, "positive_base": name} for name in names]})}}
+        graph.update({
+            "12": {"class_type": "ScenePrompterMerge", "inputs": {"scene_prompt1": ["6", 0], "scene_prompt2": ["11", 0]}},
+            "14": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["13", 0], "count": 2}},
+            "15": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["14", 0], "current_index": 0, "run_id": "compact-rows", "seed_base": 123, "timestamp_dir": False}},
+            "16": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+            "17": {"class_type": "TestSceneTextImage", "inputs": {"image": ["16", 0], "positive": ["15", 0], "negative": ["15", 1], "log_path": str(marker)}},
+            "18": {"class_type": "SceneSaveImage", "inputs": {"images": ["17", 0], "scene_info": ["15", 2], "path": "compact-rows", "metadata_mode": "生成経路ノードのみ"}},
+        })
+        expected = [f"{first}, {x}, {second}, {y}" for first, a_count in (("alpha", 2), ("beta", 3))
+                    for x in ("x", "y") for second, b_count in (("gamma", 2), ("delta", 1))
+                    for y in ("u", "v") for _ in range(a_count * b_count * 2)]
+        self.assertEqual(len(expected), 120)
+        prepared = self._request("/scene_prompt/runs/prepare", {"api_graph": {"output": graph}, "expand_node_id": "15"})
+        self.assertEqual(prepared["total_batches"], len(expected))
+        self._request("/scene_prompt/runs/release", {"run_handle": prepared["run_handle"]})
+        handle, workflow = self._prepare_callback_run(graph, "15")
+        try:
+            for index in (0, 7, 49, 119):
+                with self.subTest(index=index):
+                    graph["15"]["inputs"]["current_index"] = index
+                    self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                    self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], expected[index])
+                    selected = max((self.base / "output" / "compact-rows").glob("*.png"), key=lambda path: path.stat().st_mtime_ns)
+                    with Image.open(selected) as image:
+                        replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                    replay["18"]["inputs"]["path"] = "compact-rows-replay"
+                    replay_handle, replay_workflow = self._prepare_callback_run(replay, "15", replay_workflow)
+                    try:
+                        self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))[0], expected[index])
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+        finally:
+            self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_count_path_policy_native_order_preflight_and_selected_png_replay(self):
         from PIL import Image
@@ -1374,6 +1459,239 @@ NODE_CLASS_MAPPINGS = {
                             self.assertNotIn("ComfySwitchNode", classes, "selected-only PNG contracts Scene switches to their chosen branch before core validation")
                     finally:
                         self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+
+    def test_literal_switch_scene_input_preparation_matches_native_execution(self):
+        for selected, on_true, on_false in ((True, "TRUE_TAG", "FALSE_TAG"),
+                                            (False, "TRUE_TAG", "FALSE_TAG"),
+                                            (True, "", "UNUSED"), (False, "UNUSED", "")):
+            with self.subTest(selected=selected, on_true=on_true, on_false=on_false):
+                graph = {
+                    "1": {"class_type": "ScenePrompter", "inputs": {
+                        **_scene_prompt_inputs(), "positive_base": ["2", 0]}},
+                    "2": {"class_type": "ComfySwitchNode", "inputs": {
+                        "switch": selected, "on_true": on_true, "on_false": on_false}},
+                    "3": {"class_type": "ScenePrompterExpand", "inputs": {
+                        "scene_prompt": ["1", 0], "seed_base": 123, "current_index": 0, "run_id": "", "timestamp_dir": False}},
+                    "4": {"class_type": "PreviewAny", "inputs": {"source": ["3", 0]}},
+                }
+                expected = [on_true if selected else on_false]
+                ordinary = self._queue_and_wait(graph)
+                self.assertEqual(ordinary["outputs"]["4"]["text"], expected)
+                handle, workflow = self._prepare_callback_run(graph, "3")
+                try:
+                    prepared = self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                    self.assertEqual(prepared["outputs"]["4"]["text"], expected)
+                finally:
+                    self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
+    def test_generic_switch_selected_png_skips_inactive_text_and_replays(self):
+        import itertools
+        from PIL import Image
+        for mode, literal_data in itertools.product(('ワークフロー全体', '生成経路ノードのみ'), (False, True)):
+            for selected in (True, False):
+                with self.subTest(mode=mode, selected=selected, literal_data=literal_data):
+                    folder = f'generic-switch-{mode}-{selected}-{literal_data}'
+                    graph = _save_graph(mode)
+                    graph.pop('7')
+                    graph['4']['inputs'].update(seed_base=123, current_index=1)
+                    graph['1']['inputs'].update(positive_base='A', negative_base=folder)
+                    graph['2'] = {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['8', 0]}}
+                    marker = self.base / f'{folder}.json'
+                    graph['14'] = graph['5']
+                    graph['5'] = {'class_type': 'TestSceneTextImage', 'inputs': {'image': ['14', 0], 'positive': ['4', 0], 'negative': ['4', 1], 'log_path': str(marker)}}
+                    graph['3']['inputs'].update(width=16, height=16)
+                    graph.update({
+                        '8': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'B', 'negative_base': folder}},
+                        '9': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['2', 0], 'scope': '全てのノード', 'seed_base': 123}},
+                        '10': {'class_type': 'PrimitiveString', 'inputs': {'value': folder}},
+                        '11': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': ['12', 0], 'on_true': ['10', 0], 'on_false': ['9', 1]}},
+                        '12': {'class_type': 'PrimitiveBoolean', 'inputs': {'value': selected}},
+                        '13': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': False, 'on_true': ['11', 0], 'on_false': ['11', 0]}},
+                    })
+                    if literal_data:
+                        graph['11']['inputs']['on_true'] = folder
+                    graph['6']['inputs']['path'] = ['13', 0]
+                    handle, workflow = self._prepare_callback_run(graph, '4')
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding='utf-8'))[0], 'B')
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': handle})
+                    files = list((self.base / 'output' / folder).glob('*.png'))
+                    self.assertEqual(len(files), 1)
+                    with Image.open(files[0]) as image:
+                        replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
+                    if mode == '生成経路ノードのみ' and not (literal_data and selected):
+                        self.assertEqual(replay['6']['inputs']['path'], ['10', 0] if selected else ['9', 1])
+                        self.assertNotIn('11', replay)
+                        self.assertNotIn('13', replay)
+                        self.assertEqual('9' in replay, not selected)
+                    else:
+                        self.assertIn('9', replay)
+                        self.assertIn('11', replay)
+                    # Requeue the actual embedded graph with its own saved workflow.
+                    replay_handle, visual = self._prepare_callback_run(replay, '4', visual)
+                    try:
+                        self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding='utf-8'))[0], 'B')
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+                    self.assertEqual(len(list((self.base / 'output' / folder).glob('*.png'))), 2)
+
+    def test_conflicting_random_consumers_replay_with_unused_model_arm(self):
+        from PIL import Image
+        for join in ('ScenePromptRandomRouteOutput', 'ScenePrompterQueue'):
+            with self.subTest(join=join):
+                marker = self.base / f'conflicting-{join}.json'
+                loader_marker = self.base / f'unused-model-{join}.log'
+                weights = [3333, 3333, 3334] + [0] * 7
+                graph = {
+                    '1': {'class_type': 'ScenePromptRandomRoute', 'inputs': {'weights_json': json.dumps(weights)}},
+                    '5': {'class_type': join, 'inputs': {'scene_prompt1': ['2', 0], 'scene_prompt2': ['3', 0], 'scene_prompt3': ['12', 0]}},
+                    '6': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['5', 0], 'seed_base': 1, 'current_index': 0, 'timestamp_dir': False, 'run_id': ''}},
+                    '7': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['5', 0], 'scope': '全てのノード', 'seed_base': 2, 'current_index': 0}},
+                    '8': {'class_type': 'EmptyImage', 'inputs': {'width': 16, 'height': 16, 'batch_size': 1, 'color': 0}},
+                    '9': {'class_type': 'TestSceneTextImage', 'inputs': {'image': ['8', 0], 'positive': ['6', 0], 'negative': ['7', 0], 'log_path': str(marker)}},
+                    '10': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['9', 0], 'scene_info': ['6', 2], 'path': f'conflict-{join}', 'metadata_mode': '生成経路ノードのみ'}},
+                    '11': {'class_type': 'TestSceneModelBundle', 'inputs': {'label': 'unused-model', 'log_path': str(loader_marker)}},
+                    '12': {'class_type': 'SceneApplyModel', 'inputs': {'scene_prompt': ['4', 0], 'model': ['11', 0], 'clip': ['11', 1], 'vae': ['11', 2]}},
+                }
+                for arm, node_id in enumerate(('2', '3', '4')):
+                    graph[node_id] = {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': chr(65 + arm), 'scene_prompt': ['1', arm]}}
+                handle, workflow = self._prepare_callback_run(graph, '6')
+                try:
+                    self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                    self.assertEqual(json.loads(marker.read_text(encoding='utf-8')), ['A', 'B'])
+                finally:
+                    self._request('/scene_prompt/runs/release', {'run_handle': handle})
+                file = next((self.base / 'output' / f'conflict-{join}').glob('*.png'))
+                with Image.open(file) as image:
+                    replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
+                self.assertTrue({'2', '3', '4', '11', '12'}.issubset(replay))
+                self.assertEqual(json.loads(replay['1']['inputs']['weights_json']), weights)
+                replay_handle, visual = self._prepare_callback_run(replay, '6', visual)
+                try:
+                    self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                    self.assertEqual(json.loads(marker.read_text(encoding='utf-8')), ['A', 'B'])
+                finally:
+                    self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+                self.assertFalse(loader_marker.exists(), 'retaining an unused arm must not load its model')
+
+    def test_selected_png_uses_executed_linked_index_seed_and_auto_seed(self):
+        from PIL import Image
+        for kind, metadata in (('ScenePromptToText', False), ('ScenePrompterExpand', False), ('ScenePrompterExpand', True)):
+            for literal in (False, True):
+                with self.subTest(kind=kind, metadata=metadata, literal=literal):
+                    folder = f'linked-replay-{kind}-{metadata}-{literal}'
+                    marker = self.base / f'{folder}.json'
+                    graph = {
+                        '1': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'A'}},
+                        '11': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'B, {red|blue|green}'}},
+                        '12': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['11', 0]}},
+                        '2': {'class_type': kind, 'inputs': {'scene_prompt': ['12', 0], 'seed_base': ['3', 0], 'current_index': ['13', 0], 'seed_base_literal': ['14', 0]}},
+                        '3': {'class_type': 'PrimitiveInt', 'inputs': {'value': 0}},
+                        '13': {'class_type': 'PrimitiveInt', 'inputs': {'value': 1}},
+                        '14': {'class_type': 'PrimitiveBoolean', 'inputs': {'value': literal}},
+                        '4': {'class_type': 'EmptyImage', 'inputs': {'width': 16, 'height': 16, 'batch_size': 1, 'color': ['3', 0]}},
+                        '5': {'class_type': 'TestSceneTextImage', 'inputs': {'image': ['4', 0], 'positive': ['2', 0], 'negative': ['2', 1], 'log_path': str(marker)}},
+                        '6': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['5', 0], 'path': folder, 'metadata_mode': '生成経路ノードのみ'}},
+                    }
+                    graph['2']['inputs'].update({'scope': '全てのノード'} if kind == 'ScenePromptToText' else {'run_id': '', 'timestamp_dir': False})
+                    if metadata:
+                        graph['6']['inputs']['scene_info'] = ['2', 2]
+                    expand_id = '2' if kind == 'ScenePrompterExpand' else None
+                    handle, workflow = self._prepare_callback_run(graph, expand_id)
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        expected = json.loads(marker.read_text(encoding='utf-8'))
+                        self.assertTrue(expected[0].startswith('B, '))
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': handle})
+                    file = next((self.base / 'output' / folder).rglob('*.png'))
+                    with Image.open(file) as image:
+                        replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
+                    self.assertNotIn('1', replay)
+                    self.assertEqual(replay['2']['inputs']['current_index'], 0)
+                    self.assertEqual(type(replay['2']['inputs']['seed_base']), int)
+                    self.assertEqual(replay['4']['inputs']['color'], ['3', 0])
+                    self.assertEqual(replay['3']['inputs']['value'], 0)
+                    if kind == 'ScenePromptToText':
+                        text_visual = next(node for node in visual['nodes'] if str(node['id']) == '2')
+                        controls = [slot for slot in text_visual['inputs'] if slot['name'] in {'current_index', 'seed_base', 'seed_base_literal'}]
+                        self.assertEqual(len(controls), 3)
+                        self.assertTrue(all(slot['link'] is None for slot in controls))
+                        image_visual = next(node for node in visual['nodes'] if str(node['id']) == '4')
+                        self.assertIsNotNone(next(slot['link'] for slot in image_visual['inputs'] if slot['name'] == 'color'))
+                    replay_handle, visual = self._prepare_callback_run(replay, expand_id, visual)
+                    try:
+                        self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                        self.assertEqual(json.loads(marker.read_text(encoding='utf-8')), expected)
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+
+    def test_mapped_consumers_preserve_pixels_and_required_scene_list_inputs(self):
+        from PIL import Image
+        for mapped_plan in (False, True):
+            for kind, metadata in (('ScenePromptToText', False), ('ScenePrompterExpand', False), ('ScenePrompterExpand', True)):
+                with self.subTest(mapped_plan=mapped_plan, kind=kind, metadata=metadata):
+                    folder = f'mapped-{mapped_plan}-{kind}-{metadata}'
+                    graph = {
+                        '1': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'A'}},
+                        '2': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'B'}},
+                        '3': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['2', 0]}},
+                        '4': {'class_type': kind, 'inputs': {'scene_prompt': ['3', 0], 'current_index': ['5', 0], 'seed_base': ['9', 0]}},
+                        '5': {'class_type': 'TestSceneIntList', 'inputs': {'values': '[0,1]'}},
+                        '6': {'class_type': 'EmptyImage', 'inputs': {'width': 16, 'height': 16, 'batch_size': 1, 'color': ['10', 0]}},
+                        '7': {'class_type': 'TestSceneTextPixels', 'inputs': {'image': ['6', 0], 'positive': ['4', 0], 'negative': ['14', 0]}},
+                        '8': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['7', 0], 'path': folder, 'metadata_mode': '生成経路ノードのみ'}},
+                        '9': {'class_type': 'TestSceneIntList', 'inputs': {'values': '[100,200]'}},
+                        '10': {'class_type': 'TestSceneIntList', 'inputs': {'values': '[0,1,2]'}},
+                        '14': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['3', 0], 'scope': '全てのノード', 'current_index': 1, 'seed_base': 700}},
+                    }
+                    graph['4']['inputs'].update({'scope': '全てのノード'} if kind == 'ScenePromptToText' else {'run_id': '', 'timestamp_dir': False})
+                    if metadata:
+                        graph['8']['inputs']['scene_info'] = ['4', 2]
+                    if mapped_plan:
+                        graph['3'] = {'class_type': 'TestScenePlanList', 'inputs': {'a': ['1', 0], 'b': ['2', 0]}}
+                        graph['4']['inputs'].update(current_index=0, seed_base=100)
+                        graph['6']['inputs']['color'] = 0
+                        graph['7']['inputs']['negative'] = ''
+                        del graph['14']
+                    # Unknown providers use native execution, not Scene's static count planner.
+                    expand_id = '4' if kind == 'ScenePrompterExpand' and not mapped_plan else None
+                    handle, workflow = self._prepare_callback_run(graph, expand_id)
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': handle})
+                    files = sorted((self.base / 'output' / folder).rglob('*.png'))
+                    self.assertEqual(len(files), 2 if mapped_plan else 3)
+                    originals = []
+                    for file in files:
+                        with Image.open(file) as image:
+                            originals.append(image.getpixel((0, 0)))
+                    self.assertEqual([pixel[0] for pixel in originals], [25, 229] if mapped_plan else [25, 229, 229])
+                    for index, file in enumerate(files):
+                        with Image.open(file) as image:
+                            replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
+                        replay_folder = f'{folder}-replay-{index}'
+                        replay['8']['inputs']['path'] = replay_folder
+                        if mapped_plan:
+                            # An opaque provider retains its native list and both required inputs.
+                            self.assertEqual(replay['3']['inputs'], {'a': ['1', 0], 'b': ['2', 0]})
+                        else:
+                            self.assertEqual(replay['4']['inputs']['seed_base'] + replay['4']['inputs']['current_index'], 100 if index == 0 else 201)
+                            self.assertEqual(replay['14']['inputs']['seed_base'] + replay['14']['inputs']['current_index'], 701)
+                        replay_handle, visual = self._prepare_callback_run(replay, expand_id, visual)
+                        try:
+                            self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                        finally:
+                            self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+                        pixels = []
+                        for png in sorted((self.base / 'output' / replay_folder).rglob('*.png')):
+                            with Image.open(png) as image:
+                                pixels.append(image.getpixel((0, 0)))
+                        self.assertEqual(pixels, originals if mapped_plan else [originals[index]] * 3)
 
     def test_model_specific_loras_execute_only_matching_loaders(self):
         for mode, include_illustrious, expected in (("Anima", True, ["lora:anima.safetensors"]),
@@ -2256,10 +2574,15 @@ NODE_CLASS_MAPPINGS = {
     def test_http_random_output_nested_hundred_percent_count_and_png_replay(self):
         self._assert_random_route_count_and_png("ScenePromptRandomRouteOutput")
 
-    def _assert_random_route_count_and_png(self, join_type):
+    def test_http_linked_random_controls_prepare_and_replay_selected_png(self):
+        self._assert_random_route_count_and_png("ScenePromptRandomRouteOutput", linked=True)
+
+    def _assert_random_route_count_and_png(self, join_type, linked=False):
         from PIL import Image
         import hashlib
         image_path = "random-output" if join_type == "ScenePromptRandomRouteOutput" else "random-route"
+        if linked:
+            image_path += "-linked"
         marker = self.base / (image_path + "-result.json")
         graph = {
             "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "base"}},
@@ -2283,6 +2606,10 @@ NODE_CLASS_MAPPINGS = {
                 "scene_prompt": ["2", 0], "weights_json": json.dumps([10000] + [0] * 9), "preserve_join": True}}
             graph["13"] = {"class_type": "ScenePromptRandomRouteOutput", "inputs": {"scene_prompt1": ["12", 0]}}
             graph["3"]["inputs"]["scene_prompt"] = ["13", 0]
+        if linked:
+            graph["14"] = {"class_type": "PrimitiveString", "inputs": {"value": graph["2"]["inputs"]["weights_json"]}}
+            graph["15"] = {"class_type": "PrimitiveBoolean", "inputs": {"value": False}}
+            graph["2"]["inputs"].update(weights_json=["14", 0], preserve_join=["15", 0])
         workflow = _workflow_for_graph(graph)
         next(node for node in workflow["nodes"] if node["id"] == 2)["widgets_values"] = [graph["2"]["inputs"]["weights_json"]] + ([True] if join_type == "ScenePromptRandomRouteOutput" else [])
         handle, workflow = self._prepare_callback_run(graph, "7", workflow)
@@ -2315,6 +2642,9 @@ NODE_CLASS_MAPPINGS = {
                 self.assertEqual("13" in replay, labels[-1] == "route_A", "Only the selected inner Output remains in the PNG route")
             route_visual = next(node for node in replay_workflow["nodes"] if node["id"] == 2)
             self.assertEqual(route_visual["widgets_values"], [replay["2"]["inputs"]["weights_json"], True])
+            if linked:
+                self.assertTrue(all(slot["link"] is None for slot in route_visual["inputs"]
+                                    if slot["name"] in {"weights_json", "preserve_join"}))
             replay["10"]["inputs"]["path"] = image_path + "-replay"
             replay_handle, replay_workflow = self._prepare_callback_run(replay, "7", replay_workflow)
             try:
@@ -2412,47 +2742,169 @@ NODE_CLASS_MAPPINGS = {
                 finally:
                     self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
+    def test_http_preset_inside_random_arm_executes_and_expanded_png_replays(self):
+        from PIL import Image
+        child = {"1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 0], "positive_base": "inside_branch"}},
+            "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}}}
+        self._request("/scene_presets/save", {"preset_id": "arm_child", "name": "Arm child", "output_node_id": "3",
+            "api_graph": {"output": child}, "workflow": _workflow_for_graph(child)})
+        parent = copy.deepcopy(child)
+        parent["2"] = {"class_type": "ScenePresetReference", "inputs": {"scene_prompt": ["1", 0], "preset_id": "arm_child"}}
+        self._request("/scene_presets/save", {"preset_id": "arm_parent", "name": "Arm parent", "output_node_id": "3",
+            "api_graph": {"output": parent}, "workflow": _workflow_for_graph(parent)})
+        marker = self.base / "preset-arm-result.json"
+        for join_type in ("ScenePrompterQueue", "ScenePromptRandomRouteOutput"):
+            for preset_id in ("arm_child", "arm_parent"):
+                graph = {
+                    "1": {"class_type": "ScenePromptRandomRoute", "inputs": {"weights_json": json.dumps([5000, 5000] + [0] * 8)}},
+                    "2": {"class_type": "ScenePresetReference", "inputs": {"scene_prompt": ["1", 0], "preset_id": preset_id}},
+                    "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 1], "positive_base": "other_branch"}},
+                    "4": {"class_type": join_type, "inputs": {"scene_prompt1": ["2", 0], "scene_prompt2": ["3", 0]}},
+                    "5": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["4", 0], "count": 2}},
+                    "6": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["5", 0], "seed_base": 123, "run_id": "preset-arm", "timestamp_dir": False}},
+                    "7": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+                    "8": {"class_type": "TestSceneTextImage", "inputs": {"image": ["7", 0], "positive": ["6", 0], "negative": ["6", 1], "log_path": str(marker)}},
+                    "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["8", 0], "scene_info": ["6", 2],
+                        "path": f"preset-arm-{join_type}-{preset_id}", "expand_preset_contents": True, "metadata_mode": "ワークフロー全体"}},
+                }
+                handle, workflow = self._prepare_callback_run(graph, "6")
+                try:
+                    for index in range(2):
+                        graph["6"]["inputs"]["current_index"] = index
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                        expected = json.loads(marker.read_text(encoding="utf-8"))
+                        self.assertIn(expected[0], ("inside_branch", "other_branch"))
+                        path = max((self.base / "output" / graph["9"]["inputs"]["path"]).glob("*.png"), key=lambda entry: entry.stat().st_mtime_ns)
+                        with Image.open(path) as image:
+                            replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                        replay["9"]["inputs"]["path"] = "preset-arm-replay"
+                        replay_handle, replay_workflow = self._prepare_callback_run(replay, "6", replay_workflow)
+                        try:
+                            self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                            self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected)
+                        finally:
+                            self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+                finally:
+                    self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
     def test_http_to_text_delete_cached_plan_and_execution_png_replay(self):
         from PIL import Image
-        marker = self.base / "text-result.json"
-        graph = {
-            "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "{bald|hair}, coat", "negative_base": "{coat|bad}"}},
-            "2": {"class_type": "ScenePromptDelete", "inputs": {"scene_prompt": ["1", 0], "positive": "bald", "negative": ""}},
-            "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 4}},
-            "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0], "current_index": 3, "run_id": "", "seed_base": 100, "timestamp_dir": False}},
-            "5": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["3", 0], "scope": "全てのノード", "current_index": 2, "seed_base": 100}},
-            "6": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
-            "7": {"class_type": "TestSceneTextImage", "inputs": {"image": ["6", 0], "positive": ["5", 0], "negative": ["5", 1], "log_path": str(marker)}},
-            "8": {"class_type": "SceneSaveImage", "inputs": {"images": ["7", 0], "scene_info": ["4", 2], "path": "text-runtime", "metadata_mode": "生成経路ノードのみ"}},
+        for metadata_connected in (False, True):
+            for mode in ("ワークフロー全体", "生成経路ノードのみ"):
+                with self.subTest(metadata=metadata_connected, mode=mode):
+                    case = f"cached-text-{int(metadata_connected)}-{int(mode == '生成経路ノードのみ')}"
+                    marker = self.base / f"{case}.json"
+                    graph = {
+                        "1": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "positive_base": "{bald|hair}, coat", "negative_base": "{coat|bad}"}},
+                        "2": {"class_type": "ScenePromptDelete", "inputs": {"scene_prompt": ["1", 0], "positive": "bald", "negative": ""}},
+                        "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 4}},
+                        "4": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["3", 0], "current_index": 3, "run_id": "", "seed_base": 100, "timestamp_dir": False}},
+                        "5": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["3", 0], "scope": "全てのノード", "current_index": 2, "seed_base": 100}},
+                        "6": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+                        "7": {"class_type": "TestSceneTextImage", "inputs": {"image": ["6", 0], "positive": ["4", 0], "negative": ["5", 1], "log_path": str(marker)}},
+                        "8": {"class_type": "SceneSaveImage", "inputs": {"images": ["7", 0], "path": case, "metadata_mode": mode}},
+                    }
+                    if metadata_connected:
+                        graph["8"]["inputs"]["scene_info"] = ["4", 2]
+                    handle, workflow = self._prepare_callback_run(graph, "4")
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        expected = [json.loads(marker.read_text(encoding="utf-8"))]
+                        cached = copy.deepcopy(graph)
+                        for node_id in ("1", "2", "3"):
+                            del cached[node_id]
+                        for node_id in ("4", "5"):
+                            cached[node_id]["inputs"].pop("scene_prompt")
+                            cached[node_id]["inputs"]["seed_base"] = 200
+                        self._queue_callback_graph(cached, handle, workflow)
+                        expected.append(json.loads(marker.read_text(encoding="utf-8")))
+                        files = sorted((self.base / "output" / case).rglob("*.png"), key=lambda path: path.stat().st_mtime_ns)
+                        self.assertEqual(len(files), 2)
+                        for index, file in enumerate(files):
+                            self.assertNotIn("bald", expected[index][0])
+                            with Image.open(file) as image:
+                                replay = json.loads(image.text["prompt"])
+                                replay_workflow = json.loads(image.text["workflow"])
+                            self.assertIn("2", replay, "cached PNG restores the Delete ancestor")
+                            self.assertEqual(replay["4"]["inputs"]["scene_prompt"], ["3", 0])
+                            self.assertEqual(replay["5"]["inputs"]["scene_prompt"], ["3", 0])
+                            self.assertEqual(replay["5"]["inputs"]["current_index"], 2)
+                            self.assertEqual(replay["5"]["inputs"]["seed_base"], 100 + 100 * index)
+                            replay["8"]["inputs"]["path"] = f"{case}-replay-{index}"
+                            replay_handle, replay_workflow = self._prepare_callback_run(replay, "4", replay_workflow)
+                            try:
+                                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected[index])
+                            finally:
+                                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
+    def test_http_to_text_only_save_and_preset_expansion_replay(self):
+        from PIL import Image
+        inner = {
+            "11": {"class_type": "ScenePresetInput", "inputs": {}},
+            "12": {"class_type": "ScenePrompter", "inputs": {
+                **_scene_prompt_inputs(), "scene_prompt": ["11", 0],
+                "positive_base": "{red|blue}, coat", "negative_base": "{bad|worse}",
+            }},
+            "13": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["12", 0], "count": 4}},
+            "14": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["13", 0]}},
         }
-        handle, workflow = self._prepare_callback_run(graph, "4")
-        try:
-            self._queue_callback_graph(graph, handle, workflow, claim_run=True)
-            cached = copy.deepcopy(graph)
-            for node_id in ("1", "2", "3"): del cached[node_id]
-            for node_id in ("4", "5"):
-                cached[node_id]["inputs"].pop("scene_prompt")
-                cached[node_id]["inputs"].update(current_index=3 if node_id == "4" else 2, seed_base=200)
-            self._queue_callback_graph(cached, handle, workflow)
-            expected = json.loads(marker.read_text(encoding="utf-8"))
-            self.assertNotIn("bald", expected[0])
-            files = list((self.base / "output" / "text-runtime").glob("*.png"))
-            self.assertEqual(len(files), 2)
-            with Image.open(max(files, key=lambda path: path.stat().st_mtime_ns)) as image:
-                replay = json.loads(image.text["prompt"])
-                replay_workflow = json.loads(image.text["workflow"])
-            self.assertIn("2", replay, "cached PNG restores the Delete ancestor")
-            self.assertEqual(replay["5"]["inputs"]["current_index"], 2)
-            self.assertEqual(replay["5"]["inputs"]["seed_base"], 200)
-            replay["8"]["inputs"]["path"] = "text-replay"
-            replay_handle, replay_workflow = self._prepare_callback_run(replay, "4", replay_workflow)
-            try:
-                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
-                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected)
-            finally:
-                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
-        finally:
-            self._request("/scene_prompt/runs/release", {"run_handle": handle})
+        self._request("/scene_presets/save", {
+            "preset_id": "text-only-save", "name": "text-only-save", "output_node_id": "14",
+            "api_graph": {"output": inner}, "workflow": _workflow_for_graph(inner),
+        })
+        for in_preset in (False, True):
+            for expand_contents in (False, True):
+                for mode in ("ワークフロー全体", "生成経路ノードのみ"):
+                    with self.subTest(preset=in_preset, expand=expand_contents, mode=mode):
+                        case = f"text-only-{int(in_preset)}-{int(expand_contents)}-{int(mode == '生成経路ノードのみ')}"
+                        marker = self.base / f"{case}.json"
+                        graph = {
+                            "0": {"class_type": "ScenePrompter", "inputs": {
+                                **_scene_prompt_inputs(), "positive_base": "{red|blue}, coat", "negative_base": "{bad|worse}",
+                            }},
+                            "1": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["0", 0], "count": 4}},
+                            "2": {"class_type": "ScenePromptToText", "inputs": {
+                                "scene_prompt": ["1", 0], "scope": "全てのノード", "current_index": 2, "seed_base": 100,
+                            }},
+                            "3": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+                            "4": {"class_type": "TestSceneTextImage", "inputs": {
+                                "image": ["3", 0], "positive": ["2", 0], "negative": ["2", 1], "log_path": str(marker),
+                            }},
+                            "5": {"class_type": "SceneSaveImage", "inputs": {
+                                "images": ["4", 0], "path": case, "metadata_mode": mode, "expand_preset_contents": expand_contents,
+                            }},
+                        }
+                        if in_preset:
+                            del graph["0"]
+                            graph["1"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "text-only-save"}}
+                        handle, workflow = self._prepare_callback_run(graph, None)
+                        try:
+                            self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                            expected = json.loads(marker.read_text(encoding="utf-8"))
+                            self.assertIn("coat", expected[0])
+                            self.assertIn(expected[1], ("bad", "worse"))
+                            files = list((self.base / "output" / case).rglob("*.png"))
+                            self.assertEqual(len(files), 1)
+                            with Image.open(files[0]) as image:
+                                replay = json.loads(image.text["prompt"])
+                                replay_workflow = json.loads(image.text["workflow"])
+                            kinds = {node["class_type"] for node in replay.values()}
+                            self.assertNotIn("ScenePrompterExpand", kinds)
+                            self.assertEqual("ScenePresetReference" in kinds, in_preset and not expand_contents)
+                            replay["5"]["inputs"]["path"] = f"{case}-replay"
+                            replay_handle, replay_workflow = self._prepare_callback_run(replay, None, replay_workflow)
+                            try:
+                                self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected)
+                                self.assertEqual(len(list((self.base / "output" / f"{case}-replay").rglob("*.png"))), 1)
+                            finally:
+                                self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+                        finally:
+                            self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_http_prompt_history_two_outputs_and_metadata_modes(self):
         for index, mode in enumerate(("ワークフロー全体", "生成経路ノードのみ", "プロンプトのみ"), start=1):
@@ -2558,7 +3010,7 @@ NODE_CLASS_MAPPINGS = {
         reloaded_workflow = json.loads(metadata["workflow"])
         self.assertNotIn("ScenePresetReference", {node["class_type"] for node in reloaded_prompt.values()})
         self.assertNotIn("ScenePresetReference", {node["type"] for node in reloaded_workflow["nodes"]})
-        self.assertNotIn("ScenePresetInput", {node["type"] for node in reloaded_workflow["nodes"]})
+        self.assertIn("ScenePresetInput", {node["type"] for node in reloaded_workflow["nodes"]})
         self.assertNotIn("ScenePresetOutput", {node["type"] for node in reloaded_workflow["nodes"]})
 
         self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
@@ -2580,6 +3032,57 @@ NODE_CLASS_MAPPINGS = {
         replay = self._wait_for_prompt(replay_queued["prompt_id"])
         self.assertEqual(set(replay["outputs"]).intersection({"6", "7"}), {"6", "7"})
         self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})["released"])
+
+    def test_starting_passthrough_and_required_preset_save_and_png_replay(self):
+        from PIL import Image
+        for kind in ("pass", "required", "bypass"):
+            preset_id = f"seed-{kind}"
+            preset_nodes = {
+                "1": {"class_type": "ScenePresetInput", "inputs": {}},
+                "2": {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["1", 0], "reverse_scope": "全てのノード"}},
+                "3": {"class_type": "ScenePresetOutput", "inputs": {"preset_id": preset_id, "preset_name": preset_id, "scene_prompt": ["2", 0]}},
+            }
+            preset_workflow = _workflow_for_graph(preset_nodes)
+            if kind != "required":
+                preset_nodes.pop("2")
+                preset_nodes["3"]["inputs"]["scene_prompt"] = ["1", 0]
+                if kind == "pass":
+                    preset_workflow = _workflow_for_graph(preset_nodes)
+                else:
+                    next(node for node in preset_workflow["nodes"] if node["id"] == 2)["mode"] = 4
+            self._request("/scene_presets/save", {"preset_id": preset_id, "name": preset_id, "output_node_id": "3",
+                "api_graph": {"output": preset_nodes}, "workflow": preset_workflow})
+            for mode in ("ワークフロー全体", "生成経路ノードのみ"):
+                with self.subTest(kind=kind, mode=mode):
+                    path = f"seed-preset-{kind}-{mode}"
+                    graph = _save_graph(mode, path, expand_presets=True)
+                    graph["1"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": preset_id}}
+                    graph["2"] = {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["1", 0], "reverse_scope": "全てのノード"}}
+                    handle, workflow = self._prepare_callback_run(graph, "4")
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                        files = list((self.base / "output" / path).glob("*.png"))
+                        self.assertEqual(len(files), 2)
+                        with Image.open(files[0]) as image:
+                            replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                        self.assertIn("ScenePresetInput", {node["class_type"] for node in replay.values()})
+                        self.assertNotIn("ScenePresetReference", {node["class_type"] for node in replay.values()})
+                        if kind == "bypass":
+                            bypass = next(node for node in replay_workflow["nodes"] if node.get("mode") == 4)
+                            self.assertTrue(any(link[3] == bypass["id"] for link in replay_workflow["links"]))
+                            self.assertTrue(any(link[1] == bypass["id"] for link in replay_workflow["links"]))
+                        for node in replay.values():
+                            if node["class_type"] == "SceneSaveImage":
+                                node["inputs"]["path"] = path + "-replay"
+                        replay_handle, replay_workflow = self._prepare_callback_run(replay, "4", replay_workflow)
+                        try:
+                            self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                            self.assertEqual(len(list((self.base / "output" / (path + "-replay")).glob("*.png"))),
+                                1 if mode == "生成経路ノードのみ" else 2)
+                        finally:
+                            self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+                    finally:
+                        self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_preset_http_lifecycle_and_save_failure_recovery(self):
         preset_graph = {

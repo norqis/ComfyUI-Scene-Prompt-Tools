@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { chromium } from "playwright";
 import { parseSelectionState } from "../web/scene_prompt_state.js";
+import { verifySceneModalHistory, verifyCandidateReloadSelections, verifyCandidateEditHistory } from "./scene_modal_history.mjs";
 
 if (process.env.RUN_REAL_COMFYUI_BROWSER_SMOKE !== "1") {
     console.log("real ComfyUI browser smoke skipped");
@@ -140,6 +141,19 @@ for name in ("CheckpointLoaderSimple", "UNETLoader", "CLIPLoader", "VAELoader", 
 @PromptServer.instance.routes.get("/scene_test/model_executions")
 async def model_executions(request):
     return web.json_response(executions)
+@PromptServer.instance.routes.post("/scene_test/preset_metadata")
+async def preset_metadata(request):
+    data = await request.json()
+    package = nodes.NODE_CLASS_MAPPINGS["SceneApplyLora"].__module__.rsplit(".", 1)[0]
+    metadata = importlib.import_module(package + ".preset_metadata")
+    presets = importlib.import_module(package + ".presets")
+    prompt = data["graph"]["output"]
+    if data.get("expand"):
+        prompt, workflow, _ = metadata.expand_preset_references(prompt, data["graph"]["workflow"], data["presets"], True)
+    else:
+        workflow = data["graph"]["workflow"]
+    text = presets._scene_node_value(prompt, data["text_id"], {}, set())
+    return web.json_response({"output": prompt, "workflow": workflow, "text": text})
 lookup_calls = []
 @PromptServer.instance.routes.post("/scene_test/civitai_lookup")
 async def civitai_lookup(request):
@@ -163,7 +177,16 @@ async def civitai_lookup(request):
                 "trainedWords": ["native_metadata_trigger"], "private_upstream_field": "omitted"}
     civitai.api_get = api_get
     return web.json_response({"calls": lookup_calls})
-NODE_CLASS_MAPPINGS = {}
+class TestSceneTextImage:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"positive": ("STRING",), "negative": ("STRING",)}}
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "render"
+    CATEGORY = "test"
+    def render(self, positive, negative):
+        return {"ui": {"text": [positive, negative]}, "result": nodes.EmptyImage().generate(16, 16, 1, 0)}
+NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage}
 `);
     child = spawn(python, [
         "main.py",
@@ -255,6 +278,7 @@ NODE_CLASS_MAPPINGS = {}
         const sourceUI = (await response.text()).replace("onError: showAPIError,", "onError: (error, query, retry) => { window.__sceneLLMRuntimeError = error.stack; showAPIError(error, query, retry); },");
         await route.fulfill({ response, body: `${sourceUI}
 window.__sceneSeedRuntimeTest = {
+    titleNodes() { return [...sceneTitleSyncNodes]; },
     llmWidgets(node) {
         const names = ["model_mode", "description", "positive", "negative", "generation_state_json"];
         return { firstRole: node.widgets[0]?.sceneRole, settingsCount: node.widgets.filter(widget => widget.sceneRole === "llm_settings").length,
@@ -275,7 +299,7 @@ window.__sceneSeedRuntimeTest = {
     countPreview(node) { return sceneSchedulePrefix(sceneScheduleForNode(node), 40).map(entry => entry.parts.join("")); },
     presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
-    openCandidatePicker(id) { return openPromptCandidatePopup(app.graph.getNodeById(id), ["Modal Undo Runtime"], { stateWidgetName: "positive_json" }); },
+    openCandidatePicker(id, side = "positive") { return openPromptCandidatePopup(app.graph.getNodeById(id), ["Modal Undo Runtime"], { stateWidgetName: side + "_json" }); },
     reloadCandidateItems() { return loadPromptItems(true); },
     writeSelection(node, state) { return writeState(node, state, { stateWidgetName: "positive_json" }); },
     async refreshPresetReference(node) { await loadScenePresetList(true); refreshScenePresetReference(node); },
@@ -321,6 +345,150 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    const removedInitialization = await page.evaluate(async () => {
+        const graph = window.app.graph, removed = [];
+        graph.clear();
+        for (let index = 0; index < 20; index++) {
+            const node = window.LiteGraph.createNode('SceneMatrix'); graph.add(node);
+            node.configure(node.serialize()); graph.remove(node); removed.push(node);
+        }
+        const live = window.LiteGraph.createNode('SceneMatrix');
+        live.configure(live.serialize()); graph.add(live);
+        await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+        const titles = window.__sceneSeedRuntimeTest.titleNodes();
+        const result = { retained: titles.filter(node => removed.includes(node)).length,
+            liveRetained: titles.includes(live), pending: removed.some(node => node.scenePromptAttachScheduled != null) };
+        graph.clear(); return result;
+    });
+    assert.deepEqual(removedInitialization, { retained: 0, liveRetained: true, pending: false });
+    console.log('real ComfyUI configure/remove cancels deferred initialization without retaining deleted nodes; configure-before-add remains active');
+    const allowPreviewQueue = route => route.continue();
+    await page.route('**/prompt', allowPreviewQueue);
+    nativeRunChecks = true;
+    try {
+        await page.evaluate(async () => {
+            const { api } = await import('/scripts/api.js');
+            const app = window.app; app.graph.clear();
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const set = (node, name, value) => { const widget = node.widgets.find(item => item.name === name); widget.value = value; widget.callback?.(value); };
+            const count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+            const save = add('SceneSaveImage'), image = add('EmptyImage');
+            set(count, 'count', 12); set(image, 'width', 64); set(image, 'height', 64); set(expand, 'timestamp_dir', false);
+            count.connect(0, expand, expand.inputs.findIndex(input => input.name === 'scene_prompt'));
+            expand.connect(2, save, save.inputs.findIndex(input => input.name === 'scene_info'));
+            image.connect(0, save, save.inputs.findIndex(input => input.name === 'images'));
+            const state = window.__scenePreviewRuntime = { saveId: save.id, expandId: expand.id, points: [], errors: [] };
+            const executed = ({ detail }) => {
+                if (String(detail.node) !== String(save.id)) return;
+                state.points.push({ promptId: detail.prompt_id, filename: detail.output.images.at(-1).filename,
+                    keys: save.scenePreviewKeys.size, images: save.scenePreviewImages.size });
+            };
+            const failed = ({ detail }) => state.errors.push(detail);
+            api.addEventListener('executed', executed); api.addEventListener('execution_error', failed);
+            state.cleanup = () => { api.removeEventListener('executed', executed); api.removeEventListener('execution_error', failed); };
+            expand.widgets.find(widget => widget.sceneRole === 'expand_run_all').callback();
+        });
+        await page.waitForFunction(() => {
+            const state = window.__scenePreviewRuntime;
+            return state.errors.length || state.points.length === 12
+                && !window.app.graph.getNodeById(state.expandId).widgets.find(widget => widget.name === 'run_id').value;
+        }, null, { timeout: 60_000 });
+        await page.waitForFunction(() => {
+            const state = window.__scenePreviewRuntime, node = window.app.graph.getNodeById(state.saveId);
+            return node.imgs?.length === 1 && node.imgs[0].complete && node.imgs[0].naturalWidth === 64
+                && new URL(node.imgs[0].src).searchParams.get('filename') === state.points.at(-1)?.filename;
+        });
+        const preview = await page.evaluate(() => {
+            const { points, errors } = window.__scenePreviewRuntime; return { points, errors };
+        });
+        assert.deepEqual(preview.errors, []);
+        assert.equal(preview.points.length, 12);
+        assert.equal(new Set(preview.points.map(point => point.promptId)).size, 12);
+        assert(preview.points.every(point => point.keys === 1 && point.images === 1), JSON.stringify(preview.points));
+        for (const point of preview.points) {
+            const history = (await (await fetch(`${url}/history/${point.promptId}`)).json())[point.promptId];
+            assert.equal(history?.status?.status_str, 'success');
+        }
+        console.log('real ComfyUI 12-image CPU batch retains only the current Save preview after native image replacement');
+    } finally {
+        await page.evaluate(() => { window.__scenePreviewRuntime?.cleanup(); delete window.__scenePreviewRuntime; });
+        nativeRunChecks = false;
+        await page.unroute('**/prompt', allowPreviewQueue);
+    }
+    let releaseBatchPost;
+    const batchPostGate = new Promise(resolveGate => { releaseBatchPost = resolveGate; });
+    const collisionRequests = [];
+    const allowCollisionQueue = async route => {
+        collisionRequests.push(route.request().postDataJSON());
+        if (collisionRequests.length === 1) await batchPostGate;
+        await route.continue();
+    };
+    await page.route('**/prompt', allowCollisionQueue);
+    nativeRunChecks = true;
+    try {
+        const ids = await page.evaluate(async () => {
+            const app = window.app; app.graph.clear();
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const set = (node, name, value) => { node.widgets.find(widget => widget.name === name).value = value; };
+            const connect = (source, slot, target, name) => source.connect(slot, target, target.inputs.findIndex(input => input.name === name));
+            const input = add('ScenePresetInput'), prompt = add('ScenePrompter'), output = add('ScenePresetOutput');
+            set(prompt, 'positive_base', 'independent_execution');
+            connect(input, 0, prompt, 'scene_prompt'); connect(prompt, 0, output, 'scene_prompt');
+            const graph = await app.graphToPrompt();
+            const response = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ preset_id: 'native-normal-during-batch', output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow }) });
+            if (!response.ok) throw new Error(await response.text());
+            app.graph.clear();
+            const reference = add('ScenePresetReference'), count = add('ScenePromptCounter');
+            const expand = add('ScenePrompterExpand'), preview = add('PreviewAny');
+            set(reference, 'preset_id', 'native-normal-during-batch'); set(count, 'count', 2);
+            await window.__sceneSeedRuntimeTest.refreshPresetReference(reference);
+            connect(reference, 0, count, 'scene_prompt'); connect(count, 0, expand, 'scene_prompt'); connect(expand, 0, preview, 'source');
+            expand.widgets.find(widget => widget.sceneRole === 'expand_run_all').callback();
+            return { reference: reference.id, expand: expand.id, preview: preview.id };
+        });
+        const deadline = Date.now() + 30_000;
+        while (!collisionRequests.length && Date.now() < deadline) await new Promise(resolveTimer => setTimeout(resolveTimer, 50));
+        assert.equal(collisionRequests.length, 1, 'the first batch POST is held before normal Queue');
+        const ownedRunId = collisionRequests[0].prompt[String(ids.expand)].inputs.run_id;
+        const ownedHandle = collisionRequests[0].prompt[String(ids.reference)].inputs.run_handle;
+        const before = runRequests.length;
+        const ordinary = await page.evaluate(async () => {
+            const { api } = await import('/scripts/api.js');
+            return api.queuePrompt(0, await window.app.graphToPrompt());
+        });
+        assert.equal(runRequests.slice(before).filter(path => path.endsWith('/prepare')).length, 1);
+        const ordinaryPrompt = collisionRequests[1].prompt;
+        assert.equal(ordinaryPrompt[String(ids.expand)].inputs.run_id, '');
+        assert(ordinaryPrompt[String(ids.reference)].inputs.run_handle);
+        assert.notEqual(ordinaryPrompt[String(ids.reference)].inputs.run_handle, ownedHandle);
+        assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'run_id').value, ids.expand), ownedRunId);
+        let ordinaryHistory;
+        const ordinaryDeadline = Date.now() + 30_000;
+        while (Date.now() < ordinaryDeadline) {
+            ordinaryHistory = (await (await fetch(`${url}/history/${ordinary.prompt_id}`)).json())[ordinary.prompt_id];
+            if (ordinaryHistory?.status) break;
+            await new Promise(resolveTimer => setTimeout(resolveTimer, 50));
+        }
+        assert.equal(ordinaryHistory?.status?.status_str, 'success', JSON.stringify(ordinaryHistory?.status));
+        assert.deepEqual(ordinaryHistory.outputs[String(ids.preview)].text, ['independent_execution']);
+        releaseBatchPost();
+        await page.waitForFunction(id => !window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'run_id').value,
+            ids.expand, { timeout: 30_000 });
+        assert.equal(collisionRequests.length, 3, 'ordinary Queue does not consume either batch iteration');
+        assert.equal(collisionRequests[2].prompt[String(ids.expand)].inputs.run_id, ownedRunId);
+        assert.equal(collisionRequests[2].prompt[String(ids.expand)].inputs.run_handle, ownedHandle);
+        const histories = await (await fetch(`${url}/history`)).json();
+        const batchHistories = Object.values(histories).filter(history => history.prompt[2][String(ids.expand)]?.inputs?.run_id === ownedRunId);
+        assert.equal(batchHistories.length, 2);
+        assert(batchHistories.every(history => history.status.status_str === 'success'));
+        assert(batchHistories.every(history => history.outputs[String(ids.preview)].text[0] === 'independent_execution'));
+        console.log('real ComfyUI ordinary Queue during an active batch prepares independently and both Preset batch iterations still succeed');
+    } finally {
+        releaseBatchPost();
+        nativeRunChecks = false;
+        await page.unroute('**/prompt', allowCollisionQueue);
+    }
     const screenshotDirectory = process.env.SCENE_BROWSER_SCREENSHOTS_DIR || resolve(tmpdir(), 'scene-prompt-civitai-review');
     await mkdir(screenshotDirectory, { recursive: true });
     const nativeCanvasCache = await page.evaluate(() => {
@@ -526,6 +694,48 @@ window.__sceneSeedRuntimeTest = {
         assert(!nativeGPURequests.at(-1).extra_data.scene_gpu_policy);
         assert.equal(nativeResourceRequests.length, resourceCount, "native OFF queue adds no resource-control requests");
         assert.equal(gpuEvents.length, providerCount, "native OFF queue never touches the provider resource API");
+
+        // Drop one cleanup request before it reaches the real coordinator. The
+        // next Queue or OFF prompt action must recover before entering its gate.
+        for (const nextOperation of ["queue", "llm"]) {
+            await setGPU(true, false);
+            const cleanupStart = nativeResourceRequests.length;
+            let droppedEnd = false;
+            const dropFirstEnd = async (route) => {
+                if (!droppedEnd) { droppedEnd = true; return route.abort("failed"); }
+                return route.continue();
+            };
+            await page.route("**/scene_prompt/llm/end", dropFirstEnd);
+            try {
+                const recoveredPrompt = await page.evaluate(async () => {
+                    const { app } = await import("/scripts/app.js"); app.graph.clear();
+                    const target = window.LiteGraph.createNode("ScenePromptLLM"); app.graph.add(target);
+                    target.widgets.find((widget) => widget.name === "description").value = "recover failed resource cleanup";
+                    await target.widgets.find((widget) => widget.sceneRole === "llm_generate").callback();
+                    return target.widgets.find((widget) => widget.name === "positive").value;
+                });
+                assert.equal(recoveredPrompt, "fixture prompt");
+                assert.equal(droppedEnd, true);
+                if (nextOperation === "queue") {
+                    const recoveredImage = await queueImage(2);
+                    const recoveredHistory = await completedHistory(recoveredImage.prompt_id);
+                    assert.equal(recoveredHistory[recoveredImage.prompt_id].status.status_str, "success");
+                } else {
+                    await setGPU(false, false);
+                    const nextPrompt = await page.evaluate(async () => {
+                        const target = window.app.graph._nodes.find((node) => node.type === "ScenePromptLLM");
+                        target.widgets.find((widget) => widget.name === "positive").value = "";
+                        await target.widgets.find((widget) => widget.sceneRole === "llm_generate").callback();
+                        return target.widgets.find((widget) => widget.name === "positive").value;
+                    });
+                    assert.equal(nextPrompt, "fixture prompt", "OFF prompt generation recovers the real exclusive gate");
+                    assert(!nativeResourceRequests.at(-1).body.session_id);
+                }
+                assert.deepEqual(nativeResourceRequests.slice(cleanupStart).map(({ path }) => path),
+                    ["/scene_prompt/llm/begin", "/scene_prompt/llm/generate", "/scene_prompt/llm/end", "/scene_prompt/llm/end",
+                        ...(nextOperation === "llm" ? ["/scene_prompt/llm/generate"] : [])]);
+            } finally { await page.unroute("**/scene_prompt/llm/end", dropFirstEnd); }
+        }
         await setGPU(false, false);
         await page.evaluate(async (connection) => {
             const { api } = await import("/scripts/api.js");
@@ -533,8 +743,77 @@ window.__sceneSeedRuntimeTest = {
                 body: JSON.stringify({ base_url: connection.base_url, port: connection.port ?? "", model: connection.model, api_key: "" }) });
             window.app.graph.clear();
         }, originalConnection);
-        console.log("real ComfyUI native GPU settings persistence, prompt control, scoped POST policy, release-before-image and OFF compatibility passed");
+        console.log("real ComfyUI native GPU settings, scoped POST policy, release-before-image, OFF compatibility and failed-cleanup recovery before normal Queue and OFF LLM generation passed");
     } finally { nativeGPUChecks = false; }
+    const presetBoundaryReplay = await page.evaluate(async () => {
+        const app = window.app, results = [];
+        const create = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+        const set = (node, name, value) => { node.widgets.find(widget => widget.name === name).value = value; };
+        const connect = (from, to) => from.connect(0, to, to.inputs.findIndex(slot => slot.name === "scene_prompt"));
+        const post = async (path, body) => {
+            const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            if (!response.ok) throw new Error(await response.text());
+            return response.json();
+        };
+        for (const nested of [false, true]) for (const passthrough of [false, true]) for (const chainLength of [1, 2, 3]) {
+            const presets = {};
+            app.graph.clear();
+            const input = create("ScenePresetInput"), inner = create(passthrough ? "ScenePromptCounter" : "ScenePrompter"), output = create("ScenePresetOutput");
+            set(input, "switch_names_json", '["Named"]');
+            if (passthrough) inner.mode = 4; else set(inner, "positive_base", "INSIDE");
+            connect(input, inner); connect(inner, output);
+            const childId = `boundary-${nested}-${passthrough}`;
+            set(output, "preset_id", childId);
+            let graph = await app.graphToPrompt();
+            await post("/scene_presets/save", { preset_id: childId, name: childId, output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow });
+            presets[childId] = await (await fetch(`/scene_presets/load?preset_id=${childId}&include_api_graph=1`)).json();
+            let presetId = childId;
+            if (nested) {
+                app.graph.clear();
+                const parentInput = create("ScenePresetInput"), ref = create("ScenePresetReference"), parentOutput = create("ScenePresetOutput");
+                set(parentInput, "switch_names_json", '["Parent"]'); set(ref, "preset_id", childId);
+                connect(parentInput, ref); connect(ref, parentOutput);
+                presetId = `${childId}-parent`; set(parentOutput, "preset_id", presetId);
+                graph = await app.graphToPrompt();
+                await post("/scene_presets/save", { preset_id: presetId, name: presetId, output_node_id: String(parentOutput.id), api_graph: graph, workflow: graph.workflow });
+                presets[presetId] = await (await fetch(`/scene_presets/load?preset_id=${presetId}&include_api_graph=1`)).json();
+            }
+            app.graph.clear();
+            const outside = create("ScenePrompter"), text = create("ScenePromptToText");
+            set(outside, "positive_base", "OUTSIDE"); set(text, "scope", "直前のノードのみ");
+            let previous = outside;
+            for (let index = 0; index < chainLength; index++) {
+                const ref = create("ScenePresetReference");
+                set(ref, "preset_id", presetId); connect(previous, ref); previous = ref;
+            }
+            connect(previous, text);
+            graph = await app.graphToPrompt();
+            const expanded = await post("/scene_test/preset_metadata", { graph, presets, expand: true, text_id: String(text.id) });
+            await app.loadGraphData(expanded.workflow, true, true);
+            const replay = await app.graphToPrompt();
+            const reloaded = await post("/scene_test/preset_metadata", { graph: replay, text_id: String(text.id) });
+            results.push({ nested, passthrough, chainLength, before: expanded.text, after: reloaded.text,
+                boundaries: Object.values(replay.output).filter(node => node.inputs?.prompt_trace_kind === "whole").length });
+        }
+        app.graph.clear(); return results;
+    });
+    for (const result of presetBoundaryReplay) {
+        const expected = [result.passthrough ? "OUTSIDE" : "OUTSIDE, INSIDE", ""];
+        assert.deepEqual(result.before, expected);
+        assert.deepEqual(result.after, expected, "native LiteGraph reload preserves named-switch input and previous-scope Preset boundary");
+        assert.equal(result.boundaries, result.chainLength * (result.nested ? 2 : 1));
+    }
+    console.log("real ComfyUI expanded Preset workflow reload preserves serial references, named-switch passthrough, nested boundaries and previous-scope text");
+    const allowPngReplayQueue = route => route.continue();
+    await page.route('**/prompt', allowPngReplayQueue);
+    nativeRunChecks = true;
+    try {
+        await (await import('./scene_random_png_replay.mjs')).testRandomPngReplay(page);
+    } finally {
+        nativeRunChecks = false;
+        await page.unroute('**/prompt', allowPngReplayQueue);
+    }
+
     if (process.env.COMFYUI_WORKFLOW_PNG) {
         const extracted = spawnSync(python, [
             "-c",
@@ -1336,6 +1615,107 @@ window.__sceneSeedRuntimeTest = {
     assert(randomOutputRuntime.restoredInputs.includes('scene_prompt10'));
     assert(randomOutputRuntime.missingStatus>=400); assert.match(JSON.stringify(randomOutputRuntime.missing),/出力1|ランダム分岐/u);
     console.log('real ComfyUI nested 100% Input/Output UI, Count10, preflight and serialization passed');
+    const randomErrorPropagation = await page.evaluate(async () => {
+        const results = [];
+        for (const joinType of ['ScenePrompterQueue', 'ScenePromptRandomRouteOutput']) {
+            for (const invalidSide of [1, 2]) {
+                const app = window.app; app.graph.clear();
+                const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+                const link = (from, slot, to, name) => from.connect(slot, to, to.inputs.findIndex(input => input.name === name));
+                const random = add('ScenePromptRandomRoute'), join = add(joinType);
+                const valid = add('ScenePrompter'), merge = add('ScenePrompterMerge');
+                const nextRandom = add('ScenePromptRandomRoute'), nextOutput = add('ScenePromptRandomRouteOutput');
+                const count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+                for (const node of [random, nextRandom])
+                    node.widgets.find(widget => widget.name === 'weights_json').value = '[5000,5000,0,0,0,0,0,0,0,0]';
+                count.widgets.find(widget => widget.name === 'count').value = 10;
+                link(random, 0, join, 'scene_prompt1');
+                link(join, 0, merge, `scene_prompt${invalidSide}`);
+                link(valid, 0, merge, `scene_prompt${3 - invalidSide}`);
+                link(merge, 0, nextRandom, 'scene_prompt');
+                link(nextRandom, 0, nextOutput, 'scene_prompt1');
+                link(nextRandom, 1, nextOutput, 'scene_prompt2');
+                link(nextOutput, 0, count, 'scene_prompt'); link(count, 0, expand, 'scene_prompt');
+                await new Promise(done => setTimeout(done, 300));
+                const widget = expand.widgets.find(item => item.sceneRole === 'expand_total_count');
+                const before = { label: widget.value, total: widget.sceneTotalCount };
+                link(random, 1, join, 'scene_prompt2');
+                await new Promise(done => setTimeout(done, 300));
+                results.push({ joinType, invalidSide, before, after: { label: widget.value, total: widget.sceneTotalCount } });
+            }
+        }
+        return results;
+    });
+    for (const result of randomErrorPropagation) {
+        assert.match(result.before.label, /ランダム分岐.*0%/u, JSON.stringify(result));
+        assert.equal(result.before.total, null, 'invalid Random routes must not display a plausible zero');
+        assert.equal(result.after.total, 10, 'reconnecting the missing arm restores the visible count');
+        assert.doesNotMatch(result.after.label, /ランダム分岐/u);
+    }
+    console.log('real ComfyUI upstream Random errors survive both Merge sides and downstream Random; reconnection restores Count10');
+    nativeRunChecks = true;
+    const matrixValidation = await page.evaluate(async () => {
+        const { api } = await import('/scripts/api.js');
+        const results = [];
+        for (const mode of ['missing-disabled', 'open-disabled', 'open-unconfigured', 'overflow-disabled', 'valid-disabled', 'valid-unconfigured']) {
+            const app = window.app; app.graph.clear();
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const link = (from, slot, to, name) => from.connect(slot, to, to.inputs.findIndex(input => input.name === name));
+            const matrix = add('SceneMatrix'), queue = add('ScenePrompterQueue');
+            const valid = add('ScenePrompter'), expand = add('ScenePrompterExpand');
+            matrix.widgets.find(widget => widget.name === 'matrix_json').value = JSON.stringify({ version: 1,
+                sets: mode.endsWith('unconfigured') ? [] : [{ row_id: 'off', name: 'off', path_label: 'off', enabled: false }] });
+            let tail = matrix;
+            if (mode.startsWith('missing') || mode.startsWith('open')) {
+                const random = add('ScenePromptRandomRoute');
+                random.widgets.find(widget => widget.name === 'weights_json').value = '[5000,5000,0,0,0,0,0,0,0,0]';
+                if (mode.startsWith('missing')) {
+                    const output = add('ScenePromptRandomRouteOutput');
+                    link(random, 0, output, 'scene_prompt1'); link(output, 0, matrix, 'scene_prompt');
+                } else {
+                    link(random, 0, matrix, 'scene_prompt');
+                    if (mode.endsWith('unconfigured')) {
+                        tail = add('ScenePromptRandomRouteOutput');
+                        link(matrix, 0, tail, 'scene_prompt1'); link(random, 1, tail, 'scene_prompt2');
+                    }
+                }
+            } else {
+                const count = add('ScenePromptCounter');
+                count.widgets.find(widget => widget.name === 'count').value = mode.startsWith('overflow') ? 100_000_000 : 2;
+                if (mode.startsWith('overflow')) {
+                    const upstream = add('ScenePromptCounter');
+                    upstream.widgets.find(widget => widget.name === 'count').value = 100_000_000;
+                    link(upstream, 0, count, 'scene_prompt');
+                }
+                link(count, 0, matrix, 'scene_prompt');
+            }
+            link(tail, 0, queue, 'scene_prompt1'); link(valid, 0, queue, 'scene_prompt2'); link(queue, 0, expand, 'scene_prompt');
+            await new Promise(done => setTimeout(done, 300));
+            const widget = expand.widgets.find(item => item.sceneRole === 'expand_total_count');
+            const preview = { total: widget.sceneTotalCount, label: widget.value };
+            const prompt = await app.graphToPrompt();
+            const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST',
+                body: JSON.stringify({ api_graph: prompt, workflow: prompt.workflow, expand_node_id: String(expand.id) }) });
+            const body = await response.json();
+            if (body.run_handle) await api.fetchApi('/scene_prompt/runs/release', { method: 'POST', body: JSON.stringify({ run_handle: body.run_handle }) });
+            results.push({ mode, preview, status: response.status, body });
+        }
+        return results;
+    });
+    nativeRunChecks = false;
+    for (const result of matrixValidation) {
+        if (result.mode.startsWith('valid')) {
+            const expected = result.mode.endsWith('unconfigured') ? 3 : 1;
+            assert.equal(result.preview.total, expected, JSON.stringify(result));
+            assert.equal(result.status, 200, JSON.stringify(result));
+            assert.equal(result.body.total_batches, expected);
+        } else {
+            assert.equal(result.preview.total, null, JSON.stringify(result));
+            assert.match(result.preview.label, /ランダム分岐|Matrix|大きすぎ/u);
+            assert(result.status >= 400, JSON.stringify(result));
+        }
+    }
+    console.log('real ComfyUI empty/disabled Matrix preserves upstream errors and Random restrictions; valid zero/passthrough counts match preparation');
     const queueModeRuntime = await page.evaluate(async () => {
         const app=window.app; app.graph.clear();
         const add=type=>{const node=window.LiteGraph.createNode(type);app.graph.add(node);return node;};
@@ -2511,6 +2891,44 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(switchLegacy.api[String(switchLive.second)].inputs.scene_prompt, [String(switchLive.input), 0], 'legacy Input keeps its original Scene slot 0 link');
     const oldReference = await page.evaluate(id => window.app.graph.getNodeById(id).serialize().widgets_values_named, switchLive.second);
     assert.equal(oldReference.run_handle, 'legacy-run'); assert.equal(oldReference.llm_presets_json, '{"version":1,"presets":{}}');
+    const legacyPreview = await page.evaluate(id => {
+        const app = window.app, reference = app.graph.getNodeById(id);
+        const text = window.LiteGraph.createNode('ScenePromptToText'), preview = window.LiteGraph.createNode('PreviewAny');
+        app.graph.add(text); app.graph.add(preview);
+        reference.connect(0, text, text.inputs.findIndex(input => input.name === 'scene_prompt'));
+        text.connect(0, preview, preview.inputs.findIndex(input => input.name === 'source'));
+        return preview.id;
+    }, switchLive.second);
+    let legacyQueuedBody, previousLegacyHandle;
+    const allowLegacyQueue = async route => { legacyQueuedBody = route.request().postDataJSON(); await route.continue(); };
+    await page.route('**/prompt', allowLegacyQueue);
+    try {
+        for (let execution = 0; execution < 2; execution++) {
+            const before = runRequests.length;
+            const queued = await page.evaluate(async () => {
+                const { api } = await import('/scripts/api.js');
+                return api.queuePrompt(0, await window.app.graphToPrompt());
+            });
+            assert.equal(runRequests.slice(before).filter(path => path.endsWith('/prepare')).length, 1,
+                'normal Queue prepares exactly once despite saved legacy handles');
+            const handles = Object.values(legacyQueuedBody.prompt)
+                .filter(node => ['ScenePresetReference', 'ScenePrompterExpand', 'ScenePromptToText'].includes(node.class_type))
+                .map(node => node.inputs.run_handle);
+            assert(handles[0] && handles.every(handle => handle === handles[0]));
+            assert.notEqual(handles[0], 'legacy-run'); assert.notEqual(handles[0], previousLegacyHandle);
+            previousLegacyHandle = handles[0];
+            let history;
+            const deadline = Date.now() + 30_000;
+            while (Date.now() < deadline) {
+                history = (await (await fetch(`${url}/history/${queued.prompt_id}`)).json())[queued.prompt_id];
+                if (history?.status?.completed) break;
+                await new Promise(resolveTimer => setTimeout(resolveTimer, 100));
+            }
+            assert.equal(history?.status?.status_str, 'success', JSON.stringify(history?.status));
+            assert.deepEqual(history.outputs[String(legacyPreview)].text, ['browser_false']);
+        }
+    } finally { await page.unroute('**/prompt', allowLegacyQueue); }
+    console.log('real ComfyUI normal Queue replaces saved legacy handles on every execution and completes CPU text output');
     assert.equal((await inputSwitchSnapshot(switchLive.input)).ports.length, 12, 'legacy one-output Input appends fixed slots');
     await page.evaluate(async workflow => window.app.loadGraphData(workflow, true, true), switchReloadWorkflow);
     const settingsBeforeSwitchReload = await page.evaluate(async () => {
@@ -2628,20 +3046,21 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(primitiveQueueOffAgain.serialized, primitiveQueueOff.serialized);
     console.log('real ComfyUI PrimitiveBoolean canvas pointer toggle switches Queue boundary/controls/counts and preserves Queue settings');
 
-    const prepareAfterDisplay = async (id, total) => {
+    const prepareAfterDisplay = async (id, total, totalImages) => {
         // This is deliberately after the display-only wait: no test planner, redraw,
         // refresh or graphToPrompt call may repair the user's stale display first.
         await waitExpandDisplay(id, total);
-        const preparedTotal = await page.evaluate(async id => {
+        const preparedCounts = await page.evaluate(async id => {
             const app = window.app, { api } = await import('/scripts/api.js'), prompt = await app.graphToPrompt();
             const response = await api.fetchApi('/scene_prompt/runs/prepare', { method: 'POST', body: JSON.stringify({
                 api_graph: prompt, workflow: prompt.workflow, expand_node_id: String(id),
             }) });
             const prepared = await response.json(); if (!response.ok) throw new Error(JSON.stringify(prepared));
             await api.fetchApi('/scene_prompt/runs/release', { method: 'POST', body: JSON.stringify({ run_handle: prepared.run_handle }) });
-            return prepared.total_batches;
+            return { total: prepared.total_batches, images: prepared.total_images };
         }, id);
-        assert.equal(preparedTotal, total, 'the already-updated display matches native prepare');
+        assert.equal(preparedCounts.total, total, 'the already-updated display matches native prepare');
+        if (totalImages !== undefined) assert.equal(preparedCounts.images, totalImages, 'native preparation preserves the latent batch size');
     };
     const clickCountWidget = async (id, name, expected, increment = false) => {
         const point = await page.evaluate(({ id, name, increment }) => {
@@ -2775,6 +3194,43 @@ window.__sceneSeedRuntimeTest = {
         await prepareAfterDisplay(mappedCountLive.expand, total);
     }
     console.log('real ComfyUI Count number/Boolean pointer edits and mapped Preset Count ON/OFF update the visible Expand count before any test planner/refresh/API capture');
+    for (const arm of [0, 9]) {
+        const randomExpand = await page.evaluate(async arm => {
+            const app = window.app;
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const set = (node, name, value) => { node.widgets.find(widget => widget.name === name).value = value; };
+            const connect = (from, to, slot = 0) => from.connect(slot, to, to.inputs.findIndex(input => input.name === 'scene_prompt'));
+            let presetId = '';
+            for (let level = 0; level < 3; level++) {
+                app.graph.clear();
+                const input = add('ScenePresetInput'), inner = add(level ? 'ScenePresetReference' : 'ScenePromptRandomRoute');
+                const output = add('ScenePresetOutput');
+                if (level) set(inner, 'preset_id', presetId);
+                else {
+                    set(inner, 'weights_json', JSON.stringify(Array.from({ length: 10 }, (_, index) => index === arm ? 10000 : 0)));
+                    set(inner, 'preserve_join', false); // Legacy 100% routes do not require a join.
+                }
+                connect(input, inner); connect(inner, output, level ? 0 : arm);
+                presetId = `native-random-count-${arm}-${level}`; set(output, 'preset_id', presetId);
+                const graph = await app.graphToPrompt();
+                const response = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                    preset_id: presetId, output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow,
+                }) });
+                if (!response.ok) throw new Error(await response.text());
+            }
+            app.graph.clear();
+            const first = add('ScenePromptCounter'), latent = add('SceneEmptyLatent'), reference = add('ScenePresetReference');
+            const last = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+            set(first, 'count', 4); set(latent, 'batch_size', 3); set(reference, 'preset_id', presetId); set(last, 'count', 6);
+            connect(first, latent); connect(latent, reference); connect(reference, last); connect(last, expand);
+            const ids = { reference: reference.id, expand: expand.id };
+            await app.loadGraphData(app.graph.serialize(), true, true);
+            await window.__sceneSeedRuntimeTest.refreshPresetReference(app.graph.getNodeById(ids.reference));
+            return ids.expand;
+        }, arm);
+        await prepareAfterDisplay(randomExpand, 24, 72);
+    }
+    console.log('real ComfyUI nested 100% Random slots 0/9 show correct Count before native prepare and preserve latent totals');
     nativeRunChecks = false;
     console.log('real ComfyUI standard Switch MatchType, fixed slots, names/mapping DOM saves, siblings, count/selected preview, Undo/Redo, clone, legacy restore, reload and one settings category passed');
 
@@ -2797,9 +3253,15 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(nativeWeightedLine.positive_parts, ["first", "((TAG:4):0.5)", "(equal:1.)", "(science:1_2e-1)"]);
     assert.deepEqual(nativeWeightedLine.negative_parts, ["(blocked:.1)"]);
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    await verifySceneModalHistory(page);
+    await verifyCandidateEditHistory(page);
+    await verifyCandidateReloadSelections(page);
     await page.waitForTimeout(100);
     assert.deepEqual(pageErrors, []);
     console.log("real ComfyUI local metadata HTTP, model/LoRA dialogs, retry, red links and weighted Matrix input preservation passed");
+} catch (error) {
+    console.error(output.join("").slice(-6000));
+    throw error;
 } finally {
     await browser?.close();
     if (child?.exitCode === null) {

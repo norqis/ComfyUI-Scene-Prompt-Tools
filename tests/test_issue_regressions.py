@@ -211,8 +211,10 @@ class OpenIssueRegressionTests(unittest.TestCase):
                 "input_repeats_json": '{"scene_prompt1":99}',
             }},
             "4": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["3", 0]}},
+            "5": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 1, "prompt_trace_kind": "whole"}},
         }}
         compact = self.presets._compact_preset_list_graph(graph)
+        self.assertEqual(compact["output"]["5"]["inputs"]["prompt_trace_kind"], "whole")
         encoded = compact["output"]["2"]["inputs"]["matrix_json"]
         self.assertLess(len(encoded), 500)
         parsed = json.loads(encoded)

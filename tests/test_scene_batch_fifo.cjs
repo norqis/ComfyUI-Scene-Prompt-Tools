@@ -219,6 +219,7 @@ async function testHiddenPendingTabUsesItsCapturedGraphWhenActivated() {
         sceneBatchFinalizingRuns: new Set(),
         sceneBatchPendingRuns: [],
         sceneBatchPlanId() { return "captured-plan"; },
+        isScenePresetReferenceNode(node) { return node.type === "ScenePresetReference"; },
         sceneBatchRunId() { return "run"; },
         sceneBatchSeedBase() { return 123; },
         captureRandomizedSamplerSeedTargets() { return []; },
@@ -296,6 +297,7 @@ testQueuedPrefixesStayWithTheirTabs()
     .then(testPresetErrorMarksOnlyTargetReference)
     .then(testPresetErrorClearStaysInSelectedBranch)
     .then(testPresetResolveClearsOnlyItsOwnReferences)
+    .then(testPresetErrorsRetainCapturedNodeOwners)
     .then(testPresetDisplayCacheStaysPerReference)
     .then(() => console.log("Scene Prompt Expand cross-tab FIFO tests passed."))
     .catch((error) => {
@@ -361,8 +363,6 @@ async function testScenePresetResolution() {
         "scenePresetGraphNodes",
         "apiLink",
         "apiInput",
-        "apiMatrixEnabledCount",
-        "apiMatrixConfigured",
         "emptyScenePromptStats",
         "sceneStatNumber",
         "sceneStatProduct",
@@ -708,7 +708,7 @@ async function testPresetErrorMarksOnlyTargetReference() {
         Set,
         String,
         Object,
-        app: { graph: { _nodes: canvasNodes, setDirtyCanvas() {} } },
+        app: { graph: { _nodes: canvasNodes, getNodeById(id) { return this._nodes.find(node => String(node.id) === String(id)); }, setDirtyCanvas() {} } },
         isScenePresetReferenceNode(node) { return node.presetReference; },
     };
     require("./scene_switches_test_context.cjs").install(markContext);
@@ -791,6 +791,24 @@ async function testSelectedExpandBranchOnlyQueues() {
         () => branchContext.createSceneBatchPromptSnapshot("2"),
         /複数の Scene Prompt Expand/,
     );
+
+    const captured = structuredClone(fullPrompt);
+    const validWeights = "[10000,0,0,0,0,0,0,0,0,0]";
+    captured.output["1"] = { class_type: "ScenePromptRandomRoute", inputs: { weights_json: validWeights } };
+    let release;
+    const graph = { _nodes: [{ id: 1, type: "ScenePromptRandomRoute", properties: { owner: "A" } }] };
+    branchContext.sceneNodeById = () => { throw new Error("captured Random must not read or update the current tab"); };
+    branchContext.app = { graph, async graphToPrompt() {
+        const snapshot = structuredClone(captured);
+        await new Promise((resolve) => { release = resolve; });
+        return snapshot;
+    } };
+    const pending = branchContext.createSceneBatchPromptSnapshot("2");
+    graph._nodes = [{ id: 1, type: "ScenePromptRandomRoute", widgets: [{ name: "weights_json", value: "[0,0,0,0,0,0,0,0,0,0]" }] }];
+    release();
+    const randomSnapshot = await pending;
+    assert.equal(randomSnapshot.output["1"].inputs.weights_json, validWeights);
+    assert.equal(graph._nodes[0].sceneRandomError, undefined);
 }
 
 async function testCancelledPresetResolutionReleasesOnce() {
@@ -849,7 +867,7 @@ async function testPresetErrorClearStaysInSelectedBranch() {
     const clearContext = {
         Set,
         String,
-        app: { graph: { _nodes: nodes, setDirtyCanvas() {} } },
+        app: { graph: { _nodes: nodes, getNodeById(id) { return this._nodes.find(node => String(node.id) === String(id)); }, setDirtyCanvas() {} } },
         isScenePresetReferenceNode(node) { return node.presetReference; },
     };
     require("./scene_switches_test_context.cjs").install(clearContext);
@@ -871,7 +889,7 @@ async function testPresetResolveClearsOnlyItsOwnReferences() {
         Object,
         Array,
         JSON,
-        app: { graph: { _nodes: nodes, setDirtyCanvas() {} } },
+        app: { graph: { _nodes: nodes, getNodeById(id) { return this._nodes.find(node => String(node.id) === String(id)); }, setDirtyCanvas() {} } },
         isScenePresetReferenceNode(node) { return node.presetReference; },
         async prepareSceneRunContext(_snapshot, expand) {
             if (String(expand) === "4") {
@@ -894,14 +912,14 @@ async function testPresetResolveClearsOnlyItsOwnReferences() {
     }
     resolveContext.markScenePresetReferenceErrors("A is broken", { nodeId: "1" });
     await resolveContext.resolveScenePresetsForRun(
-        { runId: "fixed-A" },
+        { runId: "fixed-A", graph: resolveContext.app.graph, presetErrorNodes: [...nodes] },
         { output: { "1": { class_type: "ScenePresetReference", inputs: {} }, "2": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["1", 0] } } } },
         "2",
     );
     assert.equal(nodes[0].color, "a");
     await assert.rejects(
         () => resolveContext.resolveScenePresetsForRun(
-            { runId: "broken-B" },
+            { runId: "broken-B", graph: resolveContext.app.graph, presetErrorNodes: [...nodes] },
             { output: { "3": { class_type: "ScenePresetReference", inputs: {} }, "4": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["3", 0] } } } },
             "4",
         ),
@@ -938,4 +956,69 @@ async function testPresetDisplayCacheStaysPerReference() {
     displayContext.refreshScenePresetReference(nodeB, presets);
     assert.equal(nodeA.scenePresetGraph.metadata.sha256, "a");
     assert.equal(nodeB.scenePresetGraph.metadata.sha256, "b");
+}
+
+async function testPresetErrorsRetainCapturedNodeOwners() {
+    const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+    const graph = () => ({ _nodes: [], getNodeById(id) { return this._nodes.find(node => String(node.id) === String(id)); }, serialize() { return { nodes: [] }; } });
+    const reference = g => {
+        const node = { id: 5, presetReference: true, graph: g, color: "old-error", bgcolor: "old-bg",
+            scenePresetError: "old", scenePresetOriginalColors: { color: "base", bgcolor: "base-bg" }, setDirtyCanvas() {} };
+        g._nodes.push(node); return node;
+    };
+    for (const phase of ["capture", "request"]) for (const outcome of ["success", "failure", "save-failure"])
+    for (const transition of ["stay", "other-graph", "reused-graph"]) {
+        const ownerGraph = graph(), original = reference(ownerGraph), capture = deferred(), request = deferred();
+        const expand = { id: 10, graph: ownerGraph, widgets: [
+            { name: "preset_id", value: "test" }, { name: "preset_name", value: "Test" },
+        ] };
+        ownerGraph._nodes.push(expand);
+        const snapshot = { output: {
+            "5": { class_type: "ScenePresetReference", inputs: {} },
+            "10": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["5", 0] } },
+        }, workflow: { nodes: [] } };
+        const ctx = {
+            app: { graph: ownerGraph, graphToPrompt: () => capture.promise },
+            isScenePresetReferenceNode: node => !!node.presetReference,
+            sceneBatchPlanId: () => "plan", sceneBatchRunId: () => "run", sceneBatchSeedBase: () => 1,
+            sceneBatchRunsById: new Map(), sceneGPUController: { snapshot: () => ({}) },
+            captureRandomizedSamplerSeedTargets: () => [], createSceneBatchPromptSnapshot: () => capture.promise,
+            setWidgetValue() {}, updateSceneExpandButton() {}, syncSceneToTextInputs() {}, updateSceneExpandCountWidget() {},
+            refreshSceneBatchRunNode() {}, sceneBatchRunStatus: () => "active", releaseCancelledSceneBatchRun() {},
+            prepareSceneRunContext: () => request.promise,
+            findWidget: (node, name) => node.widgets.find(widget => widget.name === name),
+            syncAllScenePromptNames() {}, commitActiveMatrixLineDraft() {}, applySceneSourceNodeNames() {},
+            api: { fetchApi: () => request.promise }, readApiJson: async response => response.payload,
+            showSceneBatchError() {},
+        };
+        vm.createContext(ctx);
+        for (const name of ["apiInput", "apiLink", "scenePresetReferenceIdsForExpand", "markScenePresetReferenceErrors",
+            "clearScenePresetReferenceErrors", "createSceneBatchRun", "prepareSceneBatchRunSnapshot", "resolveScenePresetsForRun", "saveScenePreset"])
+            vm.runInContext(functionSource(name), ctx);
+        const run = outcome === "save-failure" ? null : ctx.createSceneBatchRun(expand, 1);
+        const pending = run ? ctx.prepareSceneBatchRunSnapshot(run, expand) : ctx.saveScenePreset(expand);
+        if (phase === "request") { capture.resolve(snapshot); await tick(); }
+        let replacement = null;
+        if (transition !== "stay") {
+            const nextGraph = transition === "other-graph" ? graph() : ownerGraph;
+            if (transition === "reused-graph") nextGraph._nodes = [];
+            replacement = reference(nextGraph); ctx.app.graph = nextGraph;
+        }
+        capture.resolve(snapshot); await tick();
+        if (outcome === "success") request.resolve({ total_batches: 1, total_images: 1, run_handle: "handle" });
+        else if (outcome === "failure") request.reject(Object.assign(new Error("Invalid Preset in A"), { scenePresetReferenceId: "5" }));
+        else request.resolve({ ok: false, payload: { node_id: "5", error: "Invalid Preset in A" } });
+        await pending;
+        const label = `${phase}/${outcome}/${transition}`;
+        if (replacement) {
+            assert.equal(replacement.color, "old-error", label);
+            assert.equal(replacement.scenePresetError, "old", label);
+        }
+        if (transition !== "reused-graph") {
+            assert.equal(original.color, outcome === "success" ? "base" : "#7f1d1d", label);
+            assert.equal(original.scenePresetError, outcome === "success" ? "" : "Invalid Preset in A", label);
+        }
+        if (run) assert.equal(run.presetErrorNodes, null, "settled preparation releases its captured node list");
+    }
 }

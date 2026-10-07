@@ -380,5 +380,5 @@ from .schedule import (  # noqa: E402
     make_plan, seed_plan, normalize_plan, transform, mark_prompt_passthrough,
     mark_prompt_whole, with_source_node, append_callback, multiply_count, merge,
     queue, matrix_product, item_for_normalized_plan, item_for_index,
-    replay_index_for_event, _validate_queue_controls, random_route, validate_random_weights,
+    replay_index_for_event, random_replay_source_ids, _validate_queue_controls, random_route, validate_random_weights,
 )

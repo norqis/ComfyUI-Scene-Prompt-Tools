@@ -389,6 +389,68 @@ class ScenePresetTests(unittest.TestCase):
         on_disk = json.loads(self.module._preset_path("compact-api-graph").read_text(encoding="utf-8"))
         self.assertEqual(set(on_disk["api_graph"]), {"output"})
 
+    def test_case_distinct_preset_ids_respect_filesystem_identity(self):
+        self.save("CasePreset", basic_nodes("original"))
+        path = self.module._preset_path("CasePreset")
+        before = path.read_bytes()
+        if self.module._preset_path("casepreset").exists():
+            with self.assertRaisesRegex(self.module.ScenePresetError, "casepreset.*CasePreset"):
+                self.save("casepreset", basic_nodes("replacement"))
+            self.assertEqual(path.read_bytes(), before)
+            with self.assertRaisesRegex(self.module.ScenePresetError, "casepreset.*CasePreset"):
+                self.module.load_preset("casepreset")
+        else:
+            self.save("casepreset", basic_nodes("separate"))
+            self.assertEqual(self.module.load_preset("casepreset")["metadata"]["preset_id"], "casepreset")
+            self.assertEqual(path.read_bytes(), before)
+        references = {"10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "CasePreset"}}}
+        occurrences = self.module.prepare_preset_occurrences(references)
+        self.assertEqual(occurrences["10"]["api_graph"]["output"]["2"]["inputs"]["positive_base"], "original")
+        self.save("CasePreset", basic_nodes("edited"))
+        self.assertEqual(self.module.load_preset("CasePreset")["api_graph"]["output"]["2"]["inputs"]["positive_base"], "edited")
+        self.assertFalse(list(path.parent.glob("*.tmp")))
+
+    def test_load_reports_preset_file_identity_mismatch(self):
+        self.save("expected", basic_nodes())
+        path = self.module._preset_path("expected")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["metadata"]["preset_id"] = "different"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(self.module.ScenePresetError, "expected.*different"):
+            self.module.load_preset("expected")
+
+    def test_concurrent_case_distinct_saves_preserve_preset_identity(self):
+        probe = self.root / "CaseProbe"
+        probe.touch()
+        case_sensitive = not (self.root / "caseprobe").exists()
+        probe.unlink()
+        barrier = threading.Barrier(2)
+        saved, errors = [], []
+
+        def save(preset_id):
+            barrier.wait()
+            try:
+                saved.append(self.save(preset_id, basic_nodes(preset_id)))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=save, args=(preset_id,)) for preset_id in ("RacePreset", "racepreset")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(saved), 2 if case_sensitive else 1)
+        self.assertEqual(len(errors), 0 if case_sensitive else 1)
+        for error in errors:
+            self.assertIsInstance(error, self.module.ScenePresetError)
+            self.assertIn("RacePreset", str(error))
+            self.assertIn("racepreset", str(error))
+        for result in saved:
+            preset_id = result["metadata"]["preset_id"]
+            self.assertEqual(self.module.load_preset(preset_id), result)
+        self.assertFalse(list(self.module.preset_directory().glob("*.tmp")))
+
     def test_load_normalizes_legacy_embedded_workflow_after_hash_validation_without_rewriting(self):
         saved = self.save("legacy-heavy", basic_nodes("legacy"))
         path = self.module._preset_path("legacy-heavy")
@@ -1371,6 +1433,27 @@ class ScenePresetTests(unittest.TestCase):
             "one-shot-workflow-run", graph(nodes), workflow=workflow
         )
         self.assertEqual([item["preset_id"] for item in result["presets"]], ["workflow_only"])
+
+    def test_batch_full_save_snapshots_canvas_presets_through_image_ancestry(self):
+        self.save("canvas_only", basic_nodes("frozen canvas"))
+        workflow = {"nodes": [{"id": 50, "type": "ScenePresetReference", "widgets_values": ["canvas_only"]}], "links": []}
+        prompt_inputs = {name: value for name, value in basic_nodes("outer")["2"]["inputs"].items() if name != "scene_prompt"}
+        for target, info, second_save, expected in (("2", None, False, True), ("5", None, False, False),
+                                                    ("5", "2", False, True), ("5", None, True, True)):
+            with self.subTest(target=target, info=info, second=second_save):
+                nodes = {
+                    "1": {"class_type": "ScenePrompter", "inputs": prompt_inputs},
+                    "2": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
+                    "5": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}},
+                    "3": {"class_type": "ImageFromLatent", "inputs": {"samples": [target, 4]}},
+                    "4": {"class_type": "SceneSaveImage", "inputs": {"images": ["3", 0], "metadata_mode": "ワークフロー全体", "expand_preset_contents": True}},
+                }
+                if info:
+                    nodes["4"]["inputs"]["scene_info"] = [info, 2]
+                if second_save:
+                    nodes["6"] = {"class_type": "SceneSaveImage", "inputs": {"images": ["2", 4], "metadata_mode": "ワークフロー全体", "expand_preset_contents": True}}
+                result = self.module.snapshot_presets_for_run(f"canvas-{target}-{info}-{second_save}", graph(nodes), "2", workflow=workflow)
+                self.assertEqual([item["preset_id"] for item in result["presets"]], ["canvas_only"] if expected else [])
 
     def test_snapshot_ignores_disconnected_workflow_references_without_connected_full_save(self):
         workflow = {

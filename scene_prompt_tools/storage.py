@@ -6,6 +6,11 @@ import folder_paths
 
 STORAGE_DIRECTORY_NAME = "scene_prompt_tools"
 PUBLIC_USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+WINDOWS_RESERVED_NAME_RE = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])", re.IGNORECASE)
+
+
+def is_windows_reserved_name(value):
+    return WINDOWS_RESERVED_NAME_RE.fullmatch(value.split(".", 1)[0].rstrip(" ")) is not None
 
 
 def public_user_directory(user_id="default"):

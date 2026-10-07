@@ -20,7 +20,9 @@ import comfy.model_management
 import folder_paths
 from comfy.cli_args import args
 from comfy_execution.graph_utils import GraphBuilder, is_link
+from comfy_execution.utils import get_executing_context
 from .switches import selected_switch_input
+from .storage import is_windows_reserved_name
 
 from .prompt import (
     DEFAULT_CATEGORY_ORDER,
@@ -47,6 +49,7 @@ from .plan import (
     empty_row,
     item_for_normalized_plan,
     replay_index_for_event,
+    random_replay_source_ids,
     matrix_product,
     merge,
     multiply_count,
@@ -64,11 +67,13 @@ from .plan import (
 from .runs import (
     claim_callback_attempt,
     get_run_plan_reference,
+    get_run_consumer_selection,
     get_run_delivery_context,
     get_run_prompt_reference,
     register_last_callback,
     require_run_context,
     set_run_plan_reference,
+    set_run_consumer_selection,
     set_run_prompt_reference,
 )
 from .callbacks import (
@@ -129,7 +134,6 @@ def _random_weights_json(value):
         raise ScenePlanError("Scene Prompt Random Route の確率設定が不正です。合計を100%にしてください。") from exc
 BAD_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 BAD_FILENAME_PREFIX_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]+')
-WINDOWS_RESERVED_PREFIX_RE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.IGNORECASE)
 SEED_MODULO = 18446744073709551616
 SEED_MAX = SEED_MODULO - 1
 def _clean_string_list(values):
@@ -224,6 +228,17 @@ def _prompt_link_source(value, node_id, input_name):
     return source_id
 
 
+def _execution_inputs(prompt, node):
+    inputs = node.get("inputs", {})
+    if node.get("class_type") == "ComfySwitchNode":
+        try:
+            selected = selected_switch_input(prompt, node)
+        except ValueError:
+            return inputs
+        return {name: inputs[name] for name in ("switch", selected) if name in inputs}
+    return inputs
+
+
 def _prompt_ancestor_ids(prompt, target_id):
     if not isinstance(prompt, dict):
         raise ValueError("Scene Save Image の生成経路を保存できません: prompt がノード辞書ではありません。")
@@ -250,7 +265,7 @@ def _prompt_ancestor_ids(prompt, target_id):
                 f"Scene Save Image の生成経路を保存できません: ノード {node_id} の inputs が不正です。"
             )
         ancestors.add(node_id)
-        for input_name, value in inputs.items():
+        for input_name, value in _execution_inputs(prompt, node).items():
             source_id = _prompt_link_source(value, node_id, input_name)
             if source_id is None:
                 continue
@@ -328,6 +343,13 @@ def _prune_workflow_node_links(nodes, link_ids):
             if not isinstance(output_slot, dict) or not isinstance(output_slot.get("links"), list):
                 continue
             output_slot["links"] = [link_id for link_id in output_slot["links"] if link_id in link_ids]
+
+
+def _remove_workflow_links(workflow, link_ids):
+    if link_ids:
+        workflow["links"] = [link for link in workflow.get("links", []) if _workflow_link_id(link) not in link_ids]
+        _prune_workflow_node_links(workflow["nodes"], {_workflow_link_id(link) for link in workflow["links"]})
+        _prune_workflow_reroutes(workflow)
 
 
 def _prune_workflow_reroutes(workflow):
@@ -647,7 +669,11 @@ def _replay_expand_values(scene_info, full_prompt, source_aliases=None, retained
 
 def _selected_random_routes(infos):
     selected = {}
+    visited = set()
     def read(path):
+        if id(path) in visited:
+            return
+        visited.add(id(path))
         for part in path:
             if isinstance(part, (tuple, list)) and len(part) == 3 and part[0] == "random_choice":
                 selected.setdefault(str(part[1]), set()).add(part[2])
@@ -662,6 +688,7 @@ def _selected_random_routes(infos):
 def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
     selected = _selected_random_routes(infos)
     aliases = source_aliases if isinstance(source_aliases, dict) else {}
+    replaced_links = set()
     for node_id, node in prompt.items():
         if not isinstance(node, dict) or node.get("class_type") != "ScenePromptRandomRoute":
             continue
@@ -669,15 +696,18 @@ def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
         if not arms or len(arms) != 1:
             continue
         arm = next(iter(arms))
-        original_weights = _random_weights_json(node.get("inputs", {}).get("weights_json", DEFAULT_RANDOM_WEIGHTS_JSON))
         weights = [10000 if index == arm else 0 for index in range(10)]
         encoded = json.dumps(weights, separators=(",", ":"))
         node.setdefault("inputs", {})["weights_json"] = encoded
-        if sum(bool(weight) for weight in original_weights) > 1:
-            node["inputs"]["preserve_join"] = True
+        node["inputs"]["preserve_join"] = True
         if isinstance(workflow, dict):
             for visual in workflow.get("nodes", []):
                 if isinstance(visual, dict) and str(visual.get("id")) == str(node_id):
+                    replaced_links.update(slot["link"] for slot in visual.get("inputs", [])
+                                          if slot.get("name") in {"weights_json", "preserve_join"} and slot.get("link") is not None)
+                    named = visual.get("widgets_values_named")
+                    if isinstance(named, dict):
+                        named.update(weights_json=encoded, preserve_join=bool(node["inputs"].get("preserve_join", False)))
                     widgets = visual.get("widgets_values")
                     if isinstance(widgets, list) and widgets:
                         widgets[0] = encoded
@@ -685,6 +715,7 @@ def _freeze_random_routes(prompt, workflow, infos, source_aliases=None):
                             widgets.append(bool(node["inputs"].get("preserve_join", False)))
                         else:
                             widgets[1] = bool(node["inputs"].get("preserve_join", False))
+    _remove_workflow_links(workflow, replaced_links)
 
 
 def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_aliases=None):
@@ -712,6 +743,9 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
             continue
         if node.get("type") != "ScenePrompterExpand":
             continue
+        named = node.get("widgets_values_named")
+        if isinstance(named, dict):
+            named.update(values)
         widgets = node.get("widgets_values")
         if not isinstance(widgets, list):
             continue
@@ -738,76 +772,122 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
     return prompt, workflow
 
 
-def _text_replay_items(prompt, save_id, scene_info):
-    """Resolve each executed text consumer against its own original plan."""
+def _consumer_replay_items(prompt, save_id, scene_info):
+    """Resolve executed consumers not already represented by Save metadata."""
     result = {}
+    context = get_executing_context()
+    list_index = (context.list_index or 0) if context else 0
+    represented_sources = _scene_source_ids(scene_info)
     for node_id in _prompt_ancestor_ids(prompt, save_id):
         node = prompt[node_id]
-        if node.get("class_type") != "ScenePromptToText":
+        kind = node.get("class_type")
+        if kind not in {"ScenePromptToText", "ScenePrompterExpand"}:
             continue
-        run_handle = str((scene_info or {}).get("run_handle") or "")
-        plan = get_run_plan_reference(run_handle, node_id) if run_handle else None
-        if plan is None:
-            raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
+        is_expand = kind == "ScenePrompterExpand"
+        if is_expand and node_id in represented_sources:
+            continue
         inputs = node.get("inputs", {})
-        requested_index = inputs.get("current_index", 0)
-        seed_base = int(inputs.get("seed_base") or 0)
-        literal = _scene_bool(inputs.get("seed_base_literal", False))
-        if not literal and seed_base <= 0:
-            raise ValueError(f"Scene Prompt To Text {node_id} の自動シードを再現できません。生成経路の保存には正の seed_base または seed_base_literal が必要です。")
-        base_seed = seed_base % SEED_MODULO if literal else _auto_seed_base(seed_base)
-        item = _text_item_for_index(plan, requested_index, (base_seed + requested_index) % SEED_MODULO)
+        run_handle = str(inputs.get("run_handle") or (scene_info or {}).get("run_handle") or "")
+        selection = get_run_consumer_selection(run_handle, node_id, list_index) if run_handle else None
+        if selection is None:
+            if is_expand:
+                continue
+            raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
+        requested_index, seed, plan = selection
+        item = (_scene_prompt_item_for_index(None, requested_index, normalized=plan, strict=True, seed=seed)
+                if is_expand else _text_item_for_index(plan, requested_index, seed))
         result[node_id] = {
             "_plan_ref": plan, "row_index": item["row_index"], "repeat_index": item["repeat_index"],
-            "source_node_ids": item["row"].get("source_node_ids", []),
-            "seed": (base_seed + requested_index) % SEED_MODULO,
+            "_model_links": item["row"].get("model_links"),
+            "source_node_ids": [*item["row"].get("source_node_ids", []), *([node_id] if is_expand else [])],
+            "seed": seed,
         }
         if "event_ref" in item:
             result[node_id]["_event_ref"] = item["event_ref"]
     return result
 
 
-def _apply_text_replay_values(prompt, workflow, items, full_prompt, source_aliases=None):
-    retained = _visible_scene_source_ids(prompt, source_aliases)
+def _apply_consumer_replay_values(prompt, workflow, items, full_prompt, source_aliases=None, retained_sources=None):
+    retained = _visible_scene_source_ids(prompt, source_aliases) if retained_sources is None else retained_sources
     workflow_nodes = {str(node.get("id")): node for node in (workflow or {}).get("nodes", [])}
+    replaced_links = set()
     for node_id, info in items.items():
         if node_id not in prompt:
             continue
         values = _replay_expand_values(info, full_prompt, source_aliases, retained)
         if values is None:
-            raise ValueError(f"Scene Prompt To Text {node_id} の再現用生成番号を算出できません。")
+            raise ValueError(f"{prompt[node_id]['class_type']} {node_id} の再現用生成番号を算出できません。")
+        if prompt[node_id].get("class_type") == "ScenePrompterExpand":
+            target = {"source_node_ids": [(source_aliases or {}).get(node_id, node_id)]}
+            _apply_replay_expand_values(prompt, workflow, target, values, source_aliases)
+            continue
         prompt[node_id].setdefault("inputs", {}).update(values)
-        widgets = workflow_nodes.get(node_id, {}).get("widgets_values")
+        visual = workflow_nodes.get(node_id, {})
+        replaced_links.update(slot["link"] for slot in visual.get("inputs", [])
+                              if slot.get("name") in values and slot.get("link") is not None)
+        named = visual.get("widgets_values_named")
+        if isinstance(named, dict):
+            named.update(values)
+        widgets = visual.get("widgets_values")
         if isinstance(widgets, list):
             for name, index in (("current_index", 1), ("seed_base", 2), ("seed_base_literal", 3)):
                 if index < len(widgets):
                     widgets[index] = values[name]
+    _remove_workflow_links(workflow, replaced_links)
+
+
+def _effective_model_source_ids(prompt, infos, source_aliases=None):
+    aliases = source_aliases or {}
+    models = {aliases.get(node_id, node_id): node_id for node_id, node in prompt.items()
+              if node.get("class_type") == "SceneApplyModel"}
+    effective = set()
+    for info in infos:
+        for source_id in reversed(_scene_source_id_list(info)):
+            node_id = models.get(source_id)
+            if node_id is None:
+                continue
+            if "_model_links" in info:
+                links = info["_model_links"]
+                inputs = prompt[node_id].get("inputs", {})
+                if links is None or any(
+                    not is_link(inputs.get(name))
+                    or [str(inputs[name][0]), inputs[name][1]] != links[name]
+                    for name in ("model", "clip", "vae")
+                ):
+                    continue
+            effective.add(node_id)
+            # Equal model links can occur on distinct shared branches. Keep
+            # each matching source so another consumer's model cannot win.
+            if "_model_links" not in info:
+                break
+    return effective
 
 
 def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=None):
     """Keep ordinary image ancestors, but only selected Scene-plan branches."""
     selected_scene_ids = _scene_source_ids(scene_info) if selected_scene_ids is None else selected_scene_ids
-    if not selected_scene_ids:
-        return _prompt_ancestor_ids(prompt, target_id)
-
-    included = set()
-    pending = [(str(target_id), False)]
+    included, visited = set(), set()
+    pending = [(str(target_id), False, not selected_scene_ids)]
     while pending:
-        node_id, scene_dependency = pending.pop()
-        if node_id in included:
+        node_id, scene_dependency, physical = pending.pop()
+        if (node_id, physical) in visited:
             continue
         node = prompt.get(node_id)
         if not isinstance(node, dict):
             raise ValueError(f"Scene Save Image の生成経路を保存できません: ノード {node_id} の定義が不正です。")
         class_type = str(node.get("class_type") or "")
-        if class_type == "ComfySwitchNode" and scene_dependency:
+        if class_type == "ComfySwitchNode" and scene_dependency and not physical:
             continue
-        if class_type in SCENE_NODE_TYPES and class_type != "ScenePresetInput" and node_id not in selected_scene_ids:
+        if not physical and class_type in SCENE_NODE_TYPES and class_type != "ScenePresetInput" and node_id not in selected_scene_ids:
             continue
         inputs = node.get("inputs", {})
         if not isinstance(inputs, dict):
             raise ValueError(f"Scene Save Image の生成経路を保存できません: ノード {node_id} の inputs が不正です。")
         included.add(node_id)
+        visited.add((node_id, physical))
+        # Opaque Scene providers and residual generic Switches need their
+        # required physical inputs even when only one output item was used.
+        physical = physical or class_type == "ComfySwitchNode" or (scene_dependency and class_type not in SCENE_NODE_TYPES)
         for input_name, value in inputs.items():
             source_id = _prompt_link_source(value, node_id, input_name)
             if source_id is not None:
@@ -816,7 +896,7 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
                         f"Scene Save Image の生成経路を保存できません: ノード {node_id} の入力 {input_name} が存在しないノード {source_id} を参照しています。"
                     )
                 is_scene_input = (class_type in SCENE_NODE_TYPES or class_type == "ScenePromptToText") and input_name in _scene_prompt_input_names(node)
-                pending.append((source_id, is_scene_input))
+                pending.append((source_id, is_scene_input, physical))
     return included
 
 
@@ -844,8 +924,8 @@ def _scene_prompt_input_links(prompt, node_id):
     )
 
 
-def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=(), scene_consumer_ids=()):
-    """Keep the row-order effective Apply Model while preserving Scene routes."""
+def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=(), scene_consumer_ids=(), effective_model_ids=None, output_node_id=None):
+    """Keep the consumers' effective Apply Models while preserving Scene routes."""
     selected_order = list(dict.fromkeys(str(node_id) for node_id in selected_scene_ids if str(node_id).strip()))
     selected = set(selected_order) | set(protected_source_ids)
     if not isinstance(prompt, dict):
@@ -855,32 +935,30 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
         node_id for node_id in selected_order
         if isinstance(prompt.get(node_id), dict) and prompt[node_id].get("class_type") == "SceneApplyModel"
     ]
-    superseded = set(model_ids[:-1]) - set(protected_source_ids)
+    effective = set(model_ids[-1:]) if effective_model_ids is None else set(effective_model_ids)
+    superseded = set(model_ids) - effective - set(protected_source_ids)
 
     replacements = {}
 
-    # An execution-path PNG contracts selected Scene switches. Removing just
+    # An execution-path PNG contracts selected switches. Removing just
     # their other branch would leave core Switch's required input unconnected.
     connected_switches, switch_choices, visited, pending = set(), {}, set(), [*selected, *scene_consumer_ids]
+    if output_node_id is not None:
+        pending.append(str(output_node_id))
     while pending:
         current_id = pending.pop()
         if current_id in visited:
             continue
         visited.add(current_id)
         current = prompt.get(current_id, {})
-        if current.get("class_type") == "ComfySwitchNode":
-            try:
-                names = (selected_switch_input(prompt, current),)
-            except ValueError:
-                continue
+        if current.get("class_type") in SCENE_NODE_TYPES and current.get("class_type") != "ScenePresetInput" and current_id not in selected and current_id not in scene_consumer_ids:
+            continue
+        inputs = _execution_inputs(prompt, current)
+        branches = [name for name in ("on_true", "on_false") if name in inputs]
+        if current.get("class_type") == "ComfySwitchNode" and len(branches) == 1:
             connected_switches.add(current_id)
-            switch_choices[current_id] = current.get("inputs", {}).get(names[0])
-        else:
-            if current.get("class_type") in SCENE_NODE_TYPES and current.get("class_type") != "ScenePresetInput" and current_id not in selected:
-                continue
-            names = _scene_prompt_input_names(current)
-        pending.extend(str(value[0]) for name in names
-                       for value in (current.get("inputs", {}).get(name),) if is_link(value))
+            switch_choices[current_id] = inputs[branches[0]]
+        pending.extend(str(value[0]) for value in inputs.values() if is_link(value))
     switch_outputs = {}
     for node_id, node in prompt.items():
         if node_id not in connected_switches or node_id in switch_outputs:
@@ -900,47 +978,71 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
             if not is_link(link):
                 break
             current_id = str(link[0])
-            if current_id in selected or prompt.get(current_id, {}).get("class_type") == "ScenePresetInput" and link[1] == 0:
+            source_type = prompt.get(current_id, {}).get("class_type")
+            if source_type == "ComfySwitchNode":
+                if link[1] != 0:
+                    break
+            elif current_id in selected or source_type == "ScenePresetInput" or source_type not in SCENE_NODE_TYPES:
                 output = list(link)
                 break
         for switch_id in path:
             switch_outputs[switch_id] = output
     replacements.update({node_id: link for node_id, link in switch_outputs.items() if link is not None})
 
-    def upstream_link(node_id, seen=None):
-        if node_id in replacements:
-            return replacements[node_id]
-        seen = set() if seen is None else seen
-        if node_id in seen:
-            return None
-        seen.add(node_id)
-        links = _scene_prompt_input_links(prompt, node_id)
-        if not links:
-            replacements[node_id] = None
-            return None
-        _name, source_id, output_index = links[0]
-        replacement = upstream_link(source_id, seen) if source_id in superseded else [source_id, output_index]
-        replacements[node_id] = replacement
+    empty_models = set()
+
+    def upstream_link(node_id):
+        current_id, path, seen = node_id, [], set()
+        replacement = None
+        while current_id not in seen:
+            if current_id in replacements:
+                replacement = replacements[current_id]
+                break
+            seen.add(current_id)
+            path.append(current_id)
+            links = _scene_prompt_input_links(prompt, current_id)
+            if not links:
+                # A root Model contributes one empty Scene, even if its model
+                # is superseded. Dropping that unit changes Queue positions.
+                empty_models.add(current_id)
+                replacement = [current_id, 0]
+                break
+            _name, source_id, output_index = links[0]
+            if source_id not in superseded:
+                replacement = [source_id, output_index]
+                break
+            current_id = source_id
+        for source_id in path:
+            replacements[source_id] = replacement
         return replacement
 
     for node_id in superseded:
         upstream_link(node_id)
+    for node_id in empty_models:
+        replacements.pop(node_id, None)
+    superseded.difference_update(empty_models)
 
     for node_id, replacement in list(replacements.items()):
         seen = {node_id}
-        while replacement is not None and str(replacement[0]) in replacements and str(replacement[0]) not in seen:
+        while replacement is not None and replacement[1] == 0 and str(replacement[0]) in replacements and str(replacement[0]) not in seen:
             seen.add(str(replacement[0]))
             replacement = replacements[str(replacement[0])]
         replacements[node_id] = replacement
 
     contracted = copy.deepcopy(prompt)
+    for node_id in empty_models:
+        inputs = prompt[node_id].get("inputs", {})
+        contracted[node_id] = {"class_type": "ScenePromptCounter", "inputs": {
+            "count": 1, "enable_downstream_count": True,
+            **{name: inputs[name] for name in ("source_node_id", "source_node_name") if name in inputs},
+        }}
     for node_id, node in contracted.items():
         inputs = node.get("inputs") if isinstance(node, dict) else None
         if not isinstance(inputs, dict):
             continue
-        for name in _scene_prompt_input_names(node):
+        for name in list(inputs):
             source_id = _prompt_link_source(inputs.get(name), node_id, name)
-            if source_id not in replacements:
+            if source_id not in replacements or inputs[name][1] != 0:
                 continue
             replacement = replacements[source_id]
             if replacement is None:
@@ -976,16 +1078,29 @@ def _sync_workflow_node_links(workflow):
                 slot["links"] = list(sources.get((node_id, index), ()))
 
 
-def _contract_superseded_model_workflow(workflow, replacements):
-    if not replacements or not isinstance(workflow, dict):
+def _contract_superseded_model_workflow(workflow, replacements, prompt=None):
+    if not isinstance(workflow, dict):
+        return workflow
+    empty_models = {str(node.get("id")) for node in workflow.get("nodes", [])
+                    if node.get("type") == "SceneApplyModel"
+                    and (prompt or {}).get(str(node.get("id")), {}).get("class_type") == "ScenePromptCounter"}
+    if not replacements and not empty_models:
         return workflow
     contracted = copy.deepcopy(workflow)
+    for node in contracted.get("nodes", []):
+        if str(node.get("id")) in empty_models:
+            node.update(type="ScenePromptCounter", widgets_values=[1, True],
+                        inputs=[{"name": "scene_prompt", "type": SCENE_PROMPT_TYPE, "link": None}],
+                        outputs=[{"name": "scene_prompt", "type": SCENE_PROMPT_TYPE, "links": []}])
+            node.pop("widgets_values_named", None)
+            node.setdefault("properties", {})["Node name for S&R"] = "ScenePromptCounter"
     links = contracted.get("links")
     if not isinstance(links, list):
         return contracted
+    links[:] = [link for link in links if not (parts := _workflow_link_parts(link)) or parts[3] not in empty_models]
     for link in links:
         parts = _workflow_link_parts(link)
-        if parts is None or parts[1] not in replacements:
+        if parts is None or parts[1] not in replacements or parts[2] != 0:
             continue
         replacement = replacements[parts[1]]
         if replacement is None:
@@ -1034,14 +1149,6 @@ def _metadata_for_save_mode(
     if extra_pnginfo is not None and not isinstance(extra_pnginfo, dict):
         raise ValueError("Scene Save Image の extra_pnginfo が不正です。")
 
-    if metadata_mode != SAVE_METADATA_PROMPT_ONLY and isinstance(scene_info, dict):
-        run_handle = str(scene_info.get("run_handle") or "").strip()
-        for expand_id in reversed(scene_info.get("source_node_ids", [])):
-            cached_prompt = get_run_prompt_reference(run_handle, expand_id) if run_handle else None
-            if cached_prompt is not None:
-                prompt = _merge_cached_prompt(cached_prompt, prompt)
-                break
-
     if metadata_mode == SAVE_METADATA_PROMPT_ONLY:
         saved_prompt = None
         saved_extra = (
@@ -1055,15 +1162,41 @@ def _metadata_for_save_mode(
         )
         return saved_prompt, saved_extra
 
+    run_handle = str((scene_info or {}).get("run_handle") or "").strip()
+    cache_sources = list(reversed(_scene_source_id_list(scene_info)))
+    if not run_handle and isinstance(prompt, dict) and str(unique_id) in prompt:
+        ancestors = _prompt_ancestor_ids(prompt, unique_id)
+        cache_sources = [node_id for node_id in ancestors if prompt[node_id].get("class_type") == "ScenePrompterExpand"]
+        for node_id in ancestors:
+            node = prompt[node_id]
+            if node.get("class_type") in {"ScenePromptToText", "ScenePrompterExpand", "ScenePresetReference"}:
+                run_handle = str(node.get("inputs", {}).get("run_handle") or "").strip()
+                if run_handle:
+                    break
+    for expand_id in cache_sources:
+        cached_prompt = get_run_prompt_reference(run_handle, expand_id) if run_handle else None
+        if cached_prompt is not None:
+            prompt = _merge_cached_prompt(cached_prompt, prompt)
+            break
+
     if metadata_mode == SAVE_METADATA_WORKFLOW and not expand_preset_contents:
         return prompt, extra_pnginfo
 
-    text_replay_items = _text_replay_items(prompt, unique_id, scene_info) if metadata_mode == SAVE_METADATA_EXECUTION_PATH else {}
-    text_source_ids = {source_id for info in text_replay_items.values() for source_id in _scene_source_ids(info)}
+    consumer_items = _consumer_replay_items(prompt, unique_id, scene_info) if metadata_mode == SAVE_METADATA_EXECUTION_PATH else {}
+    expand_infos = [info for node_id, info in consumer_items.items() if prompt[node_id]["class_type"] == "ScenePrompterExpand"]
+    text_source_ids = {source_id for node_id, info in consumer_items.items()
+                       if prompt[node_id]["class_type"] == "ScenePromptToText" for source_id in _scene_source_ids(info)}
+    selected_source_ids = [*_scene_source_id_list(scene_info),
+                           *(source_id for info in expand_infos for source_id in _scene_source_id_list(info))]
+    replay_infos = [scene_info, *consumer_items.values()]
+    conflicting_gates = {gate_id for gate_id, arms in _selected_random_routes(replay_infos).items() if len(arms) > 1}
+    protected_source_ids = text_source_ids | random_replay_source_ids(
+        [plan for info in replay_infos if isinstance(info, dict) for plan in (info.get("_plan_ref"),)
+         if isinstance(plan, dict) and plan.get("version") == 7], conflicting_gates)
 
     if metadata_mode == SAVE_METADATA_EXECUTION_PATH and not expand_preset_contents and isinstance(prompt, dict):
         has_reference = any(isinstance(node, dict) and node.get("class_type") == "ScenePresetReference" for node in prompt.values())
-        if has_reference and any("/" in gate_id for gate_id in _selected_random_routes([scene_info, *text_replay_items.values()])):
+        if has_reference and any("/" in gate_id for gate_id in _selected_random_routes([scene_info, *consumer_items.values()])):
             expand_preset_contents = True
 
     if expand_preset_contents and isinstance(prompt, dict):
@@ -1092,7 +1225,6 @@ def _metadata_for_save_mode(
         workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
         if not isinstance(workflow, dict):
             raise ValueError("Scene Save Image のPreset展開には workflow が必要です。")
-        run_handle = str((scene_info or {}).get("run_handle") or "").strip()
         context = require_run_context(run_handle)
         from .preset_metadata import expand_preset_references
         from .presets import snapshot_presets_for_metadata
@@ -1111,25 +1243,38 @@ def _metadata_for_save_mode(
         expanded_extra["workflow"] = expanded_workflow
         if metadata_mode == SAVE_METADATA_WORKFLOW:
             return expanded_prompt, expanded_extra
-        selected_source_ids = _scene_source_id_list(scene_info)
         selected_ids = [
             node_id
             for source_id in selected_source_ids
             for node_id, alias in source_aliases.items()
             if alias == source_id
         ]
-        text_ids = {node_id for node_id, alias in source_aliases.items() if alias in text_source_ids}
+        # Older lineage lists contain the selected internal nodes without their
+        # Reference. Keep the new whole-prompt boundary for those occurrences.
+        selected_parents = {
+            "/".join(parts[:index])
+            for source_id in [*selected_source_ids, *protected_source_ids]
+            for parts in [source_id.split("/")]
+            for index in range(1, len(parts))
+        }
+        selected_ids.extend(node_id for node_id, node in expanded_prompt.items()
+                            if node.get("class_type") == "ScenePromptCounter"
+                            and node.get("inputs", {}).get("prompt_trace_kind") == "whole"
+                            and source_aliases.get(node_id) in selected_parents)
+        protected_ids = {node_id for node_id, alias in source_aliases.items() if alias in protected_source_ids}
+        effective_models = _effective_model_source_ids(expanded_prompt, [scene_info, *expand_infos], source_aliases)
         contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
-            expanded_prompt, selected_ids, text_ids, text_replay_items,
+            expanded_prompt, selected_ids, protected_ids, consumer_items, effective_models, unique_id,
         )
-        selected_ids.update(text_ids)
-        contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements)
+        selected_ids.update(protected_ids)
+        contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements, contracted_prompt)
         ancestor_ids = _selected_ancestor_ids(
             contracted_prompt, unique_id, scene_info, selected_ids
         )
         saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
-        replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases,
-            _visible_scene_source_ids(saved_prompt, source_aliases) if text_replay_items else None)
+        retained_sources = _visible_scene_source_ids(saved_prompt, source_aliases)
+        retained_sources.update(source_aliases.get(node_id, node_id) for node_id in replacements)
+        replay_values = _replay_expand_values(scene_info, expanded_prompt, source_aliases, retained_sources)
         saved_extra = {
             key: value
             for key, value in expanded_extra.items()
@@ -1145,22 +1290,23 @@ def _metadata_for_save_mode(
         _apply_replay_expand_values(
             saved_prompt, saved_extra["workflow"], scene_info, replay_values, source_aliases
         )
-        _apply_text_replay_values(saved_prompt, saved_extra["workflow"], text_replay_items, expanded_prompt, source_aliases)
-        _freeze_random_routes(saved_prompt, saved_extra["workflow"], [scene_info, *text_replay_items.values()], source_aliases)
+        _apply_consumer_replay_values(saved_prompt, saved_extra["workflow"], consumer_items, expanded_prompt, source_aliases, retained_sources)
+        _freeze_random_routes(saved_prompt, saved_extra["workflow"], [scene_info, *consumer_items.values()], source_aliases)
         return saved_prompt, saved_extra
 
     if metadata_mode == SAVE_METADATA_WORKFLOW:
         return prompt, extra_pnginfo
 
-    selected_source_ids = _scene_source_id_list(scene_info)
+    effective_models = _effective_model_source_ids(prompt, [scene_info, *expand_infos])
     contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(
-        prompt, selected_source_ids, text_source_ids, text_replay_items,
+        prompt, selected_source_ids, protected_source_ids, consumer_items, effective_models, unique_id,
     )
-    selected_sources.update(text_source_ids)
+    selected_sources.update(protected_source_ids)
     ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)
     saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
-    replay_values = _replay_expand_values(scene_info, prompt, retained_source_ids=
-        _visible_scene_source_ids(saved_prompt) if text_replay_items else None)
+    # Contracted passthrough nodes still belong to the selected event's lineage.
+    retained_sources = _visible_scene_source_ids(saved_prompt) | set(replacements)
+    replay_values = _replay_expand_values(scene_info, prompt, retained_source_ids=retained_sources)
     saved_extra = None
     if extra_pnginfo is not None:
         saved_extra = {
@@ -1170,7 +1316,7 @@ def _metadata_for_save_mode(
         }
         if "workflow" in extra_pnginfo:
             saved_extra["workflow"] = _slice_workflow_for_output(
-                _contract_superseded_model_workflow(extra_pnginfo["workflow"], replacements), ancestor_ids, saved_prompt
+                _contract_superseded_model_workflow(extra_pnginfo["workflow"], replacements, contracted_prompt), ancestor_ids, saved_prompt
             )
     _apply_replay_expand_values(
         saved_prompt,
@@ -1179,9 +1325,9 @@ def _metadata_for_save_mode(
         replay_values,
     )
     _freeze_random_routes(saved_prompt, saved_extra.get("workflow") if isinstance(saved_extra, dict) else None,
-                          [scene_info, *text_replay_items.values()])
-    _apply_text_replay_values(saved_prompt, saved_extra.get("workflow") if isinstance(saved_extra, dict) else None,
-                              text_replay_items, prompt)
+                          [scene_info, *consumer_items.values()])
+    _apply_consumer_replay_values(saved_prompt, saved_extra.get("workflow") if isinstance(saved_extra, dict) else None,
+                                  consumer_items, prompt, retained_sources=retained_sources)
     return saved_prompt, saved_extra
 
 
@@ -1452,12 +1598,22 @@ def _scene_count(value):
     return value
 
 
+def _record_consumer_selection(run_handle, unique_id, current_index, seed, plan):
+    if run_handle and unique_id is not None:
+        context = get_executing_context()
+        set_run_consumer_selection(run_handle, unique_id, current_index, seed, plan,
+                                   context.prompt_id if context else "", (context.list_index or 0) if context else 0)
+
+
 def _scene_run_plan(run_handle, scene_prompt=None, unique_id=None):
     if not str(run_handle or "").strip():
         return normalize_plan(scene_prompt)
     cached = get_run_plan_reference(run_handle, unique_id)
     if cached is not None:
-        return cached
+        if scene_prompt is None:
+            return cached
+        actual = normalize_plan(scene_prompt)
+        return cached if actual["change_key"] == cached["change_key"] else actual
     return set_run_plan_reference(run_handle, unique_id, normalize_plan(scene_prompt))
 
 
@@ -1485,18 +1641,13 @@ def _text_item_for_index(plan, requested_index, seed=0):
 
 
 def _safe_path_part(value, default_name="untitled"):
-    reserved_names = {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    }
     text = str(value or "").strip().strip(". ")
     text = BAD_PATH_CHARS_RE.sub("_", text)
     text = re.sub(r"\s+", " ", text).strip().strip(". ")
     if text in ("", ".", ".."):
         return default_name
-    if text.upper() in reserved_names:
-        text = f"{text}_"
+    if is_windows_reserved_name(text):
+        text = f"_{text}" if "." in text else f"{text}_"
     return text[:80].rstrip(" .") or default_name
 
 
@@ -1512,8 +1663,7 @@ def _safe_relative_parts(value):
 
 def _safe_filename_prefix(value):
     prefix = _sanitize_filename_text(value)
-    first_component = prefix.split(".", 1)[0].rstrip(" ")
-    if WINDOWS_RESERVED_PREFIX_RE.match(first_component):
+    if is_windows_reserved_name(prefix):
         prefix = f"_{prefix}"
     if sum(2 if ord(character) > 0xFFFF else 1 for character in prefix) <= 240:
         return prefix
@@ -1894,6 +2044,8 @@ def _normalize_scene_save_info(value):
         info["_plan_ref"] = value["_plan_ref"]
     if "_event_ref" in value:
         info["_event_ref"] = value["_event_ref"]
+    if "_model_links" in value:
+        info["_model_links"] = value["_model_links"]
     return info
 
 class SceneMatrix:
@@ -2024,16 +2176,17 @@ class ScenePromptRandomRoute:
                 "unique_id": "UNIQUE_ID",
                 "prompt": "PROMPT",
                 "dynprompt": "DYNPROMPT",
+                "seed_source_id": ("STRING", {"default": "", "hidden": True}),
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
                 "source_node_name": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
     @classmethod
-    def IS_CHANGED(cls, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, preserve_join=False, **kwargs):
-        return json.dumps([_random_weights_json(weights_json), _scene_prompt_change_key(scene_prompt), _scene_bool(preserve_join)], ensure_ascii=False)
+    def IS_CHANGED(cls, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, preserve_join=False, seed_source_id="", **kwargs):
+        return json.dumps([_random_weights_json(weights_json), _scene_prompt_change_key(scene_prompt), _scene_bool(preserve_join), seed_source_id], ensure_ascii=False)
 
-    def route(self, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, preserve_join=False, unique_id=None, prompt=None, dynprompt=None, source_node_id="", source_node_name=""):
+    def route(self, weights_json=DEFAULT_RANDOM_WEIGHTS_JSON, scene_prompt=None, preserve_join=False, unique_id=None, prompt=None, dynprompt=None, source_node_id="", source_node_name="", seed_source_id=""):
         gate_id = str(source_node_id or unique_id or "").strip()
         weights = _random_weights_json(weights_json)
         if unique_id is not None and (dynprompt is not None or isinstance(prompt, dict)):
@@ -2047,7 +2200,7 @@ class ScenePromptRandomRoute:
             if missing:
                 raise ScenePlanError(f"Scene Prompt Random Route Input #{gate_id}: 出力{', '.join(missing)}が未接続です。")
         plan = with_source_node(scene_prompt, gate_id, source_node_name)
-        return random_route(plan, weights, gate_id, preserve_join=_scene_bool(preserve_join))
+        return random_route(plan, weights, gate_id, preserve_join=_scene_bool(preserve_join), seed_id=seed_source_id or None)
 
 
 class ScenePromptRandomRouteOutput:
@@ -2306,6 +2459,7 @@ class ScenePromptToText:
                 else:
                     positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
         positive, negative = _resolve_prompt_parts(positive, negative, (), None, seed)
+        _record_consumer_selection(run_handle, unique_id, current_index, seed, plan)
         return _join_unique(positive, ", "), _join_unique(negative, ", ")
 
 
@@ -2364,7 +2518,12 @@ class ScenePromptCounter:
         prompt_trace_kind="",
         enable_downstream_count=True,
     ):
-        plan = multiply_count(scene_prompt, count, enable_downstream_count)
+        # Runtime/PNG Preset boundaries mark a whole prompt without changing
+        # its schedule, including an open Random branch.
+        if prompt_trace_kind == "whole" and type(count) is int and count == 1 and enable_downstream_count is True:
+            plan = normalize_plan(scene_prompt)
+        else:
+            plan = multiply_count(scene_prompt, count, enable_downstream_count)
         if prompt_trace_kind == "whole":
             plan = mark_prompt_whole(plan)
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
@@ -2998,32 +3157,36 @@ class ScenePromptExpand:
             "source_node_ids": [*row.get("source_node_ids", []), str(unique_id)] if unique_id is not None else list(row.get("source_node_ids", [])),
             "run_handle": str(run_handle or ""),
             "_plan_ref": plan,
+            "_model_links": row.get("model_links"),
         }
         if "event_ref" in item:
             save_info["_event_ref"] = item["event_ref"]
 
         model_links = row.get("model_links")
         if model_links is None:
-            return (positive, negative, save_info, seed, latent, None, None, None)
-        model = model_links["model"]
-        clip = model_links["clip"]
-        graph = GraphBuilder()
-        selected_loras = [descriptor for descriptor in row.get("loras", []) if descriptor["model_mode"] == model_mode]
-        for descriptor in selected_loras:
-            loader = graph.node(
-                "LoraLoader",
-                model=model,
-                clip=clip,
-                lora_name=descriptor["name"],
-                strength_model=descriptor["strength_model"],
-                strength_clip=descriptor["strength_clip"],
-            )
-            model = loader.out(0)
-            clip = loader.out(1)
-        return {
-            "result": (positive, negative, save_info, seed, latent, model, clip, model_links["vae"]),
-            "expand": graph.finalize(),
-        }
+            result = (positive, negative, save_info, seed, latent, None, None, None)
+        else:
+            model = model_links["model"]
+            clip = model_links["clip"]
+            graph = GraphBuilder()
+            selected_loras = [descriptor for descriptor in row.get("loras", []) if descriptor["model_mode"] == model_mode]
+            for descriptor in selected_loras:
+                loader = graph.node(
+                    "LoraLoader",
+                    model=model,
+                    clip=clip,
+                    lora_name=descriptor["name"],
+                    strength_model=descriptor["strength_model"],
+                    strength_clip=descriptor["strength_clip"],
+                )
+                model = loader.out(0)
+                clip = loader.out(1)
+            result = {
+                "result": (positive, negative, save_info, seed, latent, model, clip, model_links["vae"]),
+                "expand": graph.finalize(),
+            }
+        _record_consumer_selection(run_handle, unique_id, current_index, seed, plan)
+        return result
 
 
 

@@ -52,7 +52,7 @@ const funcs = ["nodeClassName", "nodeClassNames", "isRerouteNode", "isScenePromp
     "linkedInput", "graphLink", "firstLinkedInput", "linkKey", "resolveLinkedSourceFromLink", "resolveLinkedSourceFromInput", "linkedSourceNode",
     "scenePromptInputSource", "sceneBypassInputSource", "scenePromptSourceLocalCacheKey", "scenePromptLineageKey", "scenePromptSourceCacheKey",
     "clampSceneCount", "scenePrimitiveInputValue", "scenePromptCounterCount", "scenePromptCounterDownstreamEnabled", "sceneEmptyLatentConfig", "scenePromptSettingsError",
-    "scenePresetGraphNodes", "apiLink", "apiInput", "apiMatrixEnabledCount", "apiMatrixConfigured", "parseMatrixStateValue", "scenePresetStats",
+    "scenePresetGraphNodes", "apiLink", "apiInput", "parseMatrixStateValue", "scenePresetStats",
     "sceneQueueBoundaryInPreset", "sceneQueueBoundaryInNode", "sceneRandomRouteInNode", "sceneQueuePendingInNode", "scenePromptStats",
     "scenePromptInputNumber", "scenePromptQueueInputIndexes", "connectedScenePromptSourcesForQueue", "connectedScenePromptSourcesForMerge", "scenePromptPreviewEntries", "mergeScenePromptEntryPair",
     "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry", "sceneRandomJoinReady", "sceneRandomChoicePlan", "applyScenePresetSwitchBindings",
@@ -90,6 +90,104 @@ function connect(from, to, name, slot = 0, type = "SCENE_PROMPT") {
 }
 function set(node, name, value) { ctx.findWidget(node, name).value = value; }
 const matrix = count => JSON.stringify({ version: 1, sets: Array.from({ length: count }, (_, i) => ({ ...createMatrixLine(`row${i}`), positive_base: `tag${i}` })) });
+for (const configured of [false, true]) {
+    const raw = JSON.stringify({ version: 1, sets: configured ? [{ ...createMatrixLine("disabled"), enabled: false }] : [] });
+    const live = graph(); ctx.app.graph = live;
+    const first = add(live, "ScenePromptCounter", { count: 100_000_000, enable_downstream_count: true });
+    const second = add(live, "ScenePromptCounter", { count: 100_000_000, enable_downstream_count: true });
+    const rows = add(live, "SceneMatrix", { matrix_json: raw });
+    const valid = add(live, "ScenePrompter"), join = add(live, "ScenePrompterQueue");
+    connect(first, second, "scene_prompt"); connect(second, rows, "scene_prompt");
+    connect(rows, join, "scene_prompt1"); connect(valid, join, "scene_prompt2");
+    const error = ctx.scenePromptStats(second).error;
+    assert.match(error, /大きすぎ/u);
+    assert.equal(ctx.scenePromptStats(join).error, error, "Matrix never turns upstream overflow into a plausible Queue count");
+    const definition = { api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "SceneMatrix", inputs: { scene_prompt: ["1", 0], matrix_json: raw } },
+        3: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+    } } };
+    const upstream = ctx.sceneStatsCount(ctx.sceneStatsSeed(), 3);
+    assert.equal(ctx.scenePresetStats("matrix-error", { ...upstream, error }, new Set(), definition).error, error);
+    assert.equal(ctx.scenePresetStats("matrix-valid", upstream, new Set(), definition).total, configured ? 0 : 3);
+    const guarded = ctx.sceneSchedulePlan([], false, [{ gateId: "random", armIndex: 0, weights: [5000, 5000, 0, 0, 0, 0, 0, 0, 0, 0] }]);
+    assert.match(ctx.sceneScheduleForPreset("matrix-arm", guarded, new Set(), definition).stats.error, /Queueで合流/u,
+        "Preset Matrix uses the same open-arm rule even without enabled rows");
+}
+for (const arm of [0, 9]) for (const depth of [1, 3]) for (const upstreamKind of ["none", "counted", "held"]) {
+    const childId = `random-stats-${arm}`;
+    const child = { api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePromptRandomRoute", inputs: { scene_prompt: ["1", 0],
+            weights_json: JSON.stringify(Array.from({ length: 10 }, (_, index) => index === arm ? 10000 : 0)) } },
+        3: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", arm] } },
+    } } };
+    ctx.scenePresetDisplayGraphs.set(childId, child);
+    let rootId = childId;
+    for (let level = 0; level < depth; level++) {
+        const parentId = `${childId}-${level}`;
+        ctx.scenePresetDisplayGraphs.set(parentId, { api_graph: { output: {
+            1: { class_type: "ScenePresetInput", inputs: {} },
+            2: { class_type: "ScenePresetReference", inputs: { preset_id: rootId, scene_prompt: ["1", 0] } },
+            3: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+        } } });
+        rootId = parentId;
+    }
+    const live = graph(), reference = add(live, "ScenePresetReference", { preset_id: rootId });
+    ctx.app.graph = live;
+    if (upstreamKind !== "none") {
+        const rows = add(live, "SceneMatrix", { matrix_json: matrix(2) });
+        const latent = add(live, "SceneEmptyLatent", { batch_size: 3, width: 512, height: 512 });
+        const counter = add(live, "ScenePromptCounter", { count: 4, enable_downstream_count: upstreamKind !== "held" });
+        connect(rows, latent, "scene_prompt"); connect(latent, counter, "scene_prompt"); connect(counter, reference, "scene_prompt");
+    }
+    const stats = ctx.scenePromptStats(reference);
+    assert.equal(stats.total, upstreamKind === "none" ? 1 : 8, "nested single-arm Random retains the upstream generation count");
+    assert.equal(stats.totalImages, upstreamKind === "none" ? 1 : 24);
+    assert.deepEqual(plain(stats), plain(ctx.sceneScheduleForNode(reference).stats));
+    const downstream = add(live, "ScenePromptCounter", { count: 6, enable_downstream_count: true });
+    connect(reference, downstream, "scene_prompt");
+    assert.equal(ctx.scenePromptStats(downstream).total, upstreamKind === "held" ? 8 : stats.total * 6);
+}
+{
+    const presetId = "unselected-random-stats";
+    ctx.scenePresetDisplayGraphs.set(presetId, { api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePromptRandomRoute", inputs: { weights_json: "invalid", scene_prompt: ["1", 0] } },
+        3: { class_type: "ComfySwitchNode", inputs: { switch: false, on_true: ["2", 0], on_false: ["1", 0] } },
+        4: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["3", 0] } },
+    } } });
+    const originalSchedule = ctx.sceneScheduleForPreset;
+    let schedules = 0;
+    ctx.sceneScheduleForPreset = (...args) => { schedules++; return originalSchedule(...args); };
+    assert.equal(ctx.scenePresetStats(presetId, null).total, 1);
+    assert.equal(schedules, 0, "an unselected Random arm does not trigger schedule fallback");
+    ctx.sceneScheduleForPreset = originalSchedule;
+}
+{
+    const live = graph(); ctx.app.graph = live;
+    const size = add(live, "GetImageSize"); size.outputs[0].type = "INT";
+    const count = add(live, "ScenePromptCounter", { count: 4, enable_downstream_count: true });
+    connect(size, count, "count", 0, "INT");
+    const unresolved = ctx.scenePromptStats(count);
+    assert.match(unresolved.error, /Count.*確定/u);
+    const definition = { api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePromptCounter", inputs: { count: 2 } },
+        3: { class_type: "ComfySwitchNode", inputs: { switch: true, on_true: ["1", 0], on_false: ["2", 0] } },
+        4: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["3", 0], count: 3, enable_downstream_count: false } },
+        5: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["4", 0] } },
+    } } };
+    const stats = upstream => ctx.scenePresetStats("upstream-count-error", upstream, new Set(), definition);
+    assert.equal(stats(unresolved).error, unresolved.error, "Preset schedule fallback preserves the selected upstream error");
+    definition.api_graph.output[3].inputs.switch = false;
+    assert.equal(stats(unresolved).total, 6, "an independent selected branch ignores an unused upstream error");
+    assert.equal(stats(unresolved).error, undefined);
+    definition.api_graph.output[3].inputs.switch = true;
+    assert.equal(stats(ctx.sceneStatsCount(ctx.sceneStatsSeed(), 4)).total, 12, "known upstream values recover the count");
+    assert.equal(stats(ctx.emptyScenePromptStats()).total, 0);
+    assert.equal(stats(ctx.emptyScenePromptStats()).error, undefined, "a valid zero upstream remains valid");
+}
 const g = graph(), input = add(g, "ScenePresetInput", { switch_names_json: "[]" }), bool = add(g, "PrimitiveBoolean", { value: false });
 input.properties.scene_switch_values = vector(1, 3, 10);
 const bindingPrompt = { output: { [input.id]: { class_type: "ScenePresetInput", inputs: {} } } };
@@ -97,6 +195,22 @@ ctx.applyScenePresetSwitchBindings(bindingPrompt, g);
 input.properties.scene_switch_values[0] = false;
 assert.equal(bindingPrompt.output[input.id].inputs.switch_values.values[0], true, "captured API binding is independent of later widget/property edits");
 input.properties.scene_switch_values[0] = true;
+{
+    const random = add(g, "ScenePromptRandomRoute", {});
+    random.properties.scene_random_seed = { node_id: String(random.id), seed_source_id: "preset/2" };
+    const prompt = { output: { [random.id]: { class_type: "ScenePromptRandomRoute", inputs: {} } } };
+    ctx.applyScenePresetSwitchBindings(prompt, g);
+    assert.equal(prompt.output[random.id].inputs.seed_source_id, "preset/2");
+    const clone = add(g, "ScenePromptRandomRoute", {});
+    clone.properties.scene_random_seed = { ...random.properties.scene_random_seed };
+    const clonedPrompt = { output: { [clone.id]: { class_type: "ScenePromptRandomRoute", inputs: {} } } };
+    ctx.applyScenePresetSwitchBindings(clonedPrompt, g);
+    assert.equal(clonedPrompt.output[clone.id].inputs.seed_source_id, undefined, "a clone has its own draw identity");
+    const captured = { output: { [random.id]: { class_type: "ScenePromptRandomRoute", inputs: {} } },
+        workflow: { nodes: [{ id: random.id, properties: { scene_random_seed: { node_id: String(random.id), seed_source_id: "snapshot/2" } } }] } };
+    ctx.applyScenePresetSwitchBindings(captured, g);
+    assert.equal(captured.output[random.id].inputs.seed_source_id, "snapshot/2", "use the captured workflow rather than a changed live graph");
+}
 for (let slot = 1; slot <= 10; slot++) {
     const holder = add(g, "ComfySwitchNode", { switch: false }); connect(input, holder, "switch", slot, "BOOLEAN");
     assert.equal(switches.sceneLiveSwitchValue(holder, "switch", "boolean"), vector(1, 3, 10)[slot - 1]);

@@ -36,7 +36,7 @@ from .presets import (
     save_preset,
     snapshot_presets_for_run,
 )
-from .storage import prompt_data_directory
+from .storage import prompt_data_directory, is_windows_reserved_name
 from .lora_metadata import list_loras, read_lora_info
 from .resource_info import connected_resources, read_model_hash
 
@@ -287,6 +287,8 @@ def _folder_component(value, field):
         raise ValueError(f"{field} contains unsupported path characters")
     if text != text.strip(" ."):
         raise ValueError(f"{field} cannot start or end with a dot or space")
+    if os.name == "nt" and is_windows_reserved_name(text):
+        raise ValueError(f"{field}: Windowsの予約名「{text}」は保存先に使えません。")
     return text
 
 
@@ -632,8 +634,7 @@ def define_routes():
                     result = {"session_id": await gpu.begin_session(user_id, client_id, settings, state)}
             elif operation == "release":
                 policy_id = str(payload.get("policy_id") or "")
-                gpu.policy(policy_id, user_id, client_id)
-                result = {"released": gpu.retire_policy(policy_id)}
+                result = {"released": gpu.retire_policy(policy_id, user_id, client_id=client_id)}
             else:
                 result = {"ended": gpu.end_session(str(payload.get("session_id") or ""), user_id, client_id=client_id)}
             return web.json_response(result)

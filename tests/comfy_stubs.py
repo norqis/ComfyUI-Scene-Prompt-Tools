@@ -30,6 +30,8 @@ def install_torch_stub():
 def install_comfy_execution_stub():
     execution = types.ModuleType("comfy_execution")
     graph_utils = types.ModuleType("comfy_execution.graph_utils")
+    utils = types.ModuleType("comfy_execution.utils")
+    utils.get_executing_context = lambda: None
 
     def is_link(value):
         return (
@@ -73,5 +75,7 @@ def install_comfy_execution_stub():
     graph_utils.GraphBuilder = GraphBuilder
     graph_utils.is_link = is_link
     execution.graph_utils = graph_utils
+    execution.utils = utils
     sys.modules["comfy_execution"] = execution
     sys.modules["comfy_execution.graph_utils"] = graph_utils
+    sys.modules["comfy_execution.utils"] = utils

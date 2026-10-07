@@ -23,7 +23,6 @@ const ctx = {
     emptyMatrixRow: () => ({}),
     matrixLineLabel: (row) => row.label,
     sceneQueueDisplayPartsForEntry: (entry) => entry.parts,
-    mergeScenePromptRows: () => ({}),
 };
 require("./scene_switches_test_context.cjs").install(ctx);
 vm.createContext(ctx);
@@ -31,15 +30,16 @@ for (const name of [
     "emptyScenePromptStats", "sceneStatNumber", "sceneStatProduct", "sceneStatSum", "sceneStatsResult", "sceneStatsMerge",
     "sceneSchedulePlan", "sceneScheduleRun", "sceneScheduleWrapper", "sceneScheduleRepeatEach",
     "sceneCountHasHold", "sceneCountPolicyAdd", "sceneCountPolicyProduct", "sceneCountPlanPolicy", "sceneCountUnitPolicy",
-    "sceneCountPrefixPlan", "sceneCountPrefixUnit", "sceneCountEligibleIndex",
-    "sceneScheduleSequence", "sceneScheduleAlternate", "sceneScheduleAtUnit", "sceneScheduleAt",
+    "sceneCountPrefixPlan", "sceneCountPrefixUnit", "sceneCountPrefixUnitUncached", "sceneCountEligibleIndex",
+    "sceneScheduleSequence", "sceneScheduleAlternate", "sceneScheduleAtUnit", "sceneScheduleAtUnitUncached", "sceneScheduleAt",
     "sceneSchedulePrefix", "sceneScheduleCount", "sceneScheduleMap", "sceneScheduleMatrix", "sceneScheduleQueue",
     "sceneScheduleError", "sceneRandomGuard", "sceneRandomChoicePlan", "sceneRandomZeroArm", "sceneRandomJoinReady",
     "sceneScheduleHasComposite", "sceneScheduleMerge", "mergeScenePromptEntryPair",
+    "mergeScenePromptRows", "mergePositiveNegativeParts", "uniquePromptParts", "promptOverrideKeys", "promptOverrideKey", "promptIdentity",
 ]) vm.runInContext(functionSource(name), ctx);
 
 const leaf = (label, count = 1, latent = null) => ctx.sceneSchedulePlan([
-    ctx.sceneScheduleRun({ parts: [label], count, row: latent ? { latent: { batch_size: latent } } : {} }),
+    ctx.sceneScheduleRun({ parts: [label], count, row: { labels: [label], ...(latent ? { latent: { batch_size: latent } } : {}) } }),
 ]);
 const controls = (order_mode = "input_order", block = 1, repeats = "{}", downstream_count_mode = "multiply") =>
     ({ order_mode, alternate_block_size: block, input_repeats_json: repeats, downstream_count_mode });
@@ -50,19 +50,69 @@ const randomWeights = [6000, 4000, 0, 0, 0, 0, 0, 0, 0, 0];
 const guarded = (plan, index, gateId = "random-1") => ctx.sceneSchedulePlan(plan.units, plan.boundary,
     [{ gateId, armIndex: index, weights: randomWeights }]);
 const randomJoined = queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1)], controls("alternate", 3));
+const boundaryArm = guarded(leaf("boundary"), 0);
+assert.equal(ctx.sceneScheduleCount(boundaryArm, 1, true, "whole"), boundaryArm,
+    "internal Preset boundaries preserve open Random arms without applying Count");
+for (const [factor, enabled, kind] of [[1, true, ""], [2, true, "whole"], [1, false, "whole"]])
+    assert.match(ctx.sceneScheduleCount(boundaryArm, factor, enabled, kind).stats.error, /Queueで合流/u);
 assert.equal(randomJoined.stats.total, 1, "random alternatives occupy one generation slot");
 assert.equal(randomJoined.stats.rows, 1);
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(randomJoined))), ["ランダム候補"],
     "preview does not falsely claim a winner before execution");
 assert.equal(ctx.sceneScheduleCount(randomJoined, 10).stats.total, 10, "Count repeats draws, not winning paths");
+
+for (const mapped of [false, true]) {
+    let plan = randomJoined;
+    for (let level = 0; level < 28; level += 1) {
+        const left = mapped ? ctx.sceneScheduleMap(plan, (entry) => ({ ...entry, parts: [...entry.parts, "left"] })) : plan;
+        const right = mapped ? ctx.sceneScheduleMap(plan, (entry) => ({ ...entry, parts: [...entry.parts, "right"] })) : plan;
+        plan = ctx.sceneScheduleMerge(left, right);
+    }
+    const original = ctx.sceneScheduleAtUnitUncached;
+    let visits = 0;
+    ctx.sceneScheduleAtUnitUncached = (...args) => {
+        assert.ok(++visits < 200, "shared paths must not be expanded as a tree");
+        return original(...args);
+    };
+    const entry = ctx.sceneScheduleAt(plan, 0);
+    ctx.sceneScheduleAtUnitUncached = original;
+    assert.deepEqual(Array.from(entry.parts), mapped ? ["ランダム候補", "left", "right"] : ["ランダム候補"]);
+    const prefixUnit = ctx.sceneCountPrefixUnitUncached;
+    visits = 0;
+    ctx.sceneCountPrefixUnitUncached = (...args) => {
+        assert.ok(++visits < 200, "Count prefixes reuse shared paths within one calculation");
+        return prefixUnit(...args);
+    };
+    assert.deepEqual(Array.from(ctx.sceneCountPrefixPlan(plan, 1)), [0, 0, 1]);
+    ctx.sceneCountPrefixUnitUncached = prefixUnit;
+}
 assert.match(ctx.sceneScheduleCount(guarded(leaf("A"), 0), 2).stats.error, /Queueで合流/u);
 assert.match(ctx.sceneScheduleMatrix(guarded(leaf("A"), 0), [{ label: "single" }]).stats.error, /Queueで合流/u);
+for (const configured of [false, true]) {
+    assert.match(ctx.sceneScheduleMatrix(guarded(leaf("A"), 0), [], configured).stats.error, /Queueで合流/u,
+        "empty and all-disabled Matrix nodes still require Random arms to be joined first");
+}
+assert.equal(ctx.sceneScheduleMatrix(leaf("A", 3), [], false).stats.total, 3, "unconfigured Matrix passes a valid plan through");
+assert.equal(ctx.sceneScheduleMatrix(leaf("A", 3), []).stats.total, 0, "all-disabled Matrix has a valid zero count");
 assert.match(ctx.sceneScheduleMerge(guarded(leaf("A"), 0), leaf("B")).stats.error, /Queueで合流/u);
 assert.match(ctx.sceneScheduleMap(ctx.sceneScheduleError("不正な確率"), (entry) => entry).stats.error,
     /不正な確率/u, "a downstream Prompt does not erase the random validation error");
 assert.match(queue([guarded(leaf("A"), 0)], controls()).stats.error, /ランダム分岐/u,
     "a missing positive arm is an error");
+const incompleteRandom = queue([guarded(leaf("A"), 0)], controls());
+for (const merge of [
+    ctx.sceneScheduleMerge(incompleteRandom, leaf("B")),
+    ctx.sceneScheduleMerge(leaf("B"), incompleteRandom),
+]) {
+    assert.equal(merge.stats.error, incompleteRandom.stats.error,
+        "Merge preserves an upstream error instead of presenting a valid zero count");
+    assert.equal(ctx.sceneScheduleCount(ctx.sceneScheduleMatrix(merge, [{ label: "X" }]), 10).stats.error,
+        incompleteRandom.stats.error, "later Matrix and Count preserve the original error");
+}
+assert.equal(ctx.sceneScheduleMerge(randomJoined, leaf("B")).stats.total, 1,
+    "connecting the missing arm restores a valid Merge count");
 const zeroArm = ctx.sceneSchedulePlan([], false, [{ gateId: "random-1", armIndex: 2, weights: randomWeights }]);
+assert.equal(ctx.sceneScheduleMatrix(zeroArm, [], false).stats.error, undefined, "an inert zero-probability arm stays valid");
 assert.match(queue([zeroArm], controls()).stats.error, /0%を超える出力/u,
     "a Queue containing only zero-percent arms cannot close a missing positive-probability route");
 assert.equal(queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1), zeroArm], controls()).stats.total, 1,
@@ -165,6 +215,71 @@ assert.equal(huge.stats.total, 200000000);
 assert.equal(huge.units.length, 1, "large Counts keep a bounded schedule");
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(huge, 6))), ["A", "B", "A", "B", "A", "B"]);
 
+function verifyCompactOrdinaryRows() {
+    for (let factor = 0; factor < 4; factor += 1) {
+        const leftEntries = [["a", 2], ["empty", 0], ["b", 3]];
+        const rightEntries = [["c", 1], ["d", 2]];
+        const toPlan = (entries) => ctx.sceneSchedulePlan(entries.flatMap(([name, count]) => leaf(name, count).units));
+        let actual = ctx.sceneScheduleMatrix(toPlan(leftEntries), [{ label: "x" }, { label: "y" }]);
+        actual = ctx.sceneScheduleCount(actual, factor);
+        actual = ctx.sceneScheduleMerge(actual, toPlan(rightEntries));
+        actual = ctx.sceneScheduleMatrix(actual, [{ label: "u" }, { label: "v" }]);
+        const expected = leftEntries.flatMap(([name, count]) => ["x", "y"].flatMap((first) =>
+            rightEntries.flatMap(([other, otherCount]) => ["u", "v"].map((last) =>
+                ({ label: name + first + other + last, count: count * factor * otherCount })))));
+        assert.deepEqual(Array.from(prefix(actual)), expected.flatMap((entry) => Array(entry.count).fill(entry.label)));
+        let index = 0;
+        for (const entry of expected) for (let repeat = 1; repeat <= entry.count; repeat += 1) {
+            const selected = ctx.sceneScheduleAt(actual, index++);
+            assert.equal(selected.count, entry.count);
+            assert.equal(selected.repeatIndex, repeat);
+        }
+    }
+    let compact = leaf("base");
+    const rows = Array.from({ length: 30 }, (_, index) => ({ label: String(index) }));
+    for (let stage = 0; stage < 3; stage += 1) compact = ctx.sceneScheduleMatrix(compact, rows);
+    assert.equal(compact.units.length, 1);
+    assert.equal(compact.stats.rows, 27000);
+    assert.ok(JSON.stringify(compact).length < 6000, "preview retains Matrix input rows, not Cartesian combinations");
+    compact = ctx.sceneScheduleCount(compact, 100000000);
+    const last = ctx.sceneScheduleAt(compact, compact.stats.total - 1);
+    assert.deepEqual(Array.from(last.parts), ["base", "29", "29", "29"]);
+    assert.equal(last.repeatIndex, 100000000);
+    for (const held of [false, true]) {
+        let scalar = ctx.sceneScheduleCount(leaf("same"), 1, !held);
+        for (let depth = 0; depth < 40; depth += 1) scalar = ctx.sceneScheduleMerge(scalar, scalar);
+        assert.equal(scalar.units[0].kind, held ? "count_hold" : "run",
+            "single-row shared Merge chains must not create exponentially traversed products");
+        assert.deepEqual(Array.from(ctx.sceneScheduleAt(scalar, 0).row.labels), ["same"]);
+        assert.equal(ctx.sceneScheduleCount(scalar, 10).stats.total, held ? 1 : 10);
+    }
+}
+verifyCompactOrdinaryRows();
+for (const kind of ["alternate", "sequence"]) for (const held of [false, true]) for (const fixed of [false, true]) {
+    let singleton = queue([ctx.sceneScheduleCount(leaf("same"), 1, !held)], controls("alternate", 1, "{}", fixed ? "fixed" : "multiply"));
+    if (kind === "sequence") singleton = ctx.sceneSchedulePlan([ctx.sceneScheduleSequence(singleton)], true);
+    singleton = ctx.sceneScheduleMap(singleton, entry => entry, 3);
+    for (let depth = 0; depth < 40; depth++) singleton = ctx.sceneScheduleMerge(singleton, singleton);
+    assert.equal(singleton.units[0].kind, held ? "count_hold" : "run");
+    assert.deepEqual(Array.from(ctx.sceneScheduleAt(singleton, 0).parts), ["same"]);
+    assert.equal(singleton.stats.total, 1); assert.equal(singleton.stats.totalImages, 3);
+    assert.equal(singleton.boundary, true);
+    assert.equal(ctx.sceneScheduleCount(singleton, 10).stats.total, held ? 1 : 10);
+}
+for (const plan of [queue([leaf("repeat", 2)], controls("alternate")), queue([leaf("a"), leaf("b")], controls("alternate")), randomJoined]) {
+    const merged = ctx.sceneScheduleMerge(plan, plan);
+    assert.equal(merged.units[0].kind, "product", "multi-event and Random plans must keep their composition");
+    assert.equal(merged.stats.total, plan.stats.total ** 2);
+}
+for (const boundary of [false, true]) {
+    let empty = ctx.sceneSchedulePlan([], boundary);
+    for (let depth = 0; depth < 40; depth += 1) empty = ctx.sceneScheduleMerge(empty, empty);
+    assert.equal(empty.stats.rows, 0);
+    assert.equal(empty.stats.total, 0);
+    assert.equal(empty.boundary, boundary);
+    assert.equal(empty.units.length, 0, "empty shared Merge chains do not retain product subtrees");
+}
+
 Object.assign(ctx, {
     sceneWorkflowLoadDepth: 0,
     sceneWorkflowLoadSources: new Set(),
@@ -177,6 +292,15 @@ Object.assign(ctx, {
     clampSceneCount: (value, fallback) => Number.isSafeInteger(value) ? value : fallback,
 });
 vm.runInContext(functionSource("sceneScheduleForPreset"), ctx);
+const wholeBoundaryPreset = { api_graph: { output: {
+    "1": { class_type: "ScenePresetInput", inputs: {} },
+    "2": { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["1", 0], count: 1, prompt_trace_kind: "whole" } },
+    "3": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+} } };
+const presetBoundaryArm = ctx.sceneScheduleForPreset("boundary", boundaryArm, new Set(), wholeBoundaryPreset);
+assert.equal(presetBoundaryArm.stats.error, undefined);
+assert.equal(presetBoundaryArm.randomGuards.length, 1, "saved whole boundary preserves the open Random arm");
+assert.equal(queue([presetBoundaryArm, guarded(leaf("other"), 1)], controls()).stats.total, 1);
 const preset = { api_graph: { output: {
     1: { class_type: "ScenePresetInput", inputs: {} },
     2: { class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0], prompt_name: "b1" } },
@@ -214,6 +338,13 @@ const outputPreset = structuredClone(randomPreset);
 outputPreset.api_graph.output[5].class_type = "ScenePromptRandomRouteOutput";
 outputPreset.api_graph.output[2].inputs.preserve_join = true;
 const outputPlan = ctx.sceneScheduleForPreset("output-preset", leaf("X"), new Set(), outputPreset, "output-reference");
+for (const saved of [randomPreset, outputPreset]) {
+    assert.equal(ctx.sceneScheduleForPreset("invalid-upstream", incompleteRandom, new Set(), saved).stats.error,
+        incompleteRandom.stats.error, "a complete Random join inside a Preset preserves its upstream error");
+    const zero = ctx.sceneScheduleForPreset("valid-zero", ctx.sceneSchedulePlan(), new Set(), saved);
+    assert.equal(zero.stats.total, 0);
+    assert.equal(zero.stats.error, undefined, "legitimate zero-row inputs remain valid");
+}
 assert.equal(outputPlan.units[0].kind, "random_choice");
 assert.equal(ctx.sceneScheduleCount(outputPlan, 10).stats.total, 10);
 assert.equal(ctx.sceneScheduleCount(outputPlan, 1_000_000).units.length, 1);
@@ -423,6 +554,38 @@ assert.equal(oldSources.source_node_id, "source-id"); assert.equal(oldSources.so
 assert.equal(ctx.sceneCounterConfiguredValues({ widgets_values: [10, false] }).enable_downstream_count, false);
 assert.equal(ctx.sceneCounterConfiguredValues({ widgets_values: [10, true], widgets_values_named: { enable_downstream_count: false } }).enable_downstream_count, false);
 console.log("Strict Count preview composition, Random policy, compact huge access, nested Presets and legacy widget migration passed.");
+
+function verifyPresetMatrixMergeParity() {
+    ctx.parseMatrixStateValue = JSON.parse;
+    const labels = (plan) => Array.from(prefix(plan));
+    const matrixRows = [{ label: "x", enabled: true }, { label: "y", enabled: true }];
+    for (const factor of [0, 1, 2, 3]) {
+        const counted = ctx.sceneScheduleCount(leaf("A"), factor);
+        const mapped = ctx.sceneScheduleMap(counted, (entry) => ({ ...entry, parts: [...entry.parts, "P"] }));
+        const matrix = ctx.sceneScheduleMatrix(mapped, matrixRows);
+        assert.deepEqual(labels(matrix), [...Array(factor).fill("APx"), ...Array(factor).fill("APy")]);
+        const merged = ctx.sceneScheduleMerge(matrix, leaf("B", 2));
+        assert.deepEqual(labels(merged), [...Array(factor * 2).fill("APxB"), ...Array(factor * 2).fill("APyB")]);
+    }
+    const fixture = { api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["1", 0], count: 2 } },
+        3: { class_type: "SceneMatrix", inputs: { scene_prompt: ["2", 0], matrix_json: JSON.stringify({ sets: matrixRows }) } },
+        4: { class_type: "ScenePrompterMerge", inputs: { scene_prompt1: ["3", 0] } },
+        5: { class_type: "SceneEmptyLatent", inputs: { scene_prompt: ["4", 0], batch_size: 3 } },
+        6: { class_type: "ScenePrompterMerge", inputs: { scene_prompt1: ["5", 0] } },
+        7: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["6", 0] } },
+    } } };
+    const preset = ctx.sceneScheduleForPreset("matrix-merge", leaf("A"), new Set(), fixture);
+    assert.deepEqual(labels(preset), ["Ax", "Ax", "Ay", "Ay"]);
+    assert.equal(preset.stats.rows, 2);
+    assert.equal(preset.stats.totalImages, 12);
+    assert.equal(preset.stats.unsetBatches, 0);
+    const latent = ctx.sceneScheduleMap(queue([leaf("A"), leaf("B")], controls("alternate")), (entry) => entry, 3);
+    assert.equal(ctx.sceneScheduleAt(latent, 1).row.latent.batch_size, 3);
+    assert.equal(ctx.sceneScheduleMerge(latent, leaf("C", 1, 5)).stats.totalImages, 10);
+}
+verifyPresetMatrixMergeParity();
 
 if (process.argv.includes("--compact-count-response")) {
     async function verifyCompactCountResponse() {

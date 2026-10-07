@@ -257,6 +257,25 @@ def test_missing_partial_selection_is_valid_but_not_emitted():
 
 
 class PromptChoiceTests(unittest.TestCase):
+    def test_missing_selection_index_collisions_recover_without_emitting_missing_words(self):
+        for prompt, parts, expected in (
+            ("beta, gamma", [{"index": 0, "text": "alpha", "missing": True, "weight": 1.3},
+                             {"index": 0, "text": "beta", "weight": 1.2}], ["(beta:1.2)"]),
+            ("beta, alpha", [{"index": 1, "text": "alpha", "weight": 1.3},
+                             {"index": 1, "text": "alpha", "missing": True, "weight": 1.2}], ["(alpha:1.3)"]),
+        ):
+            with self.subTest(prompt=prompt):
+                state = json.dumps({"version": 1, "categories": {"Category": [selection_item(prompt, selected_parts=parts)]}})
+                parsed = _parse_selection_json(state)
+                result = parsed["Category"][0]["selected_parts"]
+                self.assertEqual(next(part["index"] for part in result if part.get("missing")), 2)
+                self.assertEqual([(part["text"], part["weight"]) for part in result], [(part["text"], part["weight"]) for part in parts])
+                self.assertEqual(_compose_prompt_parts("", state, "", False, 0), expected)
+                self.assertEqual(_parse_selection_json(json.dumps({"version": 1, "categories": parsed})), parsed)
+        duplicate = selection_item("alpha", selected_parts=[{"index": 0, "text": "alpha"}] * 2)
+        with self.assertRaisesRegex(ValueError, "repeat an index"):
+            _parse_selection_json(json.dumps({"version": 1, "categories": {"Category": [duplicate]}}))
+
     def test_plain_text_returns_original_without_consuming_rng(self):
         text = "plain | literal }, (tag:1.4)\n日本語 " * 3000
         rng = random.Random(123)

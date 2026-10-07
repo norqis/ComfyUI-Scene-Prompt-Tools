@@ -347,14 +347,14 @@ const server = http.createServer(async (request, response) => {
         let source = await readFile(resolve(root, asset), "utf8");
         if (asset === "web/scene_prompt_ui.js") {
             source += `\nwindow.__scenePromptPopupTestHooks = {\n`
-                + `  openSavePromptPopup, openSceneLoraDetails,\n`
+                + `  openSavePromptPopup, openSceneLoraDetails, openEditPromptItemPopup, closeAllPopups,\n`
                 + `  openCreatePromptPopup,\n`
                 + `  openSearchPopup, openPromptCandidatePopup, openCategoryLevelPicker, loadFavorites, setMatrixLineDraftContext,\n`
                 + `  attachMatrixTextAreaAutocomplete, readMatrixState,\n`
                 + `  openScenePresetSwitchNames, openScenePresetSwitchSettings, commitScenePresetSwitchJSON, refreshScenePresetSwitchLabels, applyScenePresetSwitchBindings,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
-                + `  saveScenePreset,\n`
+                + `  saveScenePreset, installScenePresetSwitchBindings, prepareSceneRunContext, syncSceneMatrixPromptInputs,\n`
                 + `  ensureSceneExpandControls,\n`
                 + `  installSceneNodeRemovalCleanup,\n`
                 + `  pendingDesktopNotifications() { return sceneDesktopNotificationRequests.size; },\n`
@@ -566,6 +566,53 @@ async function checkFavorites(browser, url) {
     assert.equal(await reloadedPage.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("getUserData:")).length), 1, "a fresh page shares concurrent loads and restores persistent favorites");
     await reloadedPage.close();
     console.log("Favorite persistence, failure recovery, navigation, Matrix draft, and responsive layout passed.");
+}
+
+async function checkCandidateContentReload(browser, url) {
+    for (const matrix of [false, true]) {
+        for (const side of ["positive", "negative"]) {
+            const page = await browser.newPage();
+            const errors = [];
+            page.on("pageerror", (error) => errors.push(error.message));
+            try {
+                await prepareFavoriteFixture(page, url);
+                await page.evaluate(async ({ matrix, side }) => {
+                    const node = window.__favoriteNode, item = window.__scenePromptItems[0];
+                    const selected = JSON.stringify({ version: 1, categories: { Outfit: [{ ...item, weight: 1.3 }] } });
+                    let stateWidgetName = `${side}_json`;
+                    if (matrix) {
+                        const draft = { row_id: "reload-row", positive_json: selected, negative_json: selected };
+                        window.__reloadDraft = draft;
+                        stateWidgetName = window.__scenePromptPopupTestHooks.setMatrixLineDraftContext(node, 0, draft, side, () => {}, () => {});
+                    } else {
+                        for (const widget of node.widgets) widget.value = selected;
+                        node.widgets_values = node.widgets.map((widget) => widget.value);
+                    }
+                    await window.__scenePromptPopupTestHooks.openPromptCandidatePopup(node, item.category_path, { stateWidgetName });
+                    Object.assign(item, { label: "Updated file label", prompt: "updated_file_prompt", description: "Updated file description" });
+                }, { matrix, side });
+                await page.getByRole("button", { name: "設定再読み込み", exact: true }).click();
+                const row = page.locator('.pc-candidate[title="updated_file_prompt"]');
+                await row.waitFor();
+                assert.equal(await row.locator('input[type="checkbox"]').isChecked(), true);
+                const state = await page.evaluate(({ matrix, side }) => {
+                    const node = window.__favoriteNode;
+                    const value = matrix ? window.__reloadDraft[`${side}_json`]
+                        : node.widgets.find((widget) => widget.name === `${side}_json`).value;
+                    return { selected: JSON.parse(value).categories.Outfit[0], widgets: node.widgets.map((widget) => widget.value), stored: node.widgets_values };
+                }, { matrix, side });
+                assert.deepEqual([state.selected.label, state.selected.prompt, state.selected.description, state.selected.weight],
+                    ["Updated file label", "updated_file_prompt", "Updated file description", 1.3]);
+                assert.deepEqual(state.stored, state.widgets, "reload updates the queued widget payload");
+                if (matrix) assert.ok(state.widgets.every((value) => value === '{"version":1,"categories":{}}'), "Matrix reload only updates its row draft");
+                else assert.ok(state.stored.every((value) => JSON.parse(value).categories.Outfit[0].prompt === "updated_file_prompt"), "both normal prompt sides refresh");
+                assert.deepEqual(errors, []);
+            } finally {
+                await page.close();
+            }
+        }
+    }
+    console.log("Candidate file reload preserves weights and updates positive/negative serialized selections and Matrix drafts.");
 }
 
 async function checkProgressiveCandidates(browser, url) {
@@ -2491,8 +2538,8 @@ try {
     assert.deepEqual(callbackUi.expandCallbackWidgets, [
         { name: "callback_failure_mode", label: "Callback失敗時", hidden: false },
     ], "Expand shows Japanese Callback settings");
-    assert.deepEqual(callbackUi.loadedReplay, [0, 41, false, ""], "loading resets the transient saved index while preserving the seed and clearing stale run state");
-    assert.deepEqual(callbackUi.loadedReplaySerialized, [0, "", 41, false], "normal replay serialization starts from the first Scene row after load");
+    assert.deepEqual(callbackUi.loadedReplay, [15, 41, false, ""], "loading preserves the replay index and seed while clearing stale run state");
+    assert.deepEqual(callbackUi.loadedReplaySerialized, [15, "", 41, false], "replay serialization preserves the selected Scene row after load");
     assert.deepEqual(callbackUi.zeroReplay, [0, 0, true, ""], "loading keeps literal seed 0 for one normal replay");
     assert.equal(callbackUi.replaySeedLiteralHidden, true, "literal seed replay state stays internal");
     assert.deepEqual(callbackUi.zeroReplaySerialized, [0, "", 0, true], "normal replay serialization keeps literal seed mode");
@@ -2973,6 +3020,7 @@ try {
     assert.equal(await resources.count(), 0, "a late hash response cannot reopen a removed node's modal");
     await page.evaluate(() => { window.app.graphToPrompt = window.__originalResourceGraphToPrompt; });
     await checkFavorites(browser, `http://127.0.0.1:${address.port}/`);
+    await checkCandidateContentReload(browser, `http://127.0.0.1:${address.port}/`);
     await checkProgressiveCandidates(browser, `http://127.0.0.1:${address.port}/`);
     await checkPresetSwitchModals(browser, `http://127.0.0.1:${address.port}/`);
     await page.evaluate(async () => {
@@ -3067,6 +3115,9 @@ try {
             own:llm.widgets.filter((widget)=>widget.sceneRole?.startsWith("llm_")).map((widget)=>widget.sceneRole)};
     });
     assert.deepEqual(llmControls,{emptyDisabled:true,reachableDisabled:false,bypassDisabled:true,order:true,noCalls:true,hidden:true,settingsFirst:true,own:["llm_settings","llm_generate","llm_status"]});
+    const { testSnapshotRaces, testPopupFormSubmissionRaces } = await import("./scene_snapshot_races.mjs");
+    await testSnapshotRaces(browser, page.url());
+    await testPopupFormSubmissionRaces(browser, page.url());
     console.log("Scene Prompt browser integration tests passed.");
 } finally {
     await browser.close();

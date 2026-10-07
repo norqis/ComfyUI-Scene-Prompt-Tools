@@ -571,6 +571,33 @@ async function testSavedPromptNormalLoadsShareOneInFlightRequest() {
     assert.equal(secondResult[0].label, "shared");
 }
 
+async function testOverlappingFormWritesInvalidateEarlierReadSnapshots() {
+    for (const mutationName of ["createPromptItem", "updatePromptItem", "saveCurrentPrompt"]) for (const overlappingRead of [false, true]) {
+        const kind = mutationName === "saveCurrentPrompt" ? "saved" : "items";
+        const older = deferred(), newer = deferred(), stale = deferred(), fresh = deferred();
+        const context = listRaceContext(kind, older, newer, ...(overlappingRead ? [stale] : []), fresh);
+        vm.runInContext(functionSource(mutationName), context);
+        if (kind === "items") vm.runInContext(functionSource("createPromptItem"), context);
+        const mutate = () => context[mutationName](kind === "items" ? { name: "draft" } : "draft", "", []);
+        const load = kind === "items" ? context.loadPromptItems : context.loadSavedPrompts;
+        const key = kind === "items" ? "items" : "saved_prompts";
+        const first = mutate(), second = kind === "items" ? context.createPromptItem({ name: "B" }) : mutate();
+        newer.resolve({ ok: true, payload: { [key]: [{ label: "B" }] } });
+        await second;
+        assert.equal((await load())[0].label, "B");
+        assert.equal(context.fetchCount, 2, "fresh POST list requires no extra GET");
+        const oldRead = overlappingRead ? load(true) : null;
+        older.resolve({ ok: true, payload: { [key]: [{ label: "A" }, { label: "B" }] } });
+        await first;
+        const latest = load();
+        if (overlappingRead) stale.resolve({ ok: true, payload: { [key]: [{ label: "B" }] } });
+        fresh.resolve({ ok: true, payload: { [key]: [{ label: "A" }, { label: "B" }] } });
+        assert.deepEqual(Array.from(await latest, (entry) => entry.label), ["A", "B"]);
+        if (oldRead) assert.deepEqual(Array.from(await oldRead, (entry) => entry.label), ["A", "B"]);
+        assert.equal(context[kind === "items" ? "promptItemsLatestPromise" : "savedPromptsLatestPromise"], null);
+    }
+}
+
 function testLiveWidgetStateWinsOverStaleSerializedValue() {
     const context = { String, Array };
     vm.createContext(context);
@@ -789,6 +816,7 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
         },
         activePopupContext: { node: { sceneMatrixLineDraftContext: { commitDrafts() { captureOrder.push("commit"); } } } },
         scenePresetList: [],
+        isScenePresetReferenceNode(target) { return target.type === "ScenePresetReference"; },
         syncAllScenePromptNames() {},
         applySceneSourceNodeNames(prompt) { return prompt; },
         findWidget(target, name) { return target.widgets.find((widget) => widget.name === name); },
@@ -842,6 +870,7 @@ async function testPresetSaveMarksOnlyTheReferenceReturnedByTheServer() {
         app: {
             graph: {
                 _nodes: [failedReference, otherReference],
+                getNodeById(id) { return this._nodes.find(node => String(node.id) === String(id)); },
                 serialize() { return { nodes: [] }; },
                 setDirtyCanvas() {},
             },
@@ -881,7 +910,10 @@ async function testPresetSaveMarksOnlyTheReferenceReturnedByTheServer() {
 async function testPresetPickerClearsTheSelectedReferenceError() {
     const buttons = [];
     const cleared = [];
+    const history = [];
     const node = { id: 12, widgets: [{ name: "preset_id", value: "" }], setDirtyCanvas() {} };
+    node.graph = { getNodeById: id => id === node.id ? node : null, setDirtyCanvas() {},
+        beforeChange() { history.push("before"); }, afterChange() { history.push("after"); }, change() { history.push("change"); } };
     const createElement = (tagName) => ({
         tagName,
         children: [],
@@ -894,7 +926,8 @@ async function testPresetPickerClearsTheSelectedReferenceError() {
         String,
         document: { createElement },
         scenePresetListErrors: [],
-        app: { graph: { setDirtyCanvas() {} } },
+        app: { graph: node.graph, canvas: { graph: node.graph } },
+        findWidget: (target, name) => target.widgets.find(widget => widget.name === name),
         async loadPopupRequest() { return [{ preset_id: "chosen", name: "Chosen" }]; },
         refreshScenePresetReferenceList() { throw new Error("initial load is supplied by the test"); },
         openPopupShell() { return createElement("popup"); },
@@ -917,14 +950,21 @@ async function testPresetPickerClearsTheSelectedReferenceError() {
         closePopup() {},
     };
     vm.createContext(context);
-    vm.runInContext(functionSource("sortedScenePresetCandidates"), context);
-    vm.runInContext(functionSource("openScenePresetPicker"), context);
+    for (const name of ["beginSceneGraphChange", "endSceneGraphChange", "sceneNodeHasCurrentOwner", "withSceneUserChange",
+        "sortedScenePresetCandidates", "openScenePresetPicker"]) vm.runInContext(functionSource(name), context);
 
     await context.openScenePresetPicker(node);
     buttons.find((button) => button.label === "Chosen").click();
 
     assert.equal(node.widgets[0].value, "chosen");
     assert.deepEqual(cleared, [[12]]);
+    assert.deepEqual(history, ["before", "change", "after"]);
+    buttons.find(button => button.label === "Chosen").click();
+    assert.deepEqual(history, ["before", "change", "after"], "selecting the current Preset is a no-op");
+    node.graph = null; node.widgets[0].value = "";
+    buttons.find(button => button.label === "Chosen").click();
+    assert.equal(node.widgets[0].value, "", "a removed popup owner is not changed");
+    assert.deepEqual(history, ["before", "change", "after"]);
 }
 
 async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange() {
@@ -1073,6 +1113,7 @@ Promise.resolve()
     .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)
     .then(testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost)
     .then(testSavedPromptNormalLoadsShareOneInFlightRequest)
+    .then(testOverlappingFormWritesInvalidateEarlierReadSnapshots)
     .then(testLiveWidgetStateWinsOverStaleSerializedValue)
     .then(testWorkflowLoadGuardMarksOnlyLoadWindow)
     .then(testWorkflowConnectionStormDefersSceneWork)

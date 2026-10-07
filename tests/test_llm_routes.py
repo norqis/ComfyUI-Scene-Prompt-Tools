@@ -77,6 +77,23 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await release(request))["status"], 403)
                     request.payload["client_id"] = "a"
                     self.assertTrue((await release(request))["payload"]["released"])
+                    # The response may be lost after cleanup already succeeded.
+                    repeated = await release(request)
+                    self.assertEqual(repeated["status"], 200)
+                    self.assertFalse(repeated["payload"]["released"])
+                    held_id = coordinator.prepare("alice", "a", {})
+                    coordinator.admit("pending-prompt", held_id, "alice", "a")
+                    request.payload["policy_id"] = held_id
+                    self.assertTrue((await release(request))["payload"]["released"])
+                    self.assertTrue((await release(request))["payload"]["released"])
+                    request.payload["client_id"] = "b"
+                    self.assertEqual((await release(request))["status"], 403)
+                    request.payload["client_id"] = "a"
+                    request.user_id = "bob"
+                    self.assertEqual((await release(request))["status"], 403)
+                    request.user_id = "alice"
+                    coordinator.finish_prompt("pending-prompt")
+                    self.assertFalse((await release(request))["payload"]["released"])
                     request.payload = {"client_id": "a", "session_id": "missing", "description": "scene", "model_mode": "Illustrious"}
                     self.assertEqual((await generate(request))["status"], 404)
                     request.payload = {"client_id": "missing"}

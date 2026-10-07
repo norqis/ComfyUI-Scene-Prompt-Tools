@@ -15,7 +15,7 @@ from comfy_execution.graph_utils import GraphBuilder, is_link
 from .llm_node import ScenePromptLLM
 from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
 from .plan import mark_prompt_whole, seed_plan
-from .storage import public_user_directory
+from .storage import public_user_directory, is_windows_reserved_name
 from .nodes import (
     SceneEmptyLatent,
     SceneApplyModel,
@@ -143,6 +143,8 @@ def _clean_preset_id(value):
     preset_id = str(value or "").strip()
     if not PRESET_ID_RE.fullmatch(preset_id):
         raise ScenePresetError("preset_id は英数字、_、- だけで入力してください。")
+    if os.name == "nt" and is_windows_reserved_name(preset_id):
+        raise ScenePresetError(f"preset_id: Windowsの予約名「{preset_id}」は使えません。")
     return preset_id
 
 
@@ -251,7 +253,7 @@ def _compact_preset_list_graph(api_graph, local_memo=None):
         return copy.deepcopy(api_graph)
     compact_nodes = {}
     scalar_inputs = {
-        "matrix_json", "batch_size", "count", "enable_downstream_count", "preset_id", "reverse_scope",
+        "matrix_json", "batch_size", "count", "enable_downstream_count", "prompt_trace_kind", "preset_id", "reverse_scope",
         "order_mode", "alternate_block_size", "downstream_count_mode",
         "weights_json", "preserve_join", "llm_presets_json",
         "switch_names_json", "switch_settings_json", "switch_values", "switch",
@@ -667,7 +669,6 @@ def _validate_preset_runtime(nodes, user_id="default", preset_id=None):
     output_link = validation["output_link"]
     result = _scene_node_value(nodes, output_link[0], resolved, set(), user_id=user_id)
     result = _output_value(nodes, output_link, result)
-    _validate_random_route_connections(nodes, _effective_scene_closure(nodes, output_link[0]))
     if isinstance(result, dict) and result.get("random_guards"):
         raise ScenePresetError("Scene Prompt Random Route Input の分岐をPreset内のOutputまたはQueueで合流してください。")
 
@@ -718,10 +719,17 @@ def _validate_preset_payload(preset):
         raise ScenePresetError(f"Preset「{name}」: {exc}") from exc
 
 
+def _require_preset_identity(stored_id, preset_id):
+    if stored_id != preset_id:
+        raise ScenePresetError(f"Preset ID「{preset_id}」の保存先は既存Preset「{stored_id}」と同じです。IDを「{stored_id}」に合わせるか、別のIDを指定してください。")
+
+
 def load_preset(preset_id, user_id="default"):
     """Return an owned definition; callers share it only within their operation."""
+    preset_id = _clean_preset_id(preset_id)
     preset = _read_json(_preset_path(preset_id, user_id))
     _validate_preset_payload(preset)
+    _require_preset_identity(preset["metadata"]["preset_id"], preset_id)
     return preset
 
 
@@ -776,6 +784,9 @@ def save_preset(payload, user_id="default"):
             os.fsync(handle.fileno())
         _validate_preset_payload(_read_json(Path(temp_name)))
         with _PRESET_LOCK:
+            # A case-insensitive filesystem can map distinct IDs to one file.
+            if path.exists():
+                _require_preset_identity(path.resolve().stem, preset_id)
             try:
                 # Serialize the dependency check with publication, so two
                 # concurrent saves cannot create a reference cycle.
@@ -887,6 +898,7 @@ def _workflow_references(workflow):
 
 def _needs_workflow_preset_snapshots(nodes, expand_node_id):
     """Only full-workflow saves connected to this run need canvas-only Presets."""
+    pending = []
     for node in nodes.values():
         if not isinstance(node, dict) or node.get("class_type") != "SceneSaveImage":
             continue
@@ -899,9 +911,16 @@ def _needs_workflow_preset_snapshots(nodes, expand_node_id):
             continue
         if expand_node_id is None:
             return True
-        scene_info = inputs.get("scene_info")
-        if is_link(scene_info) and str(scene_info[0]) == str(expand_node_id):
+        pending.extend(_linked_nodes(node))
+    visited = set()
+    while pending:
+        node_id = str(pending.pop())
+        if node_id == str(expand_node_id):
             return True
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        pending.extend(_linked_nodes(nodes.get(node_id, {})))
     return False
 
 
@@ -992,27 +1011,6 @@ def _scene_nodes_for_expand(nodes, expand_node_id):
     if not is_link(source):
         return {}, None
     return _scene_prompt_closure(nodes, source[0]), source
-
-
-def _validate_random_route_connections(nodes, scene_nodes):
-    for node_id, node in scene_nodes.items():
-        if node.get("class_type") != "ScenePromptRandomRoute":
-            continue
-        weights = ScenePromptRandomRoute.INPUT_TYPES()["required"]["weights_json"][1]["default"]
-        raw = _node_inputs(node).get("weights_json", weights)
-        from .nodes import _random_weights_json
-        values = _random_weights_json(raw)
-        connected = {
-            value[1] for other in nodes.values() if isinstance(other, dict)
-            for value in _node_inputs(other).values()
-            if is_link(value) and str(value[0]) == str(node_id)
-        }
-        missing = [str(index + 1) for index, weight in enumerate(values) if weight and index not in connected]
-        if missing:
-            raise ScenePresetResolutionError(
-                f"Scene Prompt Random Route Input #{node_id}: 出力{', '.join(missing)}が未接続です。",
-                str(node_id),
-            )
 
 
 def _resolve_preset_tree(preset_id, resolved, stack, user_id="default"):
@@ -1133,10 +1131,10 @@ def _scene_node_value_impl(
         return result
     if class_type == "ComfySwitchNode":
         branch = selected_switch_input(nodes, node, _switch_bindings(input_values))
-        raw = _node_inputs(node).get(branch)
-        if not is_link(raw):
+        inputs = _node_inputs(node)
+        if branch not in inputs:
             raise ScenePresetError(f"Switch の {branch} が未接続です。")
-        memo[node_id] = value(raw)
+        memo[node_id] = value(inputs[branch])
         return memo[node_id]
     if class_type == "ScenePresetReference":
         preset_id = _clean_preset_id(_node_inputs(node).get("preset_id"))
@@ -1193,8 +1191,12 @@ def _scene_node_value_impl(
         if class_type != "ScenePromptCallback":
             kwargs.setdefault("source_node_name", _source_node_name(node))
     if class_type == "ScenePromptRandomRoute":
+        kwargs["unique_id"] = node_id
+        kwargs["prompt"] = nodes
         path = "/".join(part.split("@", 1)[1] for part in preset_stack)
         kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
+        if path:
+            kwargs["seed_source_id"] = f"{path}/{kwargs.get('seed_source_id') or node_id}"
     result = getattr(cls(), cls.FUNCTION)(**kwargs)
     memo[node_id] = result if class_type == "ScenePromptRandomRoute" else result[0]
     return memo[node_id]
@@ -1299,7 +1301,6 @@ def _evaluate_preset_scene(
     input_id = validation["input_id"]
     output_link = validation["output_link"]
     input_values = {input_id: (upstream if upstream is not None else seed_plan(), *vector, vector)}
-    _validate_random_route_connections(nodes, _effective_scene_closure(nodes, output_link[0], {input_id: vector}))
     result = _scene_node_value(
         nodes,
         output_link[0],
@@ -1365,8 +1366,6 @@ def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="de
         )
         if source is not None:
             plan = _output_value(scene_nodes, source, plan)
-        effective_nodes = _effective_scene_closure(nodes, source[0]) if source is not None else {}
-        _validate_random_route_connections(nodes, effective_nodes)
         if plan["random_guards"]:
             guard = plan["random_guards"][-1]
             raise ScenePresetError(f"Scene Prompt Random Route Input {guard['gate_id']} の分岐をOutputまたはQueueで合流してください。")
@@ -1607,6 +1606,9 @@ def expand_preset_reference(
                 target.set_input("source_node_name", _source_node_name(node))
         if class_type in {"ScenePrompter", "SceneMatrix"}:
             target.set_input("run_handle", str(run_handle))
+        if class_type == "ScenePromptRandomRoute":
+            seed_source = _node_inputs(node).get("seed_source_id") or node_id
+            target.set_input("seed_source_id", f"{reference_source_id}/{seed_source}" if reference_source_id else str(seed_source))
         if class_type == "ScenePresetReference":
             target.set_input("run_handle", str(run_handle))
             if not run_handle:

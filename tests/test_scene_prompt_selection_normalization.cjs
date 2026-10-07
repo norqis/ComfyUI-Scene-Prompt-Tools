@@ -4,16 +4,18 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "web", "scene_prompt_ui.js"), "utf8");
+const stateSource = fs.readFileSync(path.join(__dirname, "..", "web", "scene_prompt_state.js"), "utf8");
 
 function functionSource(name) {
-    const start = source.indexOf(`function ${name}(`);
+    const code = name === "normalizeMissingPartIndexes" ? stateSource : source;
+    const start = code.indexOf(`function ${name}(`);
     assert.notEqual(start, -1, `Missing function: ${name}`);
-    const bodyStart = source.indexOf(") {", start);
+    const bodyStart = code.indexOf(") {", start);
     assert.notEqual(bodyStart, -1, `Missing function body: ${name}`);
     let depth = 0;
-    for (let index = bodyStart + 2; index < source.length; index += 1) {
-        if (source[index] === "{") depth += 1;
-        if (source[index] === "}" && --depth === 0) return source.slice(start, index + 1);
+    for (let index = bodyStart + 2; index < code.length; index += 1) {
+        if (code[index] === "{") depth += 1;
+        if (code[index] === "}" && --depth === 0) return code.slice(start, index + 1);
     }
     throw new Error(`Unclosed function: ${name}`);
 }
@@ -48,10 +50,12 @@ for (const name of [
     "weightForStorage",
     "splitPromptParts",
     "itemPromptParts",
+    "normalizeMissingPartIndexes",
     "normalizedSelectedParts",
     "itemForState",
     "itemForEditedState",
     "itemSelectionSignature",
+    "replacePromptItemInState",
     "pruneStateToData",
 ]) {
     vm.runInContext(functionSource(name), context);
@@ -76,6 +80,19 @@ function stateFor(item) {
             [category]: [item],
         },
     };
+}
+
+for (const extra of [{ weight: 1.4 }, { selected_parts: [{ index: 0, text: "alpha", weight: 1.2 }] }]) {
+    const item = { ...candidate("edit", "Edit", "alpha, beta"), ...extra };
+    const state = stateFor(item);
+    const noChange = context.replacePromptItemInState(state, category, context.itemKey(item), { ...candidate("edit", "Edit", "alpha, beta"), description: "" }, category);
+    assert.equal(noChange.changed, false);
+    assert.equal(noChange.state, state, "unchanged catalog saves retain selected state and avoid redundant layout writes");
+    const changed = context.replacePromptItemInState(state, category, context.itemKey(item), candidate("edit", "New label", "alpha, beta"), category);
+    assert.equal(changed.changed, true);
+    assert.equal(changed.state.categories[category][0].label, "New label");
+    assert.equal(context.itemSelectionSignature(changed.state.categories[category][0]), context.itemSelectionSignature(item));
+    assert.equal(state.categories[category][0], item);
 }
 
 const oldSelection = {
@@ -104,6 +121,39 @@ writes.length = 0;
 const currentSelection = { ...candidate("目無し_2"), weight: 1.3 };
 context.pruneStateToData({ sceneDefaultStateWidgetName: "positive_json" }, stateFor(currentSelection), [current]);
 assert.equal(writes.length, 0, "current IDs remain untouched");
+
+for (const changes of [
+    { label: "Updated label" },
+    { prompt: "updated prompt" },
+    { description: "Updated description" },
+]) {
+    const refreshed = { ...current, ...changes };
+    const state = stateFor(currentSelection);
+    writes.length = 0;
+    context.pruneStateToData(normalizedNode, state, [refreshed]);
+    assert.equal(writes.length, 1, "stable IDs still refresh changed candidate content");
+    assert.deepEqual(writes[0].value.categories[category][0], { ...refreshed, weight: 1.3 });
+    assert.equal(state.categories[category][0].prompt, refreshed.prompt);
+    context.pruneStateToData(normalizedNode, state, [refreshed]);
+    assert.equal(writes.length, 1, "unchanged reloaded content is a no-op");
+}
+for (const [prompt, expectedParts] of [
+    ["alpha, beta, added", [{ index: 0, text: "alpha", weight: 1.3 }]],
+    ["beta, added", [{ index: 0, text: "alpha", missing: true, weight: 1.3 }]],
+]) {
+    const selected = { ...candidate("stable", "Parts", "alpha, beta"), selected_parts: [{ index: 0, text: "alpha", weight: 1.3 }] };
+    const refreshed = candidate("stable", "Parts", prompt);
+    const state = stateFor(selected);
+    writes.length = 0;
+    context.pruneStateToData(normalizedNode, state, [refreshed]);
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0].value.categories[category][0], { ...refreshed, selected_parts: expectedParts });
+    context.pruneStateToData(normalizedNode, state, [refreshed]);
+    assert.equal(writes.length, 1, "reloaded partial selections remain stable");
+}
+writes.length = 0;
+context.pruneStateToData(normalizedNode, stateFor(currentSelection), [{ ...current, description: "" }]);
+assert.equal(writes.length, 0, "omitted and empty descriptions have the same meaning");
 
 assert.throws(
     () => context.pruneStateToData({}, stateFor(oldSelection), [candidate("other", "別の候補")]),
@@ -158,6 +208,32 @@ assert.deepEqual(
     "reordering and additions preserve selected parts",
 );
 
+for (const [before, after, expected] of [
+    ["alpha, beta", "beta, gamma", [{ index: 2, text: "alpha", missing: true, weight: 1.3 }, { index: 0, text: "beta", weight: 1.2 }]],
+    ["alpha, alpha", "beta, alpha", [{ index: 1, text: "alpha", weight: 1.3 }, { index: 2, text: "alpha", missing: true, weight: 1.2 }]],
+]) {
+    const previous = { ...candidate("colliding", "Parts", before), selected_parts: before.split(", ").map((text, index) => ({ index, text, weight: index ? 1.2 : 1.3 })) };
+    const edited = context.itemForEditedState(candidate("colliding", "Parts", after), previous);
+    assert.deepEqual(JSON.parse(JSON.stringify(edited.selected_parts)), expected, "missing and current occurrences keep independent identities");
+    assert.deepEqual(JSON.parse(JSON.stringify(context.itemForState(edited).selected_parts)), expected, "unchanged reads preserve missing occurrences");
+    const restored = context.itemForEditedState(candidate("colliding", "Parts", before), edited);
+    assert.deepEqual(JSON.parse(JSON.stringify(restored.selected_parts)), previous.selected_parts, "restoring removed repeated words preserves occurrence weights");
+}
+for (const parts of [
+    [{ index: 1, text: "alpha", weight: 1.2 }],
+    [{ index: 1, text: "alpha", weight: 1.2 }, { index: 0, text: "alpha", weight: 1.3 }],
+]) {
+    const previous = { ...candidate("occurrences", "Parts", "alpha, alpha"), selected_parts: parts };
+    const edited = context.itemForEditedState(candidate("occurrences", "Parts", "beta, alpha"), previous);
+    assert.equal(edited.selected_parts[0].missing, true);
+    const unchanged = context.itemForState(edited);
+    assert.deepEqual(JSON.parse(JSON.stringify(unchanged.selected_parts)), JSON.parse(JSON.stringify(edited.selected_parts)));
+    const unrelated = context.itemForEditedState(candidate("occurrences", "Parts", "gamma, alpha"), edited);
+    assert.equal(unrelated.selected_parts[0].missing, true, "an unrelated edit does not restore an absent occurrence");
+    const restored = context.itemForEditedState(candidate("occurrences", "Parts", "alpha, alpha"), unrelated);
+    assert.deepEqual(JSON.parse(JSON.stringify(restored.selected_parts)), parts);
+}
+
 const partWrites = [];
 const partContext = {
     Number,
@@ -189,6 +265,7 @@ for (const name of [
     "splitPromptParts",
     "itemPromptParts",
     "partKey",
+    "normalizeMissingPartIndexes",
     "normalizedSelectedParts",
     "itemForState",
     "selectedItems",
@@ -263,3 +340,22 @@ assert.deepEqual(
 assert.ok(partWrites.length >= 5, "part edits write through the active state widget");
 
 console.log("Scene Prompt selection normalization tests passed.");
+
+for (const name of ["cloneSelectionState", "mergeSelectedItemsForDisplay", "setItemChecked"])
+    vm.runInContext(functionSource(name), context);
+context.popupStateWidgetName = () => "positive_json";
+context.readStateFromWidget = node => node.state;
+context.writeState = (node, state) => { node.state = state; };
+for (const name of ["__proto__", "constructor", "toString"]) {
+    const item = { ...candidate("special"), category_path: [name], category_key: name, category_label: name };
+    const node = { state: context.cloneSelectionState({ version: 1, categories: {} }) };
+    context.setItemChecked(node, item, true);
+    assert.equal(node.state.categories[name][0].id, "special");
+    const clone = context.cloneSelectionState(node.state);
+    const display = context.cloneSelectionState({ version: 1, categories: {} });
+    context.mergeSelectedItemsForDisplay(display, clone);
+    context.pruneStateToData(node, display, [item]);
+    assert.equal(display.categories[name][0].id, "special");
+    context.setItemChecked(node, item, false);
+    assert.equal(Object.keys(node.state.categories).length, 0);
+}

@@ -113,25 +113,19 @@ displayContext.refreshScenePromptQueueNode(queueNode, { fitHeight: true });
 
 let createdImages = 0;
 const saveContext = {
-    Set, Map, JSON,
+    Set, Map, JSON, Math, Array,
     SCENE_SAVE_PREVIEW_LIMIT: 1,
     SCENE_SAVE_IMAGE_NODE_NAMES: new Set(["SceneSaveImage"]),
     sceneNodeFromEvent(detail) { return detail.node; },
     imageRefKey(ref) { return ref.filename; }, previewUrl(ref) { return ref.filename; },
     Image: class { constructor() { createdImages += 1; } },
-    trimSceneSavePreviews(node) {
-        while (node.imgs.length > 1) {
-            const old = node.imgs.shift();
-            node.scenePreviewKeys.delete(old.scenePreviewKey);
-            node.scenePreviewImages.delete(old.scenePreviewKey);
-        }
-        node.imageIndex = node.imgs.length - 1;
-    },
     app: { graph: { setDirtyCanvas() {} }, canvas: { setDirty() {} } },
 };
 require("./scene_switches_test_context.cjs").install(saveContext);
 vm.createContext(saveContext);
-vm.runInContext(functionSource("appendSceneSavePreview"), saveContext);
+for (const name of ["appendSceneSavePreview", "trimSceneSavePreviews", "clearSceneSavePreviews"]) {
+    vm.runInContext(functionSource(name), saveContext);
+}
 const saveNode = { type: "SceneSaveImage", imgs: [], size: [100, 100], setDirtyCanvas() {} };
 const hundred = Array.from({ length: 100 }, (_value, index) => ({ filename: `image-${index}` }));
 saveContext.appendSceneSavePreview({ node: saveNode, output: { images: hundred } });
@@ -142,6 +136,26 @@ assert.equal(createdImages, 1, "repeated events retain the latest cached image w
 saveContext.appendSceneSavePreview({ node: saveNode, output: { images: [{ filename: "image-100" }] } });
 assert.equal(createdImages, 2, "a newer event loads one new latest image");
 assert.equal(saveNode.imgs[0].scenePreviewKey, "image-100");
+for (let index = 101; index < 126; index++) {
+    const obsolete = saveNode.scenePreviewImages.values().next().value;
+    // Native ComfyUI replaces imgs with independently loaded Image objects.
+    saveNode.imgs = [{ src: `image-${index - 1}` }];
+    saveContext.appendSceneSavePreview({ node: saveNode, output: { images: [{ filename: `image-${index}` }] } });
+    assert.equal(saveNode.imgs.length, 1);
+    assert.deepEqual([...saveNode.scenePreviewKeys], [`image-${index}`]);
+    assert.deepEqual([...saveNode.scenePreviewImages.keys()], [`image-${index}`]);
+    assert.equal(obsolete.onload, null, "replaced preview releases its node callback");
+    const createdBeforeDuplicate = createdImages;
+    saveNode.imgs = [{ src: `image-${index}` }];
+    saveContext.appendSceneSavePreview({ node: saveNode, output: { images: [{ filename: `image-${index}` }] } });
+    assert.equal(createdImages, createdBeforeDuplicate, "native replacement does not reload a duplicate latest image");
+    assert.equal(saveNode.scenePreviewImages.size, 1);
+}
+saveContext.app.graph._nodes = [saveNode];
+saveContext.clearSceneSavePreviews();
+assert.equal(saveNode.scenePreviewImages.size, 0);
+assert.equal(saveNode.scenePreviewKeys.size, 0);
+assert.equal(saveNode.imgs.length, 0);
 
 const documentListeners = new Map();
 const dragContext = {
@@ -300,6 +314,30 @@ layoutContext.installSceneNodeRemovalCleanup(layoutNode, "ScenePrompter");
 layoutNode.onRemoved();
 assert.equal(layoutNode.sceneSelectedListLayoutCache, null, "node removal releases its widget layouts");
 
+{
+    const frames = new Map(), attached = [];
+    let nextFrame = 0;
+    layoutContext.requestAnimationFrame = callback => { const id = nextFrame++; frames.set(id, callback); return id; };
+    layoutContext.cancelAnimationFrame = id => frames.delete(id);
+    layoutContext.attachSceneNode = node => { attached.push(node); layoutContext.sceneTitleSyncNodes.add(node); };
+    vm.runInContext(functionSource('scheduleAttachSceneNode'), layoutContext);
+    const node = { widgets: [] };
+    layoutContext.installSceneNodeRemovalCleanup(node, 'SceneMatrix');
+    layoutContext.scheduleAttachSceneNode(node, 'SceneMatrix');
+    layoutContext.scheduleAttachSceneNode(node, 'SceneMatrix');
+    assert.equal(frames.size, 1, 'configuration coalesces into one pending frame');
+    node.onRemoved();
+    for (const callback of frames.values()) callback();
+    assert.equal(attached.length, 0, 'a removed node must not be reattached by its old frame');
+    assert.equal(frames.size, 0, 'removal releases the pending callback and node reference');
+    layoutContext.scheduleAttachSceneNode(node, 'SceneMatrix');
+    for (const callback of [...frames.values()]) callback();
+    frames.clear();
+    assert.deepEqual(attached, [node], 'later configuration still attaches without requiring graph membership');
+    node.onRemoved();
+    assert.equal(layoutContext.sceneTitleSyncNodes.size, 0);
+}
+
 console.log("Scene Prompt UI audit behavior tests passed.");
 
 async function testCurrentDisplayAndRasterOwnership() {
@@ -397,6 +435,35 @@ async function testCurrentDisplayAndRasterOwnership() {
     })) });
     const matrix = { size: [340, 900], mode: 0, scenePromptRevision: 0, inputLink: "link-a", inputSource: { id: 1, mode: 0, scenePromptRevision: 0, title: "Source A" },
         widgets: [{ name: "matrix_json", value: rawMatrix("before") }], properties: {} };
+    const cachedState = stateModule.parseMatrixState(matrix.widgets[0].value);
+    cachedState.sets.forEach(row => { row.enabled = false; });
+    let lineParses = 0;
+    const countContext = { Set, readMatrixState: () => cachedState,
+        normalizeMatrixLine(value) { lineParses++; return stateModule.parseMatrixLine(value); } };
+    vm.createContext(countContext);
+    for (const name of ["matrixConfiguredLineCount", "matrixLinesForNode"]) vm.runInContext(functionSource(name), countContext);
+    for (let index = 0; index < 10; index++) {
+        assert.equal(countContext.matrixConfiguredLineCount(matrix), 30);
+        assert.equal(countContext.matrixLinesForNode(matrix).length, 0);
+    }
+    assert.equal(lineParses, 0, "counting validated rows and skipping disabled rows never reparses their large selections");
+    cachedState.sets[0].enabled = true;
+    cachedState.sets[0].positive_parts = ["(positive:1.3)"];
+    cachedState.sets[0].negative_parts = ["(negative:1.2)"];
+    cachedState.sets[0].display_labels = ["weighted row"];
+    cachedState.sets[0].display_label_groups = [["first", "second"], ["third"]];
+    cachedState.sets.push(cachedState.sets[0]);
+    const enabled = countContext.matrixLinesForNode(matrix);
+    assert.equal(enabled.length, 1, "enabled row IDs still deduplicate");
+    assert.equal(lineParses, 0, "reading enabled validated rows never reparses their large selections");
+    assert.equal(JSON.stringify(enabled[0]), JSON.stringify(cachedState.sets[0]), "all normalized fields and weighted selections survive unchanged");
+    assert.notStrictEqual(enabled[0], cachedState.sets[0], "enabled rows remain independent editable copies");
+    const originalRow = JSON.stringify(cachedState.sets[0]);
+    for (const field of ["positive_parts", "negative_parts", "display_labels"]) enabled[0][field].push("local-edit");
+    enabled[0].display_label_groups[0].push("local-group-edit");
+    enabled[0].display_label_groups.push(["new group"]);
+    enabled[0].positive_json = selection("local selection", 1.5);
+    assert.equal(JSON.stringify(cachedState.sets[0]), originalRow, "editing output fields and nested groups never changes cached state");
     ctx.drawMatrixList(outer, matrix, 340, 0, 200);
     const matrixWarm = ctx.matrixDisplayCache(matrix, 340), matrixRaster = matrix.sceneMatrixRenderCache.canvas;
     calls.stringify = calls.selectionParse = calls.matrixParse = 0;

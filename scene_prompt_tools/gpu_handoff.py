@@ -248,11 +248,15 @@ class Coordinator:
                 raise HandoffError("The GPU policy client has disconnected.", 409)
             return policy
 
-    def retire_policy(self, policy_id):
+    def retire_policy(self, policy_id, user_id=None, *, client_id=None):
         with self.lock:
             policy = self.policies.get(policy_id)
             if policy is None:
                 return False
+            if user_id is not None and policy.user_id != user_id:
+                raise HandoffError("The GPU policy belongs to another client.", 403)
+            if client_id is not None and policy.client_id != client_id:
+                raise HandoffError("The GPU policy belongs to another client.", 403)
             policy.retired = True
             if not policy.prompts:
                 self.policies.pop(policy_id, None)
@@ -593,17 +597,27 @@ def _install_execution_hooks():
 
     def queue_edit(queue, operation, *args, **kwargs):
         with queue.mutex:
-            before = {item[1] for item in queue.queue}
-            result = operation(queue, *args, **kwargs)
-            after = {item[1] for item in queue.queue}
+            # Native deletion of the final pending item calls wipe_queue.
+            if getattr(queue, "_scene_queue_editing", False):
+                return operation(queue, *args, **kwargs)
+            queue._scene_queue_editing = True
+            try:
+                before = {item[1]: item[3].get("client_id") for item in queue.queue}
+                result = operation(queue, *args, **kwargs)
+                after = {item[1] for item in queue.queue}
+            finally:
+                queue._scene_queue_editing = False
         coordinator = getattr(queue.server, "_scene_gpu_handoff", None)
-        if coordinator is not None:
-            for prompt_id in before - after:
+        for prompt_id in before.keys() - after:
+            if coordinator is not None:
                 with coordinator.lock:
                     policy_id = coordinator.prompt_policies.get(prompt_id)
                 if policy_id is not None:
                     coordinator.retire_policy(policy_id)
                 coordinator.finish_prompt(prompt_id)
+            client_id = before[prompt_id]
+            if client_id:
+                queue.server.send_sync("scene_prompt_queue_removed", {"prompt_id": prompt_id}, client_id)
         return result
 
     executor_type.__init__, executor_type.execute = executor_init, execute

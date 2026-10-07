@@ -70,6 +70,53 @@ class RandomRouteIOTests(unittest.TestCase):
         self.assertEqual(fresh["random_guards"][-1]["gate_id"], "input")
         self.assertEqual(self.join(fresh)["random_guards"], [])
 
+    def test_preflight_validates_resolved_random_controls_in_live_and_preset_graphs(self):
+        for provider in ("PrimitiveString", "ComfySwitchNode"):
+            for weights, error in (([5000, 5000] + [0] * 8, None), ([10000] + [0] * 9, None),
+                                   ([5000] + [0] * 9, "100%"), ([0] * 9 + [10000], "出力10")):
+                with self.subTest(provider=provider, weights=weights):
+                    api = self.api()
+                    value = json.dumps(weights)
+                    api["10"] = {"class_type": provider, "inputs": {"value": value} if provider == "PrimitiveString"
+                                 else {"switch": True, "on_true": value, "on_false": "invalid unused weights"}}
+                    api["2"]["inputs"]["weights_json"] = ["10", 0]
+                    if error:
+                        with self.assertRaisesRegex(self.presets.ScenePresetError, error):
+                            self.prepare(api)
+                    else:
+                        self.assertEqual(self.prepare(api)["total_batches"], 10)
+                    if provider == "ComfySwitchNode":
+                        api["1"] = {"class_type": "ScenePresetInput", "inputs": {}}
+                        api["7"] = {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["6", 0]}}
+                        request = {"preset_id": "linked_random", "name": "Linked Random", "output_node_id": "7",
+                                   "api_graph": {"output": api}, "workflow": outer_workflow(api)}
+                        if error:
+                            with self.assertRaisesRegex(self.presets.ScenePresetError, error):
+                                self.presets.save_preset(request)
+                        else:
+                            self.presets.save_preset(request)
+                            graph = {"1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "linked_random"}},
+                                     "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["1", 0]}}}
+                            self.assertEqual(self.prepare(graph)["total_batches"], 10)
+
+    def test_frozen_random_controls_disconnect_only_replaced_visual_links(self):
+        api = {"2": {"class_type": "ScenePromptRandomRoute", "inputs": {"weights_json": ["1", 0], "preserve_join": ["3", 0]}}}
+        workflow = {"nodes": [
+            {"id": 1, "outputs": [{"links": [11, 13]}]},
+            {"id": 2, "inputs": [{"name": "weights_json", "link": 11}, {"name": "preserve_join", "link": 12}],
+             "widgets_values": [None, None]},
+            {"id": 3, "outputs": [{"links": [12]}]}, {"id": 4, "inputs": [{"name": "value", "link": 13}]},
+        ], "links": [[11, 1, 0, 2, 0, "STRING"], [12, 3, 0, 2, 1, "BOOLEAN"], [13, 1, 0, 4, 0, "STRING"]],
+            "reroutes": [{"id": 1, "linkIds": [11]}, {"id": 2, "linkIds": [11, 13]}]}
+        self.nodes._freeze_random_routes(api, workflow, [{"_event_ref": (("random_choice", "2", 1),)}])
+        self.assertEqual(json.loads(api["2"]["inputs"]["weights_json"]), [0, 10000] + [0] * 8)
+        self.assertIs(api["2"]["inputs"]["preserve_join"], True)
+        self.assertEqual(workflow["nodes"][1]["widgets_values"], [api["2"]["inputs"]["weights_json"], True])
+        self.assertEqual([slot["link"] for slot in workflow["nodes"][1]["inputs"]], [None, None])
+        self.assertEqual(workflow["nodes"][0]["outputs"][0]["links"], [13])
+        self.assertEqual(workflow["links"], [[13, 1, 0, 4, 0, "STRING"]])
+        self.assertEqual(workflow["reroutes"], [{"id": 2, "linkIds": [13]}])
+
     def test_output_schema_registry_and_cache_have_ten_scene_inputs_no_controls(self):
         cls = self.nodes.ScenePromptRandomRouteOutput
         schema = cls.INPUT_TYPES()
@@ -212,6 +259,56 @@ class RandomRouteIOTests(unittest.TestCase):
             self.assertNotIn(f"model-{other}", row["source_node_ids"])
             self.assertNotIn(f"llm-{other}", row["source_node_names"])
             self.assertEqual(self.nodes.ScenePromptToText().to_text(scene_prompt=joined, seed_base=seed, seed_base_literal=True)[0], f"{name}, llm_{name}")
+
+    def test_expanded_nested_presets_keep_draws_with_current_source_ids(self):
+        for preserved_seed in ('', 'previous/2'):
+            with self.subTest(preserved_seed=preserved_seed):
+                inner = self.api()
+                inner['1'] = {'class_type': 'ScenePresetInput', 'inputs': {}}
+                inner['7'] = {'class_type': 'ScenePresetOutput', 'inputs': {'scene_prompt': ['6', 0]}}
+                if preserved_seed:
+                    inner['2']['inputs']['seed_source_id'] = preserved_seed
+                saved = self.presets.save_preset({'preset_id': 'seed-inner', 'name': 'seed-inner', 'output_node_id': '7',
+                    'api_graph': {'output': inner}, 'workflow': outer_workflow(inner)})
+                outer = {'1': {'class_type': 'ScenePresetInput', 'inputs': {}},
+                         '2': {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': 'seed-inner', 'scene_prompt': ['1', 0]}},
+                         '3': {'class_type': 'ScenePresetOutput', 'inputs': {'scene_prompt': ['2', 0]}}}
+                outer_visual = outer_workflow(outer)
+                next(node for node in outer_visual['nodes'] if node['id'] == 2)['widgets_values'] = ['seed-inner']
+                nested = self.presets.save_preset({'preset_id': 'seed-outer', 'name': 'seed-outer', 'output_node_id': '3',
+                    'api_graph': {'output': outer}, 'workflow': outer_visual})
+                snapshots = {'seed-inner': saved, 'seed-outer': nested}
+                sequences = []
+                for reference_id in ('10', '11'):
+                    api = {reference_id: {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': 'seed-outer'}},
+                           '7': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': [reference_id, 0]}}}
+                    original = self.presets._scene_node_value(api, reference_id, snapshots, set())
+                    replay, workflow, _ = self.metadata.expand_preset_references(copy.deepcopy(api), outer_workflow(api), snapshots)
+                    gate_id, gate = next((key, node) for key, node in replay.items() if node['class_type'] == 'ScenePromptRandomRoute')
+                    self.assertNotIn('source_node_id', gate['inputs'])
+                    self.assertEqual(gate['inputs']['seed_source_id'], f'{reference_id}/2/{preserved_seed or "2"}')
+                    visual = next(node for node in workflow['nodes'] if str(node['id']) == gate_id)
+                    self.assertEqual(visual['properties']['scene_random_seed'], {'node_id': gate_id, 'seed_source_id': gate['inputs']['seed_source_id']})
+                    canvas = outer_workflow(api)
+                    next(node for node in canvas['nodes'] if str(node['id']) == reference_id)['widgets_values'] = ['seed-outer']
+                    _, canvas, _ = self.metadata.expand_preset_references({}, canvas, snapshots, True)
+                    canvas_gate = next(node for node in canvas['nodes'] if node['type'] == 'ScenePromptRandomRoute')
+                    self.assertEqual(canvas_gate['properties']['scene_random_seed'], {
+                        'node_id': str(canvas_gate['id']), 'seed_source_id': gate['inputs']['seed_source_id']})
+                    restored = self.presets._scene_node_value(replay, replay['7']['inputs']['scene_prompt'][0], {}, set())
+                    sequence = []
+                    for seed in range(1, 33):
+                        before = self.plan.item_for_normalized_plan(original, seed % 10, seed)
+                        after = self.plan.item_for_normalized_plan(restored, seed % 10, seed)
+                        self.assertEqual(after['row']['positive_parts'], before['row']['positive_parts'])
+                        self.assertIn(gate_id, after['row']['source_node_ids'])
+                        self.assertNotIn(f'{reference_id}/2/2', after['row']['source_node_ids'])
+                        sequence.append(after['row']['positive_parts'])
+                    sequences.append(sequence)
+                self.assertNotEqual(*sequences, 'separate Reference instances keep independent draws')
+                runtime = self.presets.expand_preset_reference('seed-inner', source_node_id='30')['expand']
+                runtime_gate = next(node for node in runtime.values() if node['class_type'] == 'ScenePromptRandomRoute')
+                self.assertEqual(runtime_gate['inputs']['seed_source_id'], f'30/{preserved_seed or "2"}')
 
     def test_preset_save_reference_nested_namespace_and_frozen_replay_keep_output(self):
         preset = self.api()

@@ -229,6 +229,21 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         }
         self.assertEqual(len(prefixes), 1)
 
+    def test_save_windows_reserved_directory_stems_in_all_path_sources(self):
+        self.assertEqual(self.nodes._safe_path_part("CON"), "CON_", "existing plain reserved-name folders stay unchanged")
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saver = self.nodes.SceneSaveImage()
+        for name in ("AUX.preview", "CON.folder", "LPT9 .txt", "COM¹.view"):
+            for source in ("base", "path", "run_dir"):
+                with self.subTest(name=name, source=source):
+                    info = {"use_run_dir": source == "run_dir", "file_index": 1}
+                    if source != "base":
+                        info[source] = name
+                    result = saver.save_images([image], name if source == "base" else "", scene_info=info)
+                    path = Path(result["result"][1])
+                    self.assertTrue(path.is_file())
+                    self.assertEqual(path.parent.name, "_" + name)
+
     def test_save_long_prefixes_keep_final_and_reservation_components_safe(self):
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
         saver = self.nodes.SceneSaveImage()
@@ -770,7 +785,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(metadata["repeat_count"], 100_000_000)
         self.assertEqual(metadata["total_count"], 100_000_000)
 
-    def test_independent_expand_unique_ids_keep_separate_immutable_plans(self):
+    def test_expand_keeps_separate_cached_plans_and_honors_actual_native_inputs(self):
         runs = sys.modules[f"{self.nodes.__package__}.runs"]
         runs.RUN_CONTEXTS.clear()
         handle = runs.create_run_context("alice")
@@ -778,8 +793,14 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         second = self.nodes.transform(first, lambda row, _item: {**row, "positive_parts": ["second"]})
         self.assertEqual(self.nodes._scene_run_plan(handle, first, "expand-1")["rows"][0]["row"]["positive_parts"], ["test"])
         self.assertEqual(self.nodes._scene_run_plan(handle, second, "expand-2")["rows"][0]["row"]["positive_parts"], ["second"])
-        self.assertEqual(self.nodes._scene_run_plan(handle, second, "expand-1")["rows"][0]["row"]["positive_parts"], ["test"])
-        self.assertEqual(self.nodes._scene_run_plan(handle, first, "expand-2")["rows"][0]["row"]["positive_parts"], ["second"])
+        cached_first = runs.get_run_plan_reference(handle, "expand-1")
+        cached_second = runs.get_run_plan_reference(handle, "expand-2")
+        self.assertEqual(self.nodes._scene_run_plan(handle, second, "expand-1")["rows"][0]["row"]["positive_parts"], ["second"])
+        self.assertEqual(self.nodes._scene_run_plan(handle, first, "expand-2")["rows"][0]["row"]["positive_parts"], ["test"])
+        self.assertIs(self.nodes._scene_run_plan(handle, None, "expand-1"), cached_first)
+        self.assertIs(self.nodes._scene_run_plan(handle, None, "expand-2"), cached_second)
+        self.assertIs(self.nodes._scene_run_plan(handle, first, "expand-1"), cached_first)
+        self.assertIs(self.nodes._scene_run_plan(handle, second, "expand-2"), cached_second)
         runs.release_run_context(handle, "alice")
         with self.assertRaises(runs.SceneRunError):
             self.nodes._scene_run_plan(handle, first)
@@ -798,7 +819,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                     current_index=0,
                     seed_base=7,
                     timestamp_dir=False,
-                    scene_prompt=plan,
+                    scene_prompt=None,
                     run_handle=handle,
                     unique_id="expand",
                 )
@@ -1522,6 +1543,29 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         for link in saved_workflow["links"]:
             self.assertIn(str(link[1]), saved_prompt)
             self.assertIn(str(link[3]), saved_prompt)
+
+    def test_generation_path_metadata_contracts_deep_actual_model_chain(self):
+        prompt = {"base": {"class_type": "ScenePrompter", "inputs": {}},
+                  "loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}}
+        # Visit the deep tail first regardless of the process hash seed, so an
+        # earlier shallow contraction cannot hide recursive traversal.
+        model_ids = list(set(f"model{i}" for i in range(1500)) - set())[::-1] + ["final_model"]
+        selected, plan = ["base"], None
+        for node_id in model_ids:
+            prompt[node_id] = {"class_type": "SceneApplyModel", "inputs": {
+                "scene_prompt": [selected[-1], 0], "model": ["loader", 0], "clip": ["loader", 1], "vae": ["loader", 2]}}
+            plan = self.nodes.SceneApplyModel().apply_model(
+                ["loader", 0], ["loader", 1], ["loader", 2], plan, unique_id=node_id)[0]
+            selected.append(node_id)
+        self.assertEqual(plan["stats"]["total_batches"], 1)
+        self.assertEqual(plan["stats"]["total_images"], 1)
+        prompt["expand"] = {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["final_model", 0]}}
+        prompt["save"] = {"class_type": "SceneSaveImage", "inputs": {"scene_info": ["expand", 2]}}
+        saved, _ = self.nodes._metadata_for_save_mode(
+            prompt, None, "save", self.nodes.SAVE_METADATA_EXECUTION_PATH, {"source_node_ids": [*selected, "expand"]})
+        self.assertEqual(set(saved), {"base", "loader", "final_model", "expand", "save"})
+        self.assertEqual(saved["final_model"]["inputs"]["scene_prompt"], ["base", 0])
+        self.assertEqual(prompt["final_model"]["inputs"]["scene_prompt"], [model_ids[-2], 0])
 
     def test_generation_path_metadata_contracts_models_behind_merge_and_queue(self):
         prompt = {

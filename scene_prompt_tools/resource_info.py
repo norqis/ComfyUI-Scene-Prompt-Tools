@@ -1,6 +1,7 @@
 """Read the resources connected to an Expand without evaluating its scene plan."""
 
 import hashlib
+import os
 import threading
 from collections import OrderedDict
 
@@ -29,7 +30,7 @@ _VALUE_TYPES = {"PrimitiveFloat": float, "PrimitiveInt": int, "PrimitiveString":
 
 
 def _resource_key(name):
-    return str(name or "").replace("\\", "/").casefold()
+    return os.path.normcase(str(name or "").replace("\\", "/"))
 
 
 def _literal(nodes, raw, default):

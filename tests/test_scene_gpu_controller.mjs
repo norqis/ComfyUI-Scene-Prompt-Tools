@@ -53,6 +53,7 @@ function fixture({ on = false, bound = false } = {}) {
         app, api, sceneGPUController: resources,
         sceneBatchRun: null, sceneBatchRunsById: new Map(), sceneBatchDetachedRuns: new Map(),
         scenePromptSubmissionsById: new Map(),
+        sceneBatchTerminalEvents: new Map(),
         syncSceneMatrixPromptInputs() {}, scenePromptSamplerSeedTargets: () => [], applySceneSourceNodeNames() {},
         randomizeStandardSceneSeeds() {}, sceneRunTargetNodes: () => [], applyRandomizedSamplerSeeds() {},
         scenePromptIdFromValue: (value) => value?.prompt_id || "", releaseSceneRunHandle: () => Promise.resolve(),
@@ -138,7 +139,8 @@ for (const initial of [false, true]) {
     // Its settings are captured at the click, before a FIFO wait in another tab.
     settings["ScenePrompt.ReleaseLLMBeforeImage"] = !initial;
     context.sceneBatchRun = run;
-    await api.queuePrompt(0, continuousPrompt(run));
+    run.firstPromptSnapshot = continuousPrompt(run);
+    await api.queuePrompt(0, run.firstPromptSnapshot);
     assert.equal(calls.filter(({ path }) => path.endsWith("gpu/prepare")).length, initial ? 1 : 0);
     if (initial) {
         assert.equal(run.cachedPrompt.extra_data.scene_gpu_policy, "policy-1", "first cached snapshot carries the policy");
@@ -193,4 +195,51 @@ for (const initial of [false, true]) {
     await assert.rejects(pending, /ページ/);
     assert.equal(calls.at(-1).keepalive, true, "page teardown also retires a late policy response");
 }
-console.log("GPU settings, native POST transport, concurrency, FIFO policy reuse and teardown tests passed.");
+for (const cleanup of ["llm/end", "gpu/release"]) {
+    const { resources, api, calls } = fixture({ on: true });
+    const originalFetch = api.fetchApi;
+    let fail = false, nextSession = 0;
+    api.fetchApi = async function (path, options) {
+        if (path.endsWith("llm/begin")) return { ok: true, json: async () => ({ session_id: `session-${++nextSession}` }) };
+        if (path.endsWith(cleanup) && fail) {
+            calls.push({ path, failed: true });
+            throw new Error("temporary cleanup transport failure");
+        }
+        return originalFetch.call(this, path, options);
+    };
+    const id = cleanup === "llm/end" ? await resources.beginLLM({ releaseComfyBeforeLLM: true })
+        : await resources.prepareImage(resources.snapshot());
+    const release = cleanup === "llm/end" ? resources.endLLM : resources.releaseImage;
+    fail = true;
+    await assert.rejects(release(id), /temporary cleanup/);
+    const before = calls.length;
+    await assert.rejects(resources.prepareImage({ releaseLLMBeforeImage: false }), /temporary cleanup/);
+    assert.equal(calls.length, before + 1, "persistent cleanup failure is attempted once and prevents new work");
+    fail = false;
+    const active = await resources.beginLLM({ releaseComfyBeforeLLM: true });
+    assert.equal(calls.at(-1).path, `/scene_prompt/${cleanup}`, "next user action retires failed ownership before acquiring new resources");
+    const recovered = calls.length;
+    assert.equal(await resources.prepareImage({ releaseLLMBeforeImage: false }), "");
+    assert.equal(calls.length, recovered, "an active LLM is not part of failed cleanup; OFF adds no request after recovery");
+    await resources.endLLM(active);
+    const complete = calls.length;
+    resources.releaseOnPageHide({ persisted: false }); await settle();
+    assert.equal(calls.length, complete, "successfully cleaned ownership is not retained");
+}
+{
+    const { resources, api, calls } = fixture();
+    const originalFetch = api.fetchApi;
+    let fail = true;
+    api.fetchApi = async function (path, options) {
+        if (path.endsWith("llm/begin")) return { ok: true, json: async () => ({ session_id: "failed-at-hide" }) };
+        if (path.endsWith("llm/end") && fail) throw new Error("end failed");
+        return originalFetch.call(this, path, options);
+    };
+    const session = await resources.beginLLM({ releaseComfyBeforeLLM: true });
+    await assert.rejects(resources.endLLM(session), /end failed/);
+    fail = false;
+    resources.releaseOnPageHide({ persisted: false }); await settle();
+    assert.equal(calls.at(-1).path, "/scene_prompt/llm/end");
+    assert.equal(calls.at(-1).keepalive, true, "pagehide retains a way to retire failed sessions");
+}
+console.log("GPU settings, native POST transport, concurrency, FIFO policy reuse, failed cleanup recovery and teardown tests passed.");

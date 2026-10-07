@@ -13,6 +13,7 @@ import {
     createMatrixState,
     createSelectionState,
     formatSceneExpandCounts,
+    normalizeMissingPartIndexes,
     parseMatrixLine,
     parseMatrixState,
     parseSelectionState,
@@ -324,7 +325,6 @@ let scenePresetListCacheCurrent = false;
 let scenePresetNotificationTimer = null;
 const sceneRunHandlesByPromptId = new Map();
 const sceneRunTerminalPromptIds = new Map();
-const sceneRunHandleReconcileTimers = new Map();
 const sceneRunReleaseStates = new Map();
 const SCENE_RUN_TERMINAL_RETENTION_MS = 10 * 60 * 1000;
 const SCENE_CALLBACK_FINALIZE_POLL_MS = 250;
@@ -469,6 +469,10 @@ async function saveCurrentPrompt(name, description, items) {
     }
     if (generation === savedPromptsRequestGeneration) {
         savedPrompts = Array.isArray(data.saved_prompts) ? data.saved_prompts : null;
+    } else {
+        // Another request may have read before this write completed.
+        savedPromptsRequestGeneration++;
+        savedPrompts = savedPromptsPromise = savedPromptsLatestPromise = null;
     }
     clearSceneSelectedListLayoutCaches();
     return data.saved_prompt;
@@ -487,6 +491,9 @@ async function createPromptItem(payload) {
     }
     if (generation === promptItemsRequestGeneration) {
         promptItems = Array.isArray(data.items) ? data.items : null;
+    } else {
+        promptItemsRequestGeneration++;
+        promptItems = promptItemsPromise = promptItemsLatestPromise = null;
     }
     return data.item;
 }
@@ -504,6 +511,9 @@ async function updatePromptItem(payload) {
     }
     if (generation === promptItemsRequestGeneration) {
         promptItems = Array.isArray(data.items) ? data.items : null;
+    } else {
+        promptItemsRequestGeneration++;
+        promptItems = promptItemsPromise = promptItemsLatestPromise = null;
     }
     return data.item;
 }
@@ -778,6 +788,25 @@ function resetPopupForm(session, formName) {
     } else if (formName === "create") {
         session.forms.create = { category: "", subcategory: "", name: "", prompt: "", description: "" };
     }
+}
+
+function bindPopupFormSubmit(button, session, formName, submit, disabled = false) {
+    const pending = session.pendingForms ||= {};
+    const refresh = () => { button.disabled = disabled || Boolean(pending[formName]); };
+    if (pending[formName]) pending[formName].refresh = refresh;
+    refresh();
+    button.addEventListener("click", async () => {
+        if (disabled || pending[formName]) return;
+        const submission = { refresh };
+        pending[formName] = submission;
+        refresh();
+        try {
+            await submit();
+        } finally {
+            delete pending[formName];
+            submission.refresh();
+        }
+    });
 }
 
 function readStateFromWidget(node, stateWidgetName) {
@@ -1128,9 +1157,10 @@ function normalizedSelectedParts(item, source = item) {
         throw new Error("選択済みのプロンプト要素が空です。");
     }
     const sourceParts = itemPromptParts(source);
+    const samePrompt = item.prompt === source.prompt;
     const used = new Set();
     const fallbackOccurrences = new Map();
-    return source.selected_parts.map((raw) => {
+    return normalizeMissingPartIndexes(source.selected_parts.map((raw) => {
         if (!raw || typeof raw !== "object" || !Number.isInteger(raw.index) || raw.index < 0
             || typeof raw.text !== "string" || !raw.text.trim()) {
             throw new Error("選択済みのプロンプト要素が不正です。");
@@ -1147,13 +1177,14 @@ function normalizedSelectedParts(item, source = item) {
                 .length - 1;
         }
         if (occurrence === null) {
-            occurrence = fallbackOccurrences.get(text) || 0;
+            const missingOccurrence = fallbackOccurrences.get(text) || 0;
+            occurrence = sourceParts.filter((part) => part.text === text).length + missingOccurrence;
+            fallbackOccurrences.set(text, missingOccurrence + 1);
         }
-        fallbackOccurrences.set(text, occurrence + 1);
 
-        let matched = null;
+        let matched = samePrompt && !raw.missing && parts[raw.index]?.text === text && !used.has(raw.index) ? parts[raw.index] : null;
         let seen = -1;
-        for (const part of parts) {
+        for (const part of samePrompt ? [] : parts) {
             if (part.text !== text) {
                 continue;
             }
@@ -1173,7 +1204,7 @@ function normalizedSelectedParts(item, source = item) {
         const stored = weightForStorage(raw.weight ?? 1);
         if (stored !== null) selectedPart.weight = stored;
         return selectedPart;
-    });
+    }), parts.length);
 }
 
 function itemHasPartSelection(item) {
@@ -1231,7 +1262,7 @@ function itemForEditedState(updatedItem, previousItem) {
 
 function replacePromptItemInState(state, originalCategory, originalKey, updatedItem, updatedCategory) {
     let changed = false;
-    const nextCategories = {};
+    const nextCategories = Object.create(null);
     const matchKeys = new Set([originalKey]);
     for (const [category, items] of Object.entries(state.categories || {})) {
         const nextItems = [];
@@ -1240,6 +1271,13 @@ function replacePromptItemInState(state, originalCategory, originalKey, updatedI
                 const replacement = itemForEditedState(updatedItem, item);
                 if (replacement) {
                     const replacementCategory = itemCategoryKey(replacement) || updatedCategory;
+                    if (replacementCategory === category && itemKey(item) === itemKey(replacement)
+                        && item.label === replacement.label && item.prompt === replacement.prompt
+                        && (item.description || "") === (replacement.description || "")
+                        && itemSelectionSignature(item) === itemSelectionSignature(replacement)) {
+                        nextItems.push(item);
+                        continue;
+                    }
                     if (replacementCategory === category) {
                         nextItems.push(replacement);
                     } else {
@@ -1406,7 +1444,7 @@ function preflightPromptItemReplacement(node, originalItem, updatedItem, options
     }
 }
 
-function replacePromptItemEverywhere(originalItem, updatedItem) {
+function replacePromptItemEverywhere(originalItem, updatedItem, nodes = graphNodes()) {
     if (!updatedItem) {
         return false;
     }
@@ -1418,7 +1456,7 @@ function replacePromptItemEverywhere(originalItem, updatedItem) {
     }
 
     let anyChanged = false;
-    for (const graphNode of graphNodes()) {
+    for (const graphNode of nodes) {
         if (isScenePromptNode(graphNode) || isSceneApplyLoraNode(graphNode)) {
             let nodeChanged = false;
             const previousStateWidgetName = activeStateWidgetName(graphNode);
@@ -1455,9 +1493,6 @@ function replacePromptItemEverywhere(originalItem, updatedItem) {
         }
     }
 
-    if (anyChanged) {
-        app.graph?.change?.();
-    }
     return anyChanged;
 }
 
@@ -1671,7 +1706,7 @@ function selectedItemMap(state, firstWins = false) {
 }
 
 function cloneSelectionState(state) {
-    const cloned = { version: state?.version || 1, categories: {} };
+    const cloned = { version: state?.version || 1, categories: Object.create(null) };
     for (const [category, items] of Object.entries(state?.categories || {})) {
         const clonedItems = (items || []).filter(Boolean).map((item) => itemForState(item, item));
         if (clonedItems.length) {
@@ -1683,7 +1718,7 @@ function cloneSelectionState(state) {
 
 function mergeSelectedItemsForDisplay(displayState, sourceState) {
     if (!displayState.categories || typeof displayState.categories !== "object") {
-        displayState.categories = {};
+        displayState.categories = Object.create(null);
     }
 
     for (const [sourceCategory, items] of Object.entries(sourceState?.categories || {})) {
@@ -1852,7 +1887,7 @@ function setSavedPromptChecked(node, savedPrompt, checked, options = {}) {
 function pruneStateToData(node, state, items, options = {}) {
     const { categories: validCategories, byKey: currentItems, fallback } = promptCatalogIndex(items);
     let changed = false;
-    const nextCategories = {};
+    const nextCategories = Object.create(null);
 
     for (const [category, selected] of Object.entries(state.categories || {})) {
         if (!validCategories.has(category)) throw new Error(`選択済みカテゴリ「${category}」が候補データにありません。`);
@@ -1869,6 +1904,8 @@ function pruneStateToData(node, state, items, options = {}) {
             const keptItem = itemForState(currentItem, item);
             kept.push(keptItem);
             if (itemKey(item) !== itemKey(keptItem)
+                || item.label !== keptItem.label || item.prompt !== keptItem.prompt
+                || (item.description || "") !== (keptItem.description || "")
                 || itemSelectionSignature(item) !== itemSelectionSignature(keptItem)) changed = true;
         }
 
@@ -2126,7 +2163,7 @@ function setAllItemParts(node, item, checked, options = {}) {
 function clearSelection(node, stateWidgetName = null) {
     const targetStateWidgetName = stateWidgetName || activeStateWidgetName(node);
     setActiveStateWidget(node, targetStateWidgetName);
-    writeState(node, { version: 1, categories: {} }, { fitHeight: true, fitDelay: 0, stateWidgetName: targetStateWidgetName });
+    writeState(node, { version: 1, categories: Object.create(null) }, { fitHeight: true, fitDelay: 0, stateWidgetName: targetStateWidgetName });
 }
 
 function summarizeSelection(state) {
@@ -3166,20 +3203,22 @@ async function openSavePromptPopup(node, options = {}) {
     const toolbar = document.createElement("div");
     toolbar.className = "pc-toolbar";
     const save = createButton("保存");
-    save.disabled = !items.length;
-    save.addEventListener("click", async () => {
+    bindPopupFormSubmit(save, session, "save", async () => {
         error.textContent = "";
+        const submitted = { name: nameInput.value, description: descInput.value };
         try {
-            await saveCurrentPrompt(nameInput.value, descInput.value, items);
-            await loadSavedPrompts(true);
+            await saveCurrentPrompt(submitted.name, submitted.description, items);
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
+            if (!Object.entries(submitted).every(([key, value]) => session.forms.save[key] === value)) return;
             resetPopupForm(session, "save");
             refreshNode(node, { fitHeight: true });
-            openSelectedPopup(node, { stateWidgetName, popupSession: session });
+            await openSelectedPopup(node, { stateWidgetName, popupSession: session });
         } catch (saveError) {
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             error.textContent = saveError.message || "プロンプトまとめの保存に失敗しました";
             fitPopupToContent(popup);
         }
-    });
+    }, !items.length);
     toolbar.appendChild(save);
 
     const back = createButton("←戻る");
@@ -3338,22 +3377,24 @@ async function openCreatePromptPopup(node, options = {}) {
     const toolbar = document.createElement("div");
     toolbar.className = "pc-toolbar";
     const create = createButton("作成");
-    create.addEventListener("click", async () => {
+    bindPopupFormSubmit(create, session, "create", async () => {
         error.textContent = "";
+        const submitted = {
+            category: categoryInput.value,
+            subcategory: subcategoryInput.value,
+            name: nameInput.value,
+            prompt: promptInput.value,
+            description: descInput.value,
+        };
         try {
-            const item = await createPromptItem({
-                category: categoryInput.value,
-                subcategory: subcategoryInput.value,
-                name: nameInput.value,
-                prompt: promptInput.value,
-                description: descInput.value,
-            });
-            promptItems = null;
-            await loadPromptItems();
+            const item = await createPromptItem(submitted);
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
+            if (!Object.entries(submitted).every(([key, value]) => session.forms.create[key] === value)) return;
             resetPopupForm(session, "create");
             refreshNode(node, { fitHeight: true });
-            openPromptCandidatePopup(node, item.category_path || [categoryInput.value].filter(Boolean), { stateWidgetName, popupSession: session });
+            await openPromptCandidatePopup(node, item.category_path || [categoryInput.value].filter(Boolean), { stateWidgetName, popupSession: session });
         } catch (createError) {
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             error.textContent = createError.message || "プロンプト作成に失敗しました";
             fitPopupToContent(popup);
         }
@@ -3418,6 +3459,8 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
     save.addEventListener("click", async () => {
         error.textContent = "";
         save.disabled = true;
+        const ownerGraph = node.graph;
+        const ownerNodes = [...(ownerGraph?._nodes || [])];
         try {
             const prospective = {
                 ...item,
@@ -3438,15 +3481,21 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
                 prompt: promptInput.value,
                 description: descInput.value,
             });
-            const selectedChanged = replaceSelectedPromptItem(node, item, updated, { stateWidgetName });
-            const graphChanged = replacePromptItemEverywhere(item, updated);
-            clearSceneComputedCaches(node);
-            refreshNode(node, { fitHeight: true });
-            if (selectedChanged || graphChanged) {
-                refreshDownstreamSceneNodes(node);
-                app.graph?.change?.();
-                node.graph?.change?.();
+            const currentNodes = new Set(ownerGraph?._nodes || []);
+            const retainedNodes = ownerNodes.filter((target) => target.graph === ownerGraph && currentNodes.has(target));
+            if (retainedNodes.includes(node)) {
+                withSceneUserChange(node, () => {
+                    const selectedChanged = replaceSelectedPromptItem(node, item, updated, { stateWidgetName });
+                    const graphChanged = replacePromptItemEverywhere(item, updated, retainedNodes);
+                    if (selectedChanged || graphChanged) {
+                        clearSceneComputedCaches(node);
+                        refreshNode(node, { fitHeight: true });
+                        refreshDownstreamSceneNodes(node);
+                        ownerGraph.change?.();
+                    }
+                });
             }
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             if (backHandler) {
                 backHandler(updated);
             } else {
@@ -5135,7 +5184,6 @@ function sceneExpandConfigureValues(config) {
         const hasMode = converted[6] === "Illustrious" || converted[6] === "Anima"
             || (converted[6] == null && linkedMode);
         if (hasMode) {
-            if (converted.length) converted[0] = 0;
             return { ...config, widgets_values: converted };
         }
         // v0.5.10 has conversion widgets immediately after counter position.
@@ -5154,9 +5202,6 @@ function sceneExpandConfigureValues(config) {
         converted.splice(8, 1);
     }
     if (converted.length >= 5) converted.splice(6, 0, modelMode);
-    if (converted.length) {
-        converted[0] = 0;
-    }
     return { ...config, widgets_values: converted };
 }
 
@@ -5280,7 +5325,11 @@ function injectSceneLoraWord(node, value) {
     const identity = sceneLoraWordIdentity(word);
     if (sceneLoraSplitPrompt(current).some((part) => sceneLoraWordIdentity(part) === identity)) return false;
     const separator = !current.trim() || /[,\n]\s*$/u.test(current) ? "" : ", ";
-    return setWidgetValue(node, "positive", `${current.trim() ? current : ""}${separator}${word}`);
+    return withSceneUserChange(node, () => {
+        const changed = setWidgetValue(node, "positive", `${current.trim() ? current : ""}${separator}${word}`);
+        node.graph.change?.();
+        return changed;
+    });
 }
 
 const SCENE_LORA_CACHE_KEY = "scene_prompt_lora_names_v1";
@@ -5611,7 +5660,12 @@ async function openSceneLoraPicker(node) {
             }
             select.onclick = async () => {
                 closeSceneLoraDetails(node);
-                setWidgetValue(node, "lora_name", item.path);
+                if (findWidget(node, "lora_name")?.value !== item.path) {
+                    withSceneUserChange(node, () => {
+                        setWidgetValue(node, "lora_name", item.path);
+                        node.graph.change?.();
+                    });
+                }
                 closeSceneLoraPicker(node);
                 try { await resolveSceneLora(item); } catch (_error) {}
             };
@@ -6361,20 +6415,23 @@ function matrixLinesForNode(node) {
     };
 
     for (const rawSet of state.sets || []) {
-        const matrixLine = normalizeMatrixLine(rawSet);
-        if (matrixLine.enabled === false) {
+        if (rawSet.enabled === false) {
             continue;
         }
-        pushMatrixLine(matrixLine);
+        pushMatrixLine({
+            ...rawSet,
+            positive_parts: [...rawSet.positive_parts],
+            negative_parts: [...rawSet.negative_parts],
+            display_labels: [...rawSet.display_labels],
+            display_label_groups: rawSet.display_label_groups.map((group) => [...group]),
+        });
     }
 
     return sets;
 }
 
 function matrixConfiguredLineCount(node) {
-    return (readMatrixState(node).sets || [])
-        .map(normalizeMatrixLine)
-        .length;
+    return readMatrixState(node).sets.length;
 }
 
 function matrixDisplayCacheKey(node, width = null) {
@@ -7193,7 +7250,8 @@ function scenePromptSourceLocalCacheKey(node) {
         return finish({ type: "reverse", reverse_scope: scenePromptReverseScope(node) });
     }
     if (isScenePromptCounterNode(node)) {
-        return finish({ type: "counter", values: values(["count", "enable_downstream_count"]) });
+        return finish({ type: "counter", values: values(["count", "enable_downstream_count"]),
+            prompt_trace_kind: node.properties?.scene_prompt_trace_kind });
     }
     if (isScenePromptRandomRouteNode(node)) {
         return finish({ type: "random_route", values: values(["weights_json", "preserve_join"]) });
@@ -7257,16 +7315,6 @@ function apiInput(node, name) {
     return node?.inputs?.[name];
 }
 
-function apiMatrixEnabledCount(node) {
-    return parseMatrixStateValue(apiInput(node, "matrix_json")).sets
-        .filter((set) => set.enabled)
-        .length;
-}
-
-function apiMatrixConfigured(node) {
-    return parseMatrixStateValue(apiInput(node, "matrix_json")).sets.length > 0;
-}
-
 function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset = null, switchValues) {
     const preset = preferredPreset || scenePresetDisplayGraphs.get(String(presetId || ""));
     const nodes = scenePresetGraphNodes(preset);
@@ -7286,7 +7334,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
     const memo = new Map();
     const visiting = new Set();
     const switches = createScenePresetSwitchContext(nodes, switchValues);
-    let hasCountHold = false;
+    let requiresSchedule = false;
     const statsForNode = (nodeId, outputSlot = 0) => {
         const key = `${nodeId}:${outputSlot}`;
         if (memo.has(key)) {
@@ -7310,9 +7358,9 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
                 result = source("scene_prompt") || sceneStatsSeed();
             } else if (node.class_type === "SceneMatrix") {
                 const base = source("scene_prompt") || sceneStatsSeed();
-                const count = apiMatrixEnabledCount(node);
-                const configured = apiMatrixConfigured(node);
-                result = count ? sceneStatsMatrix(base, count) : (configured ? emptyScenePromptStats() : base);
+                const sets = parseMatrixStateValue(apiInput(node, "matrix_json")).sets;
+                const count = sets.filter((set) => set.enabled).length;
+                result = sets.length ? sceneStatsMatrix(base, count) : base;
             } else if (node.class_type === "ScenePath") {
                 result = source("scene_prompt") || sceneStatsSeed();
             } else if (node.class_type === "SceneEmptyLatent") {
@@ -7322,10 +7370,12 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             } else if (node.class_type === "ScenePromptReverse") {
                 result = source("scene_prompt") || emptyScenePromptStats();
             } else if (node.class_type === "ScenePromptCounter") {
-                if (!switches.scalar(node, "enable_downstream_count", "boolean", true)) hasCountHold = true;
+                if (!switches.scalar(node, "enable_downstream_count", "boolean", true)) requiresSchedule = true;
                 const base = source("scene_prompt") || sceneStatsSeed();
                 const count = clampSceneCount(switches.scalar(node, "count", "number", 1), 1);
                 result = sceneStatsCount(base, count);
+            } else if (node.class_type === "ScenePromptRandomRoute") {
+                requiresSchedule = true;
             } else if (node.class_type === "ScenePrompterMerge") {
                 const first = source("scene_prompt1") || sceneStatsSeed();
                 const second = source("scene_prompt2") || sceneStatsSeed();
@@ -7350,15 +7400,16 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
                 result = source("scene_prompt") || sceneStatsSeed();
             }
         } catch (error) { result = { ...emptyScenePromptStats(), error: error.message }; }
-        if (result.hasCountHold) hasCountHold = true;
+        if (result.hasCountHold) requiresSchedule = true;
         result = sceneStatsResult(result);
         visiting.delete(key);
         memo.set(key, result);
         return result;
     };
     const result = statsForNode(outputSource, Number(apiInput(outputEntry[1], "scene_prompt")[1]) || 0);
-    if (!hasCountHold) return result;
-    const base = upstream ? sceneSchedulePlan([{ kind: "tail", ...upstream }]) : null;
+    if (!requiresSchedule) return result;
+    const base = upstream?.error ? sceneScheduleError(upstream.error)
+        : upstream ? sceneSchedulePlan([{ kind: "tail", ...upstream }]) : null;
     return sceneScheduleForPreset(presetId, base, stack, preferredPreset, String(presetId), switchValues).stats;
 }
 
@@ -7511,13 +7562,8 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
     }
     if (isPromptMatrixNode(node)) {
         const matrixCount = matrixLinesForNode(node).length;
-        if (!matrixCount) {
-            return finish(matrixConfiguredLineCount(node) > 0
-                ? emptyScenePromptStats()
-                : (upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed()));
-        }
         const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
-        return finish(sceneStatsMatrix(base, matrixCount));
+        return finish(matrixCount || matrixConfiguredLineCount(node) ? sceneStatsMatrix(base, matrixCount) : base);
     }
     if (isScenePathNode(node)) {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
@@ -7665,7 +7711,7 @@ function sceneCountUnitPolicy(unit) {
     const totals = (source) => [source.total, source.totalImages, source.unsetBatches];
     const total = totals(unit);
     let result;
-    if (unit.kind === "run" || unit.kind === "tail") result = [zero, zero, total];
+    if (["run", "tail", "row_product"].includes(unit.kind)) result = [zero, zero, total];
     else if (unit.kind === "count_hold") result = [total, zero, zero];
     else if (unit.kind === "sequence") result = sceneCountPlanPolicy(unit.plan);
     else if (unit.kind === "alternate") result = unit.plans.reduce((sum, plan) =>
@@ -7688,7 +7734,7 @@ function sceneCountUnitPolicy(unit) {
         else if (unit.kind === "map") result = unit.latentSize == null ? child
             : child.map((part) => [part[0], part[0] === null ? null : part[0] * unit.latentSize, 0]);
         else {
-            const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
+            const factor = ["matrix", "matrix_rows"].includes(unit.kind) ? unit.matrixRows.length : unit.factor;
             result = child.map((part) => factor === 0 ? zero : part.map((value) => value === null ? null : value * factor));
         }
     }
@@ -7696,11 +7742,11 @@ function sceneCountUnitPolicy(unit) {
     return result;
 }
 
-function sceneCountPrefixPlan(plan, end) {
+function sceneCountPrefixPlan(plan, end, memo = new Map()) {
     let result = [0, 0, 0];
     for (const unit of plan.units) {
         const length = Math.min(end, unit.total);
-        const prefix = sceneCountPrefixUnit(unit, length);
+        const prefix = sceneCountPrefixUnit(unit, length, memo);
         result = result.map((value, index) => value + prefix[index]);
         end -= length;
         if (!end) break;
@@ -7708,15 +7754,24 @@ function sceneCountPrefixPlan(plan, end) {
     return result;
 }
 
-function sceneCountPrefixUnit(unit, end) {
+function sceneCountPrefixUnit(unit, end, memo = new Map()) {
+    let values = memo.get(unit);
+    if (!values) memo.set(unit, values = new Map());
+    const key = `prefix:${end}`;
+    if (!values.has(key)) values.set(key, sceneCountPrefixUnitUncached(unit, end, memo));
+    const entry = values.get(key);
+    return [...entry];
+}
+
+function sceneCountPrefixUnitUncached(unit, end, memo) {
     if (!end) return [0, 0, 0];
     const add = (first, second) => first.map((value, index) => value + second[index]);
-    if (unit.kind === "run" || unit.kind === "tail") return [0, 0, end];
+    if (["run", "tail", "row_product"].includes(unit.kind)) return [0, 0, end];
     if (unit.kind === "count_hold") return [end, 0, 0];
-    if (unit.kind === "sequence") return sceneCountPrefixPlan(unit.plan, end);
+    if (unit.kind === "sequence") return sceneCountPrefixPlan(unit.plan, end, memo);
     // Preview retains the existing Random placeholder. Use the same arm for its
     // prefix and ordinal mapping; execution selects the seeded arm in Python.
-    if (unit.kind === "random_choice") return sceneCountPrefixPlan(unit.plans[0], end);
+    if (unit.kind === "random_choice") return sceneCountPrefixPlan(unit.plans[0], end, memo);
     if (unit.kind === "alternate") {
         const sizes = unit.plans.map((plan) => plan.stats.total), block = unit.blockSize;
         let low = 0, high = Math.ceil(Math.max(0, ...sizes) / block);
@@ -7731,7 +7786,7 @@ function sceneCountPrefixUnit(unit, end) {
         unit.plans.forEach((plan, index) => {
             const from = Math.min(sizes[index], start(low));
             const within = Math.min(remaining, block, sizes[index] - from);
-            result = add(result, sceneCountPrefixPlan(plan, from + within));
+            result = add(result, sceneCountPrefixPlan(plan, from + within, memo));
             remaining -= within;
         });
         return result;
@@ -7739,42 +7794,50 @@ function sceneCountPrefixUnit(unit, end) {
     if (unit.kind === "product") {
         const length = unit.right.stats.total;
         const full = Math.floor(end / length), within = end % length;
-        const left = sceneCountPrefixPlan(unit.left, full), right = sceneCountPrefixPlan(unit.right, length);
+        const left = sceneCountPrefixPlan(unit.left, full, memo), right = sceneCountPrefixPlan(unit.right, length, memo);
         const result = [0, 0, 0];
         for (let a = 0; a < 3; a += 1) for (let b = 0; b < 3; b += 1) result[Math.min(a, b)] += left[a] * right[b];
         if (within) {
-            const after = sceneCountPrefixPlan(unit.left, full + 1), prefix = sceneCountPrefixPlan(unit.right, within);
+            const after = sceneCountPrefixPlan(unit.left, full + 1, memo), prefix = sceneCountPrefixPlan(unit.right, within, memo);
             for (let a = 0; a < 3; a += 1) for (let b = 0; b < 3; b += 1) result[Math.min(a, b)] += (after[a] - left[a]) * prefix[b];
         }
         return result;
     }
     if (unit.kind === "count_scale") {
         if (unit.factor === 0) return [end, 0, 0];
-        const first = Math.min(end, unit.unit.total), result = sceneCountPrefixUnit(unit.unit, first);
+        const first = Math.min(end, unit.unit.total), result = sceneCountPrefixUnit(unit.unit, first, memo);
         result[2] += end - first;
         return result;
     }
     if (unit.kind === "fixed") {
-        const strict = sceneCountPrefixUnit(unit.unit, end)[0];
+        const strict = sceneCountPrefixUnit(unit.unit, end, memo)[0];
         return [strict, end - strict, 0];
     }
-    if (unit.kind === "map") return sceneCountPrefixUnit(unit.unit, end);
+    if (unit.kind === "map") return sceneCountPrefixUnit(unit.unit, end, memo);
     if (unit.kind === "repeat") {
         const length = unit.unit.total, cycles = Math.floor(end / length);
-        return add(sceneCountPrefixUnit(unit.unit, length).map((value) => value * cycles), sceneCountPrefixUnit(unit.unit, end % length));
+        return add(sceneCountPrefixUnit(unit.unit, length, memo).map((value) => value * cycles), sceneCountPrefixUnit(unit.unit, end % length, memo));
+    }
+    if (unit.kind === "matrix_rows") {
+        const size = unit.matrixRows.length, probe = Math.floor((end - 1) / size);
+        const entry = sceneScheduleAtUnit(unit.unit, probe, memo);
+        const start = probe - entry.repeatIndex + 1;
+        const before = sceneCountPrefixUnit(unit.unit, start, memo);
+        const after = sceneCountPrefixUnit(unit.unit, start + 1, memo);
+        return before.map((value, index) => value * size + (after[index] - value) * (end - start * size));
     }
     const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
     const full = Math.floor(end / factor), within = end % factor;
-    const prefix = unit.unit ? sceneCountPrefixUnit(unit.unit, full) : sceneCountPrefixPlan(unit.plan, full);
-    const after = within ? unit.unit ? sceneCountPrefixUnit(unit.unit, full + 1) : sceneCountPrefixPlan(unit.plan, full + 1) : prefix;
+    const prefix = unit.unit ? sceneCountPrefixUnit(unit.unit, full, memo) : sceneCountPrefixPlan(unit.plan, full, memo);
+    const after = within ? unit.unit ? sceneCountPrefixUnit(unit.unit, full + 1, memo) : sceneCountPrefixPlan(unit.plan, full + 1, memo) : prefix;
     return prefix.map((value, index) => value * factor + (after[index] - value) * within);
 }
 
-function sceneCountEligibleIndex(unit, ordinal, policy) {
+function sceneCountEligibleIndex(unit, ordinal, policy, memo = new Map()) {
     let low = 0, high = unit.total;
     while (low < high) {
         const middle = low + Math.floor((high - low) / 2);
-        if (sceneCountPrefixUnit(unit, middle + 1)[policy] <= ordinal) low = middle + 1;
+        if (sceneCountPrefixUnit(unit, middle + 1, memo)[policy] <= ordinal) low = middle + 1;
         else high = middle;
     }
     return low;
@@ -7790,6 +7853,16 @@ function sceneScheduleRun(entry) {
 }
 
 function sceneScheduleWrapper(kind, unit, factor = 1) {
+    if (kind === "repeat" && unit.kind === "run") {
+        return sceneScheduleRun({ ...unit.entry, count: sceneStatProduct(unit.total, factor) });
+    }
+    if (kind === "repeat" && unit.kind !== "fixed" && !sceneScheduleHasComposite({ units: [unit] })) {
+        kind = "row_repeat";
+        if (unit.kind === kind) {
+            factor = sceneStatProduct(unit.factor, factor);
+            unit = unit.unit;
+        }
+    }
     return {
         kind, unit, factor, total: sceneStatProduct(unit.total, factor),
         totalImages: sceneStatProduct(unit.totalImages, factor),
@@ -7851,39 +7924,67 @@ function sceneRandomJoinReady(plans) {
         && expected.every((index) => actual.includes(index));
 }
 
-function sceneScheduleAtUnit(unit, index) {
-    if (unit.kind === "run") return unit.entry;
-    if (unit.kind === "sequence") return sceneScheduleAt(unit.plan, index);
+function sceneScheduleAtUnit(unit, index, memo = new Map()) {
+    let values = memo.get(unit);
+    if (!values) memo.set(unit, values = new Map());
+    const key = `select:${index}`;
+    if (!values.has(key)) values.set(key, sceneScheduleAtUnitUncached(unit, index, memo));
+    const entry = values.get(key);
+    return entry ? { ...entry } : null;
+}
+
+function sceneScheduleAtUnitUncached(unit, index, memo) {
+    if (unit.kind === "run") return { ...unit.entry, repeatIndex: index + 1 };
+    if (unit.kind === "sequence") return sceneScheduleAt(unit.plan, index, memo);
     if (unit.kind === "random_choice") return { parts: ["ランダム候補"], count: 1, row: emptyMatrixRow() };
-    if (unit.kind === "repeat_each") return sceneScheduleAt(unit.plan, Math.floor(index / unit.factor));
-    if (unit.kind === "count_hold") return sceneScheduleAtUnit(unit.unit, index);
+    if (unit.kind === "repeat_each") return sceneScheduleAt(unit.plan, Math.floor(index / unit.factor), memo);
+    if (unit.kind === "count_hold") return sceneScheduleAtUnit(unit.unit, index, memo);
     if (unit.kind === "count_scale") {
         const child = unit.unit;
-        if (unit.factor === 0) return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, index, 0));
-        if (index < child.total) return sceneScheduleAtUnit(child, index);
-        const free = sceneCountPrefixUnit(child, child.total)[2];
-        return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, (index - child.total) % free, 2));
+        if (unit.factor === 0) return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, index, 0, memo), memo);
+        if (index < child.total) return sceneScheduleAtUnit(child, index, memo);
+        const free = sceneCountPrefixUnit(child, child.total, memo)[2];
+        return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, (index - child.total) % free, 2, memo), memo);
     }
     if (unit.kind === "repeat" || unit.kind === "fixed") {
-        return unit.unit.total ? sceneScheduleAtUnit(unit.unit, index % unit.unit.total) : null;
+        return unit.unit.total ? sceneScheduleAtUnit(unit.unit, index % unit.unit.total, memo) : null;
     }
-    if (unit.kind === "map") return unit.transform(sceneScheduleAtUnit(unit.unit, index));
-    if (unit.kind === "matrix") {
+    if (unit.kind === "map") return unit.transform(sceneScheduleAtUnit(unit.unit, index, memo));
+    if (unit.kind === "row_repeat") {
+        const entry = sceneScheduleAtUnit(unit.unit, Math.floor(index / unit.factor), memo);
+        return entry && { ...entry, count: sceneStatProduct(entry.count, unit.factor),
+            repeatIndex: (entry.repeatIndex - 1) * unit.factor + index % unit.factor + 1 };
+    }
+    if (unit.kind === "matrix" || unit.kind === "matrix_rows") {
         const rows = unit.matrixRows;
-        const entry = sceneScheduleAtUnit(unit.unit, Math.floor(index / rows.length));
-        const matrixRow = rows[index % rows.length];
+        const probe = Math.floor(index / rows.length);
+        const entry = sceneScheduleAtUnit(unit.unit, probe, memo);
+        if (!entry) return null;
+        const local = index - (probe - entry.repeatIndex + 1) * rows.length;
+        const matrixIndex = unit.kind === "matrix_rows" ? Math.floor(local / entry.count) : index % rows.length;
+        const matrixRow = rows[matrixIndex];
         const label = matrixLineLabel(matrixRow);
         const row = entry?.row || emptyMatrixRow();
         return entry && {
-            ...entry, parts: [...(entry.parts || []), label],
+            ...entry, repeatIndex: unit.kind === "matrix_rows" ? local % entry.count + 1 : entry.repeatIndex,
+            parts: [...(entry.parts || []), label],
             row: { ...row, labels: [...(row.labels || []), label], path_parts: [...(row.path_parts || [])] },
         };
+    }
+    if (unit.kind === "row_product") {
+        const rightTotal = unit.right.stats.total;
+        const leftProbe = Math.floor(index / rightTotal), left = sceneScheduleAt(unit.left, leftProbe, memo);
+        if (!left) return null;
+        const local = index - (leftProbe - left.repeatIndex + 1) * rightTotal;
+        const rightProbe = Math.floor(local / left.count), right = sceneScheduleAt(unit.right, rightProbe, memo);
+        return right && { ...mergeScenePromptEntryPair(left, right),
+            repeatIndex: local - (rightProbe - right.repeatIndex + 1) * left.count + 1 };
     }
     if (unit.kind === "product") {
         const rightCount = unit.right.stats.total;
         if (!rightCount) return null;
-        const left = sceneScheduleAt(unit.left, Math.floor(index / rightCount));
-        const right = sceneScheduleAt(unit.right, index % rightCount);
+        const left = sceneScheduleAt(unit.left, Math.floor(index / rightCount), memo);
+        const right = sceneScheduleAt(unit.right, index % rightCount, memo);
         return left && right ? mergeScenePromptEntryPair({ ...left, count: 1 }, { ...right, count: 1 }) : null;
     }
     if (unit.kind === "alternate") {
@@ -7904,17 +8005,17 @@ function sceneScheduleAtUnit(unit, index) {
         for (let socket = 0; socket < sizes.length; socket += 1) {
             const start = roundStart(low);
             const available = Math.min(k, Math.max(0, sizes[socket] - start));
-            if (offset < available) return sceneScheduleAt(unit.plans[socket], start + offset);
+            if (offset < available) return sceneScheduleAt(unit.plans[socket], start + offset, memo);
             offset -= available;
         }
     }
     return null;
 }
 
-function sceneScheduleAt(plan, index) {
+function sceneScheduleAt(plan, index, memo = new Map()) {
     if (!Number.isSafeInteger(index) || index < 0 || index >= plan.stats.total) return null;
     for (const unit of plan.units) {
-        if (index < unit.total) return sceneScheduleAtUnit(unit, index);
+        if (index < unit.total) return sceneScheduleAtUnit(unit, index, memo);
         index -= unit.total;
     }
     return null;
@@ -7929,7 +8030,8 @@ function sceneSchedulePrefix(plan, limit) {
     return entries;
 }
 
-function sceneScheduleCount(plan, factor, enableDownstreamCount = true) {
+function sceneScheduleCount(plan, factor, enableDownstreamCount = true, promptTraceKind = "") {
+    if (promptTraceKind === "whole" && factor === 1 && enableDownstreamCount === true) return plan;
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからCountを接続してください。");
@@ -7959,18 +8061,25 @@ function sceneScheduleCount(plan, factor, enableDownstreamCount = true) {
 
 function sceneScheduleMap(plan, transform, latentSize = null) {
     if (plan.stats.error) return plan;
+    const apply = (entry) => {
+        const mapped = transform(entry);
+        return latentSize === null ? mapped : { ...mapped,
+            row: { ...mapped.row, latent: { ...mapped.row?.latent, batch_size: latentSize } } };
+    };
     const mapUnit = (unit) => ["fixed", "count_hold"].includes(unit.kind)
         ? sceneScheduleWrapper(unit.kind, mapUnit(unit.unit))
-        : { kind: "map", unit, transform, latentSize, total: unit.total,
+        : unit.kind === "run" ? sceneScheduleRun(apply(unit.entry))
+        : { kind: "map", unit, transform: apply, latentSize, total: unit.total,
             totalImages: latentSize === null ? unit.totalImages : sceneStatProduct(unit.total, latentSize),
             unsetBatches: latentSize === null ? unit.unsetBatches : 0, rows: unit.rows };
     return sceneSchedulePlan(plan.units.map(mapUnit), plan.boundary, plan.randomGuards);
 }
 
-function sceneScheduleMatrix(plan, matrixRows) {
+function sceneScheduleMatrix(plan, matrixRows, configured = true) {
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMatrixを接続してください。");
+    if (!configured) return plan;
     if (!matrixRows.length) return sceneSchedulePlan([], plan.boundary, plan.randomGuards);
     const matrixEntry = (entry, matrixRow) => {
         const label = matrixLineLabel(matrixRow);
@@ -7981,10 +8090,9 @@ function sceneScheduleMatrix(plan, matrixRows) {
     const mapUnit = (unit) => {
         if (["fixed", "count_hold"].includes(unit.kind)) return mapUnit(unit.unit)
             .map((child) => sceneScheduleWrapper(unit.kind, child));
-        if (unit.kind === "run") return matrixRows.map((matrixRow) =>
-            sceneScheduleRun(matrixEntry(unit.entry, matrixRow)));
+        if (unit.kind === "run" && matrixRows.length === 1) return [sceneScheduleRun(matrixEntry(unit.entry, matrixRows[0]))];
         return [{
-            kind: "matrix", unit, matrixRows,
+            kind: sceneScheduleHasComposite({ units: [unit] }) ? "matrix" : "matrix_rows", unit, matrixRows,
             total: sceneStatProduct(unit.total, matrixRows.length),
             totalImages: sceneStatProduct(unit.totalImages, matrixRows.length),
             unsetBatches: sceneStatProduct(unit.unsetBatches, matrixRows.length),
@@ -8005,33 +8113,37 @@ function sceneScheduleHasComposite(plan) {
 }
 
 function sceneScheduleMerge(left, right) {
+    if (left.stats.error) return left;
+    if (right.stats.error) return right;
     if (left.randomGuards?.length || right.randomGuards?.length)
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMergeを接続してください。");
     const boundary = left.boundary || right.boundary;
-    if (!sceneScheduleHasComposite(left) && !sceneScheduleHasComposite(right)) {
-        const units = [];
-        for (const leftUnit of left.units) {
-            for (const rightUnit of right.units) {
-                const first = sceneScheduleAtUnit(leftUnit, 0);
-                const second = sceneScheduleAtUnit(rightUnit, 0);
-                if (!first || !second) continue;
-                units.push(sceneScheduleRun(mergeScenePromptEntryPair(
-                    { ...first, count: sceneStatProduct(leftUnit.total, rightUnit.total) },
-                    { ...second, count: 1 })));
+    if (!left.stats.rows || !right.stats.rows) return sceneSchedulePlan([], boundary);
+    if (left.units.length === 1 && right.units.length === 1) {
+        const run = (unit) => {
+            while (["fixed", "count_hold"].includes(unit.kind)) unit = unit.unit;
+            if (unit.kind === "map") {
+                const child = run(unit.unit);
+                return child && unit.transform(child);
             }
+            if (unit.total === 1) {
+                if (unit.kind === "sequence" && unit.plan.units.length === 1) return run(unit.plan.units[0]);
+                if (unit.kind === "alternate" && unit.plans.length === 1 && unit.plans[0].units.length === 1)
+                    return run(unit.plans[0].units[0]);
+            }
+            return unit.kind === "run" ? unit.entry : null;
+        };
+        const first = run(left.units[0]), second = run(right.units[0]);
+        if (first && second) {
+            let result = sceneScheduleRun(mergeScenePromptEntryPair(first, second));
+            if (left.hasCountHold || right.hasCountHold) result = sceneScheduleWrapper("count_hold", result);
+            return sceneSchedulePlan([result], boundary);
         }
-        const represented = sceneSchedulePlan(units).stats;
-        const expected = sceneStatsMerge(left.stats, right.stats);
-        if (expected.total > represented.total) units.push({ kind: "tail", entry: null,
-            total: expected.total - represented.total,
-            totalImages: expected.totalImages - represented.totalImages,
-            unsetBatches: expected.unsetBatches - represented.unsetBatches,
-            rows: expected.rows - represented.rows });
-        return sceneSchedulePlan(units, boundary);
     }
     const l = left.stats;
     const r = right.stats;
-    const unit = { kind: "product", left, right,
+    const composite = sceneScheduleHasComposite(left) || sceneScheduleHasComposite(right);
+    const unit = { kind: composite ? "product" : "row_product", left, right,
         total: sceneStatProduct(l.total, r.total),
         totalImages: sceneStatSum(sceneStatProduct(l.total, r.totalImages - r.unsetBatches),
             sceneStatProduct(l.totalImages, r.unsetBatches)),
@@ -8111,7 +8223,7 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                             [name, apiInput(entry, name) ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]])));
             } else if (entry.class_type === "ScenePromptCounter") {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-                plan = sceneScheduleCount(base, clampSceneCount(switches.scalar(entry, "count", "number", 1), 1), switches.scalar(entry, "enable_downstream_count", "boolean", true));
+                plan = sceneScheduleCount(base, clampSceneCount(switches.scalar(entry, "count", "number", 1), 1), switches.scalar(entry, "enable_downstream_count", "boolean", true), apiInput(entry, "prompt_trace_kind"));
             } else if (entry.class_type === "SceneEmptyLatent") {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 plan = base.randomGuards.length && !sceneRandomZeroArm(base)
@@ -8129,7 +8241,7 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                     plan = sceneScheduleError("ランダム分岐の確率の合計を100%にしてください。");
                 } else {
                     const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-                plan = !weights[outputSlot] ? sceneSchedulePlan([], base.boundary,
+                    plan = base.stats.error ? base : !weights[outputSlot] ? sceneSchedulePlan([], base.boundary,
                         [...base.randomGuards, { gateId: `${instancePath}/${nodeId}`, armIndex: outputSlot, weights }])
                         : weights.filter((weight) => weight > 0).length === 1 && !apiInput(entry, "preserve_join") ? base
                             : sceneSchedulePlan(base.units, base.boundary,
@@ -8142,7 +8254,7 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 const configured = parseMatrixStateValue(apiInput(entry, "matrix_json")).sets;
                 const enabled = configured.filter((row) => row.enabled);
-                plan = configured.length ? sceneScheduleMatrix(base, enabled) : base;
+                plan = sceneScheduleMatrix(base, enabled, configured.length > 0);
             } else if (entry.class_type === "ScenePrompter") {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 const title = String(apiInput(entry, "prompt_name") || "Scene Prompt");
@@ -8186,6 +8298,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         const weights = sceneRandomWeights(node);
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
             || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
+        if (base.stats.error) return finish(base);
         if (!weights[outputSlot]) return finish(sceneSchedulePlan([], base.boundary,
             [...base.randomGuards, { gateId: String(node.id), armIndex: outputSlot, weights }]));
         if (weights.filter((weight) => weight > 0).length === 1 && !findWidget(node, "preserve_join")?.value)
@@ -8205,7 +8318,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
     if (isScenePromptCounterNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
             : sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-        return finish(sceneScheduleCount(base, scenePromptCounterCount(node), scenePromptCounterDownstreamEnabled(node)));
+        return finish(sceneScheduleCount(base, scenePromptCounterCount(node), scenePromptCounterDownstreamEnabled(node), node.properties?.scene_prompt_trace_kind));
     }
     if (isScenePresetReferenceNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
@@ -8224,8 +8337,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
     if (isPromptMatrixNode(node) && upstream && (heldUpstream || sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
         const matrixRows = matrixLinesForNode(node);
-        if (!matrixRows.length) return finish(matrixConfiguredLineCount(node) ? sceneSchedulePlan([], base.boundary) : base);
-        return finish(sceneScheduleMatrix(base, matrixRows));
+        return finish(sceneScheduleMatrix(base, matrixRows, matrixRows.length > 0 || matrixConfiguredLineCount(node) > 0));
     }
     if (upstream && (heldUpstream || sceneQueueBoundaryInNode(upstream) || sceneRandomRouteInNode(upstream))) {
         const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen));
@@ -8437,7 +8549,7 @@ function mergeScenePromptRows(firstRow, secondRow) {
     );
     const row = {
         ...left,
-        labels: [...(left.labels || []), ...(right.labels || [])],
+        labels: [...new Set([...(left.labels || []), ...(right.labels || [])])],
         positive_parts: merged.positiveParts,
         negative_parts: merged.negativeParts,
         path_parts: [...(left.path_parts || []), ...(right.path_parts || [])],
@@ -8477,7 +8589,7 @@ function mergeScenePromptEntryPair(firstEntry, secondEntry) {
     }
     return {
         ...primary,
-        parts: [...(firstEntry.parts || []), ...(secondEntry.parts || [])],
+        parts: [...new Set([...(firstEntry.parts || []), ...(secondEntry.parts || [])])],
         count: sceneStatNumber(firstEntry.count) * sceneStatNumber(secondEntry.count),
         row: mergeScenePromptRows(firstEntry.row, secondEntry.row),
     };
@@ -8753,7 +8865,8 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         if (!matrixRows.length) {
             return finish(matrixConfiguredLineCount(node) > 0
                 ? []
-                : (upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo) : []));
+                : (upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+                    : [{ parts: [], count: 1, row: emptyMatrixRow() }]));
         }
         const baseEntries = upstream
             ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
@@ -8791,10 +8904,9 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const title = scenePathTitle(node);
         const pathMode = normalizePathMode(findWidget(node, "path_mode")?.value);
         const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
-        return finish(scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo).map((entry) => {
+        const entries = upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : [{ parts: [], count: 1, row: emptyMatrixRow() }];
+        return finish(entries.map((entry) => {
             const row = entry.row || emptyMatrixRow();
             return {
                 ...entry,
@@ -8811,7 +8923,8 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const firstSource = sources[0] || null;
         const secondSource = sources[1] || null;
         if (!firstSource) {
-            return finish(secondSource ? scenePromptPreviewEntries(secondSource, maxEntries, new Set(seen), memo) : []);
+            return finish(secondSource ? scenePromptPreviewEntries(secondSource, maxEntries, new Set(seen), memo)
+                : [{ parts: [], count: 1, row: emptyMatrixRow() }]);
         }
         if (!secondSource) {
             return finish(scenePromptPreviewEntries(firstSource, maxEntries, new Set(seen), memo));
@@ -8825,14 +8938,14 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const upstream = scenePromptInputSource(node);
         return finish(upstream
             ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
-            : []);
+            : (isScenePromptDeleteNode(node) ? [{ parts: [], count: 1, row: emptyMatrixRow() }] : []));
     }
 
     if (isScenePromptCounterNode(node)) {
         const count = scenePromptCounterCount(node);
         const upstream = scenePromptInputSource(node);
         if (!upstream) {
-            return finish([]);
+            return finish([{ parts: [], count, row: emptyMatrixRow() }]);
         }
         if (sceneQueueBoundaryInNode(upstream)) {
             return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
@@ -8844,11 +8957,10 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
 
     if (isSceneEmptyLatentNode(node)) {
         const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
+        const entries = upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : [{ parts: [], count: 1, row: emptyMatrixRow() }];
         const latent = sceneEmptyLatentConfig(node);
-        return finish(scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo).map((entry) => ({
+        return finish(entries.map((entry) => ({
             ...entry,
             row: { ...(entry.row || emptyMatrixRow()), latent },
         })));
@@ -9112,7 +9224,7 @@ function sceneBatchRunFromPrompt(prompt) {
         }
         const runId = String(promptNode.inputs?.run_id || "");
         const run = sceneBatchRunsById.get(runId) || sceneBatchDetachedRuns.get(runId);
-        if (run) {
+        if (run && (prompt === run.firstPromptSnapshot || prompt === run.cachedPrompt)) {
             return run;
         }
     }
@@ -9448,17 +9560,14 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
     if (!snapshot?.output || !expandPrompt?.inputs) {
         throw new Error("Scene Prompt Expand のプロンプトを取得できませんでした。");
     }
-    for (const [nodeId, promptNode] of Object.entries(snapshot.output)) {
-        if (promptNode?.class_type !== "ScenePromptRandomRoute") continue;
-        const graphNode = sceneNodeById(nodeId);
-        if (!graphNode) continue;
-        syncSceneRandomRoute(graphNode);
-        if (graphNode.sceneRandomError) throw new Error(`Scene Prompt Random Route Input #${nodeId}: ${graphNode.sceneRandomError}`);
-    }
+    // Run preparation validates Random probabilities and connections against
+    // this snapshot; the active tab may already contain a different workflow.
     return snapshot;
 }
 
 function applySceneSourceNodeNames(apiGraph, options = {}) {
+    const savedNodes = apiGraph?.workflow?.nodes;
+    const nodes = savedNodes ? new Map(savedNodes.map((node) => [String(node.id), node])) : null;
     for (const [nodeId, promptNode] of Object.entries(apiGraph?.output || {})) {
         if (!SCENE_SOURCE_NODE_CLASS_TYPES.has(promptNode?.class_type)) {
             continue;
@@ -9466,7 +9575,7 @@ function applySceneSourceNodeNames(apiGraph, options = {}) {
         if (options.onlyMissing && String(promptNode?.inputs?.source_node_name || "").trim()) {
             continue;
         }
-        const node = sceneNodeById(nodeId);
+        const node = nodes ? nodes.get(nodeId) : sceneNodeById(nodeId);
         if (!node || !isScenePromptSourceNode(node)) {
             continue;
         }
@@ -9477,12 +9586,23 @@ function applySceneSourceNodeNames(apiGraph, options = {}) {
 }
 
 function applyScenePresetSwitchBindings(apiGraph, graph) {
+    const savedNodes = apiGraph?.workflow?.nodes;
+    const nodes = savedNodes ? new Map(savedNodes.map((node) => [String(node.id), node])) : null;
     for (const [nodeId, promptNode] of Object.entries(apiGraph?.output || {})) {
-        if (promptNode?.class_type !== "ScenePresetInput") continue;
-        const values = graph?.getNodeById?.(nodeId)?.properties?.scene_switch_values;
-        if (values !== undefined) {
+        const properties = (nodes ? nodes.get(nodeId) : graph?.getNodeById?.(nodeId))?.properties;
+        const values = properties?.scene_switch_values;
+        if (promptNode?.class_type === "ScenePresetInput" && values !== undefined) {
             promptNode.inputs ||= {};
             promptNode.inputs.switch_values = { values: [...values] };
+        }
+        if (promptNode?.class_type === "ScenePromptCounter" && properties?.scene_prompt_trace_kind === "whole") {
+            promptNode.inputs ||= {};
+            promptNode.inputs.prompt_trace_kind = "whole";
+        }
+        const randomSeed = properties?.scene_random_seed;
+        if (promptNode?.class_type === "ScenePromptRandomRoute" && String(randomSeed?.node_id) === nodeId) {
+            promptNode.inputs ||= {};
+            promptNode.inputs.seed_source_id = randomSeed.seed_source_id;
         }
     }
     return apiGraph;
@@ -9492,8 +9612,15 @@ function installScenePresetSwitchBindings() {
     if (typeof app.graphToPrompt !== "function" || app.graphToPrompt.scenePresetSwitchBindings) return;
     const original = app.graphToPrompt;
     app.graphToPrompt = async function (...args) {
-        const graph = this.graph;
-        return applyScenePresetSwitchBindings(await original.apply(this, args), graph);
+        commitActiveMatrixLineDraft();
+        const bindings = new Map((this.graph?._nodes || [])
+            .filter((node) => ["ScenePresetInput", "ScenePromptCounter", "ScenePromptRandomRoute"].includes(nodeClassName(node)))
+            .map((node) => [String(node.id), { properties: {
+                scene_switch_values: node.properties?.scene_switch_values?.slice(),
+                scene_prompt_trace_kind: node.properties?.scene_prompt_trace_kind,
+                scene_random_seed: node.properties?.scene_random_seed ? { ...node.properties.scene_random_seed } : undefined,
+            } }]));
+        return applyScenePresetSwitchBindings(await original.apply(this, args), { getNodeById: (id) => bindings.get(String(id)) });
     };
     app.graphToPrompt.scenePresetSwitchBindings = true;
 }
@@ -9528,9 +9655,7 @@ async function prepareSceneRunContext(apiGraph, expandNodeId = null, workflow = 
     if (!sceneRunTargetNodes(apiGraph).length) {
         return null;
     }
-    if (workflow == null && typeof app !== "undefined") {
-        workflow = app.graph?.serialize?.() || null;
-    }
+    workflow ??= apiGraph?.workflow || null;
     const response = await api.fetchApi("/scene_prompt/runs/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -9639,13 +9764,14 @@ async function resolveScenePresetsForRun(run, snapshot, expandNodeId) {
         return null;
     }
     const referenceIds = scenePresetReferenceIdsForExpand(snapshot, expandNodeId);
-    clearScenePresetReferenceErrors({ nodeIds: referenceIds });
+    const targets = { graph: run.graph, nodes: run.presetErrorNodes || [], nodeIds: referenceIds };
+    clearScenePresetReferenceErrors(targets);
     const data = await prepareSceneRunContext(snapshot, expandNodeId);
     if (run.cancelled) {
         releaseSceneRunHandle(data?.run_handle);
         return null;
     }
-    clearScenePresetReferenceErrors({ nodeIds: referenceIds });
+    clearScenePresetReferenceErrors(targets);
     run.runHandle = String(data.run_handle);
     return data;
 }
@@ -9728,6 +9854,7 @@ function scenePresetReferenceIdsForExpand(apiGraph, expandNodeId) {
 }
 
 function markScenePresetReferenceErrors(message, options = {}) {
+    const graph = options.graph || app.graph;
     const targetIds = new Set();
     if (options.nodeId) {
         targetIds.add(String(options.nodeId));
@@ -9739,8 +9866,8 @@ function markScenePresetReferenceErrors(message, options = {}) {
     if (!targetIds.size) {
         return;
     }
-    for (const node of app.graph?._nodes || []) {
-        if (!isScenePresetReferenceNode(node) || !targetIds.has(String(node.id))) {
+    for (const node of options.nodes || graph?._nodes || []) {
+        if (graph?.getNodeById(node.id) !== node || !isScenePresetReferenceNode(node) || !targetIds.has(String(node.id))) {
             continue;
         }
         if (!node.scenePresetOriginalColors) {
@@ -9751,16 +9878,16 @@ function markScenePresetReferenceErrors(message, options = {}) {
         node.scenePresetError = message;
         node.setDirtyCanvas?.(true, true);
     }
-    app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function clearScenePresetReferenceErrors(options = {}) {
+    const graph = options.graph || app.graph;
     const targetIds = new Set((options.nodeIds || []).map((nodeId) => String(nodeId)));
     if (!targetIds.size) {
         return;
     }
-    for (const node of app.graph?._nodes || []) {
-        if (!isScenePresetReferenceNode(node) || !node.scenePresetOriginalColors || !targetIds.has(String(node.id))) {
+    for (const node of options.nodes || graph?._nodes || []) {
+        if (graph?.getNodeById(node.id) !== node || !isScenePresetReferenceNode(node) || !node.scenePresetOriginalColors || !targetIds.has(String(node.id))) {
             continue;
         }
         node.color = node.scenePresetOriginalColors.color;
@@ -9769,7 +9896,6 @@ function clearScenePresetReferenceErrors(options = {}) {
         node.scenePresetError = "";
         node.setDirtyCanvas?.(true, true);
     }
-    app.graph?.setDirtyCanvas?.(true, true);
 }
 
 async function queueSingleScenePrompt() {
@@ -10034,6 +10160,8 @@ function scenePromptSamplerSeedTargets(prompt) {
 }
 
 function syncSceneMatrixPromptInputs(prompt) {
+    // Native graphToPrompt already captured these widgets after committing drafts.
+    if (prompt?.workflow) return prompt;
     commitActiveMatrixLineDraft();
     for (const [nodeId, promptNode] of Object.entries(prompt?.output || {})) {
         if (promptNode?.class_type !== "SceneMatrix") {
@@ -10061,33 +10189,20 @@ function installSceneBatchPromptCapture() {
             || (typeof sceneWorkflowFromPrompt === "function" ? sceneWorkflowFromPrompt(prompt) : null);
         if (!submissionRun) {
             syncSceneMatrixPromptInputs(prompt);
+            for (const node of Object.values(prompt?.output || {})) {
+                if (node?.class_type === "ScenePrompterExpand" && node.inputs) node.inputs.run_id = "";
+            }
         }
         const samplerSeedTargets = scenePromptSamplerSeedTargets(prompt);
         applySceneSourceNodeNames(prompt, { onlyMissing: true });
         randomizeStandardSceneSeeds(prompt);
         let preparedRunHandle = "";
-        if (prompt?.output && sceneRunTargetNodes(prompt).length) {
-            const existingHandle = sceneRunTargetNodes(prompt)
-                .map((node) => String(node?.inputs?.run_handle || ""))
-                .find(Boolean);
-            if (!existingHandle) {
-                const prepared = await prepareSceneRunContext(prompt);
-                preparedRunHandle = String(prepared?.run_handle || "");
-            }
+        if (!submissionRun?.runHandle && sceneRunTargetNodes(prompt).length) {
+            const prepared = await prepareSceneRunContext(prompt);
+            preparedRunHandle = String(prepared?.run_handle || "");
         }
-        let run = sceneBatchRun;
-        let expandPrompt = prompt?.output?.[String(run?.nodeId)];
-        const matchesActivePlan = !!run?.firstApiPending
-            && String(expandPrompt?.inputs?.run_id || "") === run.runId;
-        if (!matchesActivePlan) {
-            const detachedEntry = Object.values(prompt?.output || {}).find((promptNode) => (
-                promptNode?.class_type === "ScenePrompterExpand"
-                && sceneBatchDetachedRuns.has(String(promptNode.inputs?.run_id || ""))
-            ));
-            const detachedRunId = String(detachedEntry?.inputs?.run_id || "");
-            run = sceneBatchDetachedRuns.get(detachedRunId) || run;
-            expandPrompt = detachedEntry || expandPrompt;
-        }
+        const run = submissionRun;
+        const expandPrompt = prompt?.output?.[String(run?.nodeId)];
         const matchesFirstBatchPrompt = !!run?.firstApiPending
             && run.nextIndex === 0
             && expandPrompt?.class_type === "ScenePrompterExpand"
@@ -10123,7 +10238,7 @@ function installSceneBatchPromptCapture() {
         } else if (sceneBatchRun !== submissionRun) {
             releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
         }
-        if (promptId && typeof scenePromptSubmissionsById !== "undefined") {
+        if (promptId && typeof scenePromptSubmissionsById !== "undefined" && !sceneBatchTerminalEvents.has(promptId)) {
             scenePromptSubmissionsById.set(promptId, {
                 workflow: submissionWorkflow,
                 runId: submissionRun?.runId || "",
@@ -10245,46 +10360,6 @@ function consumeSceneRunTerminalPromptId(promptId, now = Date.now()) {
     return found;
 }
 
-function clearQueuedSceneRunReconcile(promptId) {
-    const timer = sceneRunHandleReconcileTimers.get(promptId);
-    if (timer) {
-        clearTimeout(timer);
-    }
-    sceneRunHandleReconcileTimers.delete(promptId);
-}
-
-async function reconcileQueuedSceneRunHandle(promptId, runHandle, attempt = 0) {
-    if (sceneRunHandlesByPromptId.get(promptId) !== runHandle) {
-        clearQueuedSceneRunReconcile(promptId);
-        return;
-    }
-    try {
-        const response = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
-        const history = await readApiJson(response, "Scene Promptの実行状態を確認できませんでした");
-        if (
-            response.ok
-            && sceneHistoryStatus(history, promptId)
-            && sceneRunHandlesByPromptId.get(promptId) === runHandle
-        ) {
-            sceneRunHandlesByPromptId.delete(promptId);
-            clearQueuedSceneRunReconcile(promptId);
-            releaseSceneRunHandle(runHandle);
-            return;
-        }
-    } catch (error) {
-        console.warn("[Scene Prompt] 生成計画の完了確認に失敗しました。", error);
-    }
-    if (attempt >= 5 || sceneRunHandlesByPromptId.get(promptId) !== runHandle) {
-        clearQueuedSceneRunReconcile(promptId);
-        return;
-    }
-    const timer = setTimeout(() => {
-        sceneRunHandleReconcileTimers.delete(promptId);
-        reconcileQueuedSceneRunHandle(promptId, runHandle, attempt + 1);
-    }, 10 * 1000);
-    sceneRunHandleReconcileTimers.set(promptId, timer);
-}
-
 function releaseCompletedSceneRun(detail) {
     const promptId = scenePromptIdFromValue(detail);
     const runHandle = promptId ? sceneRunHandlesByPromptId.get(promptId) : "";
@@ -10294,7 +10369,6 @@ function releaseCompletedSceneRun(detail) {
     }
     sceneRunHandlesByPromptId.delete(promptId);
     sceneRunTerminalPromptIds.delete(promptId);
-    clearQueuedSceneRunReconcile(promptId);
     releaseSceneRunHandle(runHandle);
 }
 
@@ -10956,6 +11030,7 @@ function createSceneBatchRun(node, total) {
         nodeId: node.id,
         node,
         graph: node.graph || app.graph,
+        presetErrorNodes: ((node.graph || app.graph)?._nodes || []).filter(isScenePresetReferenceNode),
         workflow: typeof sceneActiveWorkflow === "function" ? sceneActiveWorkflow() : null,
         samplerSeedTargets: captureRandomizedSamplerSeedTargets(node.graph || app.graph),
         total,
@@ -11037,6 +11112,8 @@ function prepareSceneBatchRunSnapshot(run, node) {
             }
             run.snapshotError = error;
             markScenePresetReferenceErrors(error?.message || "Presetの検証に失敗しました。", {
+                graph: run.graph,
+                nodes: run.presetErrorNodes || [],
                 nodeId: error?.scenePresetReferenceId,
                 relatedNodeIds: scenePresetReferenceIdsForExpand(run.firstPromptSnapshot, node.id),
             });
@@ -11046,6 +11123,7 @@ function prepareSceneBatchRunSnapshot(run, node) {
                 showSceneBatchError("待機中の連続生成を準備できませんでした。", error);
             }
         } finally {
+            run.presetErrorNodes = null;
             refreshSceneBatchRunNode(run, { graphChange: false, background: false });
         }
         return run.firstPromptSnapshot;
@@ -12265,10 +12343,15 @@ async function openScenePresetPicker(node) {
             button.classList.add("pc-on");
         }
         button.addEventListener("click", () => {
-            setWidgetValue(node, "preset_id", preset.preset_id);
-            clearScenePresetReferenceErrors({ nodeIds: [node.id] });
-            refreshScenePresetReference(node, presets);
-            refreshAllScenePresetReferences(presets);
+            if (findWidget(node, "preset_id")?.value !== preset.preset_id) {
+                withSceneUserChange(node, () => {
+                    setWidgetValue(node, "preset_id", preset.preset_id);
+                    clearScenePresetReferenceErrors({ nodeIds: [node.id] });
+                    refreshScenePresetReference(node, presets);
+                    refreshAllScenePresetReferences(presets);
+                    node.graph.change?.();
+                });
+            }
             closePopup();
             node.setDirtyCanvas?.(true, true);
             app.graph?.setDirtyCanvas?.(true, true);
@@ -12371,6 +12454,8 @@ async function saveScenePreset(node) {
         return;
     }
     let failedReferenceNodeId = "";
+    const ownerGraph = node.graph;
+    const ownerNodes = (ownerGraph._nodes || []).filter(isScenePresetReferenceNode);
     try {
         const graphToPrompt = app.graphToPrompt?.bind(app);
         if (!graphToPrompt || !app.graph?.serialize) {
@@ -12378,9 +12463,11 @@ async function saveScenePreset(node) {
         }
         syncAllScenePromptNames();
         commitActiveMatrixLineDraft();
+        const ownerWorkflow = app.graph.serialize();
         const apiGraph = await graphToPrompt();
+        const workflow = apiGraph.workflow || ownerWorkflow;
+        apiGraph.workflow = workflow;
         applySceneSourceNodeNames(apiGraph);
-        const workflow = app.graph.serialize();
         if (workflow.extra && typeof workflow.extra === "object") {
             delete workflow.extra.scene_preset_editor;
         }
@@ -12414,6 +12501,8 @@ async function saveScenePreset(node) {
     } catch (error) {
         if (failedReferenceNodeId) {
             markScenePresetReferenceErrors(error?.message || "Presetの検証に失敗しました。", {
+                graph: ownerGraph,
+                nodes: ownerNodes,
                 nodeId: failedReferenceNodeId,
             });
         }
@@ -12866,12 +12955,15 @@ function openSceneRandomSettings(node) {
     document.body.append(overlay);
     const applyAndClose = () => {
         if (validFields) {
-            const next = inputs.map((input) => sceneRandomPercentToBasisPoints(input.value));
-            if (setWidgetValue(node, "weights_json", JSON.stringify(next))) {
-                syncSceneRandomRoute(node);
-                clearSceneComputedCaches(node);
-                refreshDownstreamSceneNodes(node);
-                markSceneNodeChanged(node);
+            const next = JSON.stringify(inputs.map((input) => sceneRandomPercentToBasisPoints(input.value)));
+            if (findWidget(node, "weights_json")?.value !== next) {
+                withSceneUserChange(node, () => {
+                    setWidgetValue(node, "weights_json", next);
+                    syncSceneRandomRoute(node);
+                    clearSceneComputedCaches(node);
+                    refreshDownstreamSceneNodes(node);
+                    markSceneNodeChanged(node);
+                });
             }
         }
         closeSceneRandomSettings(node);
@@ -13040,6 +13132,10 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
     const previousOnRemoved = node.onRemoved;
     node.onRemoved = function (...args) {
         const isWorkflowLoad = sceneWorkflowLoadDepth > 0;
+        if (this.scenePromptAttachScheduled != null) {
+            cancelAnimationFrame(this.scenePromptAttachScheduled);
+            this.scenePromptAttachScheduled = null;
+        }
         sceneTitleSyncNodes.delete(this);
         sceneLoadedRefreshNodes.delete(this);
         sceneDownstreamRefreshSources.delete(this);
@@ -13140,12 +13236,11 @@ function attachSceneNode(node, nodeName) {
 }
 
 function scheduleAttachSceneNode(node, nodeName) {
-    if (!node || node.scenePromptAttachScheduled) {
+    if (!node || node.scenePromptAttachScheduled != null) {
         return;
     }
-    node.scenePromptAttachScheduled = true;
-    requestAnimationFrame(() => {
-        node.scenePromptAttachScheduled = false;
+    node.scenePromptAttachScheduled = requestAnimationFrame(() => {
+        node.scenePromptAttachScheduled = null;
         if (node.scenePresetDetachedSnapshot) return;
         try {
             attachSceneNode(node, nodeName);
@@ -13226,6 +13321,16 @@ function appendSceneSavePreview(detail) {
         needed.push(imageRef);
         if (needed.length >= SCENE_SAVE_PREVIEW_LIMIT) {
             break;
+        }
+    }
+
+    // Native ComfyUI can replace imgs with its own Image objects. Retain only
+    // the selected previews, independently of that array's ownership.
+    for (const [key, image] of node.scenePreviewImages) {
+        if (!seenKeys.has(key)) {
+            image.onload = null;
+            node.scenePreviewImages.delete(key);
+            node.scenePreviewKeys.delete(key);
         }
     }
 
@@ -13388,6 +13493,15 @@ function forgetScenePromptSubmission(detail) {
     setTimeout(() => scenePromptSubmissionsById.delete(promptId), 0);
 }
 
+function receiveScenePromptTerminal(type, detail) {
+    rememberSceneBatchTerminalEvent(type, detail);
+    if (type === "success") continueSceneBatchRun(detail);
+    else failSceneBatchRun(detail);
+    releasePendingSceneBatchPlan(detail);
+    releaseCompletedSceneRun(detail);
+    forgetScenePromptSubmission(detail);
+}
+
 function acknowledgeSceneDesktopNotification(requestId, success, error = "") {
     return api.fetchApi("/scene_prompt/callbacks/desktop/ack", {
         method: "POST",
@@ -13513,27 +13627,10 @@ app.registerExtension({
         });
         api.addEventListener("progress_state", ({ detail }) => receiveSceneProgressState(detail));
         api.addEventListener("executed", ({ detail }) => appendSceneSavePreview(detail));
-        api.addEventListener("execution_success", ({ detail }) => {
-            rememberSceneBatchTerminalEvent("success", detail);
-            continueSceneBatchRun(detail);
-            releasePendingSceneBatchPlan(detail);
-            releaseCompletedSceneRun(detail);
-            forgetScenePromptSubmission(detail);
-        });
-        api.addEventListener("execution_error", ({ detail }) => {
-            rememberSceneBatchTerminalEvent("error", detail);
-            failSceneBatchRun(detail);
-            releasePendingSceneBatchPlan(detail);
-            releaseCompletedSceneRun(detail);
-            forgetScenePromptSubmission(detail);
-        });
-        api.addEventListener("execution_interrupted", ({ detail }) => {
-            rememberSceneBatchTerminalEvent("interrupted", detail);
-            failSceneBatchRun(detail);
-            releasePendingSceneBatchPlan(detail);
-            releaseCompletedSceneRun(detail);
-            forgetScenePromptSubmission(detail);
-        });
+        api.addEventListener("execution_success", ({ detail }) => receiveScenePromptTerminal("success", detail));
+        api.addEventListener("execution_error", ({ detail }) => receiveScenePromptTerminal("error", detail));
+        api.addEventListener("execution_interrupted", ({ detail }) => receiveScenePromptTerminal("interrupted", detail));
+        api.addEventListener("scene_prompt_queue_removed", ({ detail }) => receiveScenePromptTerminal("interrupted", detail));
     },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
