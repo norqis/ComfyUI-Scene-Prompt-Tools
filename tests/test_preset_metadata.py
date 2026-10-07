@@ -569,7 +569,7 @@ class PresetMetadataTests(unittest.TestCase):
                         "4": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["1", 0], "scope": self.nodes.TEXT_SCOPE_PREVIOUS}},
                         "5": {"class_type": "ScenePromptToText", "inputs": {"scene_prompt": ["2", 0], "scope": self.nodes.TEXT_SCOPE_PREVIOUS}}}
                     if reverse:
-                        graph["6"] = {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["2", 0], "reverse_scope": self.nodes.TEXT_SCOPE_PREVIOUS}}
+                        graph["6"] = {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["2", 0], "reverse_scope": self.nodes.REVERSE_SCOPE_PREVIOUS}}
                         graph["3"]["inputs"].update(scene_prompt=["6", 0], scope=self.nodes.TEXT_SCOPE_ALL)
                     snapshots = {"child": child, "parent": parent}
                     expected = self.presets._scene_node_value(graph, "3", snapshots, set())
