@@ -424,6 +424,40 @@ assert.equal(ctx.sceneCounterConfiguredValues({ widgets_values: [10, false] }).e
 assert.equal(ctx.sceneCounterConfiguredValues({ widgets_values: [10, true], widgets_values_named: { enable_downstream_count: false } }).enable_downstream_count, false);
 console.log("Strict Count preview composition, Random policy, compact huge access, nested Presets and legacy widget migration passed.");
 
+function verifyPresetMatrixMergeParity() {
+    ctx.parseMatrixStateValue = JSON.parse;
+    for (const name of ["mergeScenePromptRows", "mergePositiveNegativeParts", "uniquePromptParts", "promptOverrideKeys", "promptOverrideKey", "promptIdentity"])
+        vm.runInContext(functionSource(name), ctx);
+    const labels = (plan) => Array.from(prefix(plan));
+    const matrixRows = [{ label: "x", enabled: true }, { label: "y", enabled: true }];
+    for (const factor of [0, 1, 2, 3]) {
+        const counted = ctx.sceneScheduleCount(leaf("A"), factor);
+        const mapped = ctx.sceneScheduleMap(counted, (entry) => ({ ...entry, parts: [...entry.parts, "P"] }));
+        const matrix = ctx.sceneScheduleMatrix(mapped, matrixRows);
+        assert.deepEqual(labels(matrix), [...Array(factor).fill("APx"), ...Array(factor).fill("APy")]);
+        const merged = ctx.sceneScheduleMerge(matrix, leaf("B", 2));
+        assert.deepEqual(labels(merged), [...Array(factor * 2).fill("APxB"), ...Array(factor * 2).fill("APyB")]);
+    }
+    const fixture = { api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["1", 0], count: 2 } },
+        3: { class_type: "SceneMatrix", inputs: { scene_prompt: ["2", 0], matrix_json: JSON.stringify({ sets: matrixRows }) } },
+        4: { class_type: "ScenePrompterMerge", inputs: { scene_prompt1: ["3", 0] } },
+        5: { class_type: "SceneEmptyLatent", inputs: { scene_prompt: ["4", 0], batch_size: 3 } },
+        6: { class_type: "ScenePrompterMerge", inputs: { scene_prompt1: ["5", 0] } },
+        7: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["6", 0] } },
+    } } };
+    const preset = ctx.sceneScheduleForPreset("matrix-merge", leaf("A"), new Set(), fixture);
+    assert.deepEqual(labels(preset), ["Ax", "Ax", "Ay", "Ay"]);
+    assert.equal(preset.stats.rows, 2);
+    assert.equal(preset.stats.totalImages, 12);
+    assert.equal(preset.stats.unsetBatches, 0);
+    const latent = ctx.sceneScheduleMap(queue([leaf("A"), leaf("B")], controls("alternate")), (entry) => entry, 3);
+    assert.equal(ctx.sceneScheduleAt(latent, 1).row.latent.batch_size, 3);
+    assert.equal(ctx.sceneScheduleMerge(latent, leaf("C", 1, 5)).stats.totalImages, 10);
+}
+verifyPresetMatrixMergeParity();
+
 if (process.argv.includes("--compact-count-response")) {
     async function verifyCompactCountResponse() {
         const { preparePresetReference } = await import(require("node:url").pathToFileURL(path.join(__dirname, "..", "web", "scene_llm_presets.js")).href);

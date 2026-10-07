@@ -347,14 +347,14 @@ const server = http.createServer(async (request, response) => {
         let source = await readFile(resolve(root, asset), "utf8");
         if (asset === "web/scene_prompt_ui.js") {
             source += `\nwindow.__scenePromptPopupTestHooks = {\n`
-                + `  openSavePromptPopup, openSceneLoraDetails,\n`
+                + `  openSavePromptPopup, openSceneLoraDetails, openEditPromptItemPopup, closeAllPopups,\n`
                 + `  openCreatePromptPopup,\n`
                 + `  openSearchPopup, openPromptCandidatePopup, openCategoryLevelPicker, loadFavorites, setMatrixLineDraftContext,\n`
                 + `  attachMatrixTextAreaAutocomplete, readMatrixState,\n`
                 + `  openScenePresetSwitchNames, openScenePresetSwitchSettings, commitScenePresetSwitchJSON, refreshScenePresetSwitchLabels, applyScenePresetSwitchBindings,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
-                + `  saveScenePreset,\n`
+                + `  saveScenePreset, installScenePresetSwitchBindings, prepareSceneRunContext, syncSceneMatrixPromptInputs,\n`
                 + `  ensureSceneExpandControls,\n`
                 + `  installSceneNodeRemovalCleanup,\n`
                 + `  pendingDesktopNotifications() { return sceneDesktopNotificationRequests.size; },\n`
@@ -3067,6 +3067,8 @@ try {
             own:llm.widgets.filter((widget)=>widget.sceneRole?.startsWith("llm_")).map((widget)=>widget.sceneRole)};
     });
     assert.deepEqual(llmControls,{emptyDisabled:true,reachableDisabled:false,bypassDisabled:true,order:true,noCalls:true,hidden:true,settingsFirst:true,own:["llm_settings","llm_generate","llm_status"]});
+    const { testSnapshotRaces } = await import("./scene_snapshot_races.mjs");
+    await testSnapshotRaces(browser, page.url());
     console.log("Scene Prompt browser integration tests passed.");
 } finally {
     await browser.close();

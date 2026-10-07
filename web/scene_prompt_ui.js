@@ -1406,7 +1406,7 @@ function preflightPromptItemReplacement(node, originalItem, updatedItem, options
     }
 }
 
-function replacePromptItemEverywhere(originalItem, updatedItem) {
+function replacePromptItemEverywhere(originalItem, updatedItem, nodes = graphNodes()) {
     if (!updatedItem) {
         return false;
     }
@@ -1418,7 +1418,7 @@ function replacePromptItemEverywhere(originalItem, updatedItem) {
     }
 
     let anyChanged = false;
-    for (const graphNode of graphNodes()) {
+    for (const graphNode of nodes) {
         if (isScenePromptNode(graphNode) || isSceneApplyLoraNode(graphNode)) {
             let nodeChanged = false;
             const previousStateWidgetName = activeStateWidgetName(graphNode);
@@ -1455,9 +1455,6 @@ function replacePromptItemEverywhere(originalItem, updatedItem) {
         }
     }
 
-    if (anyChanged) {
-        app.graph?.change?.();
-    }
     return anyChanged;
 }
 
@@ -3173,6 +3170,7 @@ async function openSavePromptPopup(node, options = {}) {
             await saveCurrentPrompt(nameInput.value, descInput.value, items);
             await loadSavedPrompts(true);
             resetPopupForm(session, "save");
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             refreshNode(node, { fitHeight: true });
             openSelectedPopup(node, { stateWidgetName, popupSession: session });
         } catch (saveError) {
@@ -3351,6 +3349,7 @@ async function openCreatePromptPopup(node, options = {}) {
             promptItems = null;
             await loadPromptItems();
             resetPopupForm(session, "create");
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             refreshNode(node, { fitHeight: true });
             openPromptCandidatePopup(node, item.category_path || [categoryInput.value].filter(Boolean), { stateWidgetName, popupSession: session });
         } catch (createError) {
@@ -3418,6 +3417,8 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
     save.addEventListener("click", async () => {
         error.textContent = "";
         save.disabled = true;
+        const ownerGraph = node.graph;
+        const ownerNodes = [...(ownerGraph?._nodes || [])];
         try {
             const prospective = {
                 ...item,
@@ -3438,15 +3439,19 @@ async function openEditPromptItemPopup(node, item, backHandler = null, options =
                 prompt: promptInput.value,
                 description: descInput.value,
             });
-            const selectedChanged = replaceSelectedPromptItem(node, item, updated, { stateWidgetName });
-            const graphChanged = replacePromptItemEverywhere(item, updated);
-            clearSceneComputedCaches(node);
-            refreshNode(node, { fitHeight: true });
-            if (selectedChanged || graphChanged) {
-                refreshDownstreamSceneNodes(node);
-                app.graph?.change?.();
-                node.graph?.change?.();
+            const currentNodes = new Set(ownerGraph?._nodes || []);
+            const retainedNodes = ownerNodes.filter((target) => target.graph === ownerGraph && currentNodes.has(target));
+            if (retainedNodes.includes(node)) {
+                const selectedChanged = replaceSelectedPromptItem(node, item, updated, { stateWidgetName });
+                const graphChanged = replacePromptItemEverywhere(item, updated, retainedNodes);
+                clearSceneComputedCaches(node);
+                refreshNode(node, { fitHeight: true });
+                if (selectedChanged || graphChanged) {
+                    refreshDownstreamSceneNodes(node);
+                    ownerGraph.change?.();
+                }
             }
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             if (backHandler) {
                 backHandler(updated);
             } else {
@@ -7790,6 +7795,9 @@ function sceneScheduleRun(entry) {
 }
 
 function sceneScheduleWrapper(kind, unit, factor = 1) {
+    if (kind === "repeat" && unit.kind === "run") {
+        return sceneScheduleRun({ ...unit.entry, count: sceneStatProduct(unit.total, factor) });
+    }
     return {
         kind, unit, factor, total: sceneStatProduct(unit.total, factor),
         totalImages: sceneStatProduct(unit.totalImages, factor),
@@ -7959,9 +7967,15 @@ function sceneScheduleCount(plan, factor, enableDownstreamCount = true) {
 
 function sceneScheduleMap(plan, transform, latentSize = null) {
     if (plan.stats.error) return plan;
+    const apply = (entry) => {
+        const mapped = transform(entry);
+        return latentSize === null ? mapped : { ...mapped,
+            row: { ...mapped.row, latent: { ...mapped.row?.latent, batch_size: latentSize } } };
+    };
     const mapUnit = (unit) => ["fixed", "count_hold"].includes(unit.kind)
         ? sceneScheduleWrapper(unit.kind, mapUnit(unit.unit))
-        : { kind: "map", unit, transform, latentSize, total: unit.total,
+        : unit.kind === "run" ? sceneScheduleRun(apply(unit.entry))
+        : { kind: "map", unit, transform: apply, latentSize, total: unit.total,
             totalImages: latentSize === null ? unit.totalImages : sceneStatProduct(unit.total, latentSize),
             unsetBatches: latentSize === null ? unit.unsetBatches : 0, rows: unit.rows };
     return sceneSchedulePlan(plan.units.map(mapUnit), plan.boundary, plan.randomGuards);
@@ -9459,6 +9473,8 @@ async function createSceneBatchPromptSnapshot(expandNodeId) {
 }
 
 function applySceneSourceNodeNames(apiGraph, options = {}) {
+    const savedNodes = apiGraph?.workflow?.nodes;
+    const nodes = savedNodes ? new Map(savedNodes.map((node) => [String(node.id), node])) : null;
     for (const [nodeId, promptNode] of Object.entries(apiGraph?.output || {})) {
         if (!SCENE_SOURCE_NODE_CLASS_TYPES.has(promptNode?.class_type)) {
             continue;
@@ -9466,7 +9482,7 @@ function applySceneSourceNodeNames(apiGraph, options = {}) {
         if (options.onlyMissing && String(promptNode?.inputs?.source_node_name || "").trim()) {
             continue;
         }
-        const node = sceneNodeById(nodeId);
+        const node = nodes ? nodes.get(nodeId) : sceneNodeById(nodeId);
         if (!node || !isScenePromptSourceNode(node)) {
             continue;
         }
@@ -9477,9 +9493,11 @@ function applySceneSourceNodeNames(apiGraph, options = {}) {
 }
 
 function applyScenePresetSwitchBindings(apiGraph, graph) {
+    const savedNodes = apiGraph?.workflow?.nodes;
+    const nodes = savedNodes ? new Map(savedNodes.map((node) => [String(node.id), node])) : null;
     for (const [nodeId, promptNode] of Object.entries(apiGraph?.output || {})) {
         if (promptNode?.class_type !== "ScenePresetInput") continue;
-        const values = graph?.getNodeById?.(nodeId)?.properties?.scene_switch_values;
+        const values = (nodes ? nodes.get(nodeId) : graph?.getNodeById?.(nodeId))?.properties?.scene_switch_values;
         if (values !== undefined) {
             promptNode.inputs ||= {};
             promptNode.inputs.switch_values = { values: [...values] };
@@ -9492,8 +9510,11 @@ function installScenePresetSwitchBindings() {
     if (typeof app.graphToPrompt !== "function" || app.graphToPrompt.scenePresetSwitchBindings) return;
     const original = app.graphToPrompt;
     app.graphToPrompt = async function (...args) {
-        const graph = this.graph;
-        return applyScenePresetSwitchBindings(await original.apply(this, args), graph);
+        commitActiveMatrixLineDraft();
+        const bindings = new Map((this.graph?._nodes || [])
+            .filter((node) => nodeClassName(node) === "ScenePresetInput" && node.properties?.scene_switch_values)
+            .map((node) => [String(node.id), { properties: { scene_switch_values: [...node.properties.scene_switch_values] } }]));
+        return applyScenePresetSwitchBindings(await original.apply(this, args), { getNodeById: (id) => bindings.get(String(id)) });
     };
     app.graphToPrompt.scenePresetSwitchBindings = true;
 }
@@ -9528,9 +9549,7 @@ async function prepareSceneRunContext(apiGraph, expandNodeId = null, workflow = 
     if (!sceneRunTargetNodes(apiGraph).length) {
         return null;
     }
-    if (workflow == null && typeof app !== "undefined") {
-        workflow = app.graph?.serialize?.() || null;
-    }
+    workflow ??= apiGraph?.workflow || null;
     const response = await api.fetchApi("/scene_prompt/runs/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -10034,6 +10053,8 @@ function scenePromptSamplerSeedTargets(prompt) {
 }
 
 function syncSceneMatrixPromptInputs(prompt) {
+    // Native graphToPrompt already captured these widgets after committing drafts.
+    if (prompt?.workflow) return prompt;
     commitActiveMatrixLineDraft();
     for (const [nodeId, promptNode] of Object.entries(prompt?.output || {})) {
         if (promptNode?.class_type !== "SceneMatrix") {
@@ -12378,9 +12399,11 @@ async function saveScenePreset(node) {
         }
         syncAllScenePromptNames();
         commitActiveMatrixLineDraft();
+        const ownerWorkflow = app.graph.serialize();
         const apiGraph = await graphToPrompt();
+        const workflow = apiGraph.workflow || ownerWorkflow;
+        apiGraph.workflow = workflow;
         applySceneSourceNodeNames(apiGraph);
-        const workflow = app.graph.serialize();
         if (workflow.extra && typeof workflow.extra === "object") {
             delete workflow.extra.scene_preset_editor;
         }

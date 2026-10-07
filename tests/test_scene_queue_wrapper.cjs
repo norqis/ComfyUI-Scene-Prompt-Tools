@@ -247,12 +247,14 @@ context.installSceneBatchPromptCapture();
         return { ok: true, payload: { run_handle: "two-expand-handle" } };
     };
     const multiExpand = {
+        workflow: { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] },
         output: {
             "1": { class_type: "ScenePrompter", inputs: {} },
             "10": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["1", 0] } },
             "20": { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["1", 0] } },
         },
     };
+    context.app.graph.serialize = () => { throw new Error("A captured prompt must not read the active tab"); };
     await context.prepareSceneRunContext(multiExpand);
     assert.equal(preparedPayload.expand_node_id, null, "standard Queue prepares all Expand branches, not the first one");
     assert.deepEqual(preparedPayload.workflow, { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] });
