@@ -822,7 +822,10 @@ def _effective_model_source_ids(prompt, infos, source_aliases=None):
                 ):
                     continue
             effective.add(node_id)
-            break
+            # Equal model links can occur on distinct shared branches. Keep
+            # each matching source so another consumer's model cannot win.
+            if "_model_links" not in info:
+                break
     return effective
 
 
