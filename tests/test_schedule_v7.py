@@ -7,7 +7,7 @@ import sys
 from scene_prompt_tools.plan import (
     MAX_SAFE_INTEGER, ScenePlanError, append_callback, empty_row, item_for_index, make_plan, matrix_product,
     merge, multiply_count, normalize_plan, queue, replay_index_for_event, transform,
-    with_source_node,
+    with_source_node, random_route, random_replay_source_ids,
 )
 
 
@@ -21,6 +21,23 @@ def labels(plan):
 
 
 class LazyScheduleTests(unittest.TestCase):
+    def test_random_replay_sources_stay_scoped_and_do_not_retain_large_shared_plans(self):
+        import gc
+        import weakref
+        arms = random_route(branch('upstream'), [3333, 3333, 3334] + [0] * 7, 'gate')
+        random = queue([with_source_node(arm, name) for arm, name in zip(arms, 'ABC')])
+        plan = random
+        for _ in range(35):
+            plan = merge(plan, plan)
+        plan = multiply_count(queue([plan, branch('unrelated')]), 10**12)
+        # Both the shared DAG and trillion-event counts remain compact.
+        reference = weakref.ref(plan)
+        self.assertEqual(random_replay_source_ids([plan], {'gate'}), {'upstream', 'A', 'B', 'C'})
+        self.assertEqual(random_replay_source_ids([plan], set()), set())
+        del plan
+        gc.collect()
+        self.assertIsNone(reference())
+
     def test_target_mixed_queue_composition_and_locked_controls(self):
         alternate = queue([branch("b1"), branch("b2")], order_mode="alternate")
         ordinary = queue([branch("b3"), branch("b4")])

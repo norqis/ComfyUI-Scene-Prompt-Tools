@@ -1437,6 +1437,38 @@ def _rank_unit(unit, path, memo=None):
     raise ScenePlanError("Selected Scene Prompt event path does not match its plan.")
 
 
+def random_replay_source_ids(plans, gate_ids):
+    """Keep complete branch sources when one gate must replay different draws."""
+    if not gate_ids:
+        return set()
+    sources, visited = set(), set()
+    pending = [(unit, False) for plan in plans for unit in plan["units"]]
+    while pending:
+        unit, preserve = pending.pop()
+        preserve = preserve or unit["kind"] == "random_choice" and unit["gate_id"] in gate_ids
+        key = (id(unit), preserve)
+        if key in visited:
+            continue
+        visited.add(key)
+        kind = unit["kind"]
+        if kind == "run":
+            if preserve:
+                sources.update(unit["row"]["source_node_ids"])
+            continue
+        if preserve and kind == "map":
+            sources.update(operation["payload"][0] for operation in unit["operations"] if operation["kind"] == "source_node")
+        if kind == "sequence":
+            children = unit["plan"]["units"]
+        elif kind in {"alternate", "random_choice"}:
+            children = [child for plan in unit["inputs"] for child in plan["units"]]
+        elif kind in {"product", "row_product"}:
+            children = [*unit["left"]["units"], *unit["right"]["units"]]
+        else:
+            children = (unit["unit"],)
+        pending.extend((child, preserve) for child in children)
+    return sources
+
+
 def replay_index_for_event(plan, event_ref, selected_sources, visible_source_ids):
     """Rank the selected event after excluding other visible generation paths."""
     source = normalize_plan(plan)

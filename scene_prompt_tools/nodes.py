@@ -48,6 +48,7 @@ from .plan import (
     empty_row,
     item_for_normalized_plan,
     replay_index_for_event,
+    random_replay_source_ids,
     matrix_product,
     merge,
     multiply_count,
@@ -1175,6 +1176,11 @@ def _metadata_for_save_mode(
                        if prompt[node_id]["class_type"] == "ScenePromptToText" for source_id in _scene_source_ids(info)}
     selected_source_ids = [*_scene_source_id_list(scene_info),
                            *(source_id for info in expand_infos for source_id in _scene_source_id_list(info))]
+    replay_infos = [scene_info, *consumer_items.values()]
+    conflicting_gates = {gate_id for gate_id, arms in _selected_random_routes(replay_infos).items() if len(arms) > 1}
+    protected_source_ids = text_source_ids | random_replay_source_ids(
+        [plan for info in replay_infos if isinstance(info, dict) for plan in (info.get("_plan_ref"),)
+         if isinstance(plan, dict) and plan.get("version") == 7], conflicting_gates)
 
     if metadata_mode == SAVE_METADATA_EXECUTION_PATH and not expand_preset_contents and isinstance(prompt, dict):
         has_reference = any(isinstance(node, dict) and node.get("class_type") == "ScenePresetReference" for node in prompt.values())
@@ -1235,7 +1241,7 @@ def _metadata_for_save_mode(
         # Reference. Keep the new whole-prompt boundary for those occurrences.
         selected_parents = {
             "/".join(parts[:index])
-            for source_id in [*selected_source_ids, *text_source_ids]
+            for source_id in [*selected_source_ids, *protected_source_ids]
             for parts in [source_id.split("/")]
             for index in range(1, len(parts))
         }
@@ -1243,12 +1249,12 @@ def _metadata_for_save_mode(
                             if node.get("class_type") == "ScenePromptCounter"
                             and node.get("inputs", {}).get("prompt_trace_kind") == "whole"
                             and source_aliases.get(node_id) in selected_parents)
-        text_ids = {node_id for node_id, alias in source_aliases.items() if alias in text_source_ids}
+        protected_ids = {node_id for node_id, alias in source_aliases.items() if alias in protected_source_ids}
         effective_models = _effective_model_source_ids(expanded_prompt, [scene_info, *expand_infos], source_aliases)
         contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
-            expanded_prompt, selected_ids, text_ids, consumer_items, effective_models, unique_id,
+            expanded_prompt, selected_ids, protected_ids, consumer_items, effective_models, unique_id,
         )
-        selected_ids.update(text_ids)
+        selected_ids.update(protected_ids)
         contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements, contracted_prompt)
         ancestor_ids = _selected_ancestor_ids(
             contracted_prompt, unique_id, scene_info, selected_ids
@@ -1281,9 +1287,9 @@ def _metadata_for_save_mode(
 
     effective_models = _effective_model_source_ids(prompt, [scene_info, *expand_infos])
     contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(
-        prompt, selected_source_ids, text_source_ids, consumer_items, effective_models, unique_id,
+        prompt, selected_source_ids, protected_source_ids, consumer_items, effective_models, unique_id,
     )
-    selected_sources.update(text_source_ids)
+    selected_sources.update(protected_source_ids)
     ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)
     saved_prompt = _slice_prompt_to_ids(contracted_prompt, ancestor_ids)
     # Contracted passthrough nodes still belong to the selected event's lineage.

@@ -1484,6 +1484,45 @@ NODE_CLASS_MAPPINGS = {
                         self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
                     self.assertEqual(len(list((self.base / 'output' / folder).glob('*.png'))), 2)
 
+    def test_conflicting_random_consumers_replay_with_unused_model_arm(self):
+        from PIL import Image
+        for join in ('ScenePromptRandomRouteOutput', 'ScenePrompterQueue'):
+            with self.subTest(join=join):
+                marker = self.base / f'conflicting-{join}.json'
+                loader_marker = self.base / f'unused-model-{join}.log'
+                weights = [3333, 3333, 3334] + [0] * 7
+                graph = {
+                    '1': {'class_type': 'ScenePromptRandomRoute', 'inputs': {'weights_json': json.dumps(weights)}},
+                    '5': {'class_type': join, 'inputs': {'scene_prompt1': ['2', 0], 'scene_prompt2': ['3', 0], 'scene_prompt3': ['12', 0]}},
+                    '6': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['5', 0], 'seed_base': 1, 'current_index': 0, 'timestamp_dir': False, 'run_id': ''}},
+                    '7': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['5', 0], 'scope': '全てのノード', 'seed_base': 2, 'current_index': 0}},
+                    '8': {'class_type': 'EmptyImage', 'inputs': {'width': 16, 'height': 16, 'batch_size': 1, 'color': 0}},
+                    '9': {'class_type': 'TestSceneTextImage', 'inputs': {'image': ['8', 0], 'positive': ['6', 0], 'negative': ['7', 0], 'log_path': str(marker)}},
+                    '10': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['9', 0], 'scene_info': ['6', 2], 'path': f'conflict-{join}', 'metadata_mode': '生成経路ノードのみ'}},
+                    '11': {'class_type': 'TestSceneModelBundle', 'inputs': {'label': 'unused-model', 'log_path': str(loader_marker)}},
+                    '12': {'class_type': 'SceneApplyModel', 'inputs': {'scene_prompt': ['4', 0], 'model': ['11', 0], 'clip': ['11', 1], 'vae': ['11', 2]}},
+                }
+                for arm, node_id in enumerate(('2', '3', '4')):
+                    graph[node_id] = {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': chr(65 + arm), 'scene_prompt': ['1', arm]}}
+                handle, workflow = self._prepare_callback_run(graph, '6')
+                try:
+                    self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                    self.assertEqual(json.loads(marker.read_text(encoding='utf-8')), ['A', 'B'])
+                finally:
+                    self._request('/scene_prompt/runs/release', {'run_handle': handle})
+                file = next((self.base / 'output' / f'conflict-{join}').glob('*.png'))
+                with Image.open(file) as image:
+                    replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
+                self.assertTrue({'2', '3', '4', '11', '12'}.issubset(replay))
+                self.assertEqual(json.loads(replay['1']['inputs']['weights_json']), weights)
+                replay_handle, visual = self._prepare_callback_run(replay, '6', visual)
+                try:
+                    self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                    self.assertEqual(json.loads(marker.read_text(encoding='utf-8')), ['A', 'B'])
+                finally:
+                    self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+                self.assertFalse(loader_marker.exists(), 'retaining an unused arm must not load its model')
+
     def test_model_specific_loras_execute_only_matching_loaders(self):
         for mode, include_illustrious, expected in (("Anima", True, ["lora:anima.safetensors"]),
                 ("Illustrious", True, ["lora:illustrious.safetensors"]), ("Illustrious", False, [])):

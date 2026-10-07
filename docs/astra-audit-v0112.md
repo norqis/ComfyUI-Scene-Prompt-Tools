@@ -202,6 +202,16 @@ Remediation review of `ebdc842` found a further boundary: native API MatchType i
 
 The review then exercised a shared Queue(A, B) at Expand index 1. Retaining both physical branches for a literal Switch made the old selected-source-only rebasing incorrectly turn B into A. Root removed the two conditions that withheld actual retained sources when no additional consumer executed. Both normal and expanded-Preset save paths now always calculate the primary replay index against the graph actually retained. The native eight-case test now checks the actual consumed text before and after replay, including shared Queue branches and index 1. It passes after correcting the test fixture's required image/negative/log inputs. All 748 Python tests pass (2 opt-in native classes skipped); the full browser is being rerun with the final rebasing change.
 
+The sixteenth auditor independently re-executed all eight cases and the shared Queue PNGs, approving exact HEAD `d555862c1c9f216df68f6ed19e1372be8b797a33`. All required CI checks passed (Python 748, frontend 25 suites, native CPU/HTTP 49), as did the complete final native browser. A new seventeenth auditor then reviewed the entire repository.
+
+## Seventeenth independent full audit
+
+The new GPT-6 Astra xhigh auditor (`astra_audit_round17`) found one additional Random replay defect. When Expand and To Text selected different arms of a shared gate with three or more positive-weight arms, selected-path saving removed the unused third arm but kept its positive probability. The PNG then failed preflight because that required branch was missing. Both Random Route Output and Queue joins reproduced the error with actual isolated CPU saves. Its other independent probes passed 172 compositions / 1,973 roundtrip events, 521 source-pruned replay ranks, and six-trillion-event indexing with a 27,655-byte traced peak and successful reference release.
+
+The auditor approved root's design: a small pure schedule traversal collects source IDs beneath only the conflicting Random choices. It visits each shared unit by identity and preservation state, without enumerating events or rows. Those sources join the existing protected set before PNG pruning/model contraction, with existing Preset aliases applied. Original probabilities and seed identities remain unchanged; unrelated Queue rows are still removed. Nested gates and model nodes inside unused required arms survive. No new cache, cap or whole-workflow fallback is introduced.
+
+The focused 60 tests pass, including 3/10 active arms, both join types, an unused nested gate/model, retained seed/index/text identity, unrelated-row pruning, a shared DAG with trillion-event counts and weak-reference release. Native CPU saves and replays both join types with actual A/B outputs and confirms that retaining the unused model arm never loads its model. The full native browser passes with three-arm Preset PNG import and a second save, using differing consumer seeds and ordinary common-seed execution. Initial test-fixture omissions (required run ID and explicit synthetic Model identity) were corrected to match native execution; no product workaround was added for them. Full Python and exact-HEAD remediation review follow before another fresh audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation

@@ -72,13 +72,14 @@ export async function testRandomPngReplay(page) {
 
         app.graph.clear();
         const input = add('ScenePresetInput'), gate = add('ScenePromptRandomRoute');
-        const a = add('ScenePrompter'), b = add('ScenePrompter'), join = add('ScenePromptRandomRouteOutput'), output = add('ScenePresetOutput');
-        set(gate, 'weights_json', JSON.stringify([5000, 5000, ...Array(8).fill(0)]));
+        const a = add('ScenePrompter'), b = add('ScenePrompter'), c = add('ScenePrompter');
+        const join = add('ScenePromptRandomRouteOutput'), output = add('ScenePresetOutput');
+        set(gate, 'weights_json', JSON.stringify([3333, 3333, 3334, ...Array(7).fill(0)]));
         set(gate, 'preserve_join', true);
-        set(a, 'positive_base', 'ARM_A'); set(b, 'positive_base', 'ARM_B');
+        set(a, 'positive_base', 'ARM_A'); set(b, 'positive_base', 'ARM_B'); set(c, 'positive_base', 'ARM_C');
         set(output, 'preset_id', 'random-png-replay');
-        connect(input, gate); connect(gate, a); connect(gate, b, 'scene_prompt', 1);
-        connect(a, join, 'scene_prompt1'); connect(b, join, 'scene_prompt2'); connect(join, output);
+        connect(input, gate); connect(gate, a); connect(gate, b, 'scene_prompt', 1); connect(gate, c, 'scene_prompt', 2);
+        connect(a, join, 'scene_prompt1'); connect(b, join, 'scene_prompt2'); connect(c, join, 'scene_prompt3'); connect(join, output);
         const definition = await app.graphToPrompt();
         await post('/scene_presets/save', { preset_id: 'random-png-replay', name: 'Random PNG', output_node_id: String(output.id), api_graph: definition, workflow: definition.workflow });
         const preset = await (await fetch('/scene_presets/load?preset_id=random-png-replay&include_api_graph=1')).json();
@@ -142,12 +143,12 @@ export async function testRandomPngReplay(page) {
         assert.deepEqual(entry.rows[1], entry.rows[0], `${entry.mode}: PNG load must preserve both draws`);
         assert.deepEqual(entry.rows[2], entry.rows[0], `${entry.mode}: second PNG save/load must preserve both draws`);
         assert.equal(entry.index, entry.mode === 'ワークフロー全体' ? 1 : 0, 'full workflow preserves the index; selected mode rebases after removing the prelude');
-        assert(entry.rows.flat().every(text => text === 'ARM_A' || text === 'ARM_B'), 'replay never selects the unconsumed prelude');
+        assert(entry.rows.flat().every(text => ['ARM_A', 'ARM_B', 'ARM_C'].includes(text)), 'replay never selects the unconsumed prelude');
         assert(entry.originalSeed, 'expanded workflow preserves the draw identity');
         assert(entry.cloneRegistered && entry.cloneId != null && String(entry.cloneId) !== String(entry.originalId), `clone receives a real independent node ID: ${JSON.stringify(entry)}`);
         assert.equal(entry.cloneSeed, undefined, 'cloned Random uses a new identity');
         if (entry.ordinary) assert.equal(JSON.parse(entry.weights).filter(Boolean).length, 1, 'ordinary Queue freezes the selected arm through named-widget reload');
-        else assert.deepEqual(JSON.parse(entry.weights), [5000, 5000, ...Array(8).fill(0)], 'conflicting consumers must not freeze one arm');
+        else assert.deepEqual(JSON.parse(entry.weights), [3333, 3333, 3334, ...Array(7).fill(0)], 'conflicting consumers retain the original distribution including the third arm');
     }
     console.log('real ComfyUI full/selected PNG import preserves generic Switch selection, distinct Random consumers and independent clones');
 }

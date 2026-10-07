@@ -877,6 +877,62 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         with self.assertRaisesRegex(self.plan.ScenePlanError, '出力2'):
             route.route(**kwargs, dynprompt=dynamic)
 
+    def test_conflicting_random_consumers_keep_all_required_nested_branches(self):
+        for arm_count, join_kind in itertools.product((3, 10), ('ScenePromptRandomRouteOutput', 'ScenePrompterQueue')):
+            with self.subTest(arms=arm_count, join=join_kind):
+                weights = [3333, 3333, 3334] + [0] * 7 if arm_count == 3 else [1000] * 10
+                graph = {
+                    '1': {'class_type': 'ScenePromptRandomRoute', 'inputs': {'weights_json': json.dumps(weights)}},
+                    '12': {'class_type': join_kind, 'inputs': {f'scene_prompt{arm + 1}': [str(arm + 2), 0] for arm in range(arm_count)}},
+                    '13': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['17', 0], 'current_index': 1}},
+                    '14': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['17', 0], 'current_index': 1}},
+                    '15': {'class_type': 'Save', 'inputs': {'info': ['13', 2], 'text': ['14', 0]}},
+                    '16': scene_prompt('UNUSED_PRELUDE'),
+                    '17': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['16', 0], 'scene_prompt2': ['12', 0]}},
+                    '19': {'class_type': 'CheckpointLoaderSimple', 'inputs': {'ckpt_name': 'unused.safetensors'}},
+                    '20': {'class_type': 'SceneApplyModel', 'inputs': {'scene_prompt': ['4', 0], 'model': ['19', 0], 'clip': ['19', 1], 'vae': ['19', 2], 'source_node_id': '20'}},
+                    '21': {'class_type': 'ScenePromptRandomRoute', 'inputs': {'scene_prompt': ['20', 0], 'weights_json': json.dumps([5000, 5000] + [0] * 8)}},
+                    '24': {'class_type': 'ScenePromptRandomRouteOutput', 'inputs': {'scene_prompt1': ['22', 0], 'scene_prompt2': ['23', 0]}},
+                }
+                for arm in range(arm_count):
+                    graph[str(arm + 2)] = scene_prompt(chr(65 + arm))
+                    graph[str(arm + 2)]['inputs']['scene_prompt'] = ['1', arm]
+                for arm, node_id in enumerate(('22', '23')):
+                    graph[node_id] = scene_prompt(f'nested{arm}')
+                    graph[node_id]['inputs']['scene_prompt'] = ['21', arm]
+                graph['12']['inputs']['scene_prompt3'] = ['24', 0]
+                plan = self.presets._scene_node_value(graph, '17', {}, set())
+                seeds = {}
+                for seed in range(2, 1000):
+                    parts = self.plan.item_for_normalized_plan(plan, 1, seed)['row']['positive_parts']
+                    if parts in (['A'], ['B']):
+                        seeds.setdefault(parts[0], seed)
+                    if len(seeds) == 2:
+                        break
+                self.assertEqual(set(seeds), {'A', 'B'})
+                handle = self.runs.create_run_context('default')
+                graph['13']['inputs']['seed_base'] = seeds['A'] - 1
+                graph['14']['inputs']['seed_base'] = seeds['B'] - 1
+                expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=plan, current_index=1,
+                    seed_base=seeds['A'] - 1, unique_id='13', run_handle=handle, prompt=graph)
+                text = self.nodes.ScenePromptToText().to_text(scene_prompt=plan, current_index=1,
+                    seed_base=seeds['B'] - 1, unique_id='14', run_handle=handle)
+                self.assertEqual((expanded[0], text[0]), ('A', 'B'))
+                saved, _ = self.nodes._metadata_for_save_mode(graph, {'workflow': self.workflow(graph)}, '15',
+                    self.nodes.SAVE_METADATA_EXECUTION_PATH, expanded[2])
+                self.assertNotIn('16', saved, 'unrelated Queue rows must still be pruned')
+                self.assertTrue(set(map(str, range(2, arm_count + 2))).issubset(saved))
+                self.assertTrue({'19', '20', '21', '22', '23', '24'}.issubset(saved), 'unused retained arm keeps its model and nested gate')
+                self.assertEqual(json.loads(saved['1']['inputs']['weights_json']), weights)
+                self.assertEqual(saved['21']['inputs']['weights_json'], graph['21']['inputs']['weights_json'])
+                replay_plan = self.presets._scene_node_value(saved, '17', {}, set())
+                for consumer, expected in (('13', 'A'), ('14', 'B')):
+                    values = saved[consumer]['inputs']
+                    self.assertEqual(values['current_index'], 0)
+                    result = self.nodes.ScenePromptToText().to_text(scene_prompt=replay_plan,
+                        **{name: values[name] for name in ('current_index', 'seed_base', 'seed_base_literal')})
+                    self.assertEqual(result[0], expected)
+
     def test_random_replay_does_not_freeze_conflicting_expand_and_to_text_arms(self):
         import json
         original = json.dumps([5000, 5000] + [0] * 8)
