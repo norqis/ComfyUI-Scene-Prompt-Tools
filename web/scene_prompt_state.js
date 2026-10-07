@@ -178,7 +178,7 @@ function parseSelectionItem(value, category, label) {
 }
 
 export function createSelectionState() {
-    return { version: SELECTION_STATE_VERSION, categories: {} };
+    return { version: SELECTION_STATE_VERSION, categories: Object.create(null) };
 }
 
 export function parseSelectionState(value) {
@@ -197,7 +197,7 @@ export function parseSelectionState(value) {
         throw new Error("Scene Prompt selection categories must be an object.");
     }
 
-    const categories = {};
+    const categories = Object.create(null);
     for (const [name, items] of Object.entries(parsed.categories)) {
         requireString(name, "Scene Prompt selection category", { allowEmpty: false });
         if (!Array.isArray(items)) {

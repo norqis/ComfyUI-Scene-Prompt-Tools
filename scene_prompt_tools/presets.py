@@ -15,7 +15,7 @@ from comfy_execution.graph_utils import GraphBuilder, is_link
 from .llm_node import ScenePromptLLM
 from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
 from .plan import mark_prompt_whole, seed_plan
-from .storage import public_user_directory
+from .storage import public_user_directory, is_windows_reserved_name
 from .nodes import (
     SceneEmptyLatent,
     SceneApplyModel,
@@ -143,6 +143,8 @@ def _clean_preset_id(value):
     preset_id = str(value or "").strip()
     if not PRESET_ID_RE.fullmatch(preset_id):
         raise ScenePresetError("preset_id は英数字、_、- だけで入力してください。")
+    if os.name == "nt" and is_windows_reserved_name(preset_id):
+        raise ScenePresetError(f"preset_id: Windowsの予約名「{preset_id}」は使えません。")
     return preset_id
 
 

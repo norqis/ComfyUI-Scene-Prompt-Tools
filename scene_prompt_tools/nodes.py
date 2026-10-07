@@ -21,6 +21,7 @@ import folder_paths
 from comfy.cli_args import args
 from comfy_execution.graph_utils import GraphBuilder, is_link
 from .switches import selected_switch_input
+from .storage import is_windows_reserved_name
 
 from .prompt import (
     DEFAULT_CATEGORY_ORDER,
@@ -129,7 +130,6 @@ def _random_weights_json(value):
         raise ScenePlanError("Scene Prompt Random Route の確率設定が不正です。合計を100%にしてください。") from exc
 BAD_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 BAD_FILENAME_PREFIX_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]+')
-WINDOWS_RESERVED_PREFIX_RE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.IGNORECASE)
 SEED_MODULO = 18446744073709551616
 SEED_MAX = SEED_MODULO - 1
 def _clean_string_list(values):
@@ -1118,6 +1118,18 @@ def _metadata_for_save_mode(
             for node_id, alias in source_aliases.items()
             if alias == source_id
         ]
+        # Older lineage lists contain the selected internal nodes without their
+        # Reference. Keep the new whole-prompt boundary for those occurrences.
+        selected_parents = {
+            "/".join(parts[:index])
+            for source_id in [*selected_source_ids, *text_source_ids]
+            for parts in [source_id.split("/")]
+            for index in range(1, len(parts))
+        }
+        selected_ids.extend(node_id for node_id, node in expanded_prompt.items()
+                            if node.get("class_type") == "ScenePromptCounter"
+                            and node.get("inputs", {}).get("prompt_trace_kind") == "whole"
+                            and source_aliases.get(node_id) in selected_parents)
         text_ids = {node_id for node_id, alias in source_aliases.items() if alias in text_source_ids}
         contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
             expanded_prompt, selected_ids, text_ids, text_replay_items,
@@ -1490,7 +1502,7 @@ def _safe_path_part(value, default_name="untitled"):
     text = re.sub(r"\s+", " ", text).strip().strip(". ")
     if text in ("", ".", ".."):
         return default_name
-    if WINDOWS_RESERVED_PREFIX_RE.match(text.split(".", 1)[0].rstrip(" ")):
+    if is_windows_reserved_name(text):
         text = f"_{text}" if "." in text else f"{text}_"
     return text[:80].rstrip(" .") or default_name
 
@@ -1507,8 +1519,7 @@ def _safe_relative_parts(value):
 
 def _safe_filename_prefix(value):
     prefix = _sanitize_filename_text(value)
-    first_component = prefix.split(".", 1)[0].rstrip(" ")
-    if WINDOWS_RESERVED_PREFIX_RE.match(first_component):
+    if is_windows_reserved_name(prefix):
         prefix = f"_{prefix}"
     if sum(2 if ord(character) > 0xFFFF else 1 for character in prefix) <= 240:
         return prefix

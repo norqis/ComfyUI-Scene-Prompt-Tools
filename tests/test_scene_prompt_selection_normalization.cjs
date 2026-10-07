@@ -263,3 +263,22 @@ assert.deepEqual(
 assert.ok(partWrites.length >= 5, "part edits write through the active state widget");
 
 console.log("Scene Prompt selection normalization tests passed.");
+
+for (const name of ["cloneSelectionState", "mergeSelectedItemsForDisplay", "setItemChecked"])
+    vm.runInContext(functionSource(name), context);
+context.popupStateWidgetName = () => "positive_json";
+context.readStateFromWidget = node => node.state;
+context.writeState = (node, state) => { node.state = state; };
+for (const name of ["__proto__", "constructor", "toString"]) {
+    const item = { ...candidate("special"), category_path: [name], category_key: name, category_label: name };
+    const node = { state: context.cloneSelectionState({ version: 1, categories: {} }) };
+    context.setItemChecked(node, item, true);
+    assert.equal(node.state.categories[name][0].id, "special");
+    const clone = context.cloneSelectionState(node.state);
+    const display = context.cloneSelectionState({ version: 1, categories: {} });
+    context.mergeSelectedItemsForDisplay(display, clone);
+    context.pruneStateToData(node, display, [item]);
+    assert.equal(display.categories[name][0].id, "special");
+    context.setItemChecked(node, item, false);
+    assert.equal(Object.keys(node.state.categories).length, 0);
+}

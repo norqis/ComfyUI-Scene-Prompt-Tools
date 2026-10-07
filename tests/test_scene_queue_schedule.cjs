@@ -205,6 +205,14 @@ function verifyCompactOrdinaryRows() {
     }
 }
 verifyCompactOrdinaryRows();
+for (const boundary of [false, true]) {
+    let empty = ctx.sceneSchedulePlan([], boundary);
+    for (let depth = 0; depth < 40; depth += 1) empty = ctx.sceneScheduleMerge(empty, empty);
+    assert.equal(empty.stats.rows, 0);
+    assert.equal(empty.stats.total, 0);
+    assert.equal(empty.boundary, boundary);
+    assert.equal(empty.units.length, 0, "empty shared Merge chains do not retain product subtrees");
+}
 
 Object.assign(ctx, {
     sceneWorkflowLoadDepth: 0,

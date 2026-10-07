@@ -29,6 +29,22 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
     def text(self, plan=None, **kwargs):
         return self.nodes.ScenePromptToText().to_text(scene_prompt=plan, seed_base=123, **kwargs)
 
+    def test_delete_deep_choices_preserves_slots_without_recursion(self):
+        value = "{" * 1500 + "tag" + "}" * 1500
+        plan = self.build(value)
+        for removal, expected in (("unrelated", "tag"), ("tag", "")):
+            deleted = self.nodes.ScenePromptDelete().delete(removal, "", plan)[0]
+            self.assertEqual(self.text(deleted), (expected, ""))
+        cases = {
+            "before { tag |keep||} after": "before {|keep||} after",
+            "{tag, keep|{tag|other}}": "{keep|{|other}}",
+            "{  keep  |tag}": "{  keep  |}",
+            "{tag|{keep}": "{tag|{keep}",
+            "prefix {tag|keep} suffix {tag}": "prefix {|keep} suffix {}",
+        }
+        for original, expected in cases.items():
+            self.assertEqual(self.prompt._delete_prompt_parts([original], {"tag"}), [expected])
+
     def test_to_text_selects_one_row_and_cycles_shorter_plans(self):
         a, b, c = [self.build(value, node_id=value) for value in ('A', 'B', 'C')]
         b = self.nodes.ScenePromptCounter().count(count=2, scene_prompt=b)[0]

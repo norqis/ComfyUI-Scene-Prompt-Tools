@@ -90,6 +90,35 @@ const set = (node, name, value) => { ctx.findWidget(node, name).value = value; }
 const key = node => ctx.scenePromptSourceCacheKey(node);
 const snapshot = node => JSON.parse(JSON.stringify(ctx.scenePromptStats(node)));
 
+// Exercise the real preview path, including optional Scene input seed semantics.
+{
+    const stubPreview = ctx.scenePromptPreviewEntries;
+    ctx.PATH_MODE_APPEND = "前のフォルダ名に結合"; ctx.PATH_MODE_DIRECTORY = "フォルダに分ける";
+    for (const name of ["scenePromptPreviewEntries", "appendScenePathPart", "normalizePathMode", "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry"])
+        vm.runInContext(functionSource(name), ctx);
+    for (const type of ["ScenePromptPath", "ScenePromptMatrix", "ScenePromptTextDelete", "SceneEmptyLatent"]) {
+        const g = graph(), start = add(g, type, { matrix_json: "[]", width: 512, height: 512, batch_size: 3 });
+        const visible = add(g, "ScenePrompter"), normal = add(g, "ScenePrompter"), queue = add(g, "ScenePrompterQueue");
+        visible.title = "VISIBLE"; normal.title = "NORMAL";
+        connect(start, visible, "scene_prompt"); connect(visible, queue, "scene_prompt1"); connect(normal, queue, "scene_prompt2");
+        const stats = ctx.scenePromptStats(queue), entries = ctx.scenePromptPreviewEntries(queue);
+        assert.equal(stats.total, 2, type);
+        assert.equal(stats.totalImages, type === "SceneEmptyLatent" ? 4 : 2, type);
+        assert.deepEqual(JSON.parse(JSON.stringify(entries.map(entry => entry.parts))), [["VISIBLE"], ["NORMAL"]], type);
+        if (type === "ScenePromptPath") assert.deepEqual(Array.from(entries[0].row.path_parts), [type]);
+        if (type === "SceneEmptyLatent") assert.equal(entries[0].row.latent.batch_size, 3);
+        const empty = add(g, "ScenePromptMatrix", { matrix_json: "[]" });
+        empty.sceneScheduleCache = null;
+        // An explicitly configured all-disabled Matrix is empty, unlike an unconfigured one.
+        const configured = ctx.matrixConfiguredLineCount;
+        ctx.matrixConfiguredLineCount = node => node === empty ? 1 : configured(node);
+        connect(empty, start, "scene_prompt");
+        assert.deepEqual(JSON.parse(JSON.stringify(ctx.scenePromptPreviewEntries(queue).map(entry => entry.parts))), [["NORMAL"]], type);
+        ctx.matrixConfiguredLineCount = configured;
+    }
+    ctx.scenePromptPreviewEntries = stubPreview;
+}
+
 const measurements = [];
 for (const depth of [1, 4, 8, 16, 32, 64]) {
     const g = graph(); let root = add(g, "ScenePrompter");

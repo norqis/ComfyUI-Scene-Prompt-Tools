@@ -88,13 +88,30 @@ def _prompt_override_key(part):
 
 def _delete_prompt_parts(parts, delete_keys):
     """Delete exact tags inside choice slots without changing their positions."""
-    def delete_slot(slot):
-        original = _split_prompt(slot)
-        remaining = _delete_prompt_parts(original, delete_keys)
-        return slot if remaining == original else ", ".join(remaining)
-
-    def delete_choices(text):
-        result = []
+    result = []
+    tasks = [("part", part, result) for part in reversed(parts)]
+    while tasks:
+        kind, value, target = tasks.pop()
+        if kind == "slot_done":
+            slot, original, remaining = value
+            target.append(slot if remaining == original else ", ".join(remaining))
+            continue
+        if kind == "part_done":
+            rewritten = "".join("".join(chunk) if isinstance(chunk, list) else chunk for chunk in value)
+            if _prompt_override_key(rewritten) not in delete_keys:
+                target.append(rewritten)
+            continue
+        if kind == "slot":
+            original = _split_prompt(value)
+            remaining = []
+            tasks.append(("slot_done", (value, original, remaining), target))
+            tasks.extend(("part", part, remaining) for part in reversed(original))
+            continue
+        text = value
+        if _prompt_override_key(text) in delete_keys:
+            continue
+        chunks = []
+        children = []
         start = 0
         depth = 0
         slots = []
@@ -113,19 +130,19 @@ def _delete_prompt_parts(parts, delete_keys):
                 depth -= 1
                 if depth == 0:
                     slots.append(text[slot_start:index])
-                    result.append(text[start:choice_start])
-                    result.append("{" + "|".join(delete_slot(slot) for slot in slots) + "}")
+                    chunks.extend((text[start:choice_start], "{"))
+                    for slot_index, slot in enumerate(slots):
+                        if slot_index:
+                            chunks.append("|")
+                        rewritten_slot = []
+                        chunks.append(rewritten_slot)
+                        children.append(("slot", slot, rewritten_slot))
+                    chunks.append("}")
                     start = index + 1
-        result.append(text[start:])
-        return "".join(result)
-
-    return [
-        rewritten
-        for part in parts
-        if _prompt_override_key(part) not in delete_keys
-        for rewritten in (delete_choices(part),)
-        if _prompt_override_key(rewritten) not in delete_keys
-    ]
+        chunks.append(text[start:])
+        tasks.append(("part_done", chunks, target))
+        tasks.extend(reversed(children))
+    return result
 
 
 def _item_weight(item):

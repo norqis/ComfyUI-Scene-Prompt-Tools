@@ -724,6 +724,8 @@ def merge(left, right):
     if first["random_guards"] or second["random_guards"]:
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Prompt Merge は使えません。")
     boundary = first["contains_queue_boundary"] or second["contains_queue_boundary"]
+    if not first["stats"]["row_count"] or not second["stats"]["row_count"]:
+        return mark_prompt_whole(_plan([], boundary=boundary))
     a = _unwrap_run(first["units"][0]) if len(first["units"]) == 1 else None
     b = _unwrap_run(second["units"][0]) if len(second["units"]) == 1 else None
     if a is not None and b is not None:

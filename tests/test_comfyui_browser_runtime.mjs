@@ -140,6 +140,19 @@ for name in ("CheckpointLoaderSimple", "UNETLoader", "CLIPLoader", "VAELoader", 
 @PromptServer.instance.routes.get("/scene_test/model_executions")
 async def model_executions(request):
     return web.json_response(executions)
+@PromptServer.instance.routes.post("/scene_test/preset_metadata")
+async def preset_metadata(request):
+    data = await request.json()
+    package = nodes.NODE_CLASS_MAPPINGS["SceneApplyLora"].__module__.rsplit(".", 1)[0]
+    metadata = importlib.import_module(package + ".preset_metadata")
+    presets = importlib.import_module(package + ".presets")
+    prompt = data["graph"]["output"]
+    if data.get("expand"):
+        prompt, workflow, _ = metadata.expand_preset_references(prompt, data["graph"]["workflow"], data["presets"], True)
+    else:
+        workflow = data["graph"]["workflow"]
+    text = presets._scene_node_value(prompt, data["text_id"], {}, set())
+    return web.json_response({"output": prompt, "workflow": workflow, "text": text})
 lookup_calls = []
 @PromptServer.instance.routes.post("/scene_test/civitai_lookup")
 async def civitai_lookup(request):
@@ -577,6 +590,60 @@ window.__sceneSeedRuntimeTest = {
         }, originalConnection);
         console.log("real ComfyUI native GPU settings, scoped POST policy, release-before-image, OFF compatibility and failed-cleanup recovery before normal Queue and OFF LLM generation passed");
     } finally { nativeGPUChecks = false; }
+    const presetBoundaryReplay = await page.evaluate(async () => {
+        const app = window.app, results = [];
+        const create = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+        const set = (node, name, value) => { node.widgets.find(widget => widget.name === name).value = value; };
+        const connect = (from, to) => from.connect(0, to, to.inputs.findIndex(slot => slot.name === "scene_prompt"));
+        const post = async (path, body) => {
+            const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            if (!response.ok) throw new Error(await response.text());
+            return response.json();
+        };
+        for (const nested of [false, true]) for (const passthrough of [false, true]) {
+            const presets = {};
+            app.graph.clear();
+            const input = create("ScenePresetInput"), inner = create(passthrough ? "ScenePromptCounter" : "ScenePrompter"), output = create("ScenePresetOutput");
+            set(input, "switch_names_json", '["Named"]');
+            if (passthrough) inner.mode = 4; else set(inner, "positive_base", "INSIDE");
+            connect(input, inner); connect(inner, output);
+            const childId = `boundary-${nested}-${passthrough}`;
+            set(output, "preset_id", childId);
+            let graph = await app.graphToPrompt();
+            await post("/scene_presets/save", { preset_id: childId, name: childId, output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow });
+            presets[childId] = await (await fetch(`/scene_presets/load?preset_id=${childId}&include_api_graph=1`)).json();
+            let presetId = childId;
+            if (nested) {
+                app.graph.clear();
+                const parentInput = create("ScenePresetInput"), ref = create("ScenePresetReference"), parentOutput = create("ScenePresetOutput");
+                set(parentInput, "switch_names_json", '["Parent"]'); set(ref, "preset_id", childId);
+                connect(parentInput, ref); connect(ref, parentOutput);
+                presetId = `${childId}-parent`; set(parentOutput, "preset_id", presetId);
+                graph = await app.graphToPrompt();
+                await post("/scene_presets/save", { preset_id: presetId, name: presetId, output_node_id: String(parentOutput.id), api_graph: graph, workflow: graph.workflow });
+                presets[presetId] = await (await fetch(`/scene_presets/load?preset_id=${presetId}&include_api_graph=1`)).json();
+            }
+            app.graph.clear();
+            const outside = create("ScenePrompter"), ref = create("ScenePresetReference"), text = create("ScenePromptToText");
+            set(outside, "positive_base", "OUTSIDE"); set(ref, "preset_id", presetId); set(text, "scope", "直前のノードのみ");
+            connect(outside, ref); connect(ref, text);
+            graph = await app.graphToPrompt();
+            const expanded = await post("/scene_test/preset_metadata", { graph, presets, expand: true, text_id: String(text.id) });
+            await app.loadGraphData(expanded.workflow, true, true);
+            const replay = await app.graphToPrompt();
+            const reloaded = await post("/scene_test/preset_metadata", { graph: replay, text_id: String(text.id) });
+            results.push({ nested, passthrough, before: expanded.text, after: reloaded.text,
+                boundaries: Object.values(replay.output).filter(node => node.inputs?.prompt_trace_kind === "whole").length });
+        }
+        app.graph.clear(); return results;
+    });
+    for (const result of presetBoundaryReplay) {
+        const expected = [result.passthrough ? "OUTSIDE" : "OUTSIDE, INSIDE", ""];
+        assert.deepEqual(result.before, expected);
+        assert.deepEqual(result.after, expected, "native LiteGraph reload preserves named-switch input and previous-scope Preset boundary");
+        assert.equal(result.boundaries, result.nested ? 2 : 1);
+    }
+    console.log("real ComfyUI expanded Preset workflow reload preserves named-switch passthrough, nested boundaries and previous-scope text");
     if (process.env.COMFYUI_WORKFLOW_PNG) {
         const extracted = spawnSync(python, [
             "-c",
@@ -2842,6 +2909,9 @@ window.__sceneSeedRuntimeTest = {
     await page.waitForTimeout(100);
     assert.deepEqual(pageErrors, []);
     console.log("real ComfyUI local metadata HTTP, model/LoRA dialogs, retry, red links and weighted Matrix input preservation passed");
+} catch (error) {
+    console.error(output.join("").slice(-6000));
+    throw error;
 } finally {
     await browser?.close();
     if (child?.exitCode === null) {

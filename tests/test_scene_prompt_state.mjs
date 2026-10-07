@@ -21,6 +21,14 @@ const selectionItem = {
     category_key: "Category", category_label: "Category",
     selected_parts: [{ index: 0, text: "alpha", weight: 1.2 }],
 };
+for (const name of ["__proto__", "constructor", "toString"]) {
+    const state = createSelectionState();
+    assert.equal(state.categories[name], undefined);
+    state.categories[name] = [{ ...selectionItem, category_key: name, category_label: name, category_path: [name] }];
+    const restored = parseSelectionState(serializeSelectionState(state));
+    assert.equal(restored.categories[name][0].prompt, selectionItem.prompt);
+    assert.deepEqual(Object.keys(restored.categories), [name]);
+}
 assert.equal(parseSelectionState({ version: 1, categories: { Category: [selectionItem] } }).categories.Category[0].label, "A");
 for (const weight of [-20, 50]) {
     const weighted = { ...selectionItem, selected_parts: [{ index: 0, text: "alpha", weight }] };

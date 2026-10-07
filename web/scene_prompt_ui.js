@@ -1231,7 +1231,7 @@ function itemForEditedState(updatedItem, previousItem) {
 
 function replacePromptItemInState(state, originalCategory, originalKey, updatedItem, updatedCategory) {
     let changed = false;
-    const nextCategories = {};
+    const nextCategories = Object.create(null);
     const matchKeys = new Set([originalKey]);
     for (const [category, items] of Object.entries(state.categories || {})) {
         const nextItems = [];
@@ -1668,7 +1668,7 @@ function selectedItemMap(state, firstWins = false) {
 }
 
 function cloneSelectionState(state) {
-    const cloned = { version: state?.version || 1, categories: {} };
+    const cloned = { version: state?.version || 1, categories: Object.create(null) };
     for (const [category, items] of Object.entries(state?.categories || {})) {
         const clonedItems = (items || []).filter(Boolean).map((item) => itemForState(item, item));
         if (clonedItems.length) {
@@ -1680,7 +1680,7 @@ function cloneSelectionState(state) {
 
 function mergeSelectedItemsForDisplay(displayState, sourceState) {
     if (!displayState.categories || typeof displayState.categories !== "object") {
-        displayState.categories = {};
+        displayState.categories = Object.create(null);
     }
 
     for (const [sourceCategory, items] of Object.entries(sourceState?.categories || {})) {
@@ -1849,7 +1849,7 @@ function setSavedPromptChecked(node, savedPrompt, checked, options = {}) {
 function pruneStateToData(node, state, items, options = {}) {
     const { categories: validCategories, byKey: currentItems, fallback } = promptCatalogIndex(items);
     let changed = false;
-    const nextCategories = {};
+    const nextCategories = Object.create(null);
 
     for (const [category, selected] of Object.entries(state.categories || {})) {
         if (!validCategories.has(category)) throw new Error(`選択済みカテゴリ「${category}」が候補データにありません。`);
@@ -2123,7 +2123,7 @@ function setAllItemParts(node, item, checked, options = {}) {
 function clearSelection(node, stateWidgetName = null) {
     const targetStateWidgetName = stateWidgetName || activeStateWidgetName(node);
     setActiveStateWidget(node, targetStateWidgetName);
-    writeState(node, { version: 1, categories: {} }, { fitHeight: true, fitDelay: 0, stateWidgetName: targetStateWidgetName });
+    writeState(node, { version: 1, categories: Object.create(null) }, { fitHeight: true, fitDelay: 0, stateWidgetName: targetStateWidgetName });
 }
 
 function summarizeSelection(state) {
@@ -8055,7 +8055,7 @@ function sceneScheduleMerge(left, right) {
     if (left.randomGuards?.length || right.randomGuards?.length)
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMergeを接続してください。");
     const boundary = left.boundary || right.boundary;
-    const composite = sceneScheduleHasComposite(left) || sceneScheduleHasComposite(right);
+    if (!left.stats.rows || !right.stats.rows) return sceneSchedulePlan([], boundary);
     if (left.units.length === 1 && right.units.length === 1) {
         const run = (unit) => {
             while (["fixed", "count_hold"].includes(unit.kind)) unit = unit.unit;
@@ -8074,6 +8074,7 @@ function sceneScheduleMerge(left, right) {
     }
     const l = left.stats;
     const r = right.stats;
+    const composite = sceneScheduleHasComposite(left) || sceneScheduleHasComposite(right);
     const unit = { kind: composite ? "product" : "row_product", left, right,
         total: sceneStatProduct(l.total, r.total),
         totalImages: sceneStatSum(sceneStatProduct(l.total, r.totalImages - r.unsetBatches),
@@ -8796,7 +8797,8 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         if (!matrixRows.length) {
             return finish(matrixConfiguredLineCount(node) > 0
                 ? []
-                : (upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo) : []));
+                : (upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+                    : [{ parts: [], count: 1, row: emptyMatrixRow() }]));
         }
         const baseEntries = upstream
             ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
@@ -8834,10 +8836,9 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const title = scenePathTitle(node);
         const pathMode = normalizePathMode(findWidget(node, "path_mode")?.value);
         const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
-        return finish(scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo).map((entry) => {
+        const entries = upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : [{ parts: [], count: 1, row: emptyMatrixRow() }];
+        return finish(entries.map((entry) => {
             const row = entry.row || emptyMatrixRow();
             return {
                 ...entry,
@@ -8868,7 +8869,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const upstream = scenePromptInputSource(node);
         return finish(upstream
             ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
-            : []);
+            : (isScenePromptDeleteNode(node) ? [{ parts: [], count: 1, row: emptyMatrixRow() }] : []));
     }
 
     if (isScenePromptCounterNode(node)) {
@@ -8887,11 +8888,10 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
 
     if (isSceneEmptyLatentNode(node)) {
         const upstream = scenePromptInputSource(node);
-        if (!upstream) {
-            return finish([]);
-        }
+        const entries = upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
+            : [{ parts: [], count: 1, row: emptyMatrixRow() }];
         const latent = sceneEmptyLatentConfig(node);
-        return finish(scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo).map((entry) => ({
+        return finish(entries.map((entry) => ({
             ...entry,
             row: { ...(entry.row || emptyMatrixRow()), latent },
         })));
@@ -9520,11 +9520,15 @@ function applyScenePresetSwitchBindings(apiGraph, graph) {
     const savedNodes = apiGraph?.workflow?.nodes;
     const nodes = savedNodes ? new Map(savedNodes.map((node) => [String(node.id), node])) : null;
     for (const [nodeId, promptNode] of Object.entries(apiGraph?.output || {})) {
-        if (promptNode?.class_type !== "ScenePresetInput") continue;
-        const values = (nodes ? nodes.get(nodeId) : graph?.getNodeById?.(nodeId))?.properties?.scene_switch_values;
-        if (values !== undefined) {
+        const properties = (nodes ? nodes.get(nodeId) : graph?.getNodeById?.(nodeId))?.properties;
+        const values = properties?.scene_switch_values;
+        if (promptNode?.class_type === "ScenePresetInput" && values !== undefined) {
             promptNode.inputs ||= {};
             promptNode.inputs.switch_values = { values: [...values] };
+        }
+        if (promptNode?.class_type === "ScenePromptCounter" && properties?.scene_prompt_trace_kind === "whole") {
+            promptNode.inputs ||= {};
+            promptNode.inputs.prompt_trace_kind = "whole";
         }
     }
     return apiGraph;
@@ -9536,8 +9540,11 @@ function installScenePresetSwitchBindings() {
     app.graphToPrompt = async function (...args) {
         commitActiveMatrixLineDraft();
         const bindings = new Map((this.graph?._nodes || [])
-            .filter((node) => nodeClassName(node) === "ScenePresetInput" && node.properties?.scene_switch_values)
-            .map((node) => [String(node.id), { properties: { scene_switch_values: [...node.properties.scene_switch_values] } }]));
+            .filter((node) => nodeClassName(node) === "ScenePresetInput" || nodeClassName(node) === "ScenePromptCounter")
+            .map((node) => [String(node.id), { properties: {
+                scene_switch_values: node.properties?.scene_switch_values?.slice(),
+                scene_prompt_trace_kind: node.properties?.scene_prompt_trace_kind,
+            } }]));
         return applyScenePresetSwitchBindings(await original.apply(this, args), { getNodeById: (id) => bindings.get(String(id)) });
     };
     app.graphToPrompt.scenePresetSwitchBindings = true;

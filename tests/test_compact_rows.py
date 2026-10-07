@@ -158,6 +158,18 @@ class CompactRowTests(unittest.TestCase):
             self.assertEqual(p.replay_index_for_event(compact, selected["event_ref"], {"a"}, {"a"}), 0)
             self.assertEqual(p.multiply_count(compact, 10)["stats"]["total_batches"], 1 if held else 10)
 
+    def test_empty_shared_merge_chain_keeps_no_recursive_products(self):
+        for boundary in (False, True):
+            empty = p.make_plan([])
+            if boundary:
+                empty = p.queue([empty])
+            for _ in range(40):
+                empty = p.merge(empty, empty)
+            self.assertEqual(empty["stats"]["row_count"], 0)
+            self.assertEqual(empty["stats"]["total_batches"], 0)
+            self.assertEqual(empty["contains_queue_boundary"], boundary)
+            self.assertEqual(empty["units"], [])
+
     def test_scalar_merge_preserves_strict_count_union_and_zero_counts(self):
         for left_held, right_held in ((True, False), (False, True), (True, True)):
             for a_count in (0, 1, 3):
