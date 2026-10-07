@@ -29,6 +29,17 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
     def text(self, plan=None, **kwargs):
         return self.nodes.ScenePromptToText().to_text(scene_prompt=plan, seed_base=123, **kwargs)
 
+    def test_internal_preset_boundary_preserves_open_random_branch(self):
+        arm, other, *_ = self.plan.random_route(self.build('base'), [5000, 5000] + [0] * 8, 'gate')
+        counter = self.nodes.ScenePromptCounter()
+        marked = counter.count(arm, 1, prompt_trace_kind='whole', source_node_id='reference')[0]
+        self.assertEqual(marked['random_guards'], arm['random_guards'])
+        joined = self.plan.queue([marked, other])
+        self.assertEqual(self.text(joined), ('base', ''))
+        for count, downstream, kind in ((1, True, ''), (2, True, 'whole'), (1, False, 'whole'), (True, True, 'whole')):
+            with self.subTest(count=count, downstream=downstream, kind=kind), self.assertRaises(ValueError):
+                counter.count(arm, count, prompt_trace_kind=kind, enable_downstream_count=downstream)
+
     def test_delete_deep_choices_preserves_slots_without_recursion(self):
         value = "{" * 1500 + "tag" + "}" * 1500
         plan = self.build(value)

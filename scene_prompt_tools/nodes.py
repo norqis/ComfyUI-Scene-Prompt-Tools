@@ -2370,7 +2370,12 @@ class ScenePromptCounter:
         prompt_trace_kind="",
         enable_downstream_count=True,
     ):
-        plan = multiply_count(scene_prompt, count, enable_downstream_count)
+        # Runtime/PNG Preset boundaries mark a whole prompt without changing
+        # its schedule, including an open Random branch.
+        if prompt_trace_kind == "whole" and type(count) is int and count == 1 and enable_downstream_count is True:
+            plan = normalize_plan(scene_prompt)
+        else:
+            plan = multiply_count(scene_prompt, count, enable_downstream_count)
         if prompt_trace_kind == "whole":
             plan = mark_prompt_whole(plan)
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)

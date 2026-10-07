@@ -50,6 +50,11 @@ const randomWeights = [6000, 4000, 0, 0, 0, 0, 0, 0, 0, 0];
 const guarded = (plan, index, gateId = "random-1") => ctx.sceneSchedulePlan(plan.units, plan.boundary,
     [{ gateId, armIndex: index, weights: randomWeights }]);
 const randomJoined = queue([guarded(leaf("A"), 0), guarded(leaf("B"), 1)], controls("alternate", 3));
+const boundaryArm = guarded(leaf("boundary"), 0);
+assert.equal(ctx.sceneScheduleCount(boundaryArm, 1, true, "whole"), boundaryArm,
+    "internal Preset boundaries preserve open Random arms without applying Count");
+for (const [factor, enabled, kind] of [[1, true, ""], [2, true, "whole"], [1, false, "whole"]])
+    assert.match(ctx.sceneScheduleCount(boundaryArm, factor, enabled, kind).stats.error, /Queueで合流/u);
 assert.equal(randomJoined.stats.total, 1, "random alternatives occupy one generation slot");
 assert.equal(randomJoined.stats.rows, 1);
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(randomJoined))), ["ランダム候補"],
@@ -226,6 +231,15 @@ Object.assign(ctx, {
     clampSceneCount: (value, fallback) => Number.isSafeInteger(value) ? value : fallback,
 });
 vm.runInContext(functionSource("sceneScheduleForPreset"), ctx);
+const wholeBoundaryPreset = { api_graph: { output: {
+    "1": { class_type: "ScenePresetInput", inputs: {} },
+    "2": { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["1", 0], count: 1, prompt_trace_kind: "whole" } },
+    "3": { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["2", 0] } },
+} } };
+const presetBoundaryArm = ctx.sceneScheduleForPreset("boundary", boundaryArm, new Set(), wholeBoundaryPreset);
+assert.equal(presetBoundaryArm.stats.error, undefined);
+assert.equal(presetBoundaryArm.randomGuards.length, 1, "saved whole boundary preserves the open Random arm");
+assert.equal(queue([presetBoundaryArm, guarded(leaf("other"), 1)], controls()).stats.total, 1);
 const preset = { api_graph: { output: {
     1: { class_type: "ScenePresetInput", inputs: {} },
     2: { class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0], prompt_name: "b1" } },

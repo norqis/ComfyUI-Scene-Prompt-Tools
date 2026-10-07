@@ -253,7 +253,7 @@ def _compact_preset_list_graph(api_graph, local_memo=None):
         return copy.deepcopy(api_graph)
     compact_nodes = {}
     scalar_inputs = {
-        "matrix_json", "batch_size", "count", "enable_downstream_count", "preset_id", "reverse_scope",
+        "matrix_json", "batch_size", "count", "enable_downstream_count", "prompt_trace_kind", "preset_id", "reverse_scope",
         "order_mode", "alternate_block_size", "downstream_count_mode",
         "weights_json", "preserve_join", "llm_presets_json",
         "switch_names_json", "switch_settings_json", "switch_values", "switch",

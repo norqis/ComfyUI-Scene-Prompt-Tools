@@ -2459,6 +2459,52 @@ NODE_CLASS_MAPPINGS = {
                 finally:
                     self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
+    def test_http_preset_inside_random_arm_executes_and_expanded_png_replays(self):
+        from PIL import Image
+        child = {"1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 0], "positive_base": "inside_branch"}},
+            "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}}}
+        self._request("/scene_presets/save", {"preset_id": "arm_child", "name": "Arm child", "output_node_id": "3",
+            "api_graph": {"output": child}, "workflow": _workflow_for_graph(child)})
+        parent = copy.deepcopy(child)
+        parent["2"] = {"class_type": "ScenePresetReference", "inputs": {"scene_prompt": ["1", 0], "preset_id": "arm_child"}}
+        self._request("/scene_presets/save", {"preset_id": "arm_parent", "name": "Arm parent", "output_node_id": "3",
+            "api_graph": {"output": parent}, "workflow": _workflow_for_graph(parent)})
+        marker = self.base / "preset-arm-result.json"
+        for join_type in ("ScenePrompterQueue", "ScenePromptRandomRouteOutput"):
+            for preset_id in ("arm_child", "arm_parent"):
+                graph = {
+                    "1": {"class_type": "ScenePromptRandomRoute", "inputs": {"weights_json": json.dumps([5000, 5000] + [0] * 8)}},
+                    "2": {"class_type": "ScenePresetReference", "inputs": {"scene_prompt": ["1", 0], "preset_id": preset_id}},
+                    "3": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "scene_prompt": ["1", 1], "positive_base": "other_branch"}},
+                    "4": {"class_type": join_type, "inputs": {"scene_prompt1": ["2", 0], "scene_prompt2": ["3", 0]}},
+                    "5": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["4", 0], "count": 2}},
+                    "6": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["5", 0], "seed_base": 123, "run_id": "preset-arm", "timestamp_dir": False}},
+                    "7": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
+                    "8": {"class_type": "TestSceneTextImage", "inputs": {"image": ["7", 0], "positive": ["6", 0], "negative": ["6", 1], "log_path": str(marker)}},
+                    "9": {"class_type": "SceneSaveImage", "inputs": {"images": ["8", 0], "scene_info": ["6", 2],
+                        "path": f"preset-arm-{join_type}-{preset_id}", "expand_preset_contents": True, "metadata_mode": "ワークフロー全体"}},
+                }
+                handle, workflow = self._prepare_callback_run(graph, "6")
+                try:
+                    for index in range(2):
+                        graph["6"]["inputs"]["current_index"] = index
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
+                        expected = json.loads(marker.read_text(encoding="utf-8"))
+                        self.assertIn(expected[0], ("inside_branch", "other_branch"))
+                        path = max((self.base / "output" / graph["9"]["inputs"]["path"]).glob("*.png"), key=lambda entry: entry.stat().st_mtime_ns)
+                        with Image.open(path) as image:
+                            replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
+                        replay["9"]["inputs"]["path"] = "preset-arm-replay"
+                        replay_handle, replay_workflow = self._prepare_callback_run(replay, "6", replay_workflow)
+                        try:
+                            self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
+                            self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), expected)
+                        finally:
+                            self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
+                finally:
+                    self._request("/scene_prompt/runs/release", {"run_handle": handle})
+
     def test_http_to_text_delete_cached_plan_and_execution_png_replay(self):
         from PIL import Image
         marker = self.base / "text-result.json"

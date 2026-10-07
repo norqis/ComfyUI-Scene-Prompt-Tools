@@ -7198,7 +7198,8 @@ function scenePromptSourceLocalCacheKey(node) {
         return finish({ type: "reverse", reverse_scope: scenePromptReverseScope(node) });
     }
     if (isScenePromptCounterNode(node)) {
-        return finish({ type: "counter", values: values(["count", "enable_downstream_count"]) });
+        return finish({ type: "counter", values: values(["count", "enable_downstream_count"]),
+            prompt_trace_kind: node.properties?.scene_prompt_trace_kind });
     }
     if (isScenePromptRandomRouteNode(node)) {
         return finish({ type: "random_route", values: values(["weights_json", "preserve_join"]) });
@@ -7971,7 +7972,8 @@ function sceneSchedulePrefix(plan, limit) {
     return entries;
 }
 
-function sceneScheduleCount(plan, factor, enableDownstreamCount = true) {
+function sceneScheduleCount(plan, factor, enableDownstreamCount = true, promptTraceKind = "") {
+    if (promptTraceKind === "whole" && factor === 1 && enableDownstreamCount === true) return plan;
     if (plan.stats.error) return plan;
     if (plan.randomGuards.length && !sceneRandomZeroArm(plan))
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからCountを接続してください。");
@@ -8155,7 +8157,7 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                             [name, apiInput(entry, name) ?? SCENE_QUEUE_CONTROL_DEFAULTS[name]])));
             } else if (entry.class_type === "ScenePromptCounter") {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-                plan = sceneScheduleCount(base, clampSceneCount(switches.scalar(entry, "count", "number", 1), 1), switches.scalar(entry, "enable_downstream_count", "boolean", true));
+                plan = sceneScheduleCount(base, clampSceneCount(switches.scalar(entry, "count", "number", 1), 1), switches.scalar(entry, "enable_downstream_count", "boolean", true), apiInput(entry, "prompt_trace_kind"));
             } else if (entry.class_type === "SceneEmptyLatent") {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 plan = base.randomGuards.length && !sceneRandomZeroArm(base)
@@ -8249,7 +8251,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
     if (isScenePromptCounterNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
             : sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
-        return finish(sceneScheduleCount(base, scenePromptCounterCount(node), scenePromptCounterDownstreamEnabled(node)));
+        return finish(sceneScheduleCount(base, scenePromptCounterCount(node), scenePromptCounterDownstreamEnabled(node), node.properties?.scene_prompt_trace_kind));
     }
     if (isScenePresetReferenceNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
@@ -8855,7 +8857,8 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const firstSource = sources[0] || null;
         const secondSource = sources[1] || null;
         if (!firstSource) {
-            return finish(secondSource ? scenePromptPreviewEntries(secondSource, maxEntries, new Set(seen), memo) : []);
+            return finish(secondSource ? scenePromptPreviewEntries(secondSource, maxEntries, new Set(seen), memo)
+                : [{ parts: [], count: 1, row: emptyMatrixRow() }]);
         }
         if (!secondSource) {
             return finish(scenePromptPreviewEntries(firstSource, maxEntries, new Set(seen), memo));
@@ -8876,7 +8879,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
         const count = scenePromptCounterCount(node);
         const upstream = scenePromptInputSource(node);
         if (!upstream) {
-            return finish([]);
+            return finish([{ parts: [], count, row: emptyMatrixRow() }]);
         }
         if (sceneQueueBoundaryInNode(upstream)) {
             return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
@@ -9689,13 +9692,14 @@ async function resolveScenePresetsForRun(run, snapshot, expandNodeId) {
         return null;
     }
     const referenceIds = scenePresetReferenceIdsForExpand(snapshot, expandNodeId);
-    clearScenePresetReferenceErrors({ nodeIds: referenceIds });
+    const targets = { graph: run.graph, nodes: run.presetErrorNodes || [], nodeIds: referenceIds };
+    clearScenePresetReferenceErrors(targets);
     const data = await prepareSceneRunContext(snapshot, expandNodeId);
     if (run.cancelled) {
         releaseSceneRunHandle(data?.run_handle);
         return null;
     }
-    clearScenePresetReferenceErrors({ nodeIds: referenceIds });
+    clearScenePresetReferenceErrors(targets);
     run.runHandle = String(data.run_handle);
     return data;
 }
@@ -9778,6 +9782,7 @@ function scenePresetReferenceIdsForExpand(apiGraph, expandNodeId) {
 }
 
 function markScenePresetReferenceErrors(message, options = {}) {
+    const graph = options.graph || app.graph;
     const targetIds = new Set();
     if (options.nodeId) {
         targetIds.add(String(options.nodeId));
@@ -9789,8 +9794,8 @@ function markScenePresetReferenceErrors(message, options = {}) {
     if (!targetIds.size) {
         return;
     }
-    for (const node of app.graph?._nodes || []) {
-        if (!isScenePresetReferenceNode(node) || !targetIds.has(String(node.id))) {
+    for (const node of options.nodes || graph?._nodes || []) {
+        if (graph?.getNodeById(node.id) !== node || !isScenePresetReferenceNode(node) || !targetIds.has(String(node.id))) {
             continue;
         }
         if (!node.scenePresetOriginalColors) {
@@ -9801,16 +9806,16 @@ function markScenePresetReferenceErrors(message, options = {}) {
         node.scenePresetError = message;
         node.setDirtyCanvas?.(true, true);
     }
-    app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function clearScenePresetReferenceErrors(options = {}) {
+    const graph = options.graph || app.graph;
     const targetIds = new Set((options.nodeIds || []).map((nodeId) => String(nodeId)));
     if (!targetIds.size) {
         return;
     }
-    for (const node of app.graph?._nodes || []) {
-        if (!isScenePresetReferenceNode(node) || !node.scenePresetOriginalColors || !targetIds.has(String(node.id))) {
+    for (const node of options.nodes || graph?._nodes || []) {
+        if (graph?.getNodeById(node.id) !== node || !isScenePresetReferenceNode(node) || !node.scenePresetOriginalColors || !targetIds.has(String(node.id))) {
             continue;
         }
         node.color = node.scenePresetOriginalColors.color;
@@ -9819,7 +9824,6 @@ function clearScenePresetReferenceErrors(options = {}) {
         node.scenePresetError = "";
         node.setDirtyCanvas?.(true, true);
     }
-    app.graph?.setDirtyCanvas?.(true, true);
 }
 
 async function queueSingleScenePrompt() {
@@ -11008,6 +11012,7 @@ function createSceneBatchRun(node, total) {
         nodeId: node.id,
         node,
         graph: node.graph || app.graph,
+        presetErrorNodes: ((node.graph || app.graph)?._nodes || []).filter(isScenePresetReferenceNode),
         workflow: typeof sceneActiveWorkflow === "function" ? sceneActiveWorkflow() : null,
         samplerSeedTargets: captureRandomizedSamplerSeedTargets(node.graph || app.graph),
         total,
@@ -11089,6 +11094,8 @@ function prepareSceneBatchRunSnapshot(run, node) {
             }
             run.snapshotError = error;
             markScenePresetReferenceErrors(error?.message || "Presetの検証に失敗しました。", {
+                graph: run.graph,
+                nodes: run.presetErrorNodes || [],
                 nodeId: error?.scenePresetReferenceId,
                 relatedNodeIds: scenePresetReferenceIdsForExpand(run.firstPromptSnapshot, node.id),
             });
@@ -11098,6 +11105,7 @@ function prepareSceneBatchRunSnapshot(run, node) {
                 showSceneBatchError("待機中の連続生成を準備できませんでした。", error);
             }
         } finally {
+            run.presetErrorNodes = null;
             refreshSceneBatchRunNode(run, { graphChange: false, background: false });
         }
         return run.firstPromptSnapshot;
@@ -12423,6 +12431,8 @@ async function saveScenePreset(node) {
         return;
     }
     let failedReferenceNodeId = "";
+    const ownerGraph = node.graph;
+    const ownerNodes = (ownerGraph._nodes || []).filter(isScenePresetReferenceNode);
     try {
         const graphToPrompt = app.graphToPrompt?.bind(app);
         if (!graphToPrompt || !app.graph?.serialize) {
@@ -12468,6 +12478,8 @@ async function saveScenePreset(node) {
     } catch (error) {
         if (failedReferenceNodeId) {
             markScenePresetReferenceErrors(error?.message || "Presetの検証に失敗しました。", {
+                graph: ownerGraph,
+                nodes: ownerNodes,
                 nodeId: failedReferenceNodeId,
             });
         }

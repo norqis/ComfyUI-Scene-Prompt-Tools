@@ -789,6 +789,7 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
         },
         activePopupContext: { node: { sceneMatrixLineDraftContext: { commitDrafts() { captureOrder.push("commit"); } } } },
         scenePresetList: [],
+        isScenePresetReferenceNode(target) { return target.type === "ScenePresetReference"; },
         syncAllScenePromptNames() {},
         applySceneSourceNodeNames(prompt) { return prompt; },
         findWidget(target, name) { return target.widgets.find((widget) => widget.name === name); },
@@ -842,6 +843,7 @@ async function testPresetSaveMarksOnlyTheReferenceReturnedByTheServer() {
         app: {
             graph: {
                 _nodes: [failedReference, otherReference],
+                getNodeById(id) { return this._nodes.find(node => String(node.id) === String(id)); },
                 serialize() { return { nodes: [] }; },
                 setDirtyCanvas() {},
             },

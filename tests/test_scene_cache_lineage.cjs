@@ -96,15 +96,16 @@ const snapshot = node => JSON.parse(JSON.stringify(ctx.scenePromptStats(node)));
     ctx.PATH_MODE_APPEND = "前のフォルダ名に結合"; ctx.PATH_MODE_DIRECTORY = "フォルダに分ける";
     for (const name of ["scenePromptPreviewEntries", "appendScenePathPart", "normalizePathMode", "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry"])
         vm.runInContext(functionSource(name), ctx);
-    for (const type of ["ScenePromptPath", "ScenePromptMatrix", "ScenePromptTextDelete", "SceneEmptyLatent"]) {
-        const g = graph(), start = add(g, type, { matrix_json: "[]", width: 512, height: 512, batch_size: 3 });
+    for (const type of ["ScenePromptPath", "ScenePromptMatrix", "ScenePromptTextDelete", "SceneEmptyLatent", "ScenePromptCounter", "ScenePrompterMerge"]) {
+        const g = graph(), start = add(g, type, { matrix_json: "[]", width: 512, height: 512, batch_size: 3, count: 3 });
         const visible = add(g, "ScenePrompter"), normal = add(g, "ScenePrompter"), queue = add(g, "ScenePrompterQueue");
         visible.title = "VISIBLE"; normal.title = "NORMAL";
         connect(start, visible, "scene_prompt"); connect(visible, queue, "scene_prompt1"); connect(normal, queue, "scene_prompt2");
         const stats = ctx.scenePromptStats(queue), entries = ctx.scenePromptPreviewEntries(queue);
-        assert.equal(stats.total, 2, type);
-        assert.equal(stats.totalImages, type === "SceneEmptyLatent" ? 4 : 2, type);
-        assert.deepEqual(JSON.parse(JSON.stringify(entries.map(entry => entry.parts))), [["VISIBLE"], ["NORMAL"]], type);
+        const count = type === "ScenePromptCounter" ? 3 : 1;
+        assert.equal(stats.total, count + 1, type);
+        assert.equal(stats.totalImages, type === "SceneEmptyLatent" ? 4 : count + 1, type);
+        assert.deepEqual(JSON.parse(JSON.stringify(entries.map(entry => entry.parts))), [...Array(count).fill(["VISIBLE"]), ["NORMAL"]], type);
         if (type === "ScenePromptPath") assert.deepEqual(Array.from(entries[0].row.path_parts), [type]);
         if (type === "SceneEmptyLatent") assert.equal(entries[0].row.latent.batch_size, 3);
         const empty = add(g, "ScenePromptMatrix", { matrix_json: "[]" });
@@ -112,7 +113,12 @@ const snapshot = node => JSON.parse(JSON.stringify(ctx.scenePromptStats(node)));
         // An explicitly configured all-disabled Matrix is empty, unlike an unconfigured one.
         const configured = ctx.matrixConfiguredLineCount;
         ctx.matrixConfiguredLineCount = node => node === empty ? 1 : configured(node);
-        connect(empty, start, "scene_prompt");
+        if (type === "ScenePromptCounter") {
+            set(start, "count", 0);
+            const zero = ctx.scenePromptPreviewEntries(start);
+            assert.equal(zero.length, 1); assert.equal(zero[0].count, 0);
+        }
+        connect(empty, start, type === "ScenePrompterMerge" ? "scene_prompt1" : "scene_prompt");
         assert.deepEqual(JSON.parse(JSON.stringify(ctx.scenePromptPreviewEntries(queue).map(entry => entry.parts))), [["NORMAL"]], type);
         ctx.matrixConfiguredLineCount = configured;
     }
