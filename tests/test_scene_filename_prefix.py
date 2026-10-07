@@ -229,6 +229,21 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         }
         self.assertEqual(len(prefixes), 1)
 
+    def test_save_windows_reserved_directory_stems_in_all_path_sources(self):
+        self.assertEqual(self.nodes._safe_path_part("CON"), "CON_", "existing plain reserved-name folders stay unchanged")
+        image = torch.zeros((16, 16, 3), dtype=torch.float32)
+        saver = self.nodes.SceneSaveImage()
+        for name in ("AUX.preview", "CON.folder", "LPT9 .txt", "COM¹.view"):
+            for source in ("base", "path", "run_dir"):
+                with self.subTest(name=name, source=source):
+                    info = {"use_run_dir": source == "run_dir", "file_index": 1}
+                    if source != "base":
+                        info[source] = name
+                    result = saver.save_images([image], name if source == "base" else "", scene_info=info)
+                    path = Path(result["result"][1])
+                    self.assertTrue(path.is_file())
+                    self.assertEqual(path.parent.name, "_" + name)
+
     def test_save_long_prefixes_keep_final_and_reservation_components_safe(self):
         image = torch.zeros((16, 16, 3), dtype=torch.float32)
         saver = self.nodes.SceneSaveImage()

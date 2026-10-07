@@ -2634,7 +2634,7 @@ NODE_CLASS_MAPPINGS = {
             preset_id = f"seed-{kind}"
             preset_nodes = {
                 "1": {"class_type": "ScenePresetInput", "inputs": {}},
-                "2": {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["1", 0]}},
+                "2": {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["1", 0], "reverse_scope": "全てのノード"}},
                 "3": {"class_type": "ScenePresetOutput", "inputs": {"preset_id": preset_id, "preset_name": preset_id, "scene_prompt": ["2", 0]}},
             }
             preset_workflow = _workflow_for_graph(preset_nodes)
@@ -2652,7 +2652,7 @@ NODE_CLASS_MAPPINGS = {
                     path = f"seed-preset-{kind}-{mode}"
                     graph = _save_graph(mode, path, expand_presets=True)
                     graph["1"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": preset_id}}
-                    graph["2"] = {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["1", 0]}}
+                    graph["2"] = {"class_type": "ScenePromptReverse", "inputs": {"scene_prompt": ["1", 0], "reverse_scope": "全てのノード"}}
                     handle, workflow = self._prepare_callback_run(graph, "4")
                     try:
                         self._queue_callback_graph(graph, handle, workflow, claim_run=True)
@@ -2672,7 +2672,8 @@ NODE_CLASS_MAPPINGS = {
                         replay_handle, replay_workflow = self._prepare_callback_run(replay, "4", replay_workflow)
                         try:
                             self._queue_callback_graph(replay, replay_handle, replay_workflow, claim_run=True)
-                            self.assertEqual(len(list((self.base / "output" / (path + "-replay")).glob("*.png"))), 2)
+                            self.assertEqual(len(list((self.base / "output" / (path + "-replay")).glob("*.png"))),
+                                1 if mode == "生成経路ノードのみ" else 2)
                         finally:
                             self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
                     finally:

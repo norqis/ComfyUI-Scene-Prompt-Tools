@@ -35,6 +35,16 @@ class ImportSceneHtmlTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_windows_reserved_names_are_writable_for_categories_and_subcategories(self):
+        destination = self.root / "reserved"
+        names = ("CON", "AUX.preview", "LPT9 .txt", "COM¹.view", "ordinary")
+        grouped = {name: {name: [{"label": "neutral", "prompt": "neutral"}]} for name in names}
+        self.assertEqual(self.module.write_data(grouped, destination), (5, 5, 5))
+        for name in names:
+            safe = name if name == "ordinary" else "_" + name
+            path = destination / safe / safe / "prompt.json"
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))[0]["prompt"], "neutral")
+
     def test_output_argument_is_required(self):
         with mock.patch.object(sys, "argv", ["import_scene_html.py", "--input", "source"]):
             with contextlib.redirect_stderr(io.StringIO()):

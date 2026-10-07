@@ -1485,18 +1485,13 @@ def _text_item_for_index(plan, requested_index, seed=0):
 
 
 def _safe_path_part(value, default_name="untitled"):
-    reserved_names = {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    }
     text = str(value or "").strip().strip(". ")
     text = BAD_PATH_CHARS_RE.sub("_", text)
     text = re.sub(r"\s+", " ", text).strip().strip(". ")
     if text in ("", ".", ".."):
         return default_name
-    if text.upper() in reserved_names:
-        text = f"{text}_"
+    if WINDOWS_RESERVED_PREFIX_RE.match(text.split(".", 1)[0].rstrip(" ")):
+        text = f"_{text}" if "." in text else f"{text}_"
     return text[:80].rstrip(" .") or default_name
 
 

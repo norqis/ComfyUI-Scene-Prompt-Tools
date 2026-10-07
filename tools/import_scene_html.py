@@ -24,6 +24,7 @@ TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
 BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 SPACE_RE = re.compile(r"[ \t\r\n\u3000]+")
 INVALID_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+WINDOWS_RESERVED_NAME_RE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$", re.IGNORECASE)
 
 
 def clean_text(value: str) -> str:
@@ -50,6 +51,8 @@ def safe_dir_name(value: str, default_name: str) -> str:
     name = clean_text(value) or default_name
     name = INVALID_PATH_CHARS_RE.sub("_", name)
     name = re.sub(r"\s+", " ", name).strip(" .")
+    if WINDOWS_RESERVED_NAME_RE.match(name.split(".", 1)[0].rstrip(" ")):
+        name = f"_{name}"
     return name[:100] or default_name
 
 
