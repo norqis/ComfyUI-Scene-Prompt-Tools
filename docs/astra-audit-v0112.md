@@ -224,6 +224,16 @@ The focused checks cover automatic/zero seeds, arbitrary linked providers, succe
 
 A suspected visual-link boundary was excluded: native frontend already removes these internal sockets on load, and no separate failure was demonstrated. The fix therefore only captures actual execution values. The complete browser run and exact-HEAD remediation review follow before another fresh whole audit.
 
+The eighteenth auditor approved exact HEAD `efdbf7d80d4e244214f53cfd23d72c8225a95bac`. All required CI checks passed (Python 752, frontend 25 suites, native CPU/HTTP 51), together with the complete native browser run. A new nineteenth auditor then audited the entire repository.
+
+## Nineteenth independent full audit
+
+The new GPT-6 Astra xhigh auditor reproduced two native list-mapping defects. Linked index/seed lists executed A then B, but both PNGs recorded the last consumer selection B. An opaque external provider returning two Scene plans instead executed the first plan twice because the per-consumer cache ignored the second actual input. Selected-path pruning also removed a required physical input of that provider. Root independently reproduced the mismatched pixels before editing.
+
+The existing run context now keeps the latest native evaluation's selections by list index, including the actual normalized plan reference. Saving uses its native list index and ComfyUI's repeat-last padding. A new evaluation replaces the previous list; shorter lists release old plan references. Cached native outputs can reuse their matching retained selections. No prompt history, copied plan, extra evaluator or persistent cache is added. Elided Scene input still uses the original cached batch snapshot without normalization; a present different input is honored without replacing that snapshot, and equal input reuses the cached reference. Required physical ancestors of opaque Scene providers use the existing physical traversal, keeping their saved native graph valid.
+
+All 755 Python tests pass (2 opt-in native classes skipped). Focused cases cover different-length mapped inputs, cached outputs, blocked indices, shorter evaluations and weak-reference release. The native six-case regression covers linked index/seed lists and Scene-plan lists through To Text and Expand, with and without metadata. Actual pixels and per-consumer seeds survive save/replay. Opaque providers retain their original whole list on ordinary replay; this does not claim single-item contraction or continuous-generation static count support for arbitrary external providers. Two older cache assertions were updated after review to distinguish elided input from present input. The full native browser and exact-HEAD remediation review follow before the next fresh whole audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
@@ -233,3 +243,4 @@ A suspected visual-link boundary was excluded: native frontend already removes t
 
 - https://docs.python.org/3/library/os.path.html#os.path.normcase
 - https://docs.comfy.org/custom-nodes/backend/more_on_inputs
+- https://docs.comfy.org/custom-nodes/backend/lists

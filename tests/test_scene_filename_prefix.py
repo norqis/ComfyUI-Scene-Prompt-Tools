@@ -785,7 +785,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(metadata["repeat_count"], 100_000_000)
         self.assertEqual(metadata["total_count"], 100_000_000)
 
-    def test_independent_expand_unique_ids_keep_separate_immutable_plans(self):
+    def test_expand_keeps_separate_cached_plans_and_honors_actual_native_inputs(self):
         runs = sys.modules[f"{self.nodes.__package__}.runs"]
         runs.RUN_CONTEXTS.clear()
         handle = runs.create_run_context("alice")
@@ -793,8 +793,14 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         second = self.nodes.transform(first, lambda row, _item: {**row, "positive_parts": ["second"]})
         self.assertEqual(self.nodes._scene_run_plan(handle, first, "expand-1")["rows"][0]["row"]["positive_parts"], ["test"])
         self.assertEqual(self.nodes._scene_run_plan(handle, second, "expand-2")["rows"][0]["row"]["positive_parts"], ["second"])
-        self.assertEqual(self.nodes._scene_run_plan(handle, second, "expand-1")["rows"][0]["row"]["positive_parts"], ["test"])
-        self.assertEqual(self.nodes._scene_run_plan(handle, first, "expand-2")["rows"][0]["row"]["positive_parts"], ["second"])
+        cached_first = runs.get_run_plan_reference(handle, "expand-1")
+        cached_second = runs.get_run_plan_reference(handle, "expand-2")
+        self.assertEqual(self.nodes._scene_run_plan(handle, second, "expand-1")["rows"][0]["row"]["positive_parts"], ["second"])
+        self.assertEqual(self.nodes._scene_run_plan(handle, first, "expand-2")["rows"][0]["row"]["positive_parts"], ["test"])
+        self.assertIs(self.nodes._scene_run_plan(handle, None, "expand-1"), cached_first)
+        self.assertIs(self.nodes._scene_run_plan(handle, None, "expand-2"), cached_second)
+        self.assertIs(self.nodes._scene_run_plan(handle, first, "expand-1"), cached_first)
+        self.assertIs(self.nodes._scene_run_plan(handle, second, "expand-2"), cached_second)
         runs.release_run_context(handle, "alice")
         with self.assertRaises(runs.SceneRunError):
             self.nodes._scene_run_plan(handle, first)
@@ -813,7 +819,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
                     current_index=0,
                     seed_base=7,
                     timestamp_dir=False,
-                    scene_prompt=plan,
+                    scene_prompt=None,
                     run_handle=handle,
                     unique_id="expand",
                 )

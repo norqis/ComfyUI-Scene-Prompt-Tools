@@ -20,6 +20,7 @@ import comfy.model_management
 import folder_paths
 from comfy.cli_args import args
 from comfy_execution.graph_utils import GraphBuilder, is_link
+from comfy_execution.utils import get_executing_context
 from .switches import selected_switch_input
 from .storage import is_windows_reserved_name
 
@@ -765,6 +766,8 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
 def _consumer_replay_items(prompt, save_id, scene_info):
     """Resolve executed consumers not already represented by Save metadata."""
     result = {}
+    context = get_executing_context()
+    list_index = (context.list_index or 0) if context else 0
     represented_sources = _scene_source_ids(scene_info)
     for node_id in _prompt_ancestor_ids(prompt, save_id):
         node = prompt[node_id]
@@ -776,13 +779,12 @@ def _consumer_replay_items(prompt, save_id, scene_info):
             continue
         inputs = node.get("inputs", {})
         run_handle = str(inputs.get("run_handle") or (scene_info or {}).get("run_handle") or "")
-        plan = get_run_plan_reference(run_handle, node_id) if run_handle else None
-        selection = get_run_consumer_selection(run_handle, node_id) if run_handle else None
-        if plan is None or selection is None:
+        selection = get_run_consumer_selection(run_handle, node_id, list_index) if run_handle else None
+        if selection is None:
             if is_expand:
                 continue
             raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
-        requested_index, seed = selection
+        requested_index, seed, plan = selection
         item = (_scene_prompt_item_for_index(None, requested_index, normalized=plan, strict=True, seed=seed)
                 if is_expand else _text_item_for_index(plan, requested_index, seed))
         result[node_id] = {
@@ -870,9 +872,9 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
             raise ValueError(f"Scene Save Image の生成経路を保存できません: ノード {node_id} の inputs が不正です。")
         included.add(node_id)
         visited.add((node_id, physical))
-        # A remaining generic Switch (e.g. literal data) could not contract.
-        # Keep its required physical dependencies valid for native replay.
-        physical = physical or class_type == "ComfySwitchNode"
+        # Opaque Scene providers and residual generic Switches need their
+        # required physical inputs even when only one output item was used.
+        physical = physical or class_type == "ComfySwitchNode" or (scene_dependency and class_type not in SCENE_NODE_TYPES)
         for input_name, value in inputs.items():
             source_id = _prompt_link_source(value, node_id, input_name)
             if source_id is not None:
@@ -1583,12 +1585,22 @@ def _scene_count(value):
     return value
 
 
+def _record_consumer_selection(run_handle, unique_id, current_index, seed, plan):
+    if run_handle and unique_id is not None:
+        context = get_executing_context()
+        set_run_consumer_selection(run_handle, unique_id, current_index, seed, plan,
+                                   context.prompt_id if context else "", (context.list_index or 0) if context else 0)
+
+
 def _scene_run_plan(run_handle, scene_prompt=None, unique_id=None):
     if not str(run_handle or "").strip():
         return normalize_plan(scene_prompt)
     cached = get_run_plan_reference(run_handle, unique_id)
     if cached is not None:
-        return cached
+        if scene_prompt is None:
+            return cached
+        actual = normalize_plan(scene_prompt)
+        return cached if actual["change_key"] == cached["change_key"] else actual
     return set_run_plan_reference(run_handle, unique_id, normalize_plan(scene_prompt))
 
 
@@ -2434,8 +2446,7 @@ class ScenePromptToText:
                 else:
                     positive, negative = trace["added_positive_parts"], trace["added_negative_parts"]
         positive, negative = _resolve_prompt_parts(positive, negative, (), None, seed)
-        if run_handle and unique_id is not None:
-            set_run_consumer_selection(run_handle, unique_id, current_index, seed)
+        _record_consumer_selection(run_handle, unique_id, current_index, seed, plan)
         return _join_unique(positive, ", "), _join_unique(negative, ", ")
 
 
@@ -3161,8 +3172,7 @@ class ScenePromptExpand:
                 "result": (positive, negative, save_info, seed, latent, model, clip, model_links["vae"]),
                 "expand": graph.finalize(),
             }
-        if run_handle and unique_id is not None:
-            set_run_consumer_selection(run_handle, unique_id, current_index, seed)
+        _record_consumer_selection(run_handle, unique_id, current_index, seed, plan)
         return result
 
 

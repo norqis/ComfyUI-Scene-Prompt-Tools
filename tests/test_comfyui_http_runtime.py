@@ -729,6 +729,33 @@ class TestSceneTextImage:
         Path(log_path).write_text(json.dumps([positive, negative]), encoding="utf-8")
         return (image,)
 
+class TestSceneIntList:
+    @classmethod
+    def INPUT_TYPES(cls): return {"required": {"values": ("STRING",)}}
+    RETURN_TYPES = ("INT",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "run"
+    def run(self, values): return (json.loads(values),)
+
+class TestScenePlanList:
+    @classmethod
+    def INPUT_TYPES(cls): return {"required": {"a": ("SCENE_PROMPT",), "b": ("SCENE_PROMPT",)}}
+    RETURN_TYPES = ("SCENE_PROMPT",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "run"
+    def run(self, a, b): return ([a, b],)
+
+class TestSceneTextPixels:
+    @classmethod
+    def INPUT_TYPES(cls): return {"required": {"image": ("IMAGE",), "positive": ("STRING",), "negative": ("STRING",)}}
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    def run(self, image, positive, negative):
+        result = image.clone().fill_(0)
+        result[..., 0] = 0.1 if positive == "A" else 0.9
+        result[..., 1] = 0.25 if negative == "A" else 0.75
+        return (result,)
+
 class TestSceneModelSink:
     @classmethod
     def INPUT_TYPES(cls):
@@ -803,6 +830,9 @@ NODE_CLASS_MAPPINGS = {
     "TestSceneModelBundle": TestSceneModelBundle,
     "TestSceneModelSink": TestSceneModelSink,
     "TestSceneTextImage": TestSceneTextImage,
+    "TestSceneIntList": TestSceneIntList,
+    "TestScenePlanList": TestScenePlanList,
+    "TestSceneTextPixels": TestSceneTextPixels,
     "TestSceneGPUImage": TestSceneGPUImage,
 }
 ''',
@@ -1567,6 +1597,70 @@ NODE_CLASS_MAPPINGS = {
                         self.assertEqual(json.loads(marker.read_text(encoding='utf-8')), expected)
                     finally:
                         self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+
+    def test_mapped_consumers_preserve_pixels_and_required_scene_list_inputs(self):
+        from PIL import Image
+        for mapped_plan in (False, True):
+            for kind, metadata in (('ScenePromptToText', False), ('ScenePrompterExpand', False), ('ScenePrompterExpand', True)):
+                with self.subTest(mapped_plan=mapped_plan, kind=kind, metadata=metadata):
+                    folder = f'mapped-{mapped_plan}-{kind}-{metadata}'
+                    graph = {
+                        '1': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'A'}},
+                        '2': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'positive_base': 'B'}},
+                        '3': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['2', 0]}},
+                        '4': {'class_type': kind, 'inputs': {'scene_prompt': ['3', 0], 'current_index': ['5', 0], 'seed_base': ['9', 0]}},
+                        '5': {'class_type': 'TestSceneIntList', 'inputs': {'values': '[0,1]'}},
+                        '6': {'class_type': 'EmptyImage', 'inputs': {'width': 16, 'height': 16, 'batch_size': 1, 'color': ['10', 0]}},
+                        '7': {'class_type': 'TestSceneTextPixels', 'inputs': {'image': ['6', 0], 'positive': ['4', 0], 'negative': ['14', 0]}},
+                        '8': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['7', 0], 'path': folder, 'metadata_mode': '生成経路ノードのみ'}},
+                        '9': {'class_type': 'TestSceneIntList', 'inputs': {'values': '[100,200]'}},
+                        '10': {'class_type': 'TestSceneIntList', 'inputs': {'values': '[0,1,2]'}},
+                        '14': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['3', 0], 'scope': '全てのノード', 'current_index': 1, 'seed_base': 700}},
+                    }
+                    graph['4']['inputs'].update({'scope': '全てのノード'} if kind == 'ScenePromptToText' else {'run_id': '', 'timestamp_dir': False})
+                    if metadata:
+                        graph['8']['inputs']['scene_info'] = ['4', 2]
+                    if mapped_plan:
+                        graph['3'] = {'class_type': 'TestScenePlanList', 'inputs': {'a': ['1', 0], 'b': ['2', 0]}}
+                        graph['4']['inputs'].update(current_index=0, seed_base=100)
+                        graph['6']['inputs']['color'] = 0
+                        graph['7']['inputs']['negative'] = ''
+                        del graph['14']
+                    # Unknown providers use native execution, not Scene's static count planner.
+                    expand_id = '4' if kind == 'ScenePrompterExpand' and not mapped_plan else None
+                    handle, workflow = self._prepare_callback_run(graph, expand_id)
+                    try:
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=True)
+                    finally:
+                        self._request('/scene_prompt/runs/release', {'run_handle': handle})
+                    files = sorted((self.base / 'output' / folder).rglob('*.png'))
+                    self.assertEqual(len(files), 2 if mapped_plan else 3)
+                    originals = []
+                    for file in files:
+                        with Image.open(file) as image:
+                            originals.append(image.getpixel((0, 0)))
+                    self.assertEqual([pixel[0] for pixel in originals], [25, 229] if mapped_plan else [25, 229, 229])
+                    for index, file in enumerate(files):
+                        with Image.open(file) as image:
+                            replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
+                        replay_folder = f'{folder}-replay-{index}'
+                        replay['8']['inputs']['path'] = replay_folder
+                        if mapped_plan:
+                            # An opaque provider retains its native list and both required inputs.
+                            self.assertEqual(replay['3']['inputs'], {'a': ['1', 0], 'b': ['2', 0]})
+                        else:
+                            self.assertEqual(replay['4']['inputs']['seed_base'] + replay['4']['inputs']['current_index'], 100 if index == 0 else 201)
+                            self.assertEqual(replay['14']['inputs']['seed_base'] + replay['14']['inputs']['current_index'], 701)
+                        replay_handle, visual = self._prepare_callback_run(replay, expand_id, visual)
+                        try:
+                            self._queue_callback_graph(replay, replay_handle, visual, claim_run=True)
+                        finally:
+                            self._request('/scene_prompt/runs/release', {'run_handle': replay_handle})
+                        pixels = []
+                        for png in sorted((self.base / 'output' / replay_folder).rglob('*.png')):
+                            with Image.open(png) as image:
+                                pixels.append(image.getpixel((0, 0)))
+                        self.assertEqual(pixels, originals if mapped_plan else [originals[index]] * 3)
 
     def test_model_specific_loras_execute_only_matching_loaders(self):
         for mode, include_illustrious, expected in (("Anima", True, ["lora:anima.safetensors"]),

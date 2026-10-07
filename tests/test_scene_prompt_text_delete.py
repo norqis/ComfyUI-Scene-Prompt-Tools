@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from test_scene_prompt_reverse import load_modules, add_prompt
@@ -216,7 +217,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         self.assertEqual((cycled['row_index'], cycled['repeat_index'], cycled['seed']), (0, 1, 1))
         with self.assertRaises(ValueError):
             self.nodes.ScenePromptToText().to_text(plan, current_index=-1, seed_base=99, run_handle=handle, unique_id='1')
-        self.assertEqual(self.runs.get_run_consumer_selection(handle, '1'), (1, 1))
+        self.assertEqual(self.runs.get_run_consumer_selection(handle, '1')[:2], (1, 1))
 
     def test_v7_text_replay_uses_its_own_alternate_event_path(self):
         handle = self.runs.create_run_context('default')
@@ -253,10 +254,36 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         expand = self.nodes.ScenePromptExpand()
         for index, seed in ((0, 7), (1, 11)):
             expand.expand(scene_prompt=plan, current_index=index, seed_base=seed, run_handle=handle, unique_id='expand')
-        self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand'), (1, 12))
+        self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand')[:2], (1, 12))
         with self.assertRaises(IndexError):
             expand.expand(scene_prompt=plan, current_index=2, seed_base=100, run_handle=handle, unique_id='expand')
-        self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand'), (1, 12))
+        self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand')[:2], (1, 12))
+
+    def test_mapped_scene_inputs_keep_their_actual_plan_and_save_call_selection(self):
+        handle = self.runs.create_run_context('default', continuous=True)
+        context = SimpleNamespace(prompt_id='mapped', list_index=0)
+        graph = {'text': {'class_type': 'ScenePromptToText', 'inputs': {'run_handle': handle}},
+                 'save': {'class_type': 'SceneSaveImage', 'inputs': {'text': ['text', 0]}}}
+        plans = [self.build('A', node_id='a'), self.build('B', node_id='b')]
+        with mock.patch.object(self.nodes, 'get_executing_context', return_value=context):
+            outputs = []
+            for index, plan in enumerate(plans):
+                context.list_index = index
+                outputs.append(self.nodes.ScenePromptToText().to_text(plan, seed_base=100 + index,
+                                                                     run_handle=handle, unique_id='text'))
+            self.assertEqual(outputs, [('A', ''), ('B', '')])
+            for index, source in ((0, 'a'), (1, 'b'), (2, 'b')):
+                context.list_index = index
+                info = self.nodes._consumer_replay_items(graph, 'save', None)['text']
+                self.assertEqual(info['source_node_ids'], [source])
+                self.assertEqual(info['seed'], 100 if index == 0 else 101)
+            context.prompt_id, context.list_index = 'next', 0
+            self.assertEqual(self.nodes.ScenePromptToText().to_text(plans[1], seed_base=7,
+                            run_handle=handle, unique_id='text'), ('B', ''))
+            context.list_index = 1
+            self.assertEqual(self.nodes._consumer_replay_items(graph, 'save', None)['text']['seed'], 7)
+            # An elided batch input still uses the original cached plan.
+            self.assertIs(self.nodes._scene_run_plan(handle, None, 'text'), self.runs.get_run_plan_reference(handle, 'text'))
 
     def test_text_replay_uses_its_executed_context_without_expand_metadata(self):
         handle = self.runs.create_run_context('default')

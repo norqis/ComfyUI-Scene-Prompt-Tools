@@ -272,13 +272,24 @@ class RunContextStore:
         entry = self.require(handle)
         return entry["prompts"].get(key)
 
-    def get_consumer_selection(self, handle, node_id):
-        return self.require(handle)["consumer_selections"].get(str(node_id))
+    def get_consumer_selection(self, handle, node_id, list_index=0):
+        """Follow native elementwise mapping, including repeat-last padding."""
+        evaluation = self.require(handle)["consumer_selections"].get(str(node_id))
+        if evaluation is None:
+            return None
+        selections = evaluation[1]
+        return selections[min(list_index, len(selections) - 1)]
 
-    def set_consumer_selection(self, handle, node_id, index, seed):
+    def set_consumer_selection(self, handle, node_id, index, seed, plan=None, prompt_id="", list_index=0):
+        """Replace the prior evaluation; keep current cached-output references."""
         entry = self.require(handle)
         with self._lock:
-            entry["consumer_selections"][str(node_id)] = (index, seed)
+            evaluation = entry["consumer_selections"].get(str(node_id))
+            selections = ([] if evaluation is None or evaluation[0] != prompt_id or list_index == 0
+                          else evaluation[1])
+            selections.extend([None] * max(0, list_index + 1 - len(selections)))
+            selections[list_index] = (index, seed, plan)
+            entry["consumer_selections"][str(node_id)] = (prompt_id, selections)
 
     def get_delivery_context(self, handle):
         if not str(handle or "").strip():
@@ -442,12 +453,12 @@ def get_run_prompt_reference(handle, expand_node_id):
     return RUN_CONTEXTS.get_prompt_reference(handle, expand_node_id)
 
 
-def get_run_consumer_selection(handle, node_id):
-    return RUN_CONTEXTS.get_consumer_selection(handle, node_id)
+def get_run_consumer_selection(handle, node_id, list_index=0):
+    return RUN_CONTEXTS.get_consumer_selection(handle, node_id, list_index)
 
 
-def set_run_consumer_selection(handle, node_id, index, seed):
-    return RUN_CONTEXTS.set_consumer_selection(handle, node_id, index, seed)
+def set_run_consumer_selection(handle, node_id, index, seed, plan=None, prompt_id="", list_index=0):
+    return RUN_CONTEXTS.set_consumer_selection(handle, node_id, index, seed, plan, prompt_id, list_index)
 
 
 def get_run_delivery_context(handle):

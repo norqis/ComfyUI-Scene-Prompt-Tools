@@ -18,11 +18,47 @@ class RunContextTests(unittest.TestCase):
         for index in range(100):
             store.set_consumer_selection(handle, "a", index, index + 1000)
         store.set_consumer_selection(handle, "b", 0, 0)
-        self.assertEqual(store.require(handle)["consumer_selections"], {"a": (99, 1099), "b": (0, 0)})
+        self.assertEqual(store.get_consumer_selection(handle, "a")[:2], (99, 1099))
+        self.assertEqual(store.get_consumer_selection(handle, "b")[:2], (0, 0))
+        self.assertEqual([len(value[1]) for value in store.require(handle)["consumer_selections"].values()], [1, 1])
         self.assertTrue(store.release(handle, "alice"))
         self.assertNotIn(handle, store._entries)
         with self.assertRaises(RUNS.SceneRunError):
             store.get_consumer_selection(handle, "a")
+
+    def test_mapped_consumer_selection_broadcasts_and_replaces_old_evaluation(self):
+        store = RUNS.RunContextStore()
+        handle = store.create("alice", continuous=True)
+        store.set_consumer_selection(handle, "a", 3, 103, prompt_id="first", list_index=0)
+        store.set_consumer_selection(handle, "a", 7, 207, prompt_id="first", list_index=1)
+        self.assertEqual([store.get_consumer_selection(handle, "a", index)[:2] for index in range(3)],
+                         [(3, 103), (7, 207), (7, 207)])
+        # Cached native outputs can reuse this evaluation on a later prompt.
+        self.assertEqual(store.get_consumer_selection(handle, "a", 1)[:2], (7, 207))
+        store.set_consumer_selection(handle, "a", 1, 1, prompt_id="shorter", list_index=0)
+        self.assertEqual(store.get_consumer_selection(handle, "a", 2)[:2], (1, 1))
+        self.assertEqual(len(store.require(handle)["consumer_selections"]["a"][1]), 1)
+        # A blocked first element need not invoke the consumer at index zero.
+        store.set_consumer_selection(handle, "a", 8, 8, prompt_id="blocked", list_index=1)
+        self.assertIsNone(store.get_consumer_selection(handle, "a", 0))
+        self.assertEqual(store.get_consumer_selection(handle, "a", 1)[:2], (8, 8))
+
+    def test_shorter_evaluation_releases_obsolete_mapped_plan_reference(self):
+        import gc
+        import weakref
+        class Plan:
+            pass
+        store = RUNS.RunContextStore()
+        handle = store.create("alice", continuous=True)
+        plan = Plan()
+        reference = weakref.ref(plan)
+        store.set_consumer_selection(handle, "a", 0, 1, plan, "first", 0)
+        store.set_consumer_selection(handle, "a", 1, 2, plan, "first", 1)
+        del plan
+        self.assertIsNotNone(reference())
+        store.set_consumer_selection(handle, "a", 0, 3, prompt_id="second", list_index=0)
+        gc.collect()
+        self.assertIsNone(reference())
 
     def test_handle_is_opaque_and_released_handles_are_rejected(self):
         store = RUNS.RunContextStore()
