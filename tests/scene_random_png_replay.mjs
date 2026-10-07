@@ -60,14 +60,19 @@ export async function testRandomPngReplay(page) {
         const results = [];
         for (const [mode, ordinary] of [['ワークフロー全体', false], ['生成経路ノードのみ', false], ['生成経路ノードのみ', true]]) {
             app.graph.clear();
-            const reference = add('ScenePresetReference'), first = add('ScenePromptToText'), second = add('ScenePromptToText');
+            const reference = add('ScenePresetReference'), prelude = add('ScenePrompter'), queue = add('ScenePrompterQueue');
+            const first = add('ScenePrompterExpand'), second = add('ScenePromptToText');
             const image = add('TestSceneTextImage'), save = add('SceneSaveImage');
             set(reference, 'preset_id', 'random-png-replay');
-            for (const node of [first, second]) { set(node, 'scope', '全てのノード'); set(node, 'seed_base', 1); set(node, 'seed_base_literal', true); connect(reference, node); }
+            set(prelude, 'positive_base', 'UNSELECTED_PRELUDE');
+            set(queue, 'order_mode', 'input_order'); set(queue, 'alternate_block_size', 1); set(queue, 'downstream_count_mode', 'multiply');
+            connect(prelude, queue, 'scene_prompt1'); connect(reference, queue, 'scene_prompt2');
+            set(first, 'timestamp_dir', false); set(second, 'scope', '全てのノード');
+            for (const node of [first, second]) { set(node, 'current_index', 1); set(node, 'seed_base', 1); set(node, 'seed_base_literal', true); connect(queue, node); }
             connect(first, image, 'positive'); connect(second, image, 'negative'); connect(image, save, 'images');
             set(save, 'metadata_mode', mode); set(save, 'expand_preset_contents', true);
             const graph = await app.graphToPrompt();
-            const expanded = await post('/scene_test/preset_metadata', { graph, presets: { 'random-png-replay': preset }, expand: true, text_id: String(first.id) });
+            const expanded = await post('/scene_test/preset_metadata', { graph, presets: { 'random-png-replay': preset }, expand: true, text_id: String(second.id) });
             const firstText = expanded.text[0];
             let secondSeed;
             for (let seed = 2; seed <= 32; seed++) {
@@ -93,6 +98,7 @@ export async function testRandomPngReplay(page) {
             results.push({ mode, ordinary, rows, originalSeed, cloneId: clone.id, originalId: random.id,
                 cloneRegistered: app.graph.getNodeById(clone.id) === clone,
                 cloneSeed: cloned.output[String(clone.id)]?.inputs.seed_source_id,
+                index: captured.output[String(first.id)].inputs.current_index,
                 weights: captured.output[String(random.id)].inputs.weights_json });
         }
         return results;
@@ -102,6 +108,8 @@ export async function testRandomPngReplay(page) {
         else assert.notEqual(entry.rows[0][0], entry.rows[0][1], 'two consumers must exercise different Random arms');
         assert.deepEqual(entry.rows[1], entry.rows[0], `${entry.mode}: PNG load must preserve both draws`);
         assert.deepEqual(entry.rows[2], entry.rows[0], `${entry.mode}: second PNG save/load must preserve both draws`);
+        assert.equal(entry.index, entry.mode === 'ワークフロー全体' ? 1 : 0, 'full workflow preserves the index; selected mode rebases after removing the prelude');
+        assert(entry.rows.flat().every(text => text === 'ARM_A' || text === 'ARM_B'), 'replay never selects the unconsumed prelude');
         assert(entry.originalSeed, 'expanded workflow preserves the draw identity');
         assert(entry.cloneRegistered && entry.cloneId != null && String(entry.cloneId) !== String(entry.originalId), `clone receives a real independent node ID: ${JSON.stringify(entry)}`);
         assert.equal(entry.cloneSeed, undefined, 'cloned Random uses a new identity');

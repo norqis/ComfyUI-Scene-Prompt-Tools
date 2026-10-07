@@ -5170,7 +5170,6 @@ function sceneExpandConfigureValues(config) {
         const hasMode = converted[6] === "Illustrious" || converted[6] === "Anima"
             || (converted[6] == null && linkedMode);
         if (hasMode) {
-            if (converted.length) converted[0] = 0;
             return { ...config, widgets_values: converted };
         }
         // v0.5.10 has conversion widgets immediately after counter position.
@@ -5189,9 +5188,6 @@ function sceneExpandConfigureValues(config) {
         converted.splice(8, 1);
     }
     if (converted.length >= 5) converted.splice(6, 0, modelMode);
-    if (converted.length) {
-        converted[0] = 0;
-    }
     return { ...config, widgets_values: converted };
 }
 

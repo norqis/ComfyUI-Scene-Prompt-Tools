@@ -2491,8 +2491,8 @@ try {
     assert.deepEqual(callbackUi.expandCallbackWidgets, [
         { name: "callback_failure_mode", label: "Callback失敗時", hidden: false },
     ], "Expand shows Japanese Callback settings");
-    assert.deepEqual(callbackUi.loadedReplay, [0, 41, false, ""], "loading resets the transient saved index while preserving the seed and clearing stale run state");
-    assert.deepEqual(callbackUi.loadedReplaySerialized, [0, "", 41, false], "normal replay serialization starts from the first Scene row after load");
+    assert.deepEqual(callbackUi.loadedReplay, [15, 41, false, ""], "loading preserves the replay index and seed while clearing stale run state");
+    assert.deepEqual(callbackUi.loadedReplaySerialized, [15, "", 41, false], "replay serialization preserves the selected Scene row after load");
     assert.deepEqual(callbackUi.zeroReplay, [0, 0, true, ""], "loading keeps literal seed 0 for one normal replay");
     assert.equal(callbackUi.replaySeedLiteralHidden, true, "literal seed replay state stays internal");
     assert.deepEqual(callbackUi.zeroReplaySerialized, [0, "", 0, true], "normal replay serialization keeps literal seed mode");
