@@ -40,6 +40,30 @@ def switch_names(raw="[]"):
     return tuple((names[index].strip() if index < len(names) else "") or f"スイッチ{index + 1}" for index in range(SWITCH_COUNT))
 
 
+def make_switch_values(raw="[]"):
+    values = _array(raw, "switch_values_json")
+    return switch_values(values if values else None)
+
+
+class ScenePromptMakeSwitch:
+    DESCRIPTION = "10個のスイッチのON/OFFと名前を設定し、スイッチ一式としてScene Preset Referenceへ渡します。"
+    CATEGORY = "Scene/control"
+    RETURN_TYPES = (SCENE_SWITCHES_TYPE,)
+    RETURN_NAMES = ("switches",)
+    FUNCTION = "build"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}, "optional": {
+            "switch_names_json": ("STRING", {"default": "[]", "hidden": True}),
+            "switch_values_json": ("STRING", {"default": "[]", "hidden": True}),
+        }}
+
+    def build(self, switch_names_json="[]", switch_values_json="[]"):
+        switch_names(switch_names_json)
+        return (make_switch_values(switch_values_json),)
+
+
 def switch_settings(raw="[]"):
     settings = _array(raw, "switch_settings_json")
     if not settings:
@@ -66,6 +90,8 @@ def safe_control(nodes, raw, bindings=None):
         node = nodes.get(node_id, {})
         inputs = node.get("inputs", {})
         kind = node.get("class_type")
+        if kind == "ScenePromptMakeSwitch" and slot == 0:
+            return make_switch_values(inputs.get("switch_values_json", "[]"))
         if kind == "ScenePresetInput" and 1 <= slot <= 11:
             vector = switch_binding(bindings.get(node_id, inputs.get("switch_values")))
             return vector if slot == 11 else vector[slot - 1]

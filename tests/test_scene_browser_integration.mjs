@@ -1269,7 +1269,7 @@ try {
     let civitaiLookupCount = 0;
     await page.route("**/scene_prompt/civitai/by-hash?*", (route) => { civitaiLookupCount += 1; return route.fulfill({
         status: 200, contentType: "application/json",
-        body: JSON.stringify({ found: true, version: { id: 20, modelId: 10, name: "Version One", model: { name: "Civitai Style" }, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle"] } }),
+        body: JSON.stringify({ found: true, version: { id: 20, modelId: 10, name: "Version One", model: { name: "Civitai Style" }, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle", "Local Tag, Fresh Tag"] } }),
     }); });
     await page.evaluate(() => {
         window.__sceneLoraTestNode.properties ||= {};
@@ -1347,7 +1347,7 @@ try {
     await loraDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
     assert.equal(await loraDialog.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"),
         "https://civitai.red/models/10?modelVersionId=20");
-    assert.equal(await loraDialog.locator(".pc-lora-word").count(), 4, "local and Civitai words are deduplicated");
+    assert.equal(await loraDialog.locator(".pc-lora-word").count(), 5, "local and Civitai words are deduplicated");
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), loraInfoCalls,
         "details reuse the selected LoRA cache");
     const injectWord = async (word) => loraDialog.locator(".pc-lora-word")
@@ -1357,10 +1357,24 @@ try {
     assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.name === "positive").value),
         "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra", "weighted identity is not added twice");
     await injectWord("Local Tag");
+    await injectWord("Local Tag, Fresh Tag");
+    await injectWord("Local Tag, Fresh Tag");
+    await page.evaluate(() => {
+        window.__sceneLoraBeforeSelectedTrigger = window.__sceneLoraTestNode.widgets.find(widget => widget.name === "positive_json").value;
+        window.__sceneLoraTestNode.widgets.find(widget => widget.name === "positive_json").value = JSON.stringify({
+            version:1,categories:{test:[{label:"Trigger",prompt:"Civitai Tag",weight:1.4}]},
+        });
+    });
+    await injectWord("Civitai Tag");
     await injectWord("Belle");
     const afterInjection = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
-    assert.equal(afterInjection[4], "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra, Local Tag, Belle");
+    assert.equal(afterInjection[4], "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra, Local Tag, Fresh Tag, Belle",
+        "multi-word injection adds only missing tokens, including selected weighted candidates");
     assert.equal(afterInjection[5], "bad", "injection leaves negative unchanged");
+    await page.evaluate(() => {
+        window.__sceneLoraTestNode.widgets.find(widget => widget.name === "positive_json").value = window.__sceneLoraBeforeSelectedTrigger;
+        delete window.__sceneLoraBeforeSelectedTrigger;
+    });
     await page.keyboard.press("Escape");
     assert.equal(await page.getByRole("dialog", { name: "LoRA 詳細確認" }).count(), 0);
     await page.evaluate(() => { window.__sceneLoraCatalog[0].mtime_ns = 3; window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback(); });

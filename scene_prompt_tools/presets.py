@@ -39,7 +39,7 @@ from .nodes import (
 from .runs import get_run_user_id, require_run_context
 from .switches import (SCENE_SWITCHES_TYPE, switch_values as normalize_switch_values,
                        switch_binding, switch_names, switch_settings, resolve_switches,
-                       selected_switch_input)
+                       selected_switch_input, ScenePromptMakeSwitch, make_switch_values)
 
 
 PRESET_SCHEMA_VERSION = 1
@@ -58,6 +58,7 @@ _RESOLVING_RUNS = {}
 _CANCELLED_RUNS_TTL_SECONDS = 5 * 60
 
 SAFE_NODE_CLASSES = {
+    "ScenePromptMakeSwitch": ScenePromptMakeSwitch,
     "ScenePrompter": ScenePrompt,
     "ScenePromptLLM": ScenePromptLLM,
     "SceneMatrix": SceneMatrix,
@@ -257,7 +258,7 @@ def _compact_preset_list_graph(api_graph, local_memo=None):
         "matrix_json", "batch_size", "count", "enable_downstream_count", "prompt_trace_kind", "preset_id", "reverse_scope",
         "order_mode", "alternate_block_size", "downstream_count_mode",
         "weights_json", "preserve_join", "llm_presets_json",
-        "switch_names_json", "switch_settings_json", "switch_values", "switch",
+        "switch_names_json", "switch_settings_json", "switch_values", "switch_values_json", "switch",
     }
     # Keep only control strings needed by the compact list. Prompt bodies stay
     # in full definitions even when supplied through a String node.
@@ -647,6 +648,8 @@ def _validate_preset_input_values(nodes):
                     switch_settings(value)
                 elif input_name == "switch_values":
                     switch_binding(value)
+                elif input_name == "switch_values_json":
+                    make_switch_values(value)
                 elif input_name == "switches":
                     normalize_switch_values(value)
             except ValueError as exc:
@@ -1197,7 +1200,7 @@ def _scene_node_value_impl(
         kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
     if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
-    if class_type in SAFE_NODE_CLASSES and class_type not in {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop"}:
+    if class_type in SAFE_NODE_CLASSES and class_type not in {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop", "ScenePromptMakeSwitch"}:
         path = "/".join(part.split("@", 1)[1] for part in preset_stack)
         kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
         if class_type == "SceneApplyLora" and path:
@@ -1614,7 +1617,7 @@ def expand_preset_reference(
         target = graph.lookup_node(str(node_id))
         for name, value in _node_inputs(node).items():
             target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
-        if class_type in (set(SAFE_NODE_CLASSES) - {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop"}) or class_type == "ScenePresetReference":
+        if class_type in (set(SAFE_NODE_CLASSES) - {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop", "ScenePromptMakeSwitch"}) or class_type == "ScenePresetReference":
             target.set_input("source_node_id", f"{reference_source_id}/{node_id}" if reference_source_id else str(node_id))
             if class_type != "ScenePromptCallback":
                 target.set_input("source_node_name", _source_node_name(node))

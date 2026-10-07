@@ -1,5 +1,80 @@
 import assert from "node:assert/strict";
 
+export async function verifyMakeSwitch(page) {
+    const ids = await page.evaluate(async () => {
+        const app=window.app; app.graph.clear();
+        const add=type=>{const n=window.LiteGraph.createNode(type);app.graph.add(n);return n;};
+        const field=(n,name)=>n.widgets.find(w=>w.name===name);
+        const link=(a,b,name,slot=0)=>{if(!a.connect(slot,b,b.inputs.findIndex(i=>i.name===name)))throw new Error(`Cannot connect ${name}`);};
+        const input=add('ScenePresetInput'), a=add('ScenePrompter'), b=add('ScenePrompter');
+        const off=add('ScenePromptCounter'), on=add('ScenePromptCounter'), gate=add('ComfySwitchNode'), output=add('ScenePresetOutput');
+        field(off,'count').value=3; field(on,'count').value=7;
+        link(input,a,'scene_prompt');link(input,b,'scene_prompt');link(a,off,'scene_prompt');link(b,on,'scene_prompt');
+        link(off,gate,'on_false');link(on,gate,'on_true');link(input,gate,'switch',1);link(gate,output,'scene_prompt');
+        const response=await fetch('/scene_presets/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+            preset_id:'native-maker-child',name:'Make Switch child',output_node_id:String(output.id),api_graph:await app.graphToPrompt(),workflow:app.graph.serialize()})});
+        if(!response.ok)throw new Error(await response.text());
+        app.graph.clear();
+        const maker=add('ScenePromptMakeSwitch'), reroute=add('Reroute'), ref=add('ScenePresetReference'), expand=add('ScenePrompterExpand');
+        field(ref,'preset_id').value='native-maker-child';field(ref,'preset_id').callback?.('native-maker-child');
+        field(ref,'switch_settings_json').value=JSON.stringify([3,...Array(9).fill(false)]);
+        link(maker,reroute,reroute.inputs[0].name);link(reroute,ref,'switches');link(ref,expand,'scene_prompt');
+        const ids=Object.fromEntries(Object.entries({maker,ref,expand}).map(([key,n])=>[key,n.id]));
+        await app.loadGraphData(app.graph.serialize(),true,true);
+        await window.__sceneSeedRuntimeTest.refreshPresetReference(app.graph.getNodeById(ids.ref));
+        window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
+        return ids;
+    });
+    await page.waitForFunction(id=>window.__sceneSeedRuntimeTest.countStats(window.app.graph.getNodeById(id)).total===3,ids.ref);
+    const snapshot=()=>page.evaluate(async ids=>{
+        const app=window.app,{api}=await import('/scripts/api.js'),maker=app.graph.getNodeById(ids.maker),ref=app.graph.getNodeById(ids.ref);
+        await new Promise(done=>setTimeout(done,250));app.canvas.draw(true,true);
+        const prompt=await app.graphToPrompt();
+        const response=await api.fetchApi('/scene_prompt/runs/prepare',{method:'POST',body:JSON.stringify({api_graph:prompt,workflow:prompt.workflow,expand_node_id:String(ids.expand)})});
+        const prepared=await response.json();if(!response.ok)throw new Error(JSON.stringify(prepared));
+        await api.fetchApi('/scene_prompt/runs/release',{method:'POST',body:JSON.stringify({run_handle:prepared.run_handle})});
+        return {names:maker.widgets.find(w=>w.name==='switch_names_json').value,values:maker.widgets.find(w=>w.name==='switch_values_json').value,
+            inputs:maker.inputs.length,outputs:maker.outputs.map(o=>({name:o.name,type:o.type,label:o.label})),
+            buttons:maker.widgets.filter(w=>w.sceneRole).map(w=>w.sceneRole),
+            history:window.__sceneSeedRuntimeTest.tracker().undoQueue.length,
+            total:window.__sceneSeedRuntimeTest.countStats(ref).total,actual:prepared.total_batches,
+            displayed:app.graph.getNodeById(ids.expand).widgets.find(w=>w.sceneRole==='expand_total_count').sceneTotalCount};
+    },ids);
+    const open=()=>page.evaluate(id=>window.app.graph.getNodeById(id).widgets.find(w=>w.sceneRole==='make_switch_settings').callback(),ids.maker);
+    const modal=page.locator('[data-scene-preset-switch-modal="make"]');
+    const before=await snapshot();
+    assert.equal(before.inputs,0);assert.deepEqual(before.outputs,[{name:'switches',type:'SCENE_SWITCHES',label:'スイッチ一式'}]);
+    assert.deepEqual(before.buttons,['make_switch_settings']);
+    assert.equal(before.total,3);assert.equal(before.actual,3);assert.equal(before.displayed,3);
+    await open();assert.equal(await modal.locator('[data-scene-switch-name]').count(),10);
+    await modal.locator('[data-scene-switch-save="make"]').click();
+    assert.equal((await snapshot()).history,before.history,'unchanged defaults do not add an Undo entry');
+    await open();await modal.locator('[data-scene-switch-name="3"]').fill('背景セット');
+    await modal.locator('[data-scene-switch-enabled="3"]').check();
+    assert.equal((await snapshot()).total,3,'modal draft does not modify the running graph');
+    await modal.locator('[data-scene-switch-save="make"]').click();
+    const changed=await snapshot();
+    assert.equal(changed.total,7);assert.equal(changed.actual,7);assert.equal(changed.displayed,7);
+    assert.equal(changed.history,before.history+1,'name and ON/OFF are one Undo transaction');
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().undo());
+    const undone=await snapshot();assert.equal(undone.names,before.names);assert.equal(undone.values,before.values);assert.equal(undone.total,3);
+    await page.evaluate(()=>window.__sceneSeedRuntimeTest.tracker().redo());
+    const redone=await snapshot();assert.equal(redone.names,changed.names);assert.equal(redone.values,changed.values);assert.equal(redone.total,7);
+    await page.evaluate(id=>window.app.graph.getNodeById(id).widgets.find(w=>w.sceneRole==='preset_switch_settings').callback(),ids.ref);
+    const mapping=page.locator('[data-scene-preset-switch-modal="settings"]');
+    assert.match(await mapping.locator('[data-scene-switch-index="1"] option[value="3"]').textContent(),/背景セット/,'source names pass through native Reroute');
+    await mapping.getByRole('button',{name:'閉じる',exact:true}).click();
+    await page.evaluate(async()=>{const app=window.app;await app.loadGraphData(app.graph.serialize(),true,true);});
+    const loaded=await snapshot();assert.equal(loaded.names,changed.names);assert.equal(loaded.values,changed.values);assert.equal(loaded.total,7);assert.equal(loaded.actual,7);
+    await open();assert.equal(await modal.locator('[data-scene-switch-name="3"]').inputValue(),'背景セット');
+    assert(await modal.locator('[data-scene-switch-enabled="3"]').isChecked());
+    await modal.locator('[data-scene-switch-name="3"]').fill('discard draft');
+    await modal.getByRole('button',{name:'閉じる',exact:true}).click();
+    assert.equal((await snapshot()).names,changed.names);
+    await page.evaluate(()=>window.app.graph.clear());
+    console.log('real ComfyUI Make Switch single bundle, modal names/values, native Undo/Redo, Reroute labels, live count3/7, backend prepare and reload passed');
+}
+
 export async function verifyPublicWidgetInputs(page) {
     const result = await page.evaluate(async () => {
         const app = window.app;
@@ -62,7 +137,7 @@ export async function verifyPublicWidgetInputs(page) {
     assert.deepEqual(result.failedLinks, [], JSON.stringify(result));
     assert.deepEqual(result.before, [], JSON.stringify(result));
     assert.deepEqual(result.reloaded, [], JSON.stringify(result));
-    assert.equal(result.types, 24);
+    assert.equal(result.types, 25);
     assert.equal(result.fields, 49, 'exercise all public scalar widgets, not only Queue');
     console.log(`real ComfyUI public widget inputs: ${result.fields} arguments / ${result.types} node classes retain links and API values after reload`);
 }

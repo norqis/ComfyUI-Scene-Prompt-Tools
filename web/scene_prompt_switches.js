@@ -22,6 +22,11 @@ export function sceneSwitchNames(raw) {
     return Array.from({ length: switchCount }, (_, index) => names[index]?.trim() || `スイッチ${index + 1}`);
 }
 
+export function sceneMakeSwitchValues(raw) {
+    const values = parseArray(raw);
+    return sceneSwitchValues(values.length ? values : undefined);
+}
+
 export function sceneSwitchSettings(raw) {
     const settings = parseArray(raw);
     if (!settings.length) return Array.from({ length: switchCount }, (_, index) => index + 1);
@@ -66,6 +71,8 @@ export function sceneLiveSwitchValue(node, inputName, kind) {
     const resolved = sceneLiveSwitchSource(node, inputName);
     if (!resolved) return null;
     const { source, slot } = resolved, type = className(source);
+    if (type === "ScenePromptMakeSwitch" && kind === "bundle" && slot === 0)
+        return sceneMakeSwitchValues(field(source, "switch_values_json"));
     if (["ScenePresetInput", "Scene Preset Input"].includes(type)) {
         const binding = field(source, "switch_values");
         const values = sceneSwitchValues(binding?.values ?? binding ?? source.properties?.scene_switch_values);
@@ -92,7 +99,7 @@ export function sceneLiveSwitchSelection(node) {
 
 export function sceneLiveReferenceSwitchValues(node) {
     const incoming = sceneLiveSwitchValue(node, "switches", "bundle");
-    if (incoming === null) throw new Error("接続されたスイッチ入力を確定できません。Preset Inputのswitchesを接続してください。");
+    if (incoming === null) throw new Error("接続されたスイッチ入力を確定できません。Preset InputまたはMake Switchのスイッチ一式を接続してください。");
     return resolveSceneSwitchSettings(incoming, field(node, "switch_settings_json"));
 }
 
@@ -107,7 +114,9 @@ export function createScenePresetSwitchContext(nodes, incoming) {
         visiting.add(key);
         const node = nodes[String(id)];
         let result;
-        if (node?.class_type === "ScenePresetInput") {
+        if (node?.class_type === "ScenePromptMakeSwitch" && kind === "bundle" && slot === 0) {
+            result = sceneMakeSwitchValues(node.inputs?.switch_values_json);
+        } else if (node?.class_type === "ScenePresetInput") {
             const binding = node.inputs?.switch_values;
             const bound = incoming === undefined && binding != null ? sceneSwitchValues(binding.values ?? binding) : values;
             if (kind === "bundle" && slot === 11) result = bound;

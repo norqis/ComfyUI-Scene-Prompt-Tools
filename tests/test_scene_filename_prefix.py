@@ -2342,6 +2342,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         package = _load_node_package(Path(self.temp_dir.name))
 
         current_node_names = {
+            "ScenePromptMakeSwitch",
             "ScenePrompter",
             "ScenePromptLLM",
             "SceneMatrix",
@@ -2371,6 +2372,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
         self.assertEqual(
             package.NODE_DISPLAY_NAME_MAPPINGS,
             {
+                "ScenePromptMakeSwitch": "Scene Prompt Make Switch",
                 "ScenePrompter": "Scene Prompt",
                 "ScenePromptLLM": "Scene Prompt (LLM)",
                 "SceneMatrix": "Scene Matrix",

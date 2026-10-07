@@ -341,7 +341,8 @@ export function createPresetGraph(definition, ownerGraph) {
                 ? [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] },
                     ...Array.from({ length: 10 }, (_, index) => ({ name: `switch_${index + 1}`, type: "BOOLEAN", links: [] })),
                     { name: "switches", type: "SCENE_SWITCHES", links: [] }]
-                : [{ name: "scene_prompt", type: entry.class_type === "PrimitiveBoolean" ? "BOOLEAN" : "SCENE_PROMPT", links: [] }])) };
+                : entry.class_type === "ScenePromptMakeSwitch" ? [{ name: "switches", type: "SCENE_SWITCHES", links: [] }]
+                    : [{ name: "scene_prompt", type: entry.class_type === "PrimitiveBoolean" ? "BOOLEAN" : "SCENE_PROMPT", links: [] }])) };
         if (entry.class_type === "ScenePresetInput") {
             node.outputs = Array.from({ length: 12 }, (_, slot) => ({ ...node.outputs[slot],
                 name: slot === 0 ? "scene_prompt" : slot === 11 ? "switches" : `switch_${slot}`,

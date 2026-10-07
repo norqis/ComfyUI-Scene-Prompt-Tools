@@ -818,7 +818,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         }
         reached = {node['class_type'] for node in api.values()}
         self.assertEqual(reached - {'ScenePrompterExpand', 'ScenePromptToText', 'SceneApplyModel'},
-                         set(self.presets.SAFE_NODE_CLASSES) - {'ScenePresetReference'})
+                         set(self.presets.SAFE_NODE_CLASSES) - {'ScenePresetReference', 'ScenePromptMakeSwitch'})
         scene_nodes, source = self.presets._scene_nodes_for_expand(api, '19')
         self.assertEqual(set(scene_nodes), set(api) - {'19'})
         self.assertEqual(source, ['22', 0])

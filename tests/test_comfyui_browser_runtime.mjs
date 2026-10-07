@@ -2646,6 +2646,18 @@ window.__sceneSeedRuntimeTest = {
         const node = window.app.graph.getNodeById(id);
         return [node.widgets.find(widget => widget.name === "lora_name").value, node.widgets.find(widget => widget.name === "positive").value, node.widgets.find(widget => widget.name === "negative").value];
     }, metadataNodes.lora), ["runtime-hat.safetensors", "manual trigger, native_metadata_trigger", "manual negative"]);
+    for (const positive of ['manual trigger, native_metadata_trigger', 'manual trigger, (NATIVE_METADATA_TRIGGER:1.4)', 'manual trigger, ((native_metadata_trigger))']) {
+        const before = await page.evaluate(({id,positive})=>{
+            const node=window.app.graph.getNodeById(id),widget=node.widgets.find(w=>w.name==='positive');
+            widget.value=positive;widget.callback?.(positive);
+            window.__sceneSeedRuntimeTest.tracker().captureCanvasState();
+            return window.__sceneSeedRuntimeTest.tracker().undoQueue.length;
+        },{id:metadataNodes.lora,positive});
+        await nativeDetail.locator('.pc-lora-word').filter({hasText:'native_metadata_trigger'}).getByRole('button',{name:'注入'}).click();
+        const after=await page.evaluate(id=>({positive:window.app.graph.getNodeById(id).widgets.find(w=>w.name==='positive').value,
+            history:window.__sceneSeedRuntimeTest.tracker().undoQueue.length}),metadataNodes.lora);
+        assert.deepEqual(after,{positive,history:before},'existing plain/weighted triggers leave text and Undo history unchanged');
+    }
     await page.keyboard.press("Escape");
     const lookupsBeforeResources = metadataRequests.length;
     await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.sceneRole === "expand_resources").callback(), metadataNodes.expand);
@@ -3237,6 +3249,9 @@ window.__sceneSeedRuntimeTest = {
     console.log('real ComfyUI nested 100% Random slots 0/9 show correct Count before native prepare and preserve latent totals');
     nativeRunChecks = false;
     console.log('real ComfyUI standard Switch MatchType, fixed slots, names/mapping DOM saves, siblings, count/selected preview, Undo/Redo, clone, legacy restore, reload and one settings category passed');
+    nativeRunChecks = true;
+    try { await (await import('./scene_public_widget_inputs.mjs')).verifyMakeSwitch(page); }
+    finally { nativeRunChecks = false; }
 
     const weightedInput = "first, ((TAG:4):0.5), (tag:1.2), (equal:1.), (EQUAL:1e0), (science:1_2e-1), (SCIENCE:1.1), (blocked:99)";
     const nativeMatrixId = await page.evaluate(async () => {
