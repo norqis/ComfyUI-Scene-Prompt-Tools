@@ -111,6 +111,16 @@ Real Chromium regressions cover both forms with normal completion, edits during 
 
 The same auditor approved exact HEAD `e1ada0d`. Its independent Chromium reproductions now issue one POST and retain new drafts; the reverse-order update/create case retains the edited candidate. Its 1,500-node actual model plan saves correctly in about 30 ms, and 3,000 randomized comparisons of the old and new contraction functions match, including Model/LoRA/Queue/Switch, shared links, output slots, protected sources, inputless nodes and cycles. A new ninth GPT-6 Astra xhigh agent is conducting the next independent whole-repository audit.
 
+## Ninth independent full audit
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round9`) audited the whole repository and reproduced three further groups. Root fixed them in `f3b6764`; `73b194d` aligns the native test with the existing pre-execution display contract:
+
+- On Windows, IDs differing only in case silently overwrote the same Preset file and broke existing references with an unrelated LLM identity error. Under the existing publication lock, saving now checks the resolved existing filename before replacing it. Loading checks the validated stored ID and reports both IDs directly. Same-ID updates, last-save-wins, and repairing a corrupt definition still work. This adds no directory scan or read of the old large JSON during saving. Case-sensitive filesystems retain distinct IDs. Actual Windows tests cover concurrent casing collisions, original bytes/reference preservation and temporary-file cleanup.
+- PNG expansion dropped original Reference-to-Reference physical links, although its API graph still contained them. Removed outer links now use the same two-endpoint resolution loop as inner physical links. Tests reconstruct execution from serialized links for two/three serial Presets with single or fanout entry points. The isolated native browser reloads twelve combinations of chain length one/two/three, nested Presets and physical bypass, preserving the whole-prompt boundaries and text.
+- Optimized counts treated an encountered Random node as empty inside a nested Preset. Only the selected Random-containing definition now falls back to the existing schedule calculation, just as Count-hold paths already did. Its stats flow back through parent aggregation. Tests cover first/tenth 100% arms, multiple nesting levels, upstream Matrix/Count/latent, held Count and an unselected invalid Random branch that does not invoke fallback. Actual native graph loading displays 24 executions before preparation; the backend then confirms 24 executions and 72 images for latent batch 3. These passthrough Random fixtures explicitly preserve legacy `preserve_join=false`; current join-required defaults are unchanged.
+
+Full Python passes 735 tests (2 opt-in native classes skipped), all 25 frontend suites pass, and the complete isolated native Chromium suite passes. Root reviewed all three product changes and reproduced each failing regression before the fix. The same auditor approved exact HEAD `73b194d9d9082ac3166114bff02fee03b2805b74` after independent Windows, physical-link and nested-Random probes and final test-log review. A new tenth GPT-6 Astra xhigh agent is conducting the next independent whole-repository audit.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
