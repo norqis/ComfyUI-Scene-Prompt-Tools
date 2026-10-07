@@ -138,6 +138,16 @@ A new GPT-6 Astra xhigh agent (`astra_audit_round11`) completed another whole-re
 
 Full Python passes 736 tests (2 opt-in native classes skipped), all 25 frontend suites pass, and the complete isolated native browser suite passes. The same auditor approved exact HEAD `26214009cd184475a244e55e2e31494e668e9ad6` after independently repeating the actual 12-image batch with one retained preview at every event and the Windows resource-file reproduction. Its independent scheduling checks matched 1,482 plans, 28,418 events and 1,636 source-pruned replay positions. A new twelfth GPT-6 Astra xhigh agent will audit the entire repository again before release.
 
+## Twelfth independent full audit
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round12`) completed another whole-repository audit and reproduced one further issue: ordinary Queue from the currently generating workflow inherited its live Expand run ID. The frontend mistook that fresh prompt object for the active batch, skipped preparation and submitted blank Preset handles. A real isolated Preset to Count 2 to Expand to PreviewAny workflow failed with a missing run context while the batch's first POST was held.
+
+Root fixed this in `6ba42e7`. Only the actual first snapshot or cached prompt already owned by that run can be a batch submission. Ordinary serialized Expand run IDs are cleared before existing seed/preparation handling; live widgets and the selected index are preserved. First-batch caching and acceptance use that same resolved owner instead of another run-ID search. This removes duplicate ownership logic and adds no registry, cache or policy. Tests now construct real owned snapshot identities instead of assuming a string run ID establishes ownership.
+
+The actual wrapper regression covers active and detached runs, stale/imported IDs, normal preparation/claim/release, unchanged owned snapshots and first-submission state, fresh normal seeds, and three owned iterations. The complete native browser holds the first batch POST, verifies ordinary Preset execution succeeds with its own fresh context, then releases the batch and verifies both original iterations succeed with the original handle. All 25 frontend suites and the complete isolated native browser pass. Python is unchanged from the 736-test pass and the successful required CI on `20ad847`.
+
+The same auditor approved exact HEAD `6ba42e765ed8758cc2d39c27ba3a6b77d3090233` after independently repeating its native reproduction and matching the tested product blob to the commit. Its independent combined checks passed 860 plans, 13,428 selected events and 3,684 replay-rank comparisons across three seeds. A new thirteenth GPT-6 Astra xhigh agent will audit the entire repository again before release.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
