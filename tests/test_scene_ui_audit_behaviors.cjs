@@ -113,25 +113,19 @@ displayContext.refreshScenePromptQueueNode(queueNode, { fitHeight: true });
 
 let createdImages = 0;
 const saveContext = {
-    Set, Map, JSON,
+    Set, Map, JSON, Math, Array,
     SCENE_SAVE_PREVIEW_LIMIT: 1,
     SCENE_SAVE_IMAGE_NODE_NAMES: new Set(["SceneSaveImage"]),
     sceneNodeFromEvent(detail) { return detail.node; },
     imageRefKey(ref) { return ref.filename; }, previewUrl(ref) { return ref.filename; },
     Image: class { constructor() { createdImages += 1; } },
-    trimSceneSavePreviews(node) {
-        while (node.imgs.length > 1) {
-            const old = node.imgs.shift();
-            node.scenePreviewKeys.delete(old.scenePreviewKey);
-            node.scenePreviewImages.delete(old.scenePreviewKey);
-        }
-        node.imageIndex = node.imgs.length - 1;
-    },
     app: { graph: { setDirtyCanvas() {} }, canvas: { setDirty() {} } },
 };
 require("./scene_switches_test_context.cjs").install(saveContext);
 vm.createContext(saveContext);
-vm.runInContext(functionSource("appendSceneSavePreview"), saveContext);
+for (const name of ["appendSceneSavePreview", "trimSceneSavePreviews", "clearSceneSavePreviews"]) {
+    vm.runInContext(functionSource(name), saveContext);
+}
 const saveNode = { type: "SceneSaveImage", imgs: [], size: [100, 100], setDirtyCanvas() {} };
 const hundred = Array.from({ length: 100 }, (_value, index) => ({ filename: `image-${index}` }));
 saveContext.appendSceneSavePreview({ node: saveNode, output: { images: hundred } });
@@ -142,6 +136,26 @@ assert.equal(createdImages, 1, "repeated events retain the latest cached image w
 saveContext.appendSceneSavePreview({ node: saveNode, output: { images: [{ filename: "image-100" }] } });
 assert.equal(createdImages, 2, "a newer event loads one new latest image");
 assert.equal(saveNode.imgs[0].scenePreviewKey, "image-100");
+for (let index = 101; index < 126; index++) {
+    const obsolete = saveNode.scenePreviewImages.values().next().value;
+    // Native ComfyUI replaces imgs with independently loaded Image objects.
+    saveNode.imgs = [{ src: `image-${index - 1}` }];
+    saveContext.appendSceneSavePreview({ node: saveNode, output: { images: [{ filename: `image-${index}` }] } });
+    assert.equal(saveNode.imgs.length, 1);
+    assert.deepEqual([...saveNode.scenePreviewKeys], [`image-${index}`]);
+    assert.deepEqual([...saveNode.scenePreviewImages.keys()], [`image-${index}`]);
+    assert.equal(obsolete.onload, null, "replaced preview releases its node callback");
+    const createdBeforeDuplicate = createdImages;
+    saveNode.imgs = [{ src: `image-${index}` }];
+    saveContext.appendSceneSavePreview({ node: saveNode, output: { images: [{ filename: `image-${index}` }] } });
+    assert.equal(createdImages, createdBeforeDuplicate, "native replacement does not reload a duplicate latest image");
+    assert.equal(saveNode.scenePreviewImages.size, 1);
+}
+saveContext.app.graph._nodes = [saveNode];
+saveContext.clearSceneSavePreviews();
+assert.equal(saveNode.scenePreviewImages.size, 0);
+assert.equal(saveNode.scenePreviewKeys.size, 0);
+assert.equal(saveNode.imgs.length, 0);
 
 const documentListeners = new Map();
 const dragContext = {

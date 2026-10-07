@@ -334,6 +334,59 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    const allowPreviewQueue = route => route.continue();
+    await page.route('**/prompt', allowPreviewQueue);
+    nativeRunChecks = true;
+    try {
+        await page.evaluate(async () => {
+            const { api } = await import('/scripts/api.js');
+            const app = window.app; app.graph.clear();
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const set = (node, name, value) => { const widget = node.widgets.find(item => item.name === name); widget.value = value; widget.callback?.(value); };
+            const count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+            const save = add('SceneSaveImage'), image = add('EmptyImage');
+            set(count, 'count', 12); set(image, 'width', 64); set(image, 'height', 64); set(expand, 'timestamp_dir', false);
+            count.connect(0, expand, expand.inputs.findIndex(input => input.name === 'scene_prompt'));
+            expand.connect(2, save, save.inputs.findIndex(input => input.name === 'scene_info'));
+            image.connect(0, save, save.inputs.findIndex(input => input.name === 'images'));
+            const state = window.__scenePreviewRuntime = { saveId: save.id, expandId: expand.id, points: [], errors: [] };
+            const executed = ({ detail }) => {
+                if (String(detail.node) !== String(save.id)) return;
+                state.points.push({ promptId: detail.prompt_id, filename: detail.output.images.at(-1).filename,
+                    keys: save.scenePreviewKeys.size, images: save.scenePreviewImages.size });
+            };
+            const failed = ({ detail }) => state.errors.push(detail);
+            api.addEventListener('executed', executed); api.addEventListener('execution_error', failed);
+            state.cleanup = () => { api.removeEventListener('executed', executed); api.removeEventListener('execution_error', failed); };
+            expand.widgets.find(widget => widget.sceneRole === 'expand_run_all').callback();
+        });
+        await page.waitForFunction(() => {
+            const state = window.__scenePreviewRuntime;
+            return state.errors.length || state.points.length === 12
+                && !window.app.graph.getNodeById(state.expandId).widgets.find(widget => widget.name === 'run_id').value;
+        }, null, { timeout: 60_000 });
+        await page.waitForFunction(() => {
+            const state = window.__scenePreviewRuntime, node = window.app.graph.getNodeById(state.saveId);
+            return node.imgs?.length === 1 && node.imgs[0].complete && node.imgs[0].naturalWidth === 64
+                && new URL(node.imgs[0].src).searchParams.get('filename') === state.points.at(-1)?.filename;
+        });
+        const preview = await page.evaluate(() => {
+            const { points, errors } = window.__scenePreviewRuntime; return { points, errors };
+        });
+        assert.deepEqual(preview.errors, []);
+        assert.equal(preview.points.length, 12);
+        assert.equal(new Set(preview.points.map(point => point.promptId)).size, 12);
+        assert(preview.points.every(point => point.keys === 1 && point.images === 1), JSON.stringify(preview.points));
+        for (const point of preview.points) {
+            const history = (await (await fetch(`${url}/history/${point.promptId}`)).json())[point.promptId];
+            assert.equal(history?.status?.status_str, 'success');
+        }
+        console.log('real ComfyUI 12-image CPU batch retains only the current Save preview after native image replacement');
+    } finally {
+        await page.evaluate(() => { window.__scenePreviewRuntime?.cleanup(); delete window.__scenePreviewRuntime; });
+        nativeRunChecks = false;
+        await page.unroute('**/prompt', allowPreviewQueue);
+    }
     const screenshotDirectory = process.env.SCENE_BROWSER_SCREENSHOTS_DIR || resolve(tmpdir(), 'scene-prompt-civitai-review');
     await mkdir(screenshotDirectory, { recursive: true });
     const nativeCanvasCache = await page.evaluate(() => {

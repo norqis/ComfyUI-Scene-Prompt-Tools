@@ -1,6 +1,7 @@
 import hashlib
 import importlib
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -139,14 +140,35 @@ class ResourceInfoTests(unittest.TestCase):
             with self.assertRaisesRegex(self.info.ScenePresetError, "循環"):
                 self.info.connected_resources(graph, "2")
 
-    def test_windows_path_spelling_deduplicates_resources(self):
+    def test_path_spelling_uses_platform_filename_identity(self):
         graph = {"output": {
             "1": node("SceneApplyLora", lora_name=r"Folder\Style.safetensors"),
             "2": node("SceneApplyLora", scene_prompt=["1", 0], lora_name="folder/style.safetensors"),
             "3": node("ScenePrompterExpand", scene_prompt=["2", 0]),
         }}
         result = self.info.connected_resources(graph, "3")
-        self.assertEqual(len(result["loras"]), 1)
+        self.assertEqual(len(result["loras"]), 1 if os.name == "nt" else 2)
+        graph["output"]["2"]["inputs"]["lora_name"] = "Folder/Style.safetensors"
+        self.assertEqual(len(self.info.connected_resources(graph, "3")["loras"]), 1)
+
+    def test_distinct_unicode_model_and_lora_filenames_remain_visible(self):
+        names = ["Straße.safetensors", "STRASSE.safetensors"]
+        paths = [Path(self.temp.name) / name for name in names]
+        for index, path in enumerate(paths):
+            path.write_bytes(bytes([index]))
+        self.assertFalse(paths[0].samefile(paths[1]))
+        graph = {"output": {
+            "1": node("SceneApplyModel", model=["6", 0]),
+            "2": node("SceneApplyModel", scene_prompt=["1", 0], model=["7", 0]),
+            "3": node("SceneApplyLora", scene_prompt=["2", 0], lora_name=names[0]),
+            "4": node("SceneApplyLora", scene_prompt=["3", 0], lora_name=names[1]),
+            "5": node("ScenePrompterExpand", scene_prompt=["4", 0]),
+            "6": node("CheckpointLoaderSimple", ckpt_name=names[0]),
+            "7": node("CheckpointLoaderSimple", ckpt_name=names[1]),
+        }}
+        result = self.info.connected_resources(graph, "5")
+        self.assertEqual([item["name"] for item in result["models"]], names)
+        self.assertEqual([item["name"] for item in result["loras"]], names)
 
     def test_linked_loader_filenames_are_resolved_or_marked_unavailable(self):
         graph = {"output": {

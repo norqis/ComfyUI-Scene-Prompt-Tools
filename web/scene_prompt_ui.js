@@ -13304,6 +13304,16 @@ function appendSceneSavePreview(detail) {
         }
     }
 
+    // Native ComfyUI can replace imgs with its own Image objects. Retain only
+    // the selected previews, independently of that array's ownership.
+    for (const [key, image] of node.scenePreviewImages) {
+        if (!seenKeys.has(key)) {
+            image.onload = null;
+            node.scenePreviewImages.delete(key);
+            node.scenePreviewKeys.delete(key);
+        }
+    }
+
     for (const imageRef of needed.reverse()) {
         const key = imageRefKey(imageRef);
         if (node.scenePreviewKeys.has(key) && node.scenePreviewImages.has(key)) {
