@@ -1,5 +1,97 @@
 import assert from "node:assert/strict";
 
+export async function testPopupFormSubmissionRaces(browser, url) {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    try {
+        for (const kind of ["create", "save"]) for (const action of ["normal", "edit", "reopen", "failure", "other-node", "other-form"]) {
+            await page.goto(url);
+            await page.waitForFunction(() => window.__scenePromptBrowserReady);
+            const result = await page.evaluate(async ({ kind, action }) => {
+                const hooks = window.__scenePromptPopupTestHooks, graph = window.app.graph;
+                const state = JSON.stringify({ version: 1, categories: { Outfit: [window.__scenePromptItems[0]] } });
+                const makeNode = (id) => {
+                    const node = { id, type: "FavoriteFixture", graph, size: [420, 300], properties: {},
+                        widgets: [{ name: "positive_json", value: state }, { name: "negative_json", value: '{"version":1,"categories":{}}' }], setDirtyCanvas() {} };
+                    node.widgets_values = node.widgets.map((widget) => widget.value); graph._nodes.push(node); return node;
+                };
+                const node = makeNode(901), buttonName = kind === "create" ? "作成" : "保存";
+                const open = (target = node, form = kind) => form === "create" ? hooks.openCreatePromptPopup(target) : hooks.openSavePromptPopup(target);
+                const button = () => [...document.querySelectorAll(".pc-popup button")].find((element) => element.textContent === buttonName);
+                const name = () => {
+                    const label = [...document.querySelectorAll(".pc-form label")].find((label) => label.textContent === "名前");
+                    if (!label) throw new Error(`${kind}/${action}: form missing (${document.querySelector(".pc-popup-title")?.textContent})`);
+                    return label.querySelector("input");
+                };
+                const fill = (value) => {
+                    for (const label of document.querySelectorAll(".pc-form label")) {
+                        const input = label.querySelector("input,textarea");
+                        if (!input) continue;
+                        input.value = label.textContent === "名前" ? value : label.textContent.startsWith("カテゴリ") ? "Outfit" : label.textContent === "プロンプト" ? "red dress" : "";
+                        input.dispatchEvent(new Event("input", { bubbles: true }));
+                    }
+                };
+                const addListener = HTMLButtonElement.prototype.addEventListener;
+                HTMLButtonElement.prototype.addEventListener = function (type, listener, options) {
+                    return addListener.call(this, type, type === "click" && this.textContent === buttonName
+                        ? (event) => { window.formTestDone = listener.call(this, event); } : listener, options);
+                };
+                await open(); fill("First draft");
+                const original = window.api.fetchApi;
+                let calls = 0, reads = 0, release, fail = action === "failure";
+                const gate = new Promise((resolve) => { release = resolve; });
+                const endpoint = kind === "create" ? "/scene_prompt/items" : "/scene_prompt/saved_prompts";
+                window.api.fetchApi = async (path, options = {}) => {
+                    if (path.startsWith(endpoint)) {
+                        if (options.method === "POST") {
+                            calls++; await gate;
+                            if (fail) return new Response(JSON.stringify({ error: "test failure" }), { status: 500 });
+                        } else reads++;
+                    }
+                    return original(path, options);
+                };
+                const firstButton = button(); firstButton.click(); firstButton.click();
+                const pending = { calls, disabled: firstButton.disabled };
+                let reopenedDisabled = null, independentEnabled = null;
+                if (action === "reopen") { await hooks.openSearchPopup(node); await open(); reopenedDisabled = button().disabled; button().click(); }
+                if (["edit", "reopen"].includes(action)) fill("Second draft");
+                if (action === "other-node") { await open(makeNode(902)); independentEnabled = !button().disabled; fill("Other node draft"); }
+                if (action === "other-form") {
+                    await open(node, kind === "create" ? "save" : "create");
+                    independentEnabled = ![...document.querySelectorAll(".pc-popup button")].find((element) => element.textContent === (kind === "create" ? "保存" : "作成")).disabled;
+                    fill("Other form draft");
+                }
+                release(); await window.formTestDone;
+                const postReads = reads;
+                let retryEnabled = null;
+                if (action === "failure") {
+                    retryEnabled = !button().disabled && name().value === "First draft";
+                    fail = false; button().click(); await window.formTestDone;
+                }
+                if (["normal", "failure"].includes(action)) await open();
+                const after = name().value;
+                const enabled = !button()?.disabled;
+                await open(action === "other-node" ? graph.getNodeById(902) : node, action === "other-form" ? (kind === "create" ? "save" : "create") : kind);
+                const reopened = name().value;
+                HTMLButtonElement.prototype.addEventListener = addListener;
+                return { pending, calls, postReads, reopenedDisabled, independentEnabled, retryEnabled, after, reopened, enabled };
+            }, { kind, action });
+            assert.deepEqual(result.pending, { calls: 1, disabled: true }, `${kind}/${action}: one submission`);
+            assert.equal(result.calls, action === "failure" ? 2 : 1);
+            assert.equal(result.postReads, 0, "successful POST already supplies the updated list");
+            if (action === "reopen") assert.equal(result.reopenedDisabled, true);
+            if (action.startsWith("other-")) assert.equal(result.independentEnabled, true);
+            if (action === "failure") assert.equal(result.retryEnabled, true);
+            const expected = ["normal", "failure"].includes(action) ? "" : action === "other-node" ? "Other node draft" : action === "other-form" ? "Other form draft" : "Second draft";
+            assert.equal(result.after, expected);
+            assert.equal(result.reopened, expected, `${kind}/${action}: late completion preserves session draft`);
+            assert.equal(result.enabled, true);
+        }
+        assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+}
+
 export async function testSnapshotRaces(browser, url) {
     const page = await browser.newPage();
     const errors = [];

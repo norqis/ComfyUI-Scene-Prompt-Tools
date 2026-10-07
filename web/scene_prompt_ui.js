@@ -468,6 +468,10 @@ async function saveCurrentPrompt(name, description, items) {
     }
     if (generation === savedPromptsRequestGeneration) {
         savedPrompts = Array.isArray(data.saved_prompts) ? data.saved_prompts : null;
+    } else {
+        // Another request may have read before this write completed.
+        savedPromptsRequestGeneration++;
+        savedPrompts = savedPromptsPromise = savedPromptsLatestPromise = null;
     }
     clearSceneSelectedListLayoutCaches();
     return data.saved_prompt;
@@ -486,6 +490,9 @@ async function createPromptItem(payload) {
     }
     if (generation === promptItemsRequestGeneration) {
         promptItems = Array.isArray(data.items) ? data.items : null;
+    } else {
+        promptItemsRequestGeneration++;
+        promptItems = promptItemsPromise = promptItemsLatestPromise = null;
     }
     return data.item;
 }
@@ -503,6 +510,9 @@ async function updatePromptItem(payload) {
     }
     if (generation === promptItemsRequestGeneration) {
         promptItems = Array.isArray(data.items) ? data.items : null;
+    } else {
+        promptItemsRequestGeneration++;
+        promptItems = promptItemsPromise = promptItemsLatestPromise = null;
     }
     return data.item;
 }
@@ -777,6 +787,26 @@ function resetPopupForm(session, formName) {
     } else if (formName === "create") {
         session.forms.create = { category: "", subcategory: "", name: "", prompt: "", description: "" };
     }
+}
+
+function bindPopupFormSubmit(button, session, formName, submit, disabled = false) {
+    const pending = session.pendingForms ||= {};
+    const refresh = () => { button.disabled = disabled || Boolean(pending[formName]); };
+    refresh();
+    pending[formName]?.then(refresh);
+    button.addEventListener("click", async () => {
+        if (disabled || pending[formName]) return;
+        let finish;
+        pending[formName] = new Promise((resolve) => { finish = resolve; });
+        refresh();
+        try {
+            await submit();
+        } finally {
+            delete pending[formName];
+            finish();
+            refresh();
+        }
+    });
 }
 
 function readStateFromWidget(node, stateWidgetName) {
@@ -3162,21 +3192,22 @@ async function openSavePromptPopup(node, options = {}) {
     const toolbar = document.createElement("div");
     toolbar.className = "pc-toolbar";
     const save = createButton("保存");
-    save.disabled = !items.length;
-    save.addEventListener("click", async () => {
+    bindPopupFormSubmit(save, session, "save", async () => {
         error.textContent = "";
+        const submitted = { name: nameInput.value, description: descInput.value };
         try {
-            await saveCurrentPrompt(nameInput.value, descInput.value, items);
-            await loadSavedPrompts(true);
-            resetPopupForm(session, "save");
+            await saveCurrentPrompt(submitted.name, submitted.description, items);
             if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
+            if (!Object.entries(submitted).every(([key, value]) => session.forms.save[key] === value)) return;
+            resetPopupForm(session, "save");
             refreshNode(node, { fitHeight: true });
-            openSelectedPopup(node, { stateWidgetName, popupSession: session });
+            await openSelectedPopup(node, { stateWidgetName, popupSession: session });
         } catch (saveError) {
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             error.textContent = saveError.message || "プロンプトまとめの保存に失敗しました";
             fitPopupToContent(popup);
         }
-    });
+    }, !items.length);
     toolbar.appendChild(save);
 
     const back = createButton("←戻る");
@@ -3335,23 +3366,24 @@ async function openCreatePromptPopup(node, options = {}) {
     const toolbar = document.createElement("div");
     toolbar.className = "pc-toolbar";
     const create = createButton("作成");
-    create.addEventListener("click", async () => {
+    bindPopupFormSubmit(create, session, "create", async () => {
         error.textContent = "";
+        const submitted = {
+            category: categoryInput.value,
+            subcategory: subcategoryInput.value,
+            name: nameInput.value,
+            prompt: promptInput.value,
+            description: descInput.value,
+        };
         try {
-            const item = await createPromptItem({
-                category: categoryInput.value,
-                subcategory: subcategoryInput.value,
-                name: nameInput.value,
-                prompt: promptInput.value,
-                description: descInput.value,
-            });
-            promptItems = null;
-            await loadPromptItems();
-            resetPopupForm(session, "create");
+            const item = await createPromptItem(submitted);
             if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
+            if (!Object.entries(submitted).every(([key, value]) => session.forms.create[key] === value)) return;
+            resetPopupForm(session, "create");
             refreshNode(node, { fitHeight: true });
-            openPromptCandidatePopup(node, item.category_path || [categoryInput.value].filter(Boolean), { stateWidgetName, popupSession: session });
+            await openPromptCandidatePopup(node, item.category_path || [categoryInput.value].filter(Boolean), { stateWidgetName, popupSession: session });
         } catch (createError) {
+            if (activePopupContext?.popup !== popup || node.graph !== app.graph) return;
             error.textContent = createError.message || "プロンプト作成に失敗しました";
             fitPopupToContent(popup);
         }

@@ -571,6 +571,33 @@ async function testSavedPromptNormalLoadsShareOneInFlightRequest() {
     assert.equal(secondResult[0].label, "shared");
 }
 
+async function testOverlappingFormWritesInvalidateEarlierReadSnapshots() {
+    for (const mutationName of ["createPromptItem", "updatePromptItem", "saveCurrentPrompt"]) for (const overlappingRead of [false, true]) {
+        const kind = mutationName === "saveCurrentPrompt" ? "saved" : "items";
+        const older = deferred(), newer = deferred(), stale = deferred(), fresh = deferred();
+        const context = listRaceContext(kind, older, newer, ...(overlappingRead ? [stale] : []), fresh);
+        vm.runInContext(functionSource(mutationName), context);
+        if (kind === "items") vm.runInContext(functionSource("createPromptItem"), context);
+        const mutate = () => context[mutationName](kind === "items" ? { name: "draft" } : "draft", "", []);
+        const load = kind === "items" ? context.loadPromptItems : context.loadSavedPrompts;
+        const key = kind === "items" ? "items" : "saved_prompts";
+        const first = mutate(), second = kind === "items" ? context.createPromptItem({ name: "B" }) : mutate();
+        newer.resolve({ ok: true, payload: { [key]: [{ label: "B" }] } });
+        await second;
+        assert.equal((await load())[0].label, "B");
+        assert.equal(context.fetchCount, 2, "fresh POST list requires no extra GET");
+        const oldRead = overlappingRead ? load(true) : null;
+        older.resolve({ ok: true, payload: { [key]: [{ label: "A" }, { label: "B" }] } });
+        await first;
+        const latest = load();
+        if (overlappingRead) stale.resolve({ ok: true, payload: { [key]: [{ label: "B" }] } });
+        fresh.resolve({ ok: true, payload: { [key]: [{ label: "A" }, { label: "B" }] } });
+        assert.deepEqual(Array.from(await latest, (entry) => entry.label), ["A", "B"]);
+        if (oldRead) assert.deepEqual(Array.from(await oldRead, (entry) => entry.label), ["A", "B"]);
+        assert.equal(context[kind === "items" ? "promptItemsLatestPromise" : "savedPromptsLatestPromise"], null);
+    }
+}
+
 function testLiveWidgetStateWinsOverStaleSerializedValue() {
     const context = { String, Array };
     vm.createContext(context);
@@ -1075,6 +1102,7 @@ Promise.resolve()
     .then(testItemAndSavedPromptStaleRefreshesAdoptTheLatestResponse)
     .then(testItemAndSavedPromptStaleGetDoesNotAwaitItselfAfterPost)
     .then(testSavedPromptNormalLoadsShareOneInFlightRequest)
+    .then(testOverlappingFormWritesInvalidateEarlierReadSnapshots)
     .then(testLiveWidgetStateWinsOverStaleSerializedValue)
     .then(testWorkflowLoadGuardMarksOnlyLoadWindow)
     .then(testWorkflowConnectionStormDefersSceneWork)
