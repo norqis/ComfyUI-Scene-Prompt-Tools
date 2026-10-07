@@ -30,8 +30,8 @@ for (const name of [
     "emptyScenePromptStats", "sceneStatNumber", "sceneStatProduct", "sceneStatSum", "sceneStatsResult", "sceneStatsMerge",
     "sceneSchedulePlan", "sceneScheduleRun", "sceneScheduleWrapper", "sceneScheduleRepeatEach",
     "sceneCountHasHold", "sceneCountPolicyAdd", "sceneCountPolicyProduct", "sceneCountPlanPolicy", "sceneCountUnitPolicy",
-    "sceneCountPrefixPlan", "sceneCountPrefixUnit", "sceneCountEligibleIndex",
-    "sceneScheduleSequence", "sceneScheduleAlternate", "sceneScheduleAtUnit", "sceneScheduleAt",
+    "sceneCountPrefixPlan", "sceneCountPrefixUnit", "sceneCountPrefixUnitUncached", "sceneCountEligibleIndex",
+    "sceneScheduleSequence", "sceneScheduleAlternate", "sceneScheduleAtUnit", "sceneScheduleAtUnitUncached", "sceneScheduleAt",
     "sceneSchedulePrefix", "sceneScheduleCount", "sceneScheduleMap", "sceneScheduleMatrix", "sceneScheduleQueue",
     "sceneScheduleError", "sceneRandomGuard", "sceneRandomChoicePlan", "sceneRandomZeroArm", "sceneRandomJoinReady",
     "sceneScheduleHasComposite", "sceneScheduleMerge", "mergeScenePromptEntryPair",
@@ -60,6 +60,32 @@ assert.equal(randomJoined.stats.rows, 1);
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(randomJoined))), ["ランダム候補"],
     "preview does not falsely claim a winner before execution");
 assert.equal(ctx.sceneScheduleCount(randomJoined, 10).stats.total, 10, "Count repeats draws, not winning paths");
+
+for (const mapped of [false, true]) {
+    let plan = randomJoined;
+    for (let level = 0; level < 28; level += 1) {
+        const left = mapped ? ctx.sceneScheduleMap(plan, (entry) => ({ ...entry, parts: [...entry.parts, "left"] })) : plan;
+        const right = mapped ? ctx.sceneScheduleMap(plan, (entry) => ({ ...entry, parts: [...entry.parts, "right"] })) : plan;
+        plan = ctx.sceneScheduleMerge(left, right);
+    }
+    const original = ctx.sceneScheduleAtUnitUncached;
+    let visits = 0;
+    ctx.sceneScheduleAtUnitUncached = (...args) => {
+        assert.ok(++visits < 200, "shared paths must not be expanded as a tree");
+        return original(...args);
+    };
+    const entry = ctx.sceneScheduleAt(plan, 0);
+    ctx.sceneScheduleAtUnitUncached = original;
+    assert.deepEqual(Array.from(entry.parts), mapped ? ["ランダム候補", "left", "right"] : ["ランダム候補"]);
+    const prefixUnit = ctx.sceneCountPrefixUnitUncached;
+    visits = 0;
+    ctx.sceneCountPrefixUnitUncached = (...args) => {
+        assert.ok(++visits < 200, "Count prefixes reuse shared paths within one calculation");
+        return prefixUnit(...args);
+    };
+    assert.deepEqual(Array.from(ctx.sceneCountPrefixPlan(plan, 1)), [0, 0, 1]);
+    ctx.sceneCountPrefixUnitUncached = prefixUnit;
+}
 assert.match(ctx.sceneScheduleCount(guarded(leaf("A"), 0), 2).stats.error, /Queueで合流/u);
 assert.match(ctx.sceneScheduleMatrix(guarded(leaf("A"), 0), [{ label: "single" }]).stats.error, /Queueで合流/u);
 assert.match(ctx.sceneScheduleMerge(guarded(leaf("A"), 0), leaf("B")).stats.error, /Queueで合流/u);

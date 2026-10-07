@@ -7701,11 +7701,11 @@ function sceneCountUnitPolicy(unit) {
     return result;
 }
 
-function sceneCountPrefixPlan(plan, end) {
+function sceneCountPrefixPlan(plan, end, memo = new Map()) {
     let result = [0, 0, 0];
     for (const unit of plan.units) {
         const length = Math.min(end, unit.total);
-        const prefix = sceneCountPrefixUnit(unit, length);
+        const prefix = sceneCountPrefixUnit(unit, length, memo);
         result = result.map((value, index) => value + prefix[index]);
         end -= length;
         if (!end) break;
@@ -7713,15 +7713,24 @@ function sceneCountPrefixPlan(plan, end) {
     return result;
 }
 
-function sceneCountPrefixUnit(unit, end) {
+function sceneCountPrefixUnit(unit, end, memo = new Map()) {
+    let values = memo.get(unit);
+    if (!values) memo.set(unit, values = new Map());
+    const key = `prefix:${end}`;
+    if (!values.has(key)) values.set(key, sceneCountPrefixUnitUncached(unit, end, memo));
+    const entry = values.get(key);
+    return [...entry];
+}
+
+function sceneCountPrefixUnitUncached(unit, end, memo) {
     if (!end) return [0, 0, 0];
     const add = (first, second) => first.map((value, index) => value + second[index]);
     if (["run", "tail", "row_product"].includes(unit.kind)) return [0, 0, end];
     if (unit.kind === "count_hold") return [end, 0, 0];
-    if (unit.kind === "sequence") return sceneCountPrefixPlan(unit.plan, end);
+    if (unit.kind === "sequence") return sceneCountPrefixPlan(unit.plan, end, memo);
     // Preview retains the existing Random placeholder. Use the same arm for its
     // prefix and ordinal mapping; execution selects the seeded arm in Python.
-    if (unit.kind === "random_choice") return sceneCountPrefixPlan(unit.plans[0], end);
+    if (unit.kind === "random_choice") return sceneCountPrefixPlan(unit.plans[0], end, memo);
     if (unit.kind === "alternate") {
         const sizes = unit.plans.map((plan) => plan.stats.total), block = unit.blockSize;
         let low = 0, high = Math.ceil(Math.max(0, ...sizes) / block);
@@ -7736,7 +7745,7 @@ function sceneCountPrefixUnit(unit, end) {
         unit.plans.forEach((plan, index) => {
             const from = Math.min(sizes[index], start(low));
             const within = Math.min(remaining, block, sizes[index] - from);
-            result = add(result, sceneCountPrefixPlan(plan, from + within));
+            result = add(result, sceneCountPrefixPlan(plan, from + within, memo));
             remaining -= within;
         });
         return result;
@@ -7744,50 +7753,50 @@ function sceneCountPrefixUnit(unit, end) {
     if (unit.kind === "product") {
         const length = unit.right.stats.total;
         const full = Math.floor(end / length), within = end % length;
-        const left = sceneCountPrefixPlan(unit.left, full), right = sceneCountPrefixPlan(unit.right, length);
+        const left = sceneCountPrefixPlan(unit.left, full, memo), right = sceneCountPrefixPlan(unit.right, length, memo);
         const result = [0, 0, 0];
         for (let a = 0; a < 3; a += 1) for (let b = 0; b < 3; b += 1) result[Math.min(a, b)] += left[a] * right[b];
         if (within) {
-            const after = sceneCountPrefixPlan(unit.left, full + 1), prefix = sceneCountPrefixPlan(unit.right, within);
+            const after = sceneCountPrefixPlan(unit.left, full + 1, memo), prefix = sceneCountPrefixPlan(unit.right, within, memo);
             for (let a = 0; a < 3; a += 1) for (let b = 0; b < 3; b += 1) result[Math.min(a, b)] += (after[a] - left[a]) * prefix[b];
         }
         return result;
     }
     if (unit.kind === "count_scale") {
         if (unit.factor === 0) return [end, 0, 0];
-        const first = Math.min(end, unit.unit.total), result = sceneCountPrefixUnit(unit.unit, first);
+        const first = Math.min(end, unit.unit.total), result = sceneCountPrefixUnit(unit.unit, first, memo);
         result[2] += end - first;
         return result;
     }
     if (unit.kind === "fixed") {
-        const strict = sceneCountPrefixUnit(unit.unit, end)[0];
+        const strict = sceneCountPrefixUnit(unit.unit, end, memo)[0];
         return [strict, end - strict, 0];
     }
-    if (unit.kind === "map") return sceneCountPrefixUnit(unit.unit, end);
+    if (unit.kind === "map") return sceneCountPrefixUnit(unit.unit, end, memo);
     if (unit.kind === "repeat") {
         const length = unit.unit.total, cycles = Math.floor(end / length);
-        return add(sceneCountPrefixUnit(unit.unit, length).map((value) => value * cycles), sceneCountPrefixUnit(unit.unit, end % length));
+        return add(sceneCountPrefixUnit(unit.unit, length, memo).map((value) => value * cycles), sceneCountPrefixUnit(unit.unit, end % length, memo));
     }
     if (unit.kind === "matrix_rows") {
         const size = unit.matrixRows.length, probe = Math.floor((end - 1) / size);
-        const entry = sceneScheduleAtUnit(unit.unit, probe);
+        const entry = sceneScheduleAtUnit(unit.unit, probe, memo);
         const start = probe - entry.repeatIndex + 1;
-        const before = sceneCountPrefixUnit(unit.unit, start);
-        const after = sceneCountPrefixUnit(unit.unit, start + 1);
+        const before = sceneCountPrefixUnit(unit.unit, start, memo);
+        const after = sceneCountPrefixUnit(unit.unit, start + 1, memo);
         return before.map((value, index) => value * size + (after[index] - value) * (end - start * size));
     }
     const factor = unit.kind === "matrix" ? unit.matrixRows.length : unit.factor;
     const full = Math.floor(end / factor), within = end % factor;
-    const prefix = unit.unit ? sceneCountPrefixUnit(unit.unit, full) : sceneCountPrefixPlan(unit.plan, full);
-    const after = within ? unit.unit ? sceneCountPrefixUnit(unit.unit, full + 1) : sceneCountPrefixPlan(unit.plan, full + 1) : prefix;
+    const prefix = unit.unit ? sceneCountPrefixUnit(unit.unit, full, memo) : sceneCountPrefixPlan(unit.plan, full, memo);
+    const after = within ? unit.unit ? sceneCountPrefixUnit(unit.unit, full + 1, memo) : sceneCountPrefixPlan(unit.plan, full + 1, memo) : prefix;
     return prefix.map((value, index) => value * factor + (after[index] - value) * within);
 }
 
-function sceneCountEligibleIndex(unit, ordinal, policy) {
+function sceneCountEligibleIndex(unit, ordinal, policy, memo = new Map()) {
     let low = 0, high = unit.total;
     while (low < high) {
         const middle = low + Math.floor((high - low) / 2);
-        if (sceneCountPrefixUnit(unit, middle + 1)[policy] <= ordinal) low = middle + 1;
+        if (sceneCountPrefixUnit(unit, middle + 1, memo)[policy] <= ordinal) low = middle + 1;
         else high = middle;
     }
     return low;
@@ -7874,32 +7883,41 @@ function sceneRandomJoinReady(plans) {
         && expected.every((index) => actual.includes(index));
 }
 
-function sceneScheduleAtUnit(unit, index) {
+function sceneScheduleAtUnit(unit, index, memo = new Map()) {
+    let values = memo.get(unit);
+    if (!values) memo.set(unit, values = new Map());
+    const key = `select:${index}`;
+    if (!values.has(key)) values.set(key, sceneScheduleAtUnitUncached(unit, index, memo));
+    const entry = values.get(key);
+    return entry ? { ...entry } : null;
+}
+
+function sceneScheduleAtUnitUncached(unit, index, memo) {
     if (unit.kind === "run") return { ...unit.entry, repeatIndex: index + 1 };
-    if (unit.kind === "sequence") return sceneScheduleAt(unit.plan, index);
+    if (unit.kind === "sequence") return sceneScheduleAt(unit.plan, index, memo);
     if (unit.kind === "random_choice") return { parts: ["ランダム候補"], count: 1, row: emptyMatrixRow() };
-    if (unit.kind === "repeat_each") return sceneScheduleAt(unit.plan, Math.floor(index / unit.factor));
-    if (unit.kind === "count_hold") return sceneScheduleAtUnit(unit.unit, index);
+    if (unit.kind === "repeat_each") return sceneScheduleAt(unit.plan, Math.floor(index / unit.factor), memo);
+    if (unit.kind === "count_hold") return sceneScheduleAtUnit(unit.unit, index, memo);
     if (unit.kind === "count_scale") {
         const child = unit.unit;
-        if (unit.factor === 0) return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, index, 0));
-        if (index < child.total) return sceneScheduleAtUnit(child, index);
-        const free = sceneCountPrefixUnit(child, child.total)[2];
-        return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, (index - child.total) % free, 2));
+        if (unit.factor === 0) return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, index, 0, memo), memo);
+        if (index < child.total) return sceneScheduleAtUnit(child, index, memo);
+        const free = sceneCountPrefixUnit(child, child.total, memo)[2];
+        return sceneScheduleAtUnit(child, sceneCountEligibleIndex(child, (index - child.total) % free, 2, memo), memo);
     }
     if (unit.kind === "repeat" || unit.kind === "fixed") {
-        return unit.unit.total ? sceneScheduleAtUnit(unit.unit, index % unit.unit.total) : null;
+        return unit.unit.total ? sceneScheduleAtUnit(unit.unit, index % unit.unit.total, memo) : null;
     }
-    if (unit.kind === "map") return unit.transform(sceneScheduleAtUnit(unit.unit, index));
+    if (unit.kind === "map") return unit.transform(sceneScheduleAtUnit(unit.unit, index, memo));
     if (unit.kind === "row_repeat") {
-        const entry = sceneScheduleAtUnit(unit.unit, Math.floor(index / unit.factor));
+        const entry = sceneScheduleAtUnit(unit.unit, Math.floor(index / unit.factor), memo);
         return entry && { ...entry, count: sceneStatProduct(entry.count, unit.factor),
             repeatIndex: (entry.repeatIndex - 1) * unit.factor + index % unit.factor + 1 };
     }
     if (unit.kind === "matrix" || unit.kind === "matrix_rows") {
         const rows = unit.matrixRows;
         const probe = Math.floor(index / rows.length);
-        const entry = sceneScheduleAtUnit(unit.unit, probe);
+        const entry = sceneScheduleAtUnit(unit.unit, probe, memo);
         if (!entry) return null;
         const local = index - (probe - entry.repeatIndex + 1) * rows.length;
         const matrixIndex = unit.kind === "matrix_rows" ? Math.floor(local / entry.count) : index % rows.length;
@@ -7914,18 +7932,18 @@ function sceneScheduleAtUnit(unit, index) {
     }
     if (unit.kind === "row_product") {
         const rightTotal = unit.right.stats.total;
-        const leftProbe = Math.floor(index / rightTotal), left = sceneScheduleAt(unit.left, leftProbe);
+        const leftProbe = Math.floor(index / rightTotal), left = sceneScheduleAt(unit.left, leftProbe, memo);
         if (!left) return null;
         const local = index - (leftProbe - left.repeatIndex + 1) * rightTotal;
-        const rightProbe = Math.floor(local / left.count), right = sceneScheduleAt(unit.right, rightProbe);
+        const rightProbe = Math.floor(local / left.count), right = sceneScheduleAt(unit.right, rightProbe, memo);
         return right && { ...mergeScenePromptEntryPair(left, right),
             repeatIndex: local - (rightProbe - right.repeatIndex + 1) * left.count + 1 };
     }
     if (unit.kind === "product") {
         const rightCount = unit.right.stats.total;
         if (!rightCount) return null;
-        const left = sceneScheduleAt(unit.left, Math.floor(index / rightCount));
-        const right = sceneScheduleAt(unit.right, index % rightCount);
+        const left = sceneScheduleAt(unit.left, Math.floor(index / rightCount), memo);
+        const right = sceneScheduleAt(unit.right, index % rightCount, memo);
         return left && right ? mergeScenePromptEntryPair({ ...left, count: 1 }, { ...right, count: 1 }) : null;
     }
     if (unit.kind === "alternate") {
@@ -7946,17 +7964,17 @@ function sceneScheduleAtUnit(unit, index) {
         for (let socket = 0; socket < sizes.length; socket += 1) {
             const start = roundStart(low);
             const available = Math.min(k, Math.max(0, sizes[socket] - start));
-            if (offset < available) return sceneScheduleAt(unit.plans[socket], start + offset);
+            if (offset < available) return sceneScheduleAt(unit.plans[socket], start + offset, memo);
             offset -= available;
         }
     }
     return null;
 }
 
-function sceneScheduleAt(plan, index) {
+function sceneScheduleAt(plan, index, memo = new Map()) {
     if (!Number.isSafeInteger(index) || index < 0 || index >= plan.stats.total) return null;
     for (const unit of plan.units) {
-        if (index < unit.total) return sceneScheduleAtUnit(unit, index);
+        if (index < unit.total) return sceneScheduleAtUnit(unit, index, memo);
         index -= unit.total;
     }
     return null;

@@ -49,6 +49,18 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         self.assertEqual(self.text(plan), ('cat', ''))
         self.assertEqual(plan['stats']['total_batches'], 1)
 
+    def test_random_output_shared_merge_keeps_text_and_replay_compact(self):
+        arms = self.nodes.ScenePromptRandomRoute().route(
+            weights_json=json.dumps([5000, 5000] + [0] * 8), scene_prompt=self.build('cat'), unique_id='gate')
+        plan = self.nodes.ScenePromptRandomRouteOutput().join(scene_prompt1=arms[0], scene_prompt2=arms[1])[0]
+        for index in range(28):
+            plan = self.nodes.ScenePromptMerge().merge(plan, plan, unique_id=f'merge{index}')[0]
+        self.assertEqual(self.text(plan), ('cat', ''))
+        self.assertEqual(plan['stats']['total_batches'], 1)
+        selected = self.plan.item_for_normalized_plan(plan, 0, 123)
+        sources = set(selected['row']['source_node_ids'])
+        self.assertEqual(self.plan.replay_index_for_event(plan, selected['event_ref'], sources, sources), 0)
+
     def test_delete_deep_choices_preserves_slots_without_recursion(self):
         value = "{" * 1500 + "tag" + "}" * 1500
         plan = self.build(value)

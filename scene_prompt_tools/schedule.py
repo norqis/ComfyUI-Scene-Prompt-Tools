@@ -900,30 +900,40 @@ def _random_arm(weights, gate_id, seed):
     raise ScenePlanError("Scene Prompt Random Route の確率が不正です。")
 
 
-def _select_plan(plan, index, seed=0):
+def _select_plan(plan, index, seed=0, memo=None):
+    memo = {} if memo is None else memo
     unit_index = bisect.bisect_right(plan.batch_prefix, index)
     if unit_index >= len(plan["units"]):
         raise IndexError("Generation index is outside the plan.")
     offset = plan.batch_prefix[unit_index - 1] if unit_index else 0
     row_offset = plan.row_prefix[unit_index - 1] if unit_index else 0
-    item = _select_unit(plan["units"][unit_index], index - offset, seed)
+    item = _select_unit(plan["units"][unit_index], index - offset, seed, memo=memo)
     item["row_index"] += row_offset
     item["event_ref"] = (("top", unit_index), *item["event_ref"])
     return item
 
 
-def _prefix_plan_policy(plan, end, seed=0):
+def _prefix_plan_policy(plan, end, seed=0, memo=None):
+    memo = {} if memo is None else memo
     result = [0, 0, 0]
     for unit in plan["units"]:
         length = min(end, unit["stats"]["total_batches"])
-        result = [a + b for a, b in zip(result, _prefix_unit_policy(unit, length, seed))]
+        result = [a + b for a, b in zip(result, _prefix_unit_policy(unit, length, seed, memo=memo))]
         end -= length
         if not end:
             break
     return tuple(result)
 
 
-def _prefix_unit_policy(unit, end, seed=0):
+def _prefix_unit_policy(unit, end, seed=0, memo=None):
+    memo = {} if memo is None else memo
+    key = ("prefix", id(unit), end, seed)
+    if key not in memo:
+        memo[key] = _prefix_unit_policy_uncached(unit, end, seed, memo)
+    return memo[key]
+
+
+def _prefix_unit_policy_uncached(unit, end, seed=0, memo=None):
     """Count policy classes in a prefix without visiting generated events."""
     if not end:
         return 0, 0, 0
@@ -933,12 +943,12 @@ def _prefix_unit_policy(unit, end, seed=0):
     if kind == "count_hold":
         return end, 0, 0
     if kind == "sequence":
-        return _prefix_plan_policy(unit["plan"], end, seed)
+        return _prefix_plan_policy(unit["plan"], end, seed, memo=memo)
     if kind == "random_choice":
         arm = unit["selected_arm"]
         if arm is None:
             arm = _random_arm(unit["weights"], unit["gate_id"], seed)
-        return _prefix_plan_policy(unit["inputs"][arm], end, seed)
+        return _prefix_plan_policy(unit["inputs"][arm], end, seed, memo=memo)
     if kind == "alternate":
         lengths = [plan["stats"]["total_batches"] for plan in unit["inputs"]]
         block = unit["block_size"]
@@ -954,21 +964,21 @@ def _prefix_unit_policy(unit, end, seed=0):
         for plan, length in zip(unit["inputs"], lengths):
             start = min(length, block * lower)
             within = min(remaining, block, length - start)
-            result = [a + b for a, b in zip(result, _prefix_plan_policy(plan, start + within, seed))]
+            result = [a + b for a, b in zip(result, _prefix_plan_policy(plan, start + within, seed, memo=memo))]
             remaining -= within
         return tuple(result)
     if kind == "product":
         right_total = unit["right"]["stats"]["total_batches"]
         full, within = divmod(end, right_total)
-        left = _prefix_plan_policy(unit["left"], full, seed)
-        right = _prefix_plan_policy(unit["right"], right_total, seed)
+        left = _prefix_plan_policy(unit["left"], full, seed, memo=memo)
+        right = _prefix_plan_policy(unit["right"], right_total, seed, memo=memo)
         result = [0, 0, 0]
         for a in range(3):
             for b in range(3):
                 result[min(a, b)] += left[a] * right[b]
         if within:
-            next_left = _prefix_plan_policy(unit["left"], full + 1, seed)
-            right_prefix = _prefix_plan_policy(unit["right"], within, seed)
+            next_left = _prefix_plan_policy(unit["left"], full + 1, seed, memo=memo)
+            right_prefix = _prefix_plan_policy(unit["right"], within, seed, memo=memo)
             for a in range(3):
                 for b in range(3):
                     result[min(a, b)] += (next_left[a] - left[a]) * right_prefix[b]
@@ -977,66 +987,77 @@ def _prefix_unit_policy(unit, end, seed=0):
         if unit["factor"] == 0:
             return end, 0, 0
         first = min(end, unit["unit"]["stats"]["total_batches"])
-        strict, legacy, free = _prefix_unit_policy(unit["unit"], first, seed)
+        strict, legacy, free = _prefix_unit_policy(unit["unit"], first, seed, memo=memo)
         return strict, legacy, free + end - first
     if kind == "count_fixed":
-        strict = _prefix_unit_policy(unit["unit"], end, seed)[0]
+        strict = _prefix_unit_policy(unit["unit"], end, seed, memo=memo)[0]
         return strict, end - strict, 0
     if kind == "repeat":
         length = unit["unit"]["stats"]["total_batches"]
         cycles, within = divmod(end, length)
-        total = _prefix_unit_policy(unit["unit"], length, seed)
-        partial = _prefix_unit_policy(unit["unit"], within, seed)
+        total = _prefix_unit_policy(unit["unit"], length, seed, memo=memo)
+        partial = _prefix_unit_policy(unit["unit"], within, seed, memo=memo)
         return tuple(value * cycles + rest for value, rest in zip(total, partial))
     if kind == "matrix_rows":
         size = len(unit["matrix_rows"])
         child = unit["unit"]
         if end == unit["stats"]["total_batches"]:
-            return tuple(value * size for value in _prefix_unit_policy(child, child["stats"]["total_batches"], seed))
+            return tuple(value * size for value in _prefix_unit_policy(child, child["stats"]["total_batches"], seed, memo=memo))
         probe = end // size
-        item = _select_unit(child, probe, seed)
+        item = _select_unit(child, probe, seed, memo=memo)
         start = probe - item["repeat_index"] + 1
-        prefix = _prefix_unit_policy(child, start, seed)
-        after = _prefix_unit_policy(child, start + 1, seed)
+        prefix = _prefix_unit_policy(child, start, seed, memo=memo)
+        after = _prefix_unit_policy(child, start + 1, seed, memo=memo)
         return tuple(value * size + (next_value - value) * (end - start * size) for value, next_value in zip(prefix, after))
     if kind in {"repeat_each", "matrix_map", "row_repeat"}:
         factor = len(unit["matrix_rows"]) if kind == "matrix_map" else unit["factor"]
         full, within = divmod(end, factor)
-        prefix = _prefix_unit_policy(unit["unit"], full, seed)
-        after = _prefix_unit_policy(unit["unit"], full + 1, seed) if within else prefix
+        prefix = _prefix_unit_policy(unit["unit"], full, seed, memo=memo)
+        after = _prefix_unit_policy(unit["unit"], full + 1, seed, memo=memo) if within else prefix
         return tuple(value * factor + (next_value - value) * within for value, next_value in zip(prefix, after))
     if kind == "map":
-        return _prefix_unit_policy(unit["unit"], end, seed)
+        return _prefix_unit_policy(unit["unit"], end, seed, memo=memo)
     raise ScenePlanError("Unsupported Scene Prompt Count prefix unit.")
 
 
-def _eligible_index(unit, ordinal, policy, seed):
+def _eligible_index(unit, ordinal, policy, seed, memo=None):
+    memo = {} if memo is None else memo
     lower, upper = 0, unit["stats"]["total_batches"]
     while lower < upper:
         middle = (lower + upper) // 2
-        if _prefix_unit_policy(unit, middle + 1, seed)[policy] <= ordinal:
+        if _prefix_unit_policy(unit, middle + 1, seed, memo=memo)[policy] <= ordinal:
             lower = middle + 1
         else:
             upper = middle
     return lower
 
 
-def _select_unit(unit, index, seed=0):
+def _select_unit(unit, index, seed=0, memo=None):
+    # Shared branches reuse work only within this selection. Wrappers may alter
+    # item metadata; row transformations always return a new row.
+    memo = {} if memo is None else memo
+    key = ("select", id(unit), index, seed)
+    if key not in memo:
+        memo[key] = _select_unit_uncached(unit, index, seed, memo)
+    return dict(memo[key])
+
+
+def _select_unit_uncached(unit, index, seed=0, memo=None):
     kind = unit["kind"]
     if kind == "run":
         row = copy.deepcopy(unit["row"])
         return {"row": row, "count": unit["count"], "row_index": 0, "repeat_index": index + 1,
                 "event_ref": (("run", index),)}
     if kind == "sequence":
-        item = _select_plan(unit["plan"], index, seed)
+        item = _select_plan(unit["plan"], index, seed, memo=memo)
         item["event_ref"] = (("sequence",), *item["event_ref"])
         return item
     if kind == "count_fixed":
-        item = _select_unit(unit["unit"], index, seed)
+        item = _select_unit(unit["unit"], index, seed, memo=memo)
         item["event_ref"] = (("fixed",), *item["event_ref"])
         return item
     if kind == "count_hold":
-        item = _select_unit(unit["unit"], index, seed)
+        item = _select_unit(unit["unit"], index, seed, memo=memo)
         item["event_ref"] = (("count_hold",), *item["event_ref"])
         return item
     if kind == "count_scale":
@@ -1046,18 +1067,18 @@ def _select_unit(unit, index, seed=0):
         cycle, projection = 0, "original"
         if factor == 0:
             projection = "strict"
-            local = _eligible_index(child, index, 0, seed)
+            local = _eligible_index(child, index, 0, seed, memo=memo)
         elif index < original:
             local = index
         else:
-            eligible = _prefix_unit_policy(child, original, seed)[2]
+            eligible = _prefix_unit_policy(child, original, seed, memo=memo)[2]
             cycle, ordinal = divmod(index - original, eligible)
             cycle += 1
             projection = "free"
-            local = _eligible_index(child, ordinal, 2, seed)
-        item = _select_unit(child, local, seed)
-        before = _prefix_unit_policy(child, local, seed)[2]
-        is_free = _prefix_unit_policy(child, local + 1, seed)[2] > before
+            local = _eligible_index(child, ordinal, 2, seed, memo=memo)
+        item = _select_unit(child, local, seed, memo=memo)
+        before = _prefix_unit_policy(child, local, seed, memo=memo)[2]
+        is_free = _prefix_unit_policy(child, local + 1, seed, memo=memo)[2] > before
         if is_free and factor > 0:
             item["repeat_index"] += cycle * item["count"]
             item["count"] *= factor
@@ -1066,14 +1087,14 @@ def _select_unit(unit, index, seed=0):
     if kind == "repeat":
         child_count = unit["unit"]["stats"]["total_batches"]
         cycle, local = divmod(index, child_count)
-        item = _select_unit(unit["unit"], local, seed)
+        item = _select_unit(unit["unit"], local, seed, memo=memo)
         item["repeat_index"] += cycle * item["count"]
         item["count"] *= unit["factor"]
         item["event_ref"] = (("repeat", cycle), *item["event_ref"])
         return item
     if kind in {"repeat_each", "row_repeat"}:
         child_index, within = divmod(index, unit["factor"])
-        item = _select_unit(unit["unit"], child_index, seed)
+        item = _select_unit(unit["unit"], child_index, seed, memo=memo)
         item["repeat_index"] = (item["repeat_index"] - 1) * unit["factor"] + within + 1
         item["count"] *= unit["factor"]
         item["event_ref"] = ((kind, within), *item["event_ref"])
@@ -1096,7 +1117,7 @@ def _select_unit(unit, index, seed=0):
             amount = min(block, max(0, length - block * round_index))
             if within < amount:
                 local = block * round_index + within
-                item = _select_plan(plan, local, seed)
+                item = _select_plan(plan, local, seed, memo=memo)
                 item["row_index"] += sum(previous["stats"]["row_count"] for previous in unit["inputs"][:socket])
                 item["event_ref"] = (("alternate", socket, round_index, within), *item["event_ref"])
                 return item
@@ -1105,7 +1126,7 @@ def _select_unit(unit, index, seed=0):
     if kind == "matrix_map":
         size = len(unit["matrix_rows"])
         child_index, matrix_index = divmod(index, size)
-        item = _select_unit(unit["unit"], child_index, seed)
+        item = _select_unit(unit["unit"], child_index, seed, memo=memo)
         item["row"] = _matrix_row(item["row"], unit["matrix_rows"][matrix_index])
         item["row_index"] = item["row_index"] * size + matrix_index
         item["event_ref"] = (("matrix", matrix_index), *item["event_ref"])
@@ -1113,7 +1134,7 @@ def _select_unit(unit, index, seed=0):
     if kind == "matrix_rows":
         size = len(unit["matrix_rows"])
         probe = index // size
-        item = _select_unit(unit["unit"], probe, seed)
+        item = _select_unit(unit["unit"], probe, seed, memo=memo)
         start = probe - item["repeat_index"] + 1
         matrix_index, within = divmod(index - start * size, item["count"])
         item["row"] = _matrix_row(item["row"], unit["matrix_rows"][matrix_index])
@@ -1124,11 +1145,11 @@ def _select_unit(unit, index, seed=0):
     if kind == "row_product":
         right_batches = unit["right"]["stats"]["total_batches"]
         left_probe = index // right_batches
-        left = _select_plan(unit["left"], left_probe, seed)
+        left = _select_plan(unit["left"], left_probe, seed, memo=memo)
         left_start = left_probe - left["repeat_index"] + 1
         local = index - left_start * right_batches
         right_probe = local // left["count"]
-        right = _select_plan(unit["right"], right_probe, seed)
+        right = _select_plan(unit["right"], right_probe, seed, memo=memo)
         right_start = right_probe - right["repeat_index"] + 1
         within = local - right_start * left["count"]
         return {"row": _old.merge_rows(left["row"], right["row"]), "count": left["count"] * right["count"],
@@ -1138,15 +1159,15 @@ def _select_unit(unit, index, seed=0):
     if kind == "product":
         right_batches = unit["right"]["stats"]["total_batches"]
         left_index, right_index = divmod(index, right_batches)
-        left = _select_plan(unit["left"], left_index, seed)
-        right = _select_plan(unit["right"], right_index, seed)
+        left = _select_plan(unit["left"], left_index, seed, memo=memo)
+        right = _select_plan(unit["right"], right_index, seed, memo=memo)
         row = _old.merge_rows(left["row"], right["row"])
         return {"row": row, "count": left["count"] * right["count"],
                 "row_index": left["row_index"] * unit["right"]["stats"]["row_count"] + right["row_index"],
                 "repeat_index": (left["repeat_index"] - 1) * right["count"] + right["repeat_index"],
                 "event_ref": (("product",), left["event_ref"], right["event_ref"])}
     if kind == "map":
-        item = _select_unit(unit["unit"], index, seed)
+        item = _select_unit(unit["unit"], index, seed, memo=memo)
         for operation in unit["operations"]:
             item["row"] = _apply_operation(item["row"], operation)
         item["event_ref"] = (("map",), *item["event_ref"])
@@ -1155,7 +1176,7 @@ def _select_unit(unit, index, seed=0):
         arm = unit["selected_arm"]
         if arm is None:
             arm = _random_arm(unit["weights"], unit["gate_id"], seed)
-        item = _select_plan(unit["inputs"][arm], index, seed)
+        item = _select_plan(unit["inputs"][arm], index, seed, memo=memo)
         item["event_ref"] = (("random_choice", unit["gate_id"], arm), *item["event_ref"])
         return item
     raise ScenePlanError("Unsupported Scene Prompt schedule unit.")
@@ -1239,41 +1260,57 @@ def legacy_rows(plan):
     return result
 
 
-def _prune_plan(plan, selected_sources, visible_sources, pending_operations=(), selected_arms=None):
-    return _plan(
-        [_prune_unit(unit, selected_sources, visible_sources, pending_operations, selected_arms) for unit in plan["units"]],
+def _prune_plan(plan, selected_sources, visible_sources, blocked=False, selected_arms=None, memo=None):
+    memo = {} if memo is None else memo
+    key = ("prune_plan", id(plan), blocked)
+    if key in memo:
+        return memo[key]
+    result = _plan(
+        [_prune_unit(unit, selected_sources, visible_sources, blocked, selected_arms, memo=memo) for unit in plan["units"]],
         plan["sources"], plan["contains_queue_boundary"], plan["random_guards"],
     )
+    memo[key] = result
+    return result
 
 
-def _prune_unit(unit, selected_sources, visible_sources, pending_operations=(), selected_arms=None):
+def _prune_unit(unit, selected_sources, visible_sources, blocked=False, selected_arms=None, memo=None):
+    memo = {} if memo is None else memo
+    key = ("prune_unit", id(unit), blocked)
+    if key not in memo:
+        memo[key] = _prune_unit_uncached(unit, selected_sources, visible_sources, blocked, selected_arms, memo)
+    return memo[key]
+
+
+def _prune_unit_uncached(unit, selected_sources, visible_sources, blocked=False, selected_arms=None, memo=None):
     kind = unit["kind"]
     if kind == "run":
         row = unit["row"]
-        for operation in pending_operations:
-            row = _apply_operation(row, operation)
         row_sources = {str(source) for source in row["source_node_ids"]}
-        kept = (row_sources & visible_sources) <= selected_sources
+        kept = not blocked and (row_sources & visible_sources) <= selected_sources
         return unit if kept else _unit("run", row=unit["row"], count=0)
     if kind == "sequence":
-        return _unit("sequence", plan=_prune_plan(unit["plan"], selected_sources, visible_sources, pending_operations, selected_arms))
+        return _unit("sequence", plan=_prune_plan(unit["plan"], selected_sources, visible_sources, blocked, selected_arms, memo=memo))
     if kind == "alternate":
-        return _unit("alternate", inputs=[_prune_plan(plan, selected_sources, visible_sources, pending_operations, selected_arms) for plan in unit["inputs"]], block_size=unit["block_size"])
+        return _unit("alternate", inputs=[_prune_plan(plan, selected_sources, visible_sources, blocked, selected_arms, memo=memo) for plan in unit["inputs"]], block_size=unit["block_size"])
     if kind == "random_choice":
         arm = selected_arms.get(unit["gate_id"]) if selected_arms else None
         if arm is None:
             return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=[_plan([]) for _ in range(10)], selected_arm=0)
         inputs = [_plan([]) for _ in range(10)]
-        inputs[arm] = _prune_plan(unit["inputs"][arm], selected_sources, visible_sources, pending_operations, selected_arms)
+        inputs[arm] = _prune_plan(unit["inputs"][arm], selected_sources, visible_sources, blocked, selected_arms, memo=memo)
         return _unit("random_choice", gate_id=unit["gate_id"], weights=unit["weights"], inputs=inputs, selected_arm=arm)
     if kind in {"product", "row_product"}:
         return _unit(kind,
-                     left=_prune_plan(unit["left"], selected_sources, visible_sources, pending_operations, selected_arms),
-                     right=_prune_plan(unit["right"], selected_sources, visible_sources, pending_operations, selected_arms))
+                     left=_prune_plan(unit["left"], selected_sources, visible_sources, blocked, selected_arms, memo=memo),
+                     right=_prune_plan(unit["right"], selected_sources, visible_sources, blocked, selected_arms, memo=memo))
     if kind == "map":
-        child = _prune_unit(unit["unit"], selected_sources, visible_sources, (*unit["operations"], *pending_operations), selected_arms)
+        # Only source_node operations affect pruning; all other maps stay intact.
+        blocked = blocked or any(operation["kind"] == "source_node"
+                                 and str(operation["payload"][0]) in visible_sources - selected_sources
+                                 for operation in unit["operations"])
+        child = _prune_unit(unit["unit"], selected_sources, visible_sources, blocked, selected_arms, memo=memo)
         return _unit("map", unit=child, operations=unit["operations"])
-    child = _prune_unit(unit["unit"], selected_sources, visible_sources, pending_operations, selected_arms)
+    child = _prune_unit(unit["unit"], selected_sources, visible_sources, blocked, selected_arms, memo=memo)
     if kind in {"repeat", "repeat_each", "count_scale", "row_repeat"}:
         return _unit(kind, unit=child, factor=unit["factor"])
     if kind in {"count_fixed", "count_hold"}:
@@ -1283,17 +1320,25 @@ def _prune_unit(unit, selected_sources, visible_sources, pending_operations=(), 
     raise ScenePlanError("Unsupported Scene Prompt replay unit.")
 
 
-def _rank_plan(plan, path):
+def _rank_plan(plan, path, memo=None):
+    memo = {} if memo is None else memo
+    key = ("rank", id(plan), id(path))
+    if key in memo:
+        return memo[key][1]
     if not path or path[0][0] != "top":
         raise ScenePlanError("Selected Scene Prompt event path is invalid.")
     index = path[0][1]
     if type(index) is not int or not 0 <= index < len(plan["units"]):
         raise ScenePlanError("Selected Scene Prompt event no longer exists.")
     before = plan.batch_prefix[index - 1] if index else 0
-    return before + _rank_unit(plan["units"][index], path[1:])
+    result = before + _rank_unit(plan["units"][index], path[1:], memo=memo)
+    # Keep the path alive: temporary slices must not reuse cached identities.
+    memo[key] = (path, result)
+    return result
 
 
-def _rank_unit(unit, path):
+def _rank_unit(unit, path, memo=None):
+    memo = {} if memo is None else memo
     kind = unit["kind"]
     if not path:
         raise ScenePlanError("Selected Scene Prompt event path is incomplete.")
@@ -1304,15 +1349,15 @@ def _rank_unit(unit, path):
             raise ScenePlanError("Selected Scene Prompt event was pruned.")
         return occurrence
     if kind == "sequence" and marker[0] == "sequence":
-        return _rank_plan(unit["plan"], path[1:])
+        return _rank_plan(unit["plan"], path[1:], memo=memo)
     if kind == "count_fixed" and marker[0] == "fixed":
-        return _rank_unit(unit["unit"], path[1:])
+        return _rank_unit(unit["unit"], path[1:], memo=memo)
     if kind == "count_hold" and marker[0] == "count_hold":
-        return _rank_unit(unit["unit"], path[1:])
+        return _rank_unit(unit["unit"], path[1:], memo=memo)
     if kind == "count_scale" and marker[0] == "count_scale" and len(marker) == 3:
         cycle, projection = marker[1:]
         child = unit["unit"]
-        local = _rank_unit(child, path[1:])
+        local = _rank_unit(child, path[1:], memo=memo)
         policy = 0 if unit["factor"] == 0 else 2
         if projection == "original" and cycle == 0 and unit["factor"] > 0:
             return local
@@ -1320,28 +1365,28 @@ def _rank_unit(unit, path):
         if projection != expected or type(cycle) is not int or not (
                 cycle == 0 if unit["factor"] == 0 else 1 <= cycle < unit["factor"]):
             raise ScenePlanError("Selected Scene Prompt Count cycle no longer exists.")
-        before = _prefix_unit_policy(child, local)[policy]
-        if _prefix_unit_policy(child, local + 1)[policy] == before:
+        before = _prefix_unit_policy(child, local, memo=memo)[policy]
+        if _prefix_unit_policy(child, local + 1, memo=memo)[policy] == before:
             raise ScenePlanError("Selected Scene Prompt Count event was pruned.")
         if unit["factor"] == 0:
             return before
         length = child["stats"]["total_batches"]
-        return length + (cycle - 1) * _prefix_unit_policy(child, length)[2] + before
+        return length + (cycle - 1) * _prefix_unit_policy(child, length, memo=memo)[2] + before
     if kind == "repeat" and marker[0] == "repeat":
         cycle = marker[1]
         if type(cycle) is not int or not 0 <= cycle < unit["factor"]:
             raise ScenePlanError("Selected Scene Prompt repeat no longer exists.")
-        return cycle * unit["unit"]["stats"]["total_batches"] + _rank_unit(unit["unit"], path[1:])
+        return cycle * unit["unit"]["stats"]["total_batches"] + _rank_unit(unit["unit"], path[1:], memo=memo)
     if kind in {"repeat_each", "row_repeat"} and marker[0] == kind:
         within = marker[1]
         if type(within) is not int or not 0 <= within < unit["factor"]:
             raise ScenePlanError("Selected Scene Prompt row repeat no longer exists.")
-        return _rank_unit(unit["unit"], path[1:]) * unit["factor"] + within
+        return _rank_unit(unit["unit"], path[1:], memo=memo) * unit["factor"] + within
     if kind == "alternate" and marker[0] == "alternate":
         socket = marker[1]
         if type(socket) is not int or not 0 <= socket < len(unit["inputs"]):
             raise ScenePlanError("Selected Scene Prompt socket no longer exists.")
-        local = _rank_plan(unit["inputs"][socket], path[1:])
+        local = _rank_plan(unit["inputs"][socket], path[1:], memo=memo)
         lengths = [plan["stats"]["total_batches"] for plan in unit["inputs"]]
         block = unit["block_size"]
         round_index, offset = divmod(local, block)
@@ -1352,22 +1397,22 @@ def _rank_unit(unit, path):
         arm = marker[2] if len(marker) == 3 and marker[1] == unit["gate_id"] else -1
         if type(arm) is not int or arm != unit["selected_arm"]:
             raise ScenePlanError("Scene Prompt Random Route の保存経路が一致しません。")
-        return _rank_plan(unit["inputs"][arm], path[1:])
+        return _rank_plan(unit["inputs"][arm], path[1:], memo=memo)
     if kind == "matrix_map" and marker[0] == "matrix":
         matrix_index = marker[1]
         if type(matrix_index) is not int or not 0 <= matrix_index < len(unit["matrix_rows"]):
             raise ScenePlanError("Selected Scene Prompt Matrix row no longer exists.")
-        return _rank_unit(unit["unit"], path[1:]) * len(unit["matrix_rows"]) + matrix_index
+        return _rank_unit(unit["unit"], path[1:], memo=memo) * len(unit["matrix_rows"]) + matrix_index
     if kind == "matrix_rows" and marker[0] == kind:
         _, matrix_index, within = marker
-        local = _rank_unit(unit["unit"], path[1:])
-        item = _select_unit(unit["unit"], local, 0)
+        local = _rank_unit(unit["unit"], path[1:], memo=memo)
+        item = _select_unit(unit["unit"], local, 0, memo=memo)
         if not 0 <= matrix_index < len(unit["matrix_rows"]) or not 0 <= within < item["count"]:
             raise ScenePlanError("Selected Scene Prompt Matrix row no longer exists.")
         return (local - item["repeat_index"] + 1) * len(unit["matrix_rows"]) + matrix_index * item["count"] + within
     if kind == "row_product" and marker[0] == kind:
-        left_index, right_index = _rank_plan(unit["left"], path[1]), _rank_plan(unit["right"], path[2])
-        left, right = _select_plan(unit["left"], left_index, 0), _select_plan(unit["right"], right_index, 0)
+        left_index, right_index = _rank_plan(unit["left"], path[1], memo=memo), _rank_plan(unit["right"], path[2], memo=memo)
+        left, right = _select_plan(unit["left"], left_index, 0, memo=memo), _select_plan(unit["right"], right_index, 0, memo=memo)
         within = marker[1]
         if not 0 <= within < left["count"] * right["count"]:
             raise ScenePlanError("Selected Scene Prompt Merge repetition no longer exists.")
@@ -1376,11 +1421,11 @@ def _rank_unit(unit, path):
     if kind == "product" and marker[0] == "product":
         if len(path) != 3:
             raise ScenePlanError("Selected Scene Prompt Merge path is invalid.")
-        left = _rank_plan(unit["left"], path[1])
-        right = _rank_plan(unit["right"], path[2])
+        left = _rank_plan(unit["left"], path[1], memo=memo)
+        right = _rank_plan(unit["right"], path[2], memo=memo)
         return left * unit["right"]["stats"]["total_batches"] + right
     if kind == "map" and marker[0] == "map":
-        return _rank_unit(unit["unit"], path[1:])
+        return _rank_unit(unit["unit"], path[1:], memo=memo)
     raise ScenePlanError("Selected Scene Prompt event path does not match its plan.")
 
 
@@ -1392,7 +1437,11 @@ def replay_index_for_event(plan, event_ref, selected_sources, visible_source_ids
     selected = {str(value) for value in selected_sources}
     visible = {str(value) for value in visible_source_ids}
     selected_arms = {}
+    visited = set()
     def choices(path):
+        if id(path) in visited:
+            return
+        visited.add(id(path))
         for part in path:
             if isinstance(part, (list, tuple)) and part and part[0] == "random_choice" and len(part) == 3:
                 selected_arms[part[1]] = part[2]

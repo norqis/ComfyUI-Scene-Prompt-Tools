@@ -218,6 +218,65 @@ class CompactRowTests(unittest.TestCase):
                     self.assertEqual(p.multiply_count(result, 0)["stats"], result["stats"])
                     self.assertEqual(p.multiply_count(result, 10)["stats"], result["stats"])
 
+    def test_random_shared_diamonds_select_and_replay_once_per_shared_part(self):
+        base = p.make_plan([{"row": row("base"), "count": 1}])
+        arms = p.random_route(base, [5000, 5000] + [0] * 8, "gate")
+        arms = [p.transform(arm, operation={"kind": "prompt_add", "payload": [name, [name], [], False]})
+                for arm, name in zip(arms, ("cat", "dog"))]
+        joined = p.queue(arms)
+        for mapped in (False, True):
+            compact = joined
+            for level in range(28):
+                left = p.with_source_node(compact, f"left{level}") if mapped else compact
+                right = p.with_source_node(compact, f"right{level}") if mapped else compact
+                compact = p.merge(left, right)
+            outcomes = set()
+            for seed in range(6):
+                with mock.patch.object(s, "_select_unit_uncached", wraps=s._select_unit_uncached) as select:
+                    item = p.item_for_normalized_plan(compact, 0, seed)
+                    self.assertLess(select.call_count, 250)
+                expected = p.item_for_normalized_plan(joined, 0, seed)
+                self.assertEqual(item["row"]["positive_parts"], expected["row"]["positive_parts"])
+                outcomes.add(tuple(item["row"]["positive_parts"]))
+                selected = set(item["row"]["source_node_ids"])
+                with mock.patch.object(s, "_prune_unit_uncached", wraps=s._prune_unit_uncached) as prune:
+                    self.assertEqual(p.replay_index_for_event(compact, item["event_ref"], selected, selected), 0)
+                    self.assertLess(prune.call_count, 250)
+                if mapped:
+                    with self.assertRaises(p.ScenePlanError):
+                        p.replay_index_for_event(compact, item["event_ref"], selected - {"left0"}, selected)
+            self.assertEqual(len(outcomes), 2, "separate selections must still draw from their own seed")
+
+    def test_shared_selection_matches_unshared_tree_with_counts_maps_and_pruning(self):
+        for held in (False, True):
+            for fixed in (False, True):
+                first = p.make_plan([{"row": row("a", 2), "count": 2}, {"row": row("b"), "count": 1}])
+                first = p.multiply_count(first, 1, not held)
+                second = p.make_plan([{"row": row("c"), "count": 2}])
+                mixed = p.queue([first, second], order_mode="alternate", downstream_count_mode="fixed" if fixed else "multiply")
+                merged = p.merge(p.with_source_node(mixed, "left"), p.with_source_node(mixed, "right"))
+                matrix = p.matrix_product(merged, matrix_rows("x", "y"), True)
+                for factor in (0, 2):
+                    plan = p.multiply_count(matrix, factor)
+                    # Serialized branches are independent trees: no object-identity reuse.
+                    tree = p.normalize_plan(json.loads(json.dumps(plan)))
+                    for index in range(plan["stats"]["total_batches"]):
+                        actual, expected = p.item_for_index(plan, index), p.item_for_index(tree, index)
+                        event = actual.pop("event_ref")
+                        expected_event = expected.pop("event_ref")
+                        self.assertEqual(actual, expected)
+                        selected = set(actual["row"]["source_node_ids"])
+                        visible = {"a", "b", "c", "left", "right"}
+                        self.assertEqual(p.replay_index_for_event(plan, event, selected, visible),
+                                         p.replay_index_for_event(tree, expected_event, selected, visible))
+
+    def test_pruning_keeps_branch_source_context_separate(self):
+        base = p.make_plan([{"row": row("a"), "count": 1}])
+        plan = p.queue([p.with_source_node(base, "left"), p.with_source_node(base, "right")])
+        for index, source in enumerate(("left", "right")):
+            event = p.item_for_index(plan, index)["event_ref"]
+            self.assertEqual(p.replay_index_for_event(plan, event, {"a", source}, {"a", "left", "right"}), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
