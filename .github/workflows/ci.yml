@@ -43,6 +43,8 @@ jobs:
         with:
           node-version: "20"
       - run: npm ci
+      - name: Use Ubuntu archive mirrors for browser dependencies
+        run: sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
       - run: npx playwright install --with-deps chromium
       - run: npm run check:frontend
       - run: npm run test:frontend
