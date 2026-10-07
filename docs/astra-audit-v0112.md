@@ -11,7 +11,7 @@ Agent `astra_audit_round1` completed Python modules and API, schedule/Count/Queu
 3. Preset Count2 then Matrix[x,y] preview produced x,y,x,y instead of x,x,y,y; Merge lost the y row. EmptyLatent batch3 followed by Merge lost the image count in the preview. Reproduced with actual frontend merge helpers and Python nodes.
 4. Ordinary Matrix chains eagerly materialize all Cartesian row payloads. Actual SceneMatrix.build with three matrices of 10/20/30 rows produced 1,000/8,000/27,000 units: 0.366/2.570/8.419 seconds without tracemalloc. Independent memory runs retained 3.20/25.55/86.20 MB and peaked at 6.93/54.29/182.42 MB. These are CPU preparation probes, not GPU sampling measurements.
 
-Root independently reproduced the tab races. Commit `63b98e4` uses the captured workflow for save/run metadata, captures switch fallback values before await, confines candidate replacement to retained original nodes, suppresses obsolete popup completion, and aligns simple preview Count/map/latent handling with the backend. Browser regression covers graph replacement and reuse, delayed save, names, switch values, Matrix data, and prepare ownership. Focused browser/queue/Preset/schedule/audit suites pass. Full final validation and review are still pending.
+Root independently reproduced the tab races. Commit `63b98e4` uses the captured workflow for save/run metadata, captures switch fallback values before await, confines candidate replacement to retained original nodes, suppresses obsolete popup completion, and aligns simple preview Count/map/latent handling with the backend. Browser regression covers graph replacement and reuse, delayed save, names, switch values, Matrix data, and prepare ownership. Focused browser/queue/Preset/schedule/audit suites passed before the full validation below.
 
 ## Compact ordinary row schedules
 
@@ -39,10 +39,26 @@ The first fix review reproduced one remaining shared-Merge growth path in `row.l
 
 The first Astra reviewer approved HEAD `789d84c`, covering all initial findings and follow-up fixes. Its independent comparison with `2a06f57` covered 1,496 graph compositions and 7,110 events: row payloads, count/repetition/order, serialization and replay rank after source pruning all matched. This included zero Counts, mixed fixed/strict policy, ordinary/alternating Queue, Matrix/Merge and latent maps. Full validation logs were also reviewed.
 
-A new GPT-6 Astra xhigh agent (`astra_audit_round2`) is now auditing the entire current repository independently, including code outside this diff. Release remains pending its outcome.
+A new GPT-6 Astra xhigh agent (`astra_audit_round2`) completed a second whole-repository audit, including code outside the diff, and found two further issues:
+
+- A failed GPU session-end or policy-release request discarded the browser's ownership record while the backend still retained the operation. A later action could then remain blocked. Root retains only failed cleanup IDs and retries once before a new operation; successful cleanup releases the records. No retry timer or history cache is added. Policy release is idempotent even when the server succeeded and only the response was lost; existing policies still enforce user/client ownership.
+- A single-row Merge with downstream Count disabled was stored as a recursive product. Repeatedly merging a shared scalar row doubled traversal work. Root now folds scalar merges before composite classification and preserves the strict Count policy. No general-purpose memoization or additional cache is needed.
+
+The reviewer approved `f045ed2`. Its independent comparison covered 1,728 compositions and 5,056 events, including free/strict/fixed Count, zero Counts, latent, named maps, Callback snapshots, downstream Counts and replay rank after pruning. In its shared-Merge probe, Python depth 14 improved from about 2 seconds to 0.00005 seconds; JavaScript depth 16 improved from about 740 ms to 0.008 ms. Python 714 tests, all 25 frontend suites, native CPU/HTTP 45 tests and complete native Chromium passed after these fixes.
+
+## Third independent full audit
+
+Another new GPT-6 Astra xhigh agent (`astra_audit_round3`) found three further issues:
+
+- The actual LLM button skipped GPU preparation altogether when the release setting was OFF. Consequently, switching OFF after a failed session-end request also skipped pending cleanup. Root calls resource preparation once when there is actual pending inference, regardless of the setting. Fully reusable targets still make no request, and OFF does not acquire a new session. Both real controllers are tested together for single-node and Expand generation. An isolated native browser aborts one end request before the real coordinator receives it, switches OFF, then successfully generates another prompt.
+- Expanding an inputless passthrough Preset into PNG metadata removed its seed Input. This could fail image saving or disconnect a required Scene input when reloading. Root retains the existing PresetInput when the outer Reference has no Scene input, in both API and workflow-only expansion. Nested Presets, required inputs and physical bypass paths keep their seed connection; upstream-connected References retain their existing behavior. Tests cover direct and nested passthrough, required Reverse input, bypass, Switch bundles, and actual PNG save/replay for full-workflow and selected-path metadata.
+- Windows reserved names with a dotted suffix, such as `AUX.preview`, were accepted as directory components and then failed at actual saving. Root uses the existing reserved-stem check for save paths and the same rule in the standalone HTML importer. Existing plain reserved-name output folders keep their previous names. Actual Windows PNG writes cover the Save path, Scene path and run directory; importer tests cover category and subcategory writes.
+
+The fixes are committed as `1900c5f` and `c9fcfd9`. The auditor independently reviewed all three fixes. Python 715 tests and all frontend suites passed before the final two Windows regressions, which also passed. Native CPU/HTTP verification covers 45 existing tests plus a new test with six PNG save/replay combinations; its fixture was corrected to include the required Reverse scope and to expect one retained Save node in selected-path metadata. The complete isolated native browser suite passed, including actual OFF LLM cleanup recovery. Release still requires a clean audit by a subsequent new agent.
 
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
 - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakMap
 - https://github.com/Comfy-Org/ComfyUI_frontend/blob/main/src/scripts/app.ts
+- https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
