@@ -351,7 +351,7 @@ const server = http.createServer(async (request, response) => {
                 + `  openCreatePromptPopup,\n`
                 + `  openSearchPopup, openPromptCandidatePopup, openCategoryLevelPicker, loadFavorites, setMatrixLineDraftContext,\n`
                 + `  attachMatrixTextAreaAutocomplete, readMatrixState,\n`
-                + `  openScenePresetSwitchNames, openScenePresetSwitchSettings, commitScenePresetSwitchJSON, refreshScenePresetSwitchLabels, applyScenePresetSwitchBindings,\n`
+                + `  openScenePresetSwitchNames, openScenePresetSwitchSettings, refreshScenePresetSwitchLabels, applyScenePresetSwitchBindings,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset, installScenePresetSwitchBindings, prepareSceneRunContext, syncSceneMatrixPromptInputs,\n`
@@ -797,13 +797,25 @@ async function checkPresetSwitchModals(browser, url) {
     await page.evaluate(() => window.__switchInput.widgets.find(widget => widget.sceneRole === "preset_switch_names").callback());
     const names = page.locator('[data-scene-preset-switch-modal="names"]');
     assert.equal(await names.locator("input").count(), 10);
-    await names.locator('[data-scene-switch-save="names"]').click();
+    assert.equal(await names.getByRole("button", { name: "保存", exact: true }).count(), 0);
+    await names.locator('[data-scene-switch-index="1"]').fill("スイッチ1");
+    await names.locator('[data-scene-switch-index="1"]').fill(" ");
+    await names.getByRole("button", { name: "閉じる", exact: true }).click();
     assert.equal(await page.evaluate(() => window.__switchHistory.graphBefore), 0, "unchanged name defaults create no history");
     await page.evaluate(() => window.__switchInput.widgets.find(widget => widget.sceneRole === "preset_switch_names").callback());
-    await names.locator('[data-scene-switch-index="1"]').fill("光");
+    await names.locator('[data-scene-switch-index="1"]').evaluate(input => {
+        input.value = "ひかり";
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    });
+    assert.equal(await page.evaluate(() => window.__switchInput.widgets[0].value), "[]", "IME composition stays outside graph history");
+    await names.locator('[data-scene-switch-index="1"]').evaluate(input => {
+        input.value = "光";
+        input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+        input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    assert.equal(await page.evaluate(() => window.__switchHistory.graphBefore), 1, "composition result commits once");
     await names.locator('[data-scene-switch-index="3"]').fill("光");
-    await names.locator('[data-scene-switch-save="names"]').click();
-    assert.deepEqual(await page.evaluate(() => window.__switchHistory), { graphBefore: 1, graphAfter: 1, canvasBefore: 1, canvasAfter: 1 });
+    assert.deepEqual(await page.evaluate(() => window.__switchHistory), { graphBefore: 2, graphAfter: 2, canvasBefore: 2, canvasAfter: 2 });
     assert.deepEqual(await page.evaluate(() => window.__switchInput.outputs.map(port => [port.name, port.type, port.label])), [
         ["scene_prompt", "SCENE_PROMPT", undefined], ...Array.from({ length: 10 }, (_, i) => [`switch_${i + 1}`, "BOOLEAN", i === 0 || i === 2 ? "光" : `スイッチ${i + 1}`]), ["switches", "SCENE_SWITCHES", "スイッチ一式"],
     ]);
@@ -818,14 +830,16 @@ async function checkPresetSwitchModals(browser, url) {
     assert.equal(await settings.locator("select").count(), 10);
     assert.equal(await settings.locator('[data-scene-switch-index="3"]').locator("..").textContent().then(text => text.startsWith("設定先 3: 子")), true);
     assert.equal(await settings.locator('[data-scene-switch-index="3"] option[value="1"]').textContent(), "入力 1: 光");
-    await settings.locator('[data-scene-switch-save="settings"]').click();
-    assert.equal(await page.evaluate(() => window.__switchHistory.graphBefore), 1, "identity mapping is a no-op");
+    assert.equal(await settings.getByRole("button", { name: "保存", exact: true }).count(), 0);
+    await settings.locator('[data-scene-switch-index="3"]').selectOption("3");
+    await settings.getByRole("button", { name: "閉じる", exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__switchHistory.graphBefore), 2, "identity mapping is a no-op");
     await page.evaluate(() => window.__switchReference.widgets.find(widget => widget.sceneRole === "preset_switch_settings").callback());
     await settings.locator('[data-scene-switch-index="3"]').selectOption("1");
     await settings.locator('[data-scene-switch-index="1"]').selectOption("true");
-    await settings.locator('[data-scene-switch-save="settings"]').click();
     assert.deepEqual(await page.evaluate(() => JSON.parse(window.__switchReference.widgets.find(widget => widget.name === "switch_settings_json").value)), [true, 2, 1, 4, 5, 6, 7, 8, 9, 10]);
-    assert.deepEqual(await page.evaluate(() => window.__switchHistory), { graphBefore: 2, graphAfter: 2, canvasBefore: 2, canvasAfter: 2 });
+    assert.deepEqual(await page.evaluate(() => window.__switchHistory), { graphBefore: 4, graphAfter: 4, canvasBefore: 4, canvasAfter: 4 });
+    await settings.getByRole("button", { name: "閉じる", exact: true }).click();
     const migrations = await page.evaluate(() => {
         const { Input, Reference } = window.__switchNodeClasses;
         const input = new Input(812); input.configure(window.__switchInput.serialize());
@@ -846,8 +860,8 @@ async function checkPresetSwitchModals(browser, url) {
         graph._nodes = graph._nodes.filter(node => node !== input);
         const replacement = new window.__switchNodeClasses.Input(input.id); graph._nodes.push(replacement); window.__switchReplacement = replacement;
     });
-    await names.locator('[data-scene-switch-index="1"]').fill("stale"); await names.locator('[data-scene-switch-save="names"]').click();
-    assert.deepEqual(await page.evaluate(() => [window.__switchReplacement.widgets[0].value, window.__switchInput.widgets[0].value, window.__switchHistory.graphBefore]), ["[]", JSON.stringify(["光", "", "光", "", "", "", "", "", "", ""]), 2]);
+    await names.locator('[data-scene-switch-index="1"]').fill("stale");
+    assert.deepEqual(await page.evaluate(() => [window.__switchReplacement.widgets[0].value, window.__switchInput.widgets[0].value, window.__switchHistory.graphBefore]), ["[]", JSON.stringify(["光", "", "光", "", "", "", "", "", "", ""]), 4]);
     const binding = await page.evaluate(() => {
         const graph = window.app.graph, input = window.__switchReplacement;
         input.properties.scene_switch_values = Array.from({ length: 10 }, (_, i) => i === 2);

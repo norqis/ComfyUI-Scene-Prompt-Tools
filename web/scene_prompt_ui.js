@@ -12574,18 +12574,31 @@ function layoutScenePresetSwitchOutputs(node) {
     }
 }
 
-function commitScenePresetSwitchJSON(node, values) {
-    const changes = Object.entries(values).filter(([name, value]) => findWidget(node, name)?.value !== value);
-    if (!changes.length) return false;
+function commitScenePresetSwitchValue(node, name, index, value) {
+    const isName = name === "switch_names_json";
+    const parse = isName ? sceneSwitchNames : name === "switch_values_json" ? sceneMakeSwitchValues : sceneSwitchSettings;
+    const values = parse(findWidget(node, name)?.value);
+    if (isName) value = value.trim() || `スイッチ${index + 1}`;
+    if (values[index] === value) return false;
+    values[index] = value;
+    const saved = isName ? values.map((entry, i) => entry === `スイッチ${i + 1}` ? "" : entry) : values;
     return withSceneUserChange(node, () => {
-        for (const [name, value] of changes) setWidgetValue(node, name, value);
-        clearSceneComputedCaches(node);
+        setWidgetValue(node, name, JSON.stringify(saved));
         if (isScenePresetInputNode(node)) refreshScenePresetSwitchLabels(node);
-        refreshDownstreamSceneNodes(node);
+        if (!isName) {
+            clearSceneComputedCaches(node);
+            refreshDownstreamSceneNodes(node);
+        }
         node.graph.change?.();
         node.setDirtyCanvas?.(true, true);
         return true;
     });
+}
+
+function bindSceneSwitchNameInput(input, node, index) {
+    const commit = () => commitScenePresetSwitchValue(node, "switch_names_json", index, input.value);
+    input.addEventListener("input", (event) => { if (!event.isComposing) commit(); });
+    input.addEventListener("compositionend", commit);
 }
 
 function openScenePresetSwitchNames(node) {
@@ -12594,7 +12607,7 @@ function openScenePresetSwitchNames(node) {
     const names = sceneSwitchNames(findWidget(node, "switch_names_json")?.value);
     const list = document.createElement("div");
     list.className = "pc-popup-list";
-    const inputs = names.map((name, index) => {
+    names.forEach((name, index) => {
         const row = document.createElement("label");
         row.className = "pc-toolbar";
         row.textContent = `${index + 1}: `;
@@ -12603,19 +12616,10 @@ function openScenePresetSwitchNames(node) {
         input.dataset.sceneSwitchIndex = String(index + 1);
         input.value = name === `スイッチ${index + 1}` ? "" : name;
         input.placeholder = `スイッチ${index + 1}`;
+        bindSceneSwitchNameInput(input, node, index);
         row.appendChild(input); list.appendChild(row);
-        return input;
     });
     popup.appendChild(list);
-    const save = createButton("保存");
-    save.dataset.sceneSwitchSave = "names";
-    save.addEventListener("click", () => {
-        const values = inputs.map((input) => input.value.trim());
-        if (sceneSwitchNames(values).some((name, index) => name !== names[index]))
-            commitScenePresetSwitchJSON(node, { switch_names_json: JSON.stringify(values) });
-        closePopup();
-    });
-    popup.querySelector(".pc-popup-actions").prepend(save);
 }
 
 function scenePresetSwitchMappingLabels(node) {
@@ -12644,7 +12648,7 @@ function openScenePresetSwitchSettings(node) {
     note.textContent = labels.connected ? "接続元の入力スイッチを、子Presetの各スイッチへ割り当てます。"
         : "switches入力は未接続です。入力スイッチ1〜10はすべてOFFとして扱います。";
     list.appendChild(note);
-    const selects = settings.map((setting, index) => {
+    settings.forEach((setting, index) => {
         const row = document.createElement("label"); row.className = "pc-toolbar";
         row.textContent = `設定先 ${index + 1}: ${labels.target[index]}`;
         const select = document.createElement("select"); select.className = "pc-searchbox";
@@ -12653,17 +12657,12 @@ function openScenePresetSwitchSettings(node) {
             [String(sourceIndex + 1), `入力 ${sourceIndex + 1}: ${name}${labels.connected ? "" : " (OFF)"}`])]) {
             const option = document.createElement("option"); option.value = value; option.textContent = text; select.appendChild(option);
         }
-        select.value = String(setting); row.appendChild(select); list.appendChild(row); return select;
+        select.value = String(setting);
+        select.addEventListener("change", () => commitScenePresetSwitchValue(node, "switch_settings_json", index,
+            select.value === "true" ? true : select.value === "false" ? false : Number(select.value)));
+        row.appendChild(select); list.appendChild(row);
     });
     popup.appendChild(list);
-    const save = createButton("保存"); save.dataset.sceneSwitchSave = "settings";
-    save.addEventListener("click", () => {
-        const values = selects.map((select) => select.value === "true" ? true : select.value === "false" ? false : Number(select.value));
-        if (values.some((value, index) => value !== settings[index]))
-            commitScenePresetSwitchJSON(node, { switch_settings_json: JSON.stringify(values) });
-        closePopup();
-    });
-    popup.querySelector(".pc-popup-actions").prepend(save);
 }
 
 function openSceneMakeSwitchSettings(node) {
@@ -12672,33 +12671,22 @@ function openSceneMakeSwitchSettings(node) {
     const names = sceneSwitchNames(findWidget(node, "switch_names_json")?.value);
     const values = sceneMakeSwitchValues(findWidget(node, "switch_values_json")?.value);
     const list = document.createElement("div"); list.className = "pc-popup-list";
-    const fields = names.map((name, index) => {
+    names.forEach((name, index) => {
         const row = document.createElement("div"); row.className = "pc-toolbar";
         const label = document.createElement("label"); label.textContent = `${index + 1}: `;
         const input = document.createElement("input"); input.className = "pc-searchbox";
         input.dataset.sceneSwitchName = String(index + 1);
         input.value = name === `スイッチ${index + 1}` ? "" : name;
         input.placeholder = `スイッチ${index + 1}`;
+        bindSceneSwitchNameInput(input, node, index);
         label.appendChild(input);
         const toggle = document.createElement("label"); toggle.textContent = "ON ";
         const enabled = document.createElement("input"); enabled.type = "checkbox";
         enabled.dataset.sceneSwitchEnabled = String(index + 1); enabled.checked = values[index];
+        enabled.addEventListener("change", () => commitScenePresetSwitchValue(node, "switch_values_json", index, enabled.checked));
         toggle.prepend(enabled); row.append(label, toggle); list.appendChild(row);
-        return { input, enabled };
     });
     popup.appendChild(list);
-    const save = createButton("保存"); save.dataset.sceneSwitchSave = "make";
-    save.addEventListener("click", () => {
-        const nextNames = fields.map(({ input }) => input.value.trim());
-        const nextValues = fields.map(({ enabled }) => enabled.checked);
-        if (sceneSwitchNames(nextNames).some((name, index) => name !== names[index])
-            || nextValues.some((value, index) => value !== values[index]))
-            commitScenePresetSwitchJSON(node, {
-                switch_names_json: JSON.stringify(nextNames), switch_values_json: JSON.stringify(nextValues),
-            });
-        closePopup();
-    });
-    popup.querySelector(".pc-popup-actions").prepend(save);
 }
 
 function attachSceneMakeSwitch(node) {

@@ -195,6 +195,8 @@ Use ComfyUI's standard **If/Else Switch** (Japanese **スイッチ**, marked BET
 
 On **Scene Preset Reference**, open **スイッチ設定** above **Preset編集**. Each destination switch can be ON, OFF, or use any incoming switch 1–10. For example, destination 3 can use incoming 1, and several destinations can use that same incoming value. Destination labels come from the selected Preset; incoming labels describe the connected source. A missing incoming bundle supplies OFF values. New or legacy settings forward matching incoming numbers until changed.
 
+Switch names, ON/OFF values and Reference mappings apply to the workflow as soon as you edit them; these dialogs have no Save button. Expand's count updates when a value or mapping changes. Closing keeps your edits, and Undo/Redo restores individual changes. Japanese name conversion is committed when the IME composition finishes.
+
 To pass settings into a nested Preset, connect the parent's Input **スイッチ一式** output to the child's Reference **スイッチ一式** input. This carries all ten values through one wire. The child's settings decide which values to use; its Input then exposes those resolved values for switches or another nested Reference. There is no implicit inheritance without this connection, and changing a child does not change its parent or sibling references. Continuous generation retains the settings captured when that run starts.
 
 ComfyUI's **Scene Prompt Tools** settings category contains both GPU options and Undo history. Updating preserves existing saved setting values.

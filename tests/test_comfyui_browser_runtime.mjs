@@ -2749,28 +2749,31 @@ window.__sceneSeedRuntimeTest = {
     assert(!switchBeforeNames.inputNames.includes('switch_values'), 'internal binding never appears as a user socket');
     await openSwitchModal(switchEditor.input, 'names');
     assert.equal(await namesModal.locator('input[data-scene-switch-index]').count(), 10);
+    assert.equal(await namesModal.getByRole('button', { name: '保存', exact: true }).count(), 0);
     const longSwitchName = '非常に長い日本語のスイッチ名：髪色と衣装と背景の選択をまとめて切り替える';
     for (const [index, value] of [[1, '入口'], [2, '同名'], [3, '同名'], [4, ''], [5, longSwitchName]])
         await namesModal.locator(`[data-scene-switch-index="${index}"]`).fill(value);
     await namesModal.screenshot({ path: resolve(screenshotDirectory, 'native-preset-switch-names.png') });
-    assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchBeforeNames.raw, 'editing a modal only changes its draft');
+    assert.notEqual((await inputSwitchSnapshot(switchEditor.input)).raw, switchBeforeNames.raw, 'names commit before closing the modal');
     const nativeSwitchErrors = await page.locator('[role="dialog"][aria-labelledby="global-error"]').allTextContents();
     assert.deepEqual(nativeSwitchErrors, [], 'native switch editor load/API error: ' + JSON.stringify(nativeSwitchErrors));
-    await namesModal.locator('[data-scene-switch-save="names"]').click();
+    await namesModal.getByRole('button', { name: '閉じる', exact: true }).click();
     const switchNamed = await inputSwitchSnapshot(switchEditor.input);
     assert.deepEqual(switchNamed.ports.slice(1, 6).map(port => port.label), ['入口', '同名', '同名', 'スイッチ4', longSwitchName]);
-    assert.equal(switchNamed.history, switchBeforeNames.history + 1, 'one modal save owns one native history transaction');
-    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
+    assert.equal(switchNamed.history, switchBeforeNames.history + 4, 'each changed name owns one native history transaction');
+    for (let i = 0; i < 4; i++) await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
     assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchBeforeNames.raw);
-    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().redo());
+    for (let i = 0; i < 4; i++) await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().redo());
     assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchNamed.raw);
     await openSwitchModal(switchEditor.input, 'names');
     assert.equal(await namesModal.locator('[data-scene-switch-index="3"]').inputValue(), '同名');
-    await namesModal.locator('[data-scene-switch-save="names"]').click();
-    assert.equal((await inputSwitchSnapshot(switchEditor.input)).history, switchNamed.history, 'a no-op save adds no history');
-    await openSwitchModal(switchEditor.input, 'names');
-    await namesModal.locator('[data-scene-switch-index="1"]').fill('閉じると破棄');
     await namesModal.getByRole('button', { name: '閉じる', exact: true }).click();
+    assert.equal((await inputSwitchSnapshot(switchEditor.input)).history, switchNamed.history, 'opening and closing adds no history');
+    await openSwitchModal(switchEditor.input, 'names');
+    await namesModal.locator('[data-scene-switch-index="1"]').fill('閉じても保持');
+    await namesModal.getByRole('button', { name: '閉じる', exact: true }).click();
+    assert.equal(JSON.parse((await inputSwitchSnapshot(switchEditor.input)).raw)[0], '閉じても保持');
+    await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
     assert.equal((await inputSwitchSnapshot(switchEditor.input)).raw, switchNamed.raw);
     await page.evaluate(id => {
         const app = window.app, node = app.graph.getNodeById(id);
@@ -2846,18 +2849,18 @@ window.__sceneSeedRuntimeTest = {
     await settingsModal.getByRole('button', { name: '閉じる', exact: true }).click();
     await openSwitchModal(switchLive.second, 'settings');
     assert.equal(await settingsModal.locator('select[data-scene-switch-index]').count(), 10);
+    assert.equal(await settingsModal.getByRole('button', { name: '保存', exact: true }).count(), 0);
     assert.match(await settingsModal.locator('[data-scene-switch-index="3"]').locator('..').textContent(), /設定先 3: 同名/);
     assert.match(await settingsModal.locator('[data-scene-switch-index="3"] option[value="1"]').textContent(), /入力 1: 親の入口/);
     await settingsModal.screenshot({ path: resolve(screenshotDirectory, 'native-preset-switch-settings.png') });
     await settingsModal.locator('[data-scene-switch-index="3"]').selectOption('1');
-    assert.equal((await switchPlanSnapshot()).settings, switchIdentity.settings, 'mapping draft cannot change the plan');
-    await settingsModal.locator('[data-scene-switch-save="settings"]').click();
     const switchMapped = await switchPlanSnapshot();
     assert.equal(switchMapped.history, switchIdentity.history + 1);
     for (const key of ['total', 'prepared', 'displayed']) assert.equal(switchMapped[key], 10, key);
     assert.equal(switchMapped.firstTotal, 2); assert.equal(switchMapped.secondTotal, 3);
     assert.deepEqual(switchMapped.preview, Array(10).fill('Scene Prompt'));
     assert.equal(JSON.parse(switchMapped.settings)[2], 1);
+    await settingsModal.getByRole('button', { name: '閉じる', exact: true }).click();
     await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
     const switchMappingUndo = await switchPlanSnapshot();
     assert.equal(switchMappingUndo.total, 8); assert.equal(switchMappingUndo.prepared, 8); assert.equal(switchMappingUndo.settings, switchIdentity.settings);
@@ -2865,30 +2868,30 @@ window.__sceneSeedRuntimeTest = {
     const switchMappingRedo = await switchPlanSnapshot(); assert.equal(switchMappingRedo.total, 10); assert.equal(switchMappingRedo.prepared, 10);
     await openSwitchModal(switchLive.input, 'names');
     await namesModal.locator('[data-scene-switch-index="1"]').fill('親の変更後');
-    await namesModal.locator('[data-scene-switch-save="names"]').click();
+    await namesModal.getByRole('button', { name: '閉じる', exact: true }).click();
     const switchRenamed = await switchPlanSnapshot(); assert.equal(switchRenamed.total, 10); assert.equal(switchRenamed.settings, switchMapped.settings);
     await openSwitchModal(switchLive.second, 'settings');
     assert.equal(await settingsModal.locator('[data-scene-switch-index="3"]').inputValue(), '1');
     assert.match(await settingsModal.locator('[data-scene-switch-index="3"] option[value="1"]').textContent(), /親の変更後/);
-    await settingsModal.locator('[data-scene-switch-save="settings"]').click();
+    await settingsModal.getByRole('button', { name: '閉じる', exact: true }).click();
     assert.equal((await switchPlanSnapshot()).history, switchRenamed.history);
     await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
     assert.equal((await switchPlanSnapshot()).total, 10, 'undoing only a name never changes switch values');
     await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().redo());
     const switchReloadWorkflow = await page.evaluate(() => window.app.graph.serialize());
     await openSwitchModal(switchLive.second, 'settings');
-    await settingsModal.locator('[data-scene-switch-index="3"]').selectOption('false');
     await page.evaluate(id => {
-        window.__sceneStaleSwitchSave = document.querySelector('[data-scene-switch-save="settings"]');
+        window.__sceneStaleSwitchSelect = document.querySelector('[data-scene-switch-index="3"]');
         window.__sceneStaleSwitchNode = window.app.graph.getNodeById(id);
     }, switchLive.second);
     await page.evaluate(async workflow => window.app.loadGraphData(workflow, true, true), switchReloadWorkflow);
     // Invoke the detached old DOM action to prove it cannot edit either old or replacement nodes.
     const staleMappingResult = await page.evaluate(() => {
-        const save = window.__sceneStaleSwitchSave, node = window.__sceneStaleSwitchNode;
+        const select = window.__sceneStaleSwitchSelect, node = window.__sceneStaleSwitchNode;
         const raw = () => node.widgets.find(widget => widget.name === 'switch_settings_json').value;
-        const before = raw(), history = window.__sceneSeedRuntimeTest.tracker().undoQueue.length; save.click();
-        delete window.__sceneStaleSwitchSave; delete window.__sceneStaleSwitchNode;
+        const before = raw(), history = window.__sceneSeedRuntimeTest.tracker().undoQueue.length;
+        select.value = 'false'; select.dispatchEvent(new Event('change', { bubbles: true }));
+        delete window.__sceneStaleSwitchSelect; delete window.__sceneStaleSwitchNode;
         return { history, after: window.__sceneSeedRuntimeTest.tracker().undoQueue.length, before, raw: raw() };
     });
     assert.equal(staleMappingResult.after, staleMappingResult.history); assert.equal(staleMappingResult.raw, staleMappingResult.before);
@@ -3206,8 +3209,8 @@ window.__sceneSeedRuntimeTest = {
     for (const [value, total] of [['true', 100], ['false', 10], ['true', 100]]) {
         await openSwitchModal(mappedCountLive.reference, 'settings');
         await settingsModal.locator('[data-scene-switch-index="1"]').selectOption(value);
-        await settingsModal.locator('[data-scene-switch-save="settings"]').click();
         await prepareAfterDisplay(mappedCountLive.expand, total);
+        await settingsModal.getByRole('button', { name: '閉じる', exact: true }).click();
     }
     console.log('real ComfyUI Count number/Boolean pointer edits and mapped Preset Count ON/OFF update the visible Expand count before any test planner/refresh/API capture');
     for (const arm of [0, 9]) {
