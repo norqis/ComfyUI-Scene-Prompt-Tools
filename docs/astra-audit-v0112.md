@@ -148,6 +148,20 @@ The actual wrapper regression covers active and detached runs, stale/imported ID
 
 The same auditor approved exact HEAD `6ba42e765ed8758cc2d39c27ba3a6b77d3090233` after independently repeating its native reproduction and matching the tested product blob to the commit. Its independent combined checks passed 860 plans, 13,428 selected events and 3,684 replay-rank comparisons across three seeds. A new thirteenth GPT-6 Astra xhigh agent will audit the entire repository again before release.
 
+## Thirteenth independent full audit
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round13`) completed another whole-repository audit and reproduced one related group in isolated native ComfyUI: saving without a Scene metadata connection incorrectly depended on an Expand's metadata. To Text could execute successfully but selected-path saving could not find its plan; Preset expansion also failed. A cached second batch submission could save a PNG without its original upstream graph, or even remove an Expand whose text was actually consumed, causing errors on replay.
+
+Root fixed the group in `abbdb2e`. The Save operation can locate its existing context and original cached prompt through its own ancestors. To Text uses its own executed handle. To Text and additional executed Expands each retain their own selected event, index and seed. Existing primary Expand metadata remains authoritative for that consumer. The same existing replay/widget helpers handle both consumer types, and Random freezing includes each selection. No new persistent state, cache, required socket or graph-wide fallback is introduced.
+
+The design review caught a multiple-Expand model issue before approval: concatenating source lists must not make one Expand's effective model look superseded by another's. Root preserves the union of effective models, while retaining existing To Text protection. Models actually superseded in every consumer are still contracted. Replay ranking includes the provenance of those contracted nodes without restoring them to the saved graph. Unit cases cover different models, a model superseded in one consumer but used by another, metadata connected/disconnected, and different consumer indices/seeds after pruning.
+
+Full Python passes 739 tests (2 opt-in native classes skipped). Real ComfyUI CPU/HTTP passes all 48 tests. The new native regression covers eight To Text-only configurations: normal/Preset, expansion OFF/ON, and full/selected-path saving, each with actual PNG re-execution. The cached regression covers metadata connected/disconnected and both saving modes, then re-executes both the first and second PNGs. An initial test-only save-URL typo was corrected and the full native suite was rerun successfully. The final local source-set reuse and metadata-connected model cases also pass all 28 text/Delete tests.
+
+Root's diff review then found a shared Model diamond where first-seen, deduplicated source order differs from the effective Model: Merge(B(A), A) selects A, but selected-path PNG contracted A and replayed B. The auditor independently confirmed it with real ComfyUI and both metadata wiring options. Model retention now compares the selected row's actual MODEL/CLIP/VAE links; a private reference accompanies existing process-local provenance and never enters PNG JSON. Contraction removes models absent from the effective union. Legacy metadata without this field retains the former fallback. New cases cover all three resource links separately, metadata wiring, two consumers, and an outer Model passed through a Preset with and without expansion. The focused text/Delete suite passes 29 tests.
+
+The auditor's independent whole-audit comparisons passed 1,633 plans / 110,769 selected events / 13,392 replay ranks, plus 1,443 frontend/backend plans / 69,517 events with matching order, counts and latent sizes. The same auditor is rechecking the complete remediation, including the Model diamond. A fresh independent whole audit remains required after approval.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
@@ -156,3 +170,4 @@ The same auditor approved exact HEAD `6ba42e765ed8758cc2d39c27ba3a6b77d3090233` 
 - https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
 
 - https://docs.python.org/3/library/os.path.html#os.path.normcase
+- https://docs.comfy.org/custom-nodes/backend/more_on_inputs

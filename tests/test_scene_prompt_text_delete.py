@@ -324,6 +324,62 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                     self.assertIn(loader, saved)
                 self.assertEqual(saved['32']['inputs'], graph['32']['inputs'])
 
+    def test_png_preserves_effective_model_in_shared_merge_and_preset(self):
+        inner = {
+            '80': {'class_type': 'ScenePresetInput', 'inputs': {}},
+            '81': {'class_type': 'ScenePresetOutput', 'inputs': {'scene_prompt': ['80', 0]}},
+        }
+        self.presets.save_preset({'preset_id': 'model-pass', 'name': 'model-pass', 'output_node_id': '81',
+                                 'api_graph': {'output': inner}, 'workflow': self.workflow(inner)})
+        for preset_mode in ('none', 'reference', 'expanded'):
+            for metadata in (False, True):
+                for second_consumer in (False, True):
+                    # A shared Model A is merged after B. Deduplicated source order is A,B,
+                    # but the effective model is A. Also cover only CLIP or VAE differing.
+                    for changed_input in ('model', 'clip', 'vae'):
+                        with self.subTest(preset=preset_mode, metadata=metadata, second=second_consumer, changed=changed_input):
+                            handle = self.runs.create_run_context('default')
+                            links_a = {name: ['101', index] for index, name in enumerate(('model', 'clip', 'vae'))}
+                            links_b = {**links_a, changed_input: ['102', links_a[changed_input][1]]}
+                            graph = {
+                                '101': {'class_type': 'CheckpointLoaderSimple', 'inputs': {'ckpt_name': 'a.safetensors'}},
+                                '102': {'class_type': 'CheckpointLoaderSimple', 'inputs': {'ckpt_name': 'b.safetensors'}},
+                                '11': {'class_type': 'SceneApplyModel', 'inputs': {**links_a, 'source_node_id': '11'}},
+                                '12': {'class_type': 'SceneApplyModel', 'inputs': {**links_b, 'scene_prompt': ['11', 0], 'source_node_id': '12'}},
+                                '13': {'class_type': 'ScenePrompterMerge', 'inputs': {'scene_prompt1': ['12', 0], 'scene_prompt2': ['11', 0]}},
+                                '14': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['13', 0], 'seed_base': 100, 'run_handle': handle}},
+                                '15': {'class_type': 'ModelImage', 'inputs': {'model': ['14', 5]}},
+                                '16': {'class_type': 'SceneSaveImage', 'inputs': {'images': ['15', 0]}},
+                            }
+                            if preset_mode != 'none':
+                                graph['17'] = {'class_type': 'ScenePresetReference', 'inputs': {'scene_prompt': ['13', 0], 'preset_id': 'model-pass', 'run_handle': handle}}
+                                graph['14']['inputs']['scene_prompt'] = ['17', 0]
+                            if second_consumer:
+                                graph['18'] = {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['12', 0], 'seed_base': 200, 'run_handle': handle}}
+                                graph['15']['inputs']['other_model'] = ['18', 5]
+                            self.presets.snapshot_presets_for_run(handle, {'output': graph}, '14')
+                            snapshots = self.presets.snapshot_presets_for_metadata(handle)
+                            for consumer in ('14', '18') if second_consumer else ('14',):
+                                source = graph[consumer]['inputs']['scene_prompt'][0]
+                                plan = self.presets._scene_node_value(graph, '13' if source == '17' else source, snapshots, set())
+                                if source == '17':
+                                    # Runtime Preset Output marks the outer Reference as a whole-prompt source.
+                                    plan = self.nodes.ScenePromptCounter().count(plan, 1, prompt_trace_kind='whole', source_node_id='17')[0]
+                                expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=plan, seed_base=100,
+                                    unique_id=consumer, run_handle=handle, prompt=graph)['result']
+                                if consumer == '14':
+                                    self.assertEqual(expanded[5:], (links_a['model'], links_a['clip'], links_a['vae']))
+                                    info = self.nodes._normalize_scene_save_info(expanded[2]) if metadata else None
+                            saved, _ = self.nodes._metadata_for_save_mode(graph, {'workflow': self.workflow(graph)}, '16',
+                                self.nodes.SAVE_METADATA_EXECUTION_PATH, info, expand_preset_contents=preset_mode == 'expanded')
+                            self.assertIn('11', saved)
+                            self.assertEqual('12' in saved, second_consumer)
+                            self.assertEqual('102' in saved, second_consumer)
+                            for consumer, expected in [('14', links_a), *([('18', links_b)] if second_consumer else [])]:
+                                replay = self.presets._scene_node_value(saved, saved[consumer]['inputs']['scene_prompt'][0], snapshots, set())
+                                row = self.plan.item_for_normalized_plan(replay, 0, 100)['row']
+                                self.assertEqual(row['model_links'], expected)
+
     def test_png_without_metadata_preserves_distinct_expand_indices_and_seeds(self):
         handle = self.runs.create_run_context('default')
         graph, branches = {}, []

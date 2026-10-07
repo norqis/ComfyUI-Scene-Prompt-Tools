@@ -772,6 +772,7 @@ def _consumer_replay_items(prompt, save_id, scene_info):
                 if is_expand else _text_item_for_index(plan, requested_index, seed))
         result[node_id] = {
             "_plan_ref": plan, "row_index": item["row_index"], "repeat_index": item["repeat_index"],
+            "_model_links": item["row"].get("model_links"),
             "source_node_ids": [*item["row"].get("source_node_ids", []), *([node_id] if is_expand else [])],
             "seed": seed,
         }
@@ -808,9 +809,20 @@ def _effective_model_source_ids(prompt, infos, source_aliases=None):
     effective = set()
     for info in infos:
         for source_id in reversed(_scene_source_id_list(info)):
-            if source_id in models:
-                effective.add(models[source_id])
-                break
+            node_id = models.get(source_id)
+            if node_id is None:
+                continue
+            if "_model_links" in info:
+                links = info["_model_links"]
+                inputs = prompt[node_id].get("inputs", {})
+                if links is None or any(
+                    not is_link(inputs.get(name))
+                    or [str(inputs[name][0]), inputs[name][1]] != links[name]
+                    for name in ("model", "clip", "vae")
+                ):
+                    continue
+            effective.add(node_id)
+            break
     return effective
 
 
@@ -874,8 +886,8 @@ def _scene_prompt_input_links(prompt, node_id):
     )
 
 
-def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=(), scene_consumer_ids=()):
-    """Keep the row-order effective Apply Model while preserving Scene routes."""
+def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_source_ids=(), scene_consumer_ids=(), effective_model_ids=None):
+    """Keep the consumers' effective Apply Models while preserving Scene routes."""
     selected_order = list(dict.fromkeys(str(node_id) for node_id in selected_scene_ids if str(node_id).strip()))
     selected = set(selected_order) | set(protected_source_ids)
     if not isinstance(prompt, dict):
@@ -885,7 +897,8 @@ def _contract_superseded_model_sources(prompt, selected_scene_ids, protected_sou
         node_id for node_id in selected_order
         if isinstance(prompt.get(node_id), dict) and prompt[node_id].get("class_type") == "SceneApplyModel"
     ]
-    superseded = set(model_ids[:-1]) - set(protected_source_ids)
+    effective = set(model_ids[-1:]) if effective_model_ids is None else set(effective_model_ids)
+    superseded = set(model_ids) - effective - set(protected_source_ids)
 
     replacements = {}
 
@@ -1179,7 +1192,7 @@ def _metadata_for_save_mode(
         text_ids = {node_id for node_id, alias in source_aliases.items() if alias in text_source_ids}
         effective_models = _effective_model_source_ids(expanded_prompt, [scene_info, *expand_infos], source_aliases)
         contracted_prompt, selected_ids, replacements = _contract_superseded_model_sources(
-            expanded_prompt, selected_ids, text_ids | effective_models, consumer_items,
+            expanded_prompt, selected_ids, text_ids, consumer_items, effective_models,
         )
         selected_ids.update(text_ids)
         contracted_workflow = _contract_superseded_model_workflow(expanded_workflow, replacements)
@@ -1215,7 +1228,7 @@ def _metadata_for_save_mode(
 
     effective_models = _effective_model_source_ids(prompt, [scene_info, *expand_infos])
     contracted_prompt, selected_sources, replacements = _contract_superseded_model_sources(
-        prompt, selected_source_ids, text_source_ids | effective_models, consumer_items,
+        prompt, selected_source_ids, text_source_ids, consumer_items, effective_models,
     )
     selected_sources.update(text_source_ids)
     ancestor_ids = _selected_ancestor_ids(contracted_prompt, unique_id, scene_info, selected_sources)
@@ -1951,6 +1964,8 @@ def _normalize_scene_save_info(value):
         info["_plan_ref"] = value["_plan_ref"]
     if "_event_ref" in value:
         info["_event_ref"] = value["_event_ref"]
+    if "_model_links" in value:
+        info["_model_links"] = value["_model_links"]
     return info
 
 class SceneMatrix:
@@ -3060,6 +3075,7 @@ class ScenePromptExpand:
             "source_node_ids": [*row.get("source_node_ids", []), str(unique_id)] if unique_id is not None else list(row.get("source_node_ids", [])),
             "run_handle": str(run_handle or ""),
             "_plan_ref": plan,
+            "_model_links": row.get("model_links"),
         }
         if "event_ref" in item:
             save_info["_event_ref"] = item["event_ref"]
