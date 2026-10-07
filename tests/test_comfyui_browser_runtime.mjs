@@ -345,7 +345,6 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
-    await verifySceneModalHistory(page);
     const removedInitialization = await page.evaluate(async () => {
         const graph = window.app.graph, removed = [];
         graph.clear();
@@ -3254,6 +3253,7 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(nativeWeightedLine.positive_parts, ["first", "((TAG:4):0.5)", "(equal:1.)", "(science:1_2e-1)"]);
     assert.deepEqual(nativeWeightedLine.negative_parts, ["(blocked:.1)"]);
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    await verifySceneModalHistory(page);
     await page.waitForTimeout(100);
     assert.deepEqual(pageErrors, []);
     console.log("real ComfyUI local metadata HTTP, model/LoRA dialogs, retry, red links and weighted Matrix input preservation passed");
