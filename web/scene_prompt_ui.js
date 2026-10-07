@@ -10177,14 +10177,9 @@ function installSceneBatchPromptCapture() {
         applySceneSourceNodeNames(prompt, { onlyMissing: true });
         randomizeStandardSceneSeeds(prompt);
         let preparedRunHandle = "";
-        if (prompt?.output && sceneRunTargetNodes(prompt).length) {
-            const existingHandle = sceneRunTargetNodes(prompt)
-                .map((node) => String(node?.inputs?.run_handle || ""))
-                .find(Boolean);
-            if (!existingHandle) {
-                const prepared = await prepareSceneRunContext(prompt);
-                preparedRunHandle = String(prepared?.run_handle || "");
-            }
+        if (!submissionRun?.runHandle && sceneRunTargetNodes(prompt).length) {
+            const prepared = await prepareSceneRunContext(prompt);
+            preparedRunHandle = String(prepared?.run_handle || "");
         }
         let run = sceneBatchRun;
         let expandPrompt = prompt?.output?.[String(run?.nodeId)];

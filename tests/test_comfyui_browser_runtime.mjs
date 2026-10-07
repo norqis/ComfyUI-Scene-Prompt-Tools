@@ -2625,6 +2625,44 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(switchLegacy.api[String(switchLive.second)].inputs.scene_prompt, [String(switchLive.input), 0], 'legacy Input keeps its original Scene slot 0 link');
     const oldReference = await page.evaluate(id => window.app.graph.getNodeById(id).serialize().widgets_values_named, switchLive.second);
     assert.equal(oldReference.run_handle, 'legacy-run'); assert.equal(oldReference.llm_presets_json, '{"version":1,"presets":{}}');
+    const legacyPreview = await page.evaluate(id => {
+        const app = window.app, reference = app.graph.getNodeById(id);
+        const text = window.LiteGraph.createNode('ScenePromptToText'), preview = window.LiteGraph.createNode('PreviewAny');
+        app.graph.add(text); app.graph.add(preview);
+        reference.connect(0, text, text.inputs.findIndex(input => input.name === 'scene_prompt'));
+        text.connect(0, preview, preview.inputs.findIndex(input => input.name === 'source'));
+        return preview.id;
+    }, switchLive.second);
+    let legacyQueuedBody, previousLegacyHandle;
+    const allowLegacyQueue = async route => { legacyQueuedBody = route.request().postDataJSON(); await route.continue(); };
+    await page.route('**/prompt', allowLegacyQueue);
+    try {
+        for (let execution = 0; execution < 2; execution++) {
+            const before = runRequests.length;
+            const queued = await page.evaluate(async () => {
+                const { api } = await import('/scripts/api.js');
+                return api.queuePrompt(0, await window.app.graphToPrompt());
+            });
+            assert.equal(runRequests.slice(before).filter(path => path.endsWith('/prepare')).length, 1,
+                'normal Queue prepares exactly once despite saved legacy handles');
+            const handles = Object.values(legacyQueuedBody.prompt)
+                .filter(node => ['ScenePresetReference', 'ScenePrompterExpand', 'ScenePromptToText'].includes(node.class_type))
+                .map(node => node.inputs.run_handle);
+            assert(handles[0] && handles.every(handle => handle === handles[0]));
+            assert.notEqual(handles[0], 'legacy-run'); assert.notEqual(handles[0], previousLegacyHandle);
+            previousLegacyHandle = handles[0];
+            let history;
+            const deadline = Date.now() + 30_000;
+            while (Date.now() < deadline) {
+                history = (await (await fetch(`${url}/history/${queued.prompt_id}`)).json())[queued.prompt_id];
+                if (history?.status?.completed) break;
+                await new Promise(resolveTimer => setTimeout(resolveTimer, 100));
+            }
+            assert.equal(history?.status?.status_str, 'success', JSON.stringify(history?.status));
+            assert.deepEqual(history.outputs[String(legacyPreview)].text, ['browser_false']);
+        }
+    } finally { await page.unroute('**/prompt', allowLegacyQueue); }
+    console.log('real ComfyUI normal Queue replaces saved legacy handles on every execution and completes CPU text output');
     assert.equal((await inputSwitchSnapshot(switchLive.input)).ports.length, 12, 'legacy one-output Input appends fixed slots');
     await page.evaluate(async workflow => window.app.loadGraphData(workflow, true, true), switchReloadWorkflow);
     const settingsBeforeSwitchReload = await page.evaluate(async () => {

@@ -35,6 +35,7 @@ const context = {
     clearTimeout,
     app: { graph: { serialize() { return { version: 1, nodes: [{ id: 99, type: "ScenePresetReference", widgets_values: ["saved"] }] }; } } },
     sceneBatchRun: null,
+    sceneBatchRunsById: new Map(),
     activePopupContext: null,
     sceneBatchDetachedRuns: new Map(),
     sceneRunHandlesByPromptId: new Map(),
@@ -73,6 +74,8 @@ const context = {
     releaseSceneRunHandle(handle) { context.released.push(handle); },
     registerQueuedSceneRunHandle(promptId, handle) { context.sceneRunHandlesByPromptId.set(promptId, handle); },
     acceptSceneBatchPrompt() {},
+    prepareSceneBatchGPU: async () => "",
+    releaseSceneBatchGPU: async () => {},
     buildSceneBatchCachedPrompt() { return null; },
     applySceneSourceNodeNames() {},
     SCENE_PLAN_NODE_CLASS_TYPES: new Set([
@@ -105,6 +108,7 @@ assert(terminalContext.sceneBatchTerminalEvents.has("terminal-current"));
 assert.equal(terminalRun.waiting, true, "terminal retention never evicts an accepted active run");
 for (const name of [
     "randomizeStandardSceneSeeds",
+    "sceneBatchRunFromPrompt",
     "sceneRunTargetNodes",
     "sceneHistoryStatus",
     "pruneSceneRunTerminalPromptIds",
@@ -176,22 +180,25 @@ context.installSceneBatchPromptCapture();
         "normal Queue submits the current Matrix enabled state and row order",
     );
     assert.equal(JSON.parse(staleMatrix.received.output["7"].inputs.matrix_json).sets[0].weight, 1.2, "normal Queue commits an open Matrix weight draft before serializing it");
+    assert.equal(context.prepared, 2, "normal Queue replaces serialized handles with fresh preparation");
+    assert.equal(staleMatrix.received.output["7"].inputs.run_handle, "opaque-handle-2");
+    assert.equal(staleMatrix.received.output["8"].inputs.run_handle, "opaque-handle-2");
 
     await assert.rejects(
         () => context.api.queuePrompt(0, { output: { "3": { class_type: "ScenePrompter", inputs: {} } } }),
         /queue failed/,
     );
-    assert.deepEqual(context.released, ["opaque-handle-1", "opaque-handle-2"], "failed queue releases its prepared handle");
+    assert.deepEqual(context.released, ["opaque-handle-1", "opaque-handle-3"], "failed queue releases its prepared handle");
 
     await context.api.queuePrompt(0, { output: { "4": { class_type: "ScenePrompter", inputs: {} } } });
-    assert.equal(context.released.at(-1), "opaque-handle-3", "a queue response without prompt_id releases its prepared handle");
+    assert.equal(context.released.at(-1), "opaque-handle-4", "a queue response without prompt_id releases its prepared handle");
 
     context.releaseCompletedSceneRun({ prompt_id: "fast-prompt" });
     context.registerQueuedSceneRunHandle("fast-prompt", "fast-handle");
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(
         context.released,
-        ["opaque-handle-1", "opaque-handle-2", "opaque-handle-3", "fast-handle"],
+        ["opaque-handle-1", "opaque-handle-3", "opaque-handle-4", "fast-handle"],
         "a completion arriving before the queue response releases the claimed handle once",
     );
 
@@ -290,6 +297,42 @@ context.installSceneBatchPromptCapture();
     assert.ok(cachedWithCallback.output["6"], "cached Expand keeps its each Callback configuration");
     assert.ok(cachedWithCallback.output["7"], "cached Expand keeps its last Callback configuration");
     assert.equal(cachedWithCallback.output["99"], undefined, "unrelated plan nodes remain stripped from cached loop prompts");
+    let preparations = 0;
+    context.api.fetchApi = async (url) => ({ ok: true, payload: url.endsWith("/prepare")
+        ? { run_handle: `fresh-${++preparations}` } : { claimed: true } });
+    for (const handles of [["legacy-run", "", ""], ["expired", "other-run", "another-run"], ["same", "same", "same"]]) {
+        const prompt = { output: {
+            10: { class_type: "ScenePresetReference", inputs: { preset_id: "saved", run_handle: handles[0] } },
+            20: { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["10", 0], run_handle: handles[1] } },
+            30: { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["10", 0], run_handle: handles[2] } },
+        } };
+        const before = preparations;
+        for (let repetition = 1; repetition <= 2; repetition++) {
+            const queued = await context.api.queuePrompt(0, prompt);
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(preparations, before + repetition, "every normal execution prepares once, including reusing the same prompt object");
+            const current = `fresh-${preparations}`;
+            assert.deepEqual(Object.values(queued.received.output).map(node => node.inputs.run_handle), [current, current, current]);
+            assert.equal(context.sceneRunHandlesByPromptId.get(queued.prompt_id), current);
+            context.releaseCompletedSceneRun(queued);
+            assert.equal(context.released.at(-1), current);
+        }
+    }
+    for (const detached of [false, true]) {
+        const run = { runId: "owned-run", runHandle: "owned-snapshot", samplerSeedTargets: [], firstApiPending: false };
+        (detached ? context.sceneBatchDetachedRuns : context.sceneBatchRunsById).set(run.runId, run);
+        context.sceneBatchRun = detached ? null : run;
+        const before = preparations;
+        for (let index = 0; index < 3; index++) {
+            const queued = await context.api.queuePrompt(0, { output: {
+                10: { class_type: "ScenePresetReference", inputs: { preset_id: "saved", run_handle: run.runHandle } },
+                20: { class_type: "ScenePrompterExpand", inputs: { run_id: run.runId, current_index: index, run_handle: run.runHandle } },
+            } });
+            assert.equal(preparations, before, "owned batch iterations reuse their captured preparation");
+            assert.deepEqual(Object.values(queued.received.output).map(node => node.inputs.run_handle), [run.runHandle, run.runHandle]);
+        }
+        context.sceneBatchRun = null; context.sceneBatchRunsById.clear(); context.sceneBatchDetachedRuns.clear();
+    }
     await testSubmissionLifetime();
     console.log("Scene Prompt queue wrapper wiring and terminal/removal lifetime tests passed.");
 })().catch((error) => {
