@@ -121,6 +121,14 @@ A new GPT-6 Astra xhigh agent (`astra_audit_round9`) audited the whole repositor
 
 Full Python passes 735 tests (2 opt-in native classes skipped), all 25 frontend suites pass, and the complete isolated native Chromium suite passes. Root reviewed all three product changes and reproduced each failing regression before the fix. The same auditor approved exact HEAD `73b194d9d9082ac3166114bff02fee03b2805b74` after independent Windows, physical-link and nested-Random probes and final test-log review. A new tenth GPT-6 Astra xhigh agent is conducting the next independent whole-repository audit.
 
+## Tenth independent full audit
+
+A new GPT-6 Astra xhigh agent (`astra_audit_round10`) completed another whole-repository audit and reproduced one further issue: normal Queue skipped preparation if any serialized Scene node already contained a run handle. Imported or saved workflows could therefore reuse an expired context, mix handles, or bypass current Preset preparation. Root fixed this in `0a28d43`: only a currently owned batch submission reuses its captured context; every normal execution prepares once and applies the fresh handle to all Scene targets. Removing the old handle scan also avoids duplicate graph walks. No retry, new cache, limit or fallback is added.
+
+Focused tests cover stale, mixed and identical handles, two executions of the same prompt object, multiple Expands, terminal release and active/detached batch iterations. The complete isolated native browser loads the actual legacy Reference fixture, executes ordinary Queue twice through To Text and PreviewAny, and verifies one preparation per call, uniform fresh handles, successful backend history and the expected text. All 25 frontend suites pass. The backend is unchanged from the auditor's independent 735-test pass (2 opt-in native classes skipped).
+
+The same auditor approved exact HEAD `0a28d439298b7f04510266ea3138c5d6eff7ac00`. Its independent whole-audit probes matched 12,000 frontend comparisons and 2,475 backend plans / 35,143 events. A new eleventh GPT-6 Astra xhigh agent will audit the entire repository again before release.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation
