@@ -245,7 +245,7 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
         if original_id == _output_id:
             copied = {"class_type": "ScenePromptCounter", "inputs": {
                 "scene_prompt": output_link, "count": 1, "enable_downstream_count": True,
-                "prompt_trace_kind": "whole", "source_node_id": reference_source,
+                "prompt_trace_kind": "whole",
                 "source_node_name": inputs.get("source_node_name", ""),
             }}
         copied_inputs = copied.get("inputs")

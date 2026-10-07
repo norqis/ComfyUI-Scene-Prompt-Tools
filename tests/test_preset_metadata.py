@@ -582,7 +582,8 @@ class PresetMetadataTests(unittest.TestCase):
                     self.assertEqual(len(markers), 2 if preset_id == "parent" else 1)
                     for marker in markers:
                         self.assertEqual(marker["widgets_values"], [1, True])
-                        self.assertEqual(replay[str(marker["id"])]["inputs"]["source_node_id"], aliases[str(marker["id"])])
+                        self.assertIn(aliases[str(marker["id"])], {"2", "2/11"})
+                        self.assertNotIn("source_node_id", replay[str(marker["id"])]["inputs"], "replayed boundaries use their current graph ID")
 
     def test_full_expansion_preserves_unrelated_workflow_branch_byte_for_byte(self):
         self.put_snapshots({"one": simple_preset("one")})
