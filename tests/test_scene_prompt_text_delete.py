@@ -1,5 +1,6 @@
 import copy
 import importlib
+import itertools
 import json
 import tempfile
 import unittest
@@ -543,9 +544,9 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         self.assertEqual(saved['5']['inputs']['scene_prompt'], ['2', 0])
 
     def test_execution_path_contracts_generic_switch_without_requiring_inactive_text(self):
-        for control in ('literal', 'primitive', 'preset'):
+        for control, literal_data in itertools.product(('literal', 'primitive', 'preset'), (False, True)):
             for selected in (True, False):
-                with self.subTest(control=control, selected=selected):
+                with self.subTest(control=control, selected=selected, literal_data=literal_data):
                     handle = self.runs.create_run_context('default')
                     prompt = {
                         '1': scene_prompt('image'),
@@ -557,6 +558,8 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                         '7': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': False, 'on_true': ['6', 0], 'on_false': ['6', 0]}},
                         '8': {'class_type': 'Save', 'inputs': {'info': ['2', 2], 'path': ['7', 0], 'label': ['6', 0]}},
                     }
+                    if literal_data:
+                        prompt['6']['inputs']['on_true'] = 'literal-path'
                     if control != 'literal':
                         prompt['9'] = ({'class_type': 'PrimitiveBoolean', 'inputs': {'value': selected}}
                             if control == 'primitive' else {'class_type': 'ScenePresetInput', 'inputs': {'switch_values': {'values': [selected] + [False] * 9}}})
@@ -568,19 +571,43 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                     original = copy.deepcopy(prompt)
                     workflow = self.workflow(prompt)
                     saved, extra = self.nodes._metadata_for_save_mode(prompt, {'workflow': workflow}, '8', self.nodes.SAVE_METADATA_EXECUTION_PATH, expanded[2])
-                    expected = ['5', 0] if selected else ['4', 1]
-                    self.assertEqual(saved['8']['inputs']['path'], expected)
-                    self.assertEqual(saved['8']['inputs']['label'], expected)
-                    self.assertNotIn('6', saved)
-                    self.assertNotIn('7', saved)
-                    self.assertEqual('4' in saved, not selected)
-                    self.assertEqual('3' in saved, not selected)
+                    if literal_data and selected:
+                        self.assertEqual(saved['8']['inputs']['path'], ['7', 0])
+                        self.assertEqual(saved['8']['inputs']['label'], ['6', 0])
+                        self.assertEqual(saved['6']['inputs'], prompt['6']['inputs'])
+                    else:
+                        expected = ['5', 0] if selected else ['4', 1]
+                        self.assertEqual(saved['8']['inputs']['path'], expected)
+                        self.assertEqual(saved['8']['inputs']['label'], expected)
+                        self.assertNotIn('6', saved)
+                        self.assertNotIn('7', saved)
+                    self.assertEqual('4' in saved, not selected or literal_data)
+                    self.assertEqual('3' in saved, not selected or literal_data)
                     saved_ids = {str(node['id']) for node in extra['workflow']['nodes']}
                     self.assertEqual(saved_ids, set(saved))
                     self.assertTrue(all(str(link[1]) in saved_ids and str(link[3]) in saved_ids for link in extra['workflow']['links']))
                     self.assertEqual(prompt, original)
                     full, _ = self.nodes._metadata_for_save_mode(prompt, {'workflow': workflow}, '8', self.nodes.SAVE_METADATA_WORKFLOW, expanded[2])
                     self.assertEqual(full, original)
+
+    def test_literal_switch_keeps_shared_scene_ancestors_after_selected_visit(self):
+        prompt = {
+            '1': scene_prompt('selected'), '2': scene_prompt('other'),
+            '3': {'class_type': 'ScenePrompterQueue', 'inputs': {'scene_prompt1': ['1', 0], 'scene_prompt2': ['2', 0]}},
+            '4': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['3', 0]}},
+            '5': {'class_type': 'ScenePromptToText', 'inputs': {'scene_prompt': ['3', 0]}},
+            '6': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': True, 'on_true': 'path', 'on_false': ['5', 0]}},
+            '7': {'class_type': 'Save', 'inputs': {'path': ['6', 0], 'info': ['4', 2]}},
+        }
+        # The stack visits Expand/Queue in selected mode before the literal Switch.
+        included = self.nodes._selected_ancestor_ids(prompt, '7', {}, {'1', '3', '4'})
+        self.assertEqual(included, set(prompt))
+        self.assertEqual(self.nodes._slice_prompt_to_ids(prompt, included), prompt)
+        # Saving without an executed Scene consumer still keeps required inputs.
+        prompt.pop('4')
+        prompt['7']['inputs'].pop('info')
+        saved, _ = self.nodes._metadata_for_save_mode(prompt, None, '7', self.nodes.SAVE_METADATA_EXECUTION_PATH, None)
+        self.assertEqual(saved, prompt)
 
     def test_execution_path_unknown_switch_control_does_not_hide_missing_text_plan(self):
         prompt = {

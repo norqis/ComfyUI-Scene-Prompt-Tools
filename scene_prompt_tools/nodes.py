@@ -853,28 +853,29 @@ def _effective_model_source_ids(prompt, infos, source_aliases=None):
 def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=None):
     """Keep ordinary image ancestors, but only selected Scene-plan branches."""
     selected_scene_ids = _scene_source_ids(scene_info) if selected_scene_ids is None else selected_scene_ids
-    if not selected_scene_ids:
-        return _prompt_ancestor_ids(prompt, target_id)
-
-    included = set()
-    pending = [(str(target_id), False)]
+    included, visited = set(), set()
+    pending = [(str(target_id), False, not selected_scene_ids)]
     while pending:
-        node_id, scene_dependency = pending.pop()
-        if node_id in included:
+        node_id, scene_dependency, physical = pending.pop()
+        if (node_id, physical) in visited:
             continue
         node = prompt.get(node_id)
         if not isinstance(node, dict):
             raise ValueError(f"Scene Save Image の生成経路を保存できません: ノード {node_id} の定義が不正です。")
         class_type = str(node.get("class_type") or "")
-        if class_type == "ComfySwitchNode" and scene_dependency:
+        if class_type == "ComfySwitchNode" and scene_dependency and not physical:
             continue
-        if class_type in SCENE_NODE_TYPES and class_type != "ScenePresetInput" and node_id not in selected_scene_ids:
+        if not physical and class_type in SCENE_NODE_TYPES and class_type != "ScenePresetInput" and node_id not in selected_scene_ids:
             continue
         inputs = node.get("inputs", {})
         if not isinstance(inputs, dict):
             raise ValueError(f"Scene Save Image の生成経路を保存できません: ノード {node_id} の inputs が不正です。")
         included.add(node_id)
-        for input_name, value in _execution_inputs(prompt, node).items():
+        visited.add((node_id, physical))
+        # A remaining generic Switch (e.g. literal data) could not contract.
+        # Keep its required physical dependencies valid for native replay.
+        physical = physical or class_type == "ComfySwitchNode"
+        for input_name, value in inputs.items():
             source_id = _prompt_link_source(value, node_id, input_name)
             if source_id is not None:
                 if source_id not in prompt:
@@ -882,7 +883,7 @@ def _selected_ancestor_ids(prompt, target_id, scene_info, selected_scene_ids=Non
                         f"Scene Save Image の生成経路を保存できません: ノード {node_id} の入力 {input_name} が存在しないノード {source_id} を参照しています。"
                     )
                 is_scene_input = (class_type in SCENE_NODE_TYPES or class_type == "ScenePromptToText") and input_name in _scene_prompt_input_names(node)
-                pending.append((source_id, is_scene_input))
+                pending.append((source_id, is_scene_input, physical))
     return included
 
 

@@ -1431,11 +1431,12 @@ NODE_CLASS_MAPPINGS = {
                         self._request("/scene_prompt/runs/release", {"run_handle": replay_handle})
 
     def test_generic_switch_selected_png_skips_inactive_text_and_replays(self):
+        import itertools
         from PIL import Image
-        for mode in ('ワークフロー全体', '生成経路ノードのみ'):
+        for mode, literal_data in itertools.product(('ワークフロー全体', '生成経路ノードのみ'), (False, True)):
             for selected in (True, False):
-                with self.subTest(mode=mode, selected=selected):
-                    folder = f'generic-switch-{mode}-{selected}'
+                with self.subTest(mode=mode, selected=selected, literal_data=literal_data):
+                    folder = f'generic-switch-{mode}-{selected}-{literal_data}'
                     graph = _save_graph(mode)
                     graph.pop('7')
                     graph['4']['inputs']['seed_base'] = 123
@@ -1448,6 +1449,8 @@ NODE_CLASS_MAPPINGS = {
                         '12': {'class_type': 'PrimitiveBoolean', 'inputs': {'value': selected}},
                         '13': {'class_type': 'ComfySwitchNode', 'inputs': {'switch': False, 'on_true': ['11', 0], 'on_false': ['11', 0]}},
                     })
+                    if literal_data:
+                        graph['11']['inputs']['on_true'] = folder
                     graph['6']['inputs']['path'] = ['13', 0]
                     handle, workflow = self._prepare_callback_run(graph, '4')
                     try:
@@ -1458,7 +1461,7 @@ NODE_CLASS_MAPPINGS = {
                     self.assertEqual(len(files), 1)
                     with Image.open(files[0]) as image:
                         replay, visual = json.loads(image.text['prompt']), json.loads(image.text['workflow'])
-                    if mode == '生成経路ノードのみ':
+                    if mode == '生成経路ノードのみ' and not (literal_data and selected):
                         self.assertEqual(replay['6']['inputs']['path'], ['10', 0] if selected else ['9', 1])
                         self.assertNotIn('11', replay)
                         self.assertNotIn('13', replay)
