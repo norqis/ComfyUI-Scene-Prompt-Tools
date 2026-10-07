@@ -1133,7 +1133,7 @@ NODE_CLASS_MAPPINGS = {
             graph[str(node_id)] = {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": [str(first), 0], "scene_prompt2": [str(second), 0]}}
         for node_id, upstream, names in ((6, 5, ("x", "y")), (13, 12, ("u", "v"))):
             graph[str(node_id)] = {"class_type": "SceneMatrix", "inputs": {"scene_prompt": [str(upstream), 0], "run_handle": "",
-                "matrix_json": json.dumps({"version": 1, "sets": [{"row_id": name, "name": name, "positive_base": name} for name in names]})}}
+                "matrix_json": json.dumps({"version": 1, "sets": [{"row_id": name, "name": name, "path_label": name, "positive_base": name} for name in names]})}}
         graph.update({
             "12": {"class_type": "ScenePromptMerge", "inputs": {"scene_prompt1": ["6", 0], "scene_prompt2": ["11", 0]}},
             "14": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["13", 0], "count": 2}},
