@@ -5311,7 +5311,11 @@ function injectSceneLoraWord(node, value) {
     const identity = sceneLoraWordIdentity(word);
     if (sceneLoraSplitPrompt(current).some((part) => sceneLoraWordIdentity(part) === identity)) return false;
     const separator = !current.trim() || /[,\n]\s*$/u.test(current) ? "" : ", ";
-    return setWidgetValue(node, "positive", `${current.trim() ? current : ""}${separator}${word}`);
+    return withSceneUserChange(node, () => {
+        const changed = setWidgetValue(node, "positive", `${current.trim() ? current : ""}${separator}${word}`);
+        node.graph.change?.();
+        return changed;
+    });
 }
 
 const SCENE_LORA_CACHE_KEY = "scene_prompt_lora_names_v1";

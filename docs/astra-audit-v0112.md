@@ -286,6 +286,10 @@ The new auditor found a mismatch between native execution and continuous prepara
 
 The safe evaluator now checks whether the selected input is present, then uses its existing literal/link value resolver. It does not execute arbitrary providers or introduce a second evaluator. The regression initially failed all eight combinations of Boolean selection and text, empty text, zero or false values. All cases now preserve value and type, leave the unselected provider unevaluated, and retain the missing-input error. Four native text/empty-text cases now produce identical output with and without continuous-run preparation; the existing full/selected PNG Switch replay regression also passes. Complete current-head validation and same-auditor review are required before another fresh whole audit.
 
+The completed audit found a second native history defect: local LoRA Trigger Word injection could Undo to the original text, but Redo did not restore the injected text. The injected state was never checkpointed. Root reproduced the auditor's canonical workflow-load, canvas-pointer opening, DOM injection and native Undo/Redo sequence. The earlier Undo-only control had missed the Redo failure. Injection now uses the same existing user-change helper as the other modal edits; empty and duplicate words return before creating history. The native history module now includes injection, asserting one checkpoint, Undo, Redo restoring the actual injected value, duplicate no-op and normal workflow reload.
+
+Independent oracle checks passed 500 mixed Queue/Count/Matrix plans with 42,530 event/replay comparisons, plus 150 alternating Merge/latent/strict/free compositions with 4,443 comparisons. An actual 35-level shared Random/Merge DAG with a trillion-event schedule supported indexed selection in 0.0326 seconds, with a 293,552-byte traced peak, and was collected after release. Whole-source coverage completed with these two actionable findings and no third finding. Same-auditor remediation approval is still followed by a new whole audit, not treated as a fresh-zero result.
+
 ## Sources
 
 - https://docs.comfy.org/custom-nodes/backend/lazy_evaluation

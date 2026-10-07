@@ -19,6 +19,7 @@ export async function verifySceneModalHistory(page) {
     const cases = [
         { type: "ScenePresetReference", role: "scene_preset_select", field: "preset_id", before: "", after: "native-history" },
         { type: "SceneApplyLora", role: "lora_select", field: "lora_name", before: "runtime-hat.safetensors", after: "runtime-local.safetensors" },
+        { type: "SceneApplyLora", role: "lora_details", field: "positive", before: "manual", after: "manual, native_metadata_trigger" },
         { type: "ScenePromptRandomRoute", role: "random_settings", field: "weights_json",
             before: "[10000,0,0,0,0,0,0,0,0,0]", after: "[5000,5000,0,0,0,0,0,0,0,0]" },
     ];
@@ -27,6 +28,7 @@ export async function verifySceneModalHistory(page) {
             const app = window.app; app.graph.clear();
             const node = window.LiteGraph.createNode(scenario.type); app.graph.add(node);
             node.widgets.find(widget => widget.name === scenario.field).value = scenario.before;
+            if (scenario.role === "lora_details") node.widgets.find(widget => widget.name === "lora_name").value = "runtime-hat.safetensors";
             node.pos = [380, 80]; app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0];
             if (scenario.type === "ScenePresetReference") await window.__sceneSeedRuntimeTest.refreshPresetReference(node);
             await app.loadGraphData(JSON.parse(JSON.stringify(app.graph.serialize())), true, true);
@@ -58,8 +60,12 @@ export async function verifySceneModalHistory(page) {
             await open();
             if (scenario.type === "ScenePresetReference") {
                 await page.locator(".pc-popup").getByRole("button", { name: "Native History", exact: true }).click();
-            } else if (scenario.type === "SceneApplyLora") {
+            } else if (scenario.role === "lora_select") {
                 await page.locator(".pc-lora-picker .pc-lora-row").filter({ hasText: changed ? scenario.after : scenario.before }).locator(".pc-lora-select").click();
+            } else if (scenario.role === "lora_details") {
+                const dialog = page.getByRole("dialog", { name: "LoRA 詳細確認", exact: true });
+                await dialog.locator(".pc-lora-word").filter({ hasText: "native_metadata_trigger" }).getByRole("button", { name: "注入" }).click();
+                await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
             } else {
                 const dialog = page.locator(".pc-random-dialog");
                 if (changed) {
@@ -85,7 +91,7 @@ export async function verifySceneModalHistory(page) {
         assert(undone.exists, `${scenario.type} Undo keeps the node`);
         assert.equal(undone.value, scenario.before);
         assert.equal(undone.redo, 1);
-        if (scenario.type !== "ScenePresetReference") {
+        if (["lora_select", "random_settings"].includes(scenario.role)) {
             await choose(false);
             assert.deepEqual(await snapshot(), undone, `${scenario.type} unchanged close/selection preserves Redo`);
         }
@@ -103,5 +109,5 @@ export async function verifySceneModalHistory(page) {
         assert.equal(reloaded.value, scenario.after);
         assert.equal(reloaded.stored, scenario.after);
     }
-    console.log("real ComfyUI Preset/local-LoRA selection and Random probability DOM edits preserve Undo/Redo, no-op history and reload");
+    console.log("real ComfyUI Preset/local-LoRA selection, Trigger Word injection and Random probability DOM edits preserve Undo/Redo, no-op history and reload");
 }
