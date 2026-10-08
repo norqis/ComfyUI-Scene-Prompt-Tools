@@ -3253,7 +3253,7 @@ window.__sceneSeedRuntimeTest = {
     nativeRunChecks = false;
     console.log('real ComfyUI standard Switch MatchType, fixed slots, names/mapping DOM saves, siblings, count/selected preview, Undo/Redo, clone, legacy restore, reload and one settings category passed');
     nativeRunChecks = true;
-    try { await (await import('./scene_public_widget_inputs.mjs')).verifyMakeSwitch(page); }
+    try { await (await import('./scene_public_widget_inputs.mjs')).verifyMakeSwitch(page, screenshotDirectory); }
     finally { nativeRunChecks = false; }
 
     const weightedInput = "first, ((TAG:4):0.5), (tag:1.2), (equal:1.), (EQUAL:1e0), (science:1_2e-1), (SCIENCE:1.1), (blocked:99)";

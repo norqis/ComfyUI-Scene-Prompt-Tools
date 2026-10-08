@@ -12672,19 +12672,32 @@ function openSceneMakeSwitchSettings(node) {
     const values = sceneMakeSwitchValues(findWidget(node, "switch_values_json")?.value);
     const list = document.createElement("div"); list.className = "pc-popup-list";
     names.forEach((name, index) => {
-        const row = document.createElement("div"); row.className = "pc-toolbar";
-        const label = document.createElement("label"); label.textContent = `${index + 1}: `;
+        const row = document.createElement("div"); row.className = "pc-switch-row";
+        const label = document.createElement("label"); label.className = "pc-switch-name";
+        const number = document.createElement("span"); number.textContent = String(index + 1);
         const input = document.createElement("input"); input.className = "pc-searchbox";
         input.dataset.sceneSwitchName = String(index + 1);
         input.value = name === `スイッチ${index + 1}` ? "" : name;
         input.placeholder = `スイッチ${index + 1}`;
         bindSceneSwitchNameInput(input, node, index);
-        label.appendChild(input);
-        const toggle = document.createElement("label"); toggle.textContent = "ON ";
-        const enabled = document.createElement("input"); enabled.type = "checkbox";
-        enabled.dataset.sceneSwitchEnabled = String(index + 1); enabled.checked = values[index];
-        enabled.addEventListener("change", () => commitScenePresetSwitchValue(node, "switch_values_json", index, enabled.checked));
-        toggle.prepend(enabled); row.append(label, toggle); list.appendChild(row);
+        label.append(number, input);
+        const toggle = createButton("", "pc-switch-toggle");
+        toggle.type = "button"; toggle.setAttribute("role", "switch");
+        toggle.setAttribute("aria-label", `スイッチ${index + 1}`);
+        toggle.dataset.sceneSwitchEnabled = String(index + 1);
+        const track = document.createElement("span"); track.className = "pc-switch-track";
+        track.setAttribute("aria-hidden", "true");
+        const state = document.createElement("span"); state.className = "pc-switch-state";
+        const render = (enabled) => {
+            toggle.setAttribute("aria-checked", String(enabled)); state.textContent = enabled ? "ON" : "OFF";
+        };
+        render(values[index]);
+        toggle.append(track, state);
+        toggle.addEventListener("click", () => {
+            const enabled = !sceneMakeSwitchValues(findWidget(node, "switch_values_json")?.value)[index];
+            if (commitScenePresetSwitchValue(node, "switch_values_json", index, enabled)) render(enabled);
+        });
+        row.append(label, toggle); list.appendChild(row);
     });
     popup.appendChild(list);
 }

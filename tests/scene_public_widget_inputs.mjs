@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 
-export async function verifyMakeSwitch(page) {
+export async function verifyMakeSwitch(page, screenshotDirectory) {
     const ids = await page.evaluate(async () => {
         const app=window.app; app.graph.clear();
         const add=type=>{const n=window.LiteGraph.createNode(type);app.graph.add(n);return n;};
@@ -42,11 +43,19 @@ export async function verifyMakeSwitch(page) {
     },ids);
     const open=()=>page.evaluate(id=>window.app.graph.getNodeById(id).widgets.find(w=>w.sceneRole==='make_switch_settings').callback(),ids.maker);
     const modal=page.locator('[data-scene-preset-switch-modal="make"]');
+    const toggle=modal.getByRole('switch',{name:'スイッチ3',exact:true});
+    const checkToggle=async enabled=>{
+        assert.equal(await toggle.getAttribute('aria-checked'),String(enabled));
+        assert.equal(await toggle.textContent(),enabled?'ON':'OFF');
+    };
     const before=await snapshot();
     assert.equal(before.inputs,0);assert.deepEqual(before.outputs,[{name:'switches',type:'SCENE_SWITCHES',label:'スイッチ一式'}]);
     assert.deepEqual(before.buttons,['make_switch_settings']);
     assert.equal(before.total,3);assert.equal(before.actual,3);assert.equal(before.displayed,3);
     await open();assert.equal(await modal.locator('[data-scene-switch-name]').count(),10);
+    assert.equal(await modal.getByRole('switch').count(),10);
+    assert.equal(await modal.locator('input[type="checkbox"]').count(),0);
+    await checkToggle(false);
     assert.equal(await modal.getByRole('button',{name:'保存',exact:true}).count(),0);
     await modal.getByRole('button',{name:'閉じる',exact:true}).click();
     assert.equal((await snapshot()).history,before.history,'unchanged defaults do not add an Undo entry');
@@ -54,7 +63,8 @@ export async function verifyMakeSwitch(page) {
     const renamed=await snapshot();
     assert.equal(JSON.parse(renamed.names)[2],'背景セット','name persists before closing');
     assert.equal(renamed.values,before.values,'editing a name leaves the Boolean JSON unchanged');
-    await modal.locator('[data-scene-switch-enabled="3"]').check();
+    await toggle.click();
+    await checkToggle(true);
     const changed=await snapshot();
     assert.equal(changed.total,7);assert.equal(changed.actual,7);assert.equal(changed.displayed,7);
     assert.equal(changed.history,before.history+2,'name and ON/OFF each commit immediately');
@@ -73,12 +83,28 @@ export async function verifyMakeSwitch(page) {
     await page.evaluate(async()=>{const app=window.app;await app.loadGraphData(app.graph.serialize(),true,true);});
     const loaded=await snapshot();assert.equal(loaded.names,changed.names);assert.equal(loaded.values,changed.values);assert.equal(loaded.total,7);assert.equal(loaded.actual,7);
     await open();assert.equal(await modal.locator('[data-scene-switch-name="3"]').inputValue(),'背景セット');
-    assert(await modal.locator('[data-scene-switch-enabled="3"]').isChecked());
+    await checkToggle(true);
+    let keyboardHistory=(await snapshot()).history;
+    for(const [key,enabled,total] of [['Space',false,3],['Enter',true,7]]){
+        await toggle.press(key);await checkToggle(enabled);
+        const current=await snapshot();
+        assert.equal(current.history,++keyboardHistory,'each keyboard activation creates one history entry');
+        assert.equal(current.total,total);assert.equal(current.actual,total);assert.equal(current.displayed,total);
+        assert.equal(await toggle.evaluate(el=>getComputedStyle(el).outlineStyle),'solid','keyboard focus remains visible');
+    }
+    if(screenshotDirectory)await modal.screenshot({path:resolve(screenshotDirectory,'native-make-switch-toggle.png')});
+    await modal.evaluate(el=>{el.style.width='420px';});
+    const layout=await modal.evaluate(el=>({overflow:el.scrollWidth>el.clientWidth,
+        rows:[...el.querySelectorAll('.pc-switch-row')].map(row=>({overflow:row.scrollWidth>row.clientWidth,
+            nameWidth:row.querySelector('input').getBoundingClientRect().width}))}));
+    assert.equal(layout.overflow,false);
+    assert(layout.rows.every(row=>!row.overflow && row.nameWidth>=140),'narrow rows retain a usable name field without horizontal overflow');
+    if(screenshotDirectory)await modal.screenshot({path:resolve(screenshotDirectory,'native-make-switch-toggle-narrow.png')});
     await modal.locator('[data-scene-switch-name="3"]').fill('閉じても保持');
     await modal.getByRole('button',{name:'閉じる',exact:true}).click();
     assert.equal(JSON.parse((await snapshot()).names)[2],'閉じても保持');
     await page.evaluate(()=>window.app.graph.clear());
-    console.log('real ComfyUI Make Switch single bundle, modal names/values, native Undo/Redo, Reroute labels, live count3/7, backend prepare and reload passed');
+    console.log('real ComfyUI Make Switch single bundle, accessible mouse/keyboard toggles, narrow layout, native Undo/Redo, Reroute labels, live count3/7, backend prepare and reload passed');
 }
 
 export async function verifyPublicWidgetInputs(page) {

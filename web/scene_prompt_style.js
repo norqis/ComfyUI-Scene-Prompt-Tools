@@ -126,6 +126,17 @@ export function injectStyle() {
             border-color: #4d9b63;
             color: #effff3;
         }
+        .pc-switch-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 6px 2px; }
+        .pc-switch-name { display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; }
+        .pc-switch-name > span { color: #a7afbd; text-align: center; font-variant-numeric: tabular-nums; }
+        .pc-button.pc-switch-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 34px; padding: 6px 10px; border-radius: 18px; color: #b8c0cc; }
+        .pc-switch-toggle:focus-visible { outline: 2px solid #9dbfff; outline-offset: 2px; }
+        .pc-switch-state { width: 25px; text-align: center; font-weight: 600; }
+        .pc-switch-track { position: relative; width: 34px; height: 20px; border-radius: 10px; background: #505969; }
+        .pc-switch-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #e7ecf4; }
+        .pc-switch-toggle[aria-checked=true] { background: #244832; border-color: #4d9b63; color: #effff3; }
+        .pc-switch-toggle[aria-checked=true] .pc-switch-track { background: #4d9b63; }
+        .pc-switch-toggle[aria-checked=true] .pc-switch-track::after { transform: translateX(14px); background: #fff; }
         .pc-button.pc-back-button {
             width: 100%;
             margin-bottom: 8px;
