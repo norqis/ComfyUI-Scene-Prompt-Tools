@@ -179,7 +179,7 @@ export const api = {
   },
   fetchApi: async (url, options = {}) => {
     calls.push({ url, options });
-    if (url.startsWith("/scene_prompt/civitai/by-hash?")) return fetch(url, options);
+    if (url.startsWith("/scene_prompt/civitai/")) return fetch(url, options);
     if (url === "/scene_prompt/loras/list" && window.__delayNextSceneLoraList) {
       window.__delayNextSceneLoraList = false;
       await new Promise((resolveDelay) => { releaseDelayedLoraList = resolveDelay; });
@@ -1281,6 +1281,26 @@ try {
     assert.equal(toTextLegacy.linkTargetSlot, 0);
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.some((call) => call.url.startsWith("/scene_prompt/loras/info?"))), false);
     let civitaiLookupCount = 0;
+    const safeDescription = await page.evaluate(async () => {
+        const { renderCivitaiDescription } = await import("/extensions/scene-prompt/web/scene_prompt_civitai.js");
+        const content = renderCivitaiDescription('<p id="foreign" class="foreign" onclick="throw 1" style="position:fixed">Safe <b>bold</b></p><pre><code>one\n  two</code></pre><script>blocked_script</script><style>blocked_style</style><iframe>blocked_frame</iframe><svg><text>blocked_svg</text></svg><math><mi>blocked_math</mi></math><template>blocked_template</template><img src="/unexpected"><video src="/unexpected">blocked_video</video><a href="https://civitai.red/models/1" onclick="throw 1">valid</a><a href="javascript:alert(1)">invalid</a><a href="/relative">relative</a><a href="//example.com">relative-host</a>');
+        document.body.append(content);
+        const result = { text: content.textContent, html: content.innerHTML,
+            code: content.querySelector("code").textContent,
+            links: [...content.querySelectorAll("a")].map(link => ({ href: link.href, rel: link.rel, target: link.target })) };
+        content.remove(); return result;
+    });
+    assert.doesNotMatch(safeDescription.text, /blocked_/u);
+    assert.doesNotMatch(safeDescription.html, /onclick|style=|foreign|<img|<video/u);
+    assert.equal(safeDescription.code, "one\n  two");
+    assert.deepEqual(safeDescription.links, [{ href: "https://civitai.red/models/1", rel: "noopener noreferrer", target: "_blank" }]);
+    let descriptionLookups = 0;
+    const descriptionFixture = { description: '<h3>Outfits</h3><p>Choose an outfit.</p><pre><code>jacket, blue shirt\n  boots</code></pre><ul><li>Uniform</li></ul>', version_description: '<p>Selected version notes</p>' };
+    await page.route("**/scene_prompt/civitai/descriptions?*", route => {
+        descriptionLookups += 1;
+        assert.equal(new URL(route.request().url()).searchParams.get("model_id"), "10");
+        return route.fulfill({ json: descriptionFixture });
+    });
     await page.route("**/scene_prompt/civitai/by-hash?*", (route) => { civitaiLookupCount += 1; return route.fulfill({
         status: 200, contentType: "application/json",
         body: JSON.stringify({ found: true, version: { id: 20, modelId: 10, name: "Version One", model: { name: "Civitai Style" }, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle", "Local Tag, Fresh Tag"] } }),
@@ -1310,10 +1330,14 @@ try {
     await pickerRows.first().locator(".pc-lora-select").focus();
     assert.equal(await pickerRows.first().evaluate((row) => getComputedStyle(row).backgroundColor), selectedColor);
     const beforePreview = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
+    assert.equal(descriptionLookups, 0, "the picker never fetches descriptions for its catalog");
     const otherDetails = pickerRows.last().locator(".pc-lora-source");
     await otherDetails.click();
     const previewDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
     await previewDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    await previewDialog.getByText("Selected version notes", { exact: true }).waitFor();
+    assert.equal(await previewDialog.locator("pre code").textContent(), "jacket, blue shirt\n  boots");
+    assert.equal(await previewDialog.locator("li").textContent(), "Uniform");
     assert.deepEqual(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values), beforePreview,
         "preview does not change the selected file or prompts");
     assert.equal(await previewDialog.locator(".pc-lora-word button:enabled").count(), 0);
@@ -1359,6 +1383,13 @@ try {
     await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback(); });
     const loraDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
     await loraDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    await loraDialog.getByText("Selected version notes", { exact: true }).waitFor();
+    assert(descriptionLookups >= 5, "cached metadata still loads descriptions when details are opened");
+    await page.setViewportSize({ width: 360, height: 740 });
+    assert.equal(await loraDialog.evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth), true, "code remains inside the narrow modal");
+    if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR) await page.screenshot({ path: resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, "lora-description.png") });
+    await page.setViewportSize({ width: 1280, height: 720 });
+    assert.equal(await page.evaluate(() => localStorage.getItem("scene_prompt_lora_names_v1").includes("Selected version notes")), false);
     assert.equal(await loraDialog.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"),
         "https://civitai.red/models/10?modelVersionId=20");
     assert.equal(await loraDialog.locator(".pc-lora-word").count(), 5, "local and Civitai words are deduplicated");
@@ -1391,6 +1422,22 @@ try {
     });
     await page.keyboard.press("Escape");
     assert.equal(await page.getByRole("dialog", { name: "LoRA 詳細確認" }).count(), 0);
+    await page.route("**/scene_prompt/civitai/descriptions?*", route => route.fulfill({ status: 503, json: { error: "description offline" } }), { times: 1 });
+    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find(widget => widget.sceneRole === "lora_details").callback(); });
+    await loraDialog.getByText(/description offline/u).waitFor();
+    assert.equal(await loraDialog.locator(".pc-lora-word button:enabled").count(), 5, "description failure does not remove trigger controls");
+    await page.keyboard.press("Escape");
+    let lateDescription;
+    const lateReady = new Promise(resolve => { lateDescription = resolve; });
+    await page.route("**/scene_prompt/civitai/descriptions?*", route => { lateDescription(route); }, { times: 1 });
+    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find(widget => widget.sceneRole === "lora_details").callback(); });
+    const lateRoute = await lateReady;
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find(widget => widget.sceneRole === "lora_details").callback(); });
+    await loraDialog.getByText("Selected version notes", { exact: true }).waitFor();
+    await lateRoute.fulfill({ json: { description: "old response", version_description: "" } }).catch(() => {});
+    assert.equal(await loraDialog.getByText("old response", { exact: true }).count(), 0, "closed description requests cannot overwrite the reopened modal");
+    await page.keyboard.press("Escape");
     await page.evaluate(() => { window.__sceneLoraCatalog[0].mtime_ns = 3; window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_select").callback(); });
     await loraPicker.locator(".pc-lora-select").filter({ hasText: "style.safetensors" }).waitFor();
     await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-title").getByText("Civitai Style").waitFor();
@@ -2937,7 +2984,7 @@ try {
             { name: "style.safetensors", variants: [
                 { model_mode: "Illustrious", strength_model: 1, strength_clip: 1, roles: ["model", "clip"], applies: false },
                 { model_mode: null, strength_model: 0.4, roles: ["model"], applies: null },
-                { model_mode: "Anima", strength_model: 0.8, strength_clip: 0.6, roles: ["model", "clip"], applies: true },
+                { node_names: ["衣装LoRA", "背景LoRA"], model_mode: "Anima", strength_model: 0.8, strength_clip: 0.6, roles: ["model", "clip"], applies: true },
                 { model_mode: null, strength_model: 0.45, roles: ["model"], applies: null },
                 { model_mode: "Anima", strength_model: 0.9, strength_clip: 0.7, roles: ["model", "clip"], applies: true },
             ] }, { name: "applied-peer.safetensors", variants: [{ model_mode: "Anima", strength_model: 0.2, applies: true }] },
@@ -2957,8 +3004,38 @@ try {
     assert.deepEqual(resourceSetup.counts, [1, 1], "hot reload does not duplicate Expand buttons");
     assert.deepEqual(resourceSetup.serialized, resourceSetup.before, "the new button does not shift legacy saved settings");
     assert.equal(resourceSetup.infoSerialize, false, "generation info is not serialized");
-    await page.evaluate(() => window.__sceneResourceExpand.widgets.find((widget) => widget.sceneRole === "expand_resources").callback());
+    const beforePaint = await page.evaluate(async () => {
+        const original = window.requestAnimationFrame, frames = [];
+        const snapshot = window.app.graphToPrompt;
+        let calls = 0;
+        window.app.graphToPrompt = async (...args) => { calls++; return snapshot(...args); };
+        window.requestAnimationFrame = callback => frames.push(callback);
+        try {
+            const pending = window.__sceneResourceExpand.widgets.find(widget => widget.sceneRole === "expand_resources").callback();
+            const dialog = document.querySelector('[aria-label="生成情報"]');
+            const initial = { calls, loading: dialog.textContent.includes("読み込み中…") };
+            frames.shift()(); await Promise.resolve();
+            const firstFrameCalls = calls;
+            dialog.querySelector("button").click();
+            frames.shift()(); await pending;
+            return { initial, firstFrameCalls, closedCalls: calls };
+        } finally { window.requestAnimationFrame = original; window.app.graphToPrompt = snapshot; }
+    });
+    assert.deepEqual(beforePaint, { initial: { calls: 0, loading: true }, firstFrameCalls: 0, closedCalls: 0 },
+        "the modal precedes graph serialization and closing it before paint cancels work");
+    await page.evaluate(() => {
+        const snapshot = window.app.graphToPrompt;
+        window.app.graphToPrompt = async (...args) => {
+            await new Promise(resolve => { window.__releaseResourceLoad = resolve; });
+            return snapshot(...args);
+        };
+        window.__restoreResourceLoad = () => { window.app.graphToPrompt = snapshot; window.__releaseResourceLoad(); };
+        window.__sceneResourceExpand.widgets.find(widget => widget.sceneRole === "expand_resources").callback();
+    });
     const resources = page.getByRole("dialog", { name: "生成情報" });
+    await resources.getByText("読み込み中…", { exact: true }).waitFor();
+    await page.waitForFunction(() => typeof window.__releaseResourceLoad === "function");
+    await page.evaluate(() => window.__restoreResourceLoad());
     await resources.getByText("Expand のモデル: Anima").waitFor();
     assert.equal(await resources.getByText("拡散モデル: anima.safetensors").count(), 1);
     assert.equal(await resources.getByText("CLIP: text-encoder.safetensors").count(), 1);
@@ -2973,6 +3050,8 @@ try {
     assert.equal(new Set(loraNames).size, loraNames.length, "resource cards remain duplicate-free");
     const details = await loraCard.locator(".pc-resource-detail").allTextContents();
     assert.match(details[0], /モデル強度 0.8.*適用対象/u); assert.match(details[1], /モデル強度 0.9.*適用対象/u);
+    assert.match(details[0], /^衣装LoRA、背景LoRA \/ Anima \/ モデル強度 0.8/u);
+    assert.match(details[1], /^Anima \/ モデル強度/u, "older responses without node names remain readable");
     assert.match(details[2], /モデル強度 0.4.*適用可否を取得不可/u); assert.match(details[3], /モデル強度 0.45.*適用可否を取得不可/u);
     assert.match(details[4], /モデル強度 1.*適用外/u);
     assert.equal(await page.evaluate(() => JSON.stringify(window.__sceneResourceResponse) === window.__sceneResourceOriginal), true,

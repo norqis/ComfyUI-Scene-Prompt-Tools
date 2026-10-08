@@ -173,6 +173,9 @@ async def civitai_lookup(request):
             raise civitai.ServiceError("Metadata fixture offline")
         if fixture.get("mode") == "missing":
             return civitai._NOT_FOUND
+        if path == "/api/v1/models/12":
+            return {"id": 12, "description": "<h3>Outfits</h3><pre><code>jacket, blue shirt</code></pre>",
+                    "modelVersions": [{"id": 99, "description": "wrong version"}, {"id": 23, "description": "<p>Selected outfit notes</p>"}]}
         return {"id": 23, "modelId": 12, "name": "Fixture v1", "model": {"name": "Native metadata"},
                 "trainedWords": ["native_metadata_trigger"], "private_upstream_field": "omitted"}
     civitai.api_get = api_get
@@ -250,7 +253,7 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage}
     await page.route("**/scene_prompt/civitai/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
-        if (path.endsWith("/by-hash")) return route.continue();
+        if (path.endsWith("/by-hash") || path.endsWith("/descriptions")) return route.continue();
         llmRequests.push({ path, body: route.request().method() === "POST" ? route.request().postDataJSON() : null });
         if (path.endsWith("/search")) {
             const preview = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="300" height="400"%3E%3Crect width="300" height="400" fill="%23366387"/%3E%3Ccircle cx="150" cy="160" r="80" fill="%23b3d9c4"/%3E%3C/svg%3E';
@@ -390,7 +393,10 @@ window.__sceneSeedRuntimeTest = {
             const failed = ({ detail }) => state.errors.push(detail);
             api.addEventListener('executed', executed); api.addEventListener('execution_error', failed);
             state.cleanup = () => { api.removeEventListener('executed', executed); api.removeEventListener('execution_error', failed); };
-            expand.widgets.find(widget => widget.sceneRole === 'expand_run_all').callback();
+            const button = expand.widgets.find(widget => widget.sceneRole === 'expand_run_all');
+            button.callback();
+            state.initial = { label: button.name, disabled: button.disabled, runId: expand.widgets.find(widget => widget.name === 'run_id').value };
+            button.callback(); // Repeated clicks during the paint boundary must not create or cancel a run.
         });
         await page.waitForFunction(() => {
             const state = window.__scenePreviewRuntime;
@@ -403,9 +409,10 @@ window.__sceneSeedRuntimeTest = {
                 && new URL(node.imgs[0].src).searchParams.get('filename') === state.points.at(-1)?.filename;
         });
         const preview = await page.evaluate(() => {
-            const { points, errors } = window.__scenePreviewRuntime; return { points, errors };
+            const { points, errors, initial } = window.__scenePreviewRuntime; return { points, errors, initial };
         });
         assert.deepEqual(preview.errors, []);
+        assert.deepEqual(preview.initial, { label: '生成準備中', disabled: true, runId: '' }, 'native button updates before run creation');
         assert.equal(preview.points.length, 12);
         assert.equal(new Set(preview.points.map(point => point.promptId)).size, 12);
         assert(preview.points.every(point => point.keys === 1 && point.images === 1), JSON.stringify(preview.points));
@@ -2624,10 +2631,13 @@ window.__sceneSeedRuntimeTest = {
         const { app } = await import("/scripts/app.js"); app.graph.clear();
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
         const lora = window.LiteGraph.createNode("SceneApplyLora"); app.graph.add(lora);
+        lora.title = "衣装LoRA";
+        field(lora, "model_mode").value = "Illustrious";
         field(lora, "lora_name").value = "runtime-hat.safetensors";
         field(lora, "positive").value = "manual trigger";
         field(lora, "negative").value = "manual negative";
         const expand = window.LiteGraph.createNode("ScenePrompterExpand"); app.graph.add(expand);
+        field(expand, "model_mode").value = "Illustrious";
         const model = window.LiteGraph.createNode("SceneApplyModel"); app.graph.add(model);
         const checkpoint = window.LiteGraph.createNode("CheckpointLoaderSimple"); app.graph.add(checkpoint);
         field(checkpoint, "ckpt_name").value = "runtime-checkpoint.safetensors";
@@ -2640,6 +2650,14 @@ window.__sceneSeedRuntimeTest = {
     });
     const nativeDetail = page.getByRole("dialog", { name: "LoRA 詳細確認", exact: true });
     await nativeDetail.getByText("Native metadata / Fixture v1", { exact: true }).waitFor();
+    await nativeDetail.getByText("Selected outfit notes", { exact: true }).waitFor();
+    assert.equal(await nativeDetail.locator("pre code").textContent(), "jacket, blue shirt");
+    assert.equal(await nativeDetail.getByText("wrong version", { exact: true }).count(), 0);
+    await page.screenshot({ path: resolve(screenshotDirectory, "native-lora-description.png") });
+    await page.setViewportSize({ width: 360, height: 740 });
+    assert.equal(await nativeDetail.evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth), true);
+    await page.screenshot({ path: resolve(screenshotDirectory, "native-lora-description-narrow.png") });
+    await page.setViewportSize({ width: 1280, height: 720 });
     assert.equal(await nativeDetail.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"), "https://civitai.red/models/12?modelVersionId=23");
     assert.deepEqual(await page.evaluate(id => window.app.graph.getNodeById(id).serialize().widgets_values, metadataNodes.lora), metadataNodes.before);
     await nativeDetail.locator(".pc-lora-word").filter({ hasText: "native_metadata_trigger" }).getByRole("button", { name: "注入" }).click();
@@ -2665,6 +2683,7 @@ window.__sceneSeedRuntimeTest = {
     const nativeResources = page.getByRole("dialog", { name: "生成情報", exact: true });
     const nativeModelCard = nativeResources.locator(".pc-resource-card").filter({ hasText: "runtime-checkpoint.safetensors" });
     await nativeModelCard.getByRole("button", { name: "Civitaiを確認" }).waitFor();
+    assert.match(await nativeResources.locator(".pc-resource-detail").filter({ hasText: "モデル強度" }).textContent(), /^衣装LoRA \/ Illustrious \/ モデル強度/u);
     assert.equal(metadataRequests.length, lookupsBeforeResources, "opening resource information does not start a hash metadata lookup");
     await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "error" }), headers: { "Content-Type": "application/json" } });
     await nativeModelCard.getByRole("button", { name: "Civitaiを確認" }).click();

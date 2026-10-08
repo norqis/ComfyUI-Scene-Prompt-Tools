@@ -255,6 +255,14 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         lookup.reset_mock()
                         self.assertEqual((await by_hash(request))["status"], 400)
                         lookup.assert_not_called()
+                        descriptions = registered[("GET", "/scene_prompt/civitai/descriptions")]
+                        request.query = {"model_id": "1", "version_id": "2"}
+                        with mock.patch.object(civitai, "descriptions", return_value={"description": "<code>outfit</code>", "version_description": ""}) as describe:
+                            self.assertEqual((await descriptions(request))["payload"]["description"], "<code>outfit</code>")
+                            describe.assert_awaited_once_with(1, 2)
+                        for query in ({}, {"model_id": "../1", "version_id": "2"}, {"model_id": "0", "version_id": "2"}):
+                            request.query = query
+                            self.assertEqual((await descriptions(request))["status"], 400)
                         request.query = {"query": "hat", "model_mode": "Anima", "sort": "Highest Rated"}
                         with mock.patch.object(civitai, "search", return_value={"items": []}) as search:
                             self.assertEqual((await registered[("GET", "/scene_prompt/civitai/search")](request))["payload"], {"items": []})

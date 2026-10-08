@@ -42,9 +42,9 @@ class ResourceInfoTests(unittest.TestCase):
                                               "source_class": "CheckpointLoaderSimple", "unresolved": False}])
         self.assertEqual(result["loras"], [{"name": "style.safetensors", "unresolved": False, "variants": [
             {"model_mode": "Anima", "strength_model": 0.9, "strength_clip": 0.7,
-             "roles": ["model", "clip"], "applies": True},
+             "roles": ["model", "clip"], "applies": True, "node_names": ["SceneApplyLora #3"]},
             {"model_mode": "Anima", "strength_model": 0.8, "strength_clip": 0.7,
-             "roles": ["model", "clip"], "applies": True},
+             "roles": ["model", "clip"], "applies": True, "node_names": ["SceneApplyLora #4"]},
         ]}])
 
     def test_random_route_shows_distinct_resources_from_both_candidate_branches(self):
@@ -91,6 +91,27 @@ class ResourceInfoTests(unittest.TestCase):
                          ["model"])
         self.assertIsNone(result["loras"][0]["variants"][0]["model_mode"])
         self.assertTrue(result["loras"][0]["variants"][0]["applies"])
+        self.assertEqual(next(item for item in result["loras"] if item["name"] == "first.safetensors")["variants"][0]["node_names"],
+                         ["LoraLoader #5", "LoraLoader #7"])
+
+    def test_node_names_group_identical_lora_settings_without_duplicate_roles(self):
+        graph = {"output": {
+            "1": node("SceneApplyLora", lora_name="style.safetensors", source_node_name="fallback", model_mode="Anima"),
+            "2": node("SceneApplyLora", scene_prompt=["1", 0], lora_name="style.safetensors", source_node_name="  衣装  ", model_mode="Anima"),
+            "3": node("SceneApplyLora", scene_prompt=["2", 0], lora_name="style.safetensors", model_mode="Illustrious"),
+            "4": node("ScenePrompterExpand", scene_prompt=["3", 0], model_mode="Anima"),
+        }}
+        graph["output"]["1"]["_meta"] = {"title": "  背景  "}
+        graph["output"]["2"]["_meta"] = {"title": " "}
+        result = self.info.connected_resources(graph, "4")
+        self.assertEqual(len(result["loras"]), 1)
+        self.assertEqual(len(result["loras"][0]["variants"]), 2)
+        active, inactive = result["loras"][0]["variants"]
+        self.assertEqual(active["node_names"], ["背景", "衣装"])
+        self.assertEqual(active["roles"], ["model", "clip"])
+        self.assertTrue(active["applies"])
+        self.assertEqual(inactive["node_names"], ["SceneApplyLora #3"])
+        self.assertFalse(inactive["applies"])
 
     def test_all_connected_model_candidates_remain_visible_after_override(self):
         graph = {"output": {
@@ -118,11 +139,14 @@ class ResourceInfoTests(unittest.TestCase):
             "3": node("ScenePresetReference", scene_prompt=["2", 0], preset_id="nested"),
             "4": node("ScenePrompterExpand", scene_prompt=["3", 0]),
         }}
+        preset_graph["output"]["2"]["_meta"] = {"title": "内部LoRA"}
+        graph["output"]["2"]["_meta"] = {"title": "外部Reference"}
         preset = {"schema_version": 1, "metadata": {"preset_id": "nested"}, "api_graph": preset_graph}
         with mock.patch.object(importlib.import_module(f"{self.routes.__package__}.presets"), "load_preset", return_value=preset) as loaded:
             result = self.info.connected_resources(graph, "4")
         loaded.assert_called_once_with("nested", "default")
         self.assertEqual([item["name"] for item in result["loras"]], ["nested.safetensors"])
+        self.assertEqual(result["loras"][0]["variants"][0]["node_names"], ["内部LoRA"])
 
     def test_nested_preset_cycle_is_rejected(self):
         def preset(reference_id):

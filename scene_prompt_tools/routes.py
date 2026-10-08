@@ -700,12 +700,14 @@ def define_routes():
             return web.json_response({"error": "Unable to access Scene Prompt LLM settings."}, status=500)
 
     async def civitai_operation(request, operation):
-        from .civitai import ServiceError, search, download, by_hash
+        from .civitai import ServiceError, search, download, by_hash, descriptions
         try:
             if operation == "search":
                 result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"))
             elif operation == "by_hash":
                 result = await by_hash(request.query.get("sha256", ""))
+            elif operation == "descriptions":
+                result = await descriptions(int(request.query.get("model_id", "0")), int(request.query.get("version_id", "0")))
             else:
                 payload = await request.json()
                 if not isinstance(payload, dict):
@@ -750,6 +752,10 @@ def define_routes():
     @PromptServer.instance.routes.post("/scene_prompt/civitai/download")
     async def scene_civitai_download(request):
         return await civitai_operation(request, "download")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/descriptions")
+    async def scene_civitai_descriptions(request):
+        return await civitai_operation(request, "descriptions")
 
     @PromptServer.instance.routes.get("/scene_prompt/loras/list")
     async def scene_prompt_lora_list(request):

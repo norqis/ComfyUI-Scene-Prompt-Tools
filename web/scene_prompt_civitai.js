@@ -3,6 +3,9 @@ import { requestJSON, identity, value, applyCandidate, captureTarget } from "./s
 let settingsModalID = 0;
 const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated"];
 const modals = [];
+export function waitForModalPaint() {
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
 export async function lookupCivitaiByHash(api, sha256) {
     const data = await requestJSON(api, `/scene_prompt/civitai/by-hash?sha256=${encodeURIComponent(sha256)}`);
     if (data?.found === false && data.version === null) return null;
@@ -24,6 +27,35 @@ function descriptionText(html) {
     for (const node of template.content.querySelectorAll("br")) node.replaceWith(document.createTextNode("\n"));
     for (const node of template.content.querySelectorAll("p,div,li,h1,h2,h3,h4,blockquote")) node.append(document.createTextNode("\n"));
     return template.content.textContent.replace(/\n{3,}/gu, "\n\n").trim();
+}
+export function renderCivitaiDescription(html) {
+    const template = document.createElement("template");
+    template.innerHTML = html || "";
+    const allowed = new Set(["P", "DIV", "SPAN", "BR", "PRE", "CODE", "UL", "OL", "LI", "STRONG", "B", "EM", "I", "U", "S",
+        "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE", "HR", "A"]);
+    const blocked = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "SVG", "MATH", "TEMPLATE", "IMG", "VIDEO", "AUDIO"]);
+    const content = element("div", undefined, "pc-civitai-description");
+    function append(source, parent) {
+        if (source.nodeType === Node.TEXT_NODE) { parent.append(document.createTextNode(source.textContent)); return; }
+        if (source.nodeType !== Node.ELEMENT_NODE) return;
+        const tag = source.tagName.toUpperCase();
+        if (blocked.has(tag)) return;
+        let target = parent;
+        if (allowed.has(tag)) {
+            target = document.createElement(tag.toLowerCase());
+            if (tag === "A") {
+                let url;
+                try { url = new URL(source.getAttribute("href")); } catch (_) { /* Plain text for non-absolute links. */ }
+                if (url && ["http:", "https:"].includes(url.protocol)) {
+                    target.href = url.href; target.target = "_blank"; target.rel = "noopener noreferrer";
+                } else target = document.createElement("span");
+            }
+            parent.append(target);
+        }
+        for (const child of source.childNodes) append(child, target);
+    }
+    for (const child of template.content.childNodes) append(child, content);
+    return content;
 }
 export function openModal(title, onDismiss) {
     const focus = document.activeElement;
@@ -206,7 +238,7 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
     query.focus(); void load(); return modal;
 }
 export async function openLLMSettings(api) {
-    const modal = openModal("LLM接続設定"), form = element("form"), status = element("p");
+    const modal = openModal("LLM接続設定"), form = element("form"), status = element("p", "読み込み中…");
     form.className = "pc-connection-settings"; status.setAttribute("role", "status");
     modal.dialog.append(form, status);
     const fields = {};
@@ -220,8 +252,11 @@ export async function openLLMSettings(api) {
         if (help) { const note = element("small", help, "pc-connection-help"); note.id = `pc-connection-help-${++settingsModalID}`; input.setAttribute("aria-describedby", note.id); form.append(note); }
     }
     try {
+        await waitForModalPaint();
+        if (!modal.overlay.isConnected) return modal;
         const settings = await requestJSON(api, "/scene_prompt/llm/settings");
         if (!modal.overlay.isConnected) return modal;
+        status.textContent = "";
         field("base_url", "API URL", settings.base_url);
         field("port", "ポート（任意）", settings.port, "空欄ならHTTP/HTTPSの既定ポートを使います。");
         field("model", "モデル名（任意）", settings.model, "空欄ならLLMサーバーの既定モデルを使います。");
