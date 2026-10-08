@@ -47,6 +47,8 @@ export async function verifyMakeSwitch(page, screenshotDirectory) {
     const checkToggle=async enabled=>{
         assert.equal(await toggle.getAttribute('aria-checked'),String(enabled));
         assert.equal(await toggle.textContent(),enabled?'ON':'OFF');
+        assert.deepEqual(await toggle.evaluate(el=>({border:getComputedStyle(el).borderWidth,background:getComputedStyle(el).backgroundColor})),
+            {border:'0px',background:'rgba(0, 0, 0, 0)'},'ON/OFF area has no enclosing frame or fill');
     };
     const before=await snapshot();
     assert.equal(before.inputs,0);assert.deepEqual(before.outputs,[{name:'switches',type:'SCENE_SWITCHES',label:'スイッチ一式'}]);
@@ -90,8 +92,9 @@ export async function verifyMakeSwitch(page, screenshotDirectory) {
         const current=await snapshot();
         assert.equal(current.history,++keyboardHistory,'each keyboard activation creates one history entry');
         assert.equal(current.total,total);assert.equal(current.actual,total);assert.equal(current.displayed,total);
-        assert.equal(await toggle.evaluate(el=>getComputedStyle(el).outlineStyle),'solid','keyboard focus remains visible');
+        assert.equal(await toggle.locator('.pc-switch-track').evaluate(el=>getComputedStyle(el).outlineStyle),'solid','keyboard focus remains visible on the track');
     }
+    await toggle.evaluate(el=>el.blur());
     if(screenshotDirectory)await modal.screenshot({path:resolve(screenshotDirectory,'native-make-switch-toggle.png')});
     await modal.evaluate(el=>{el.style.width='420px';});
     const layout=await modal.evaluate(el=>({overflow:el.scrollWidth>el.clientWidth,
