@@ -157,7 +157,9 @@ Visible Scene node settings accept standard ComfyUI widget inputs, including Que
 
 Scene Prompt Count has **後続Countを有効化**, enabled by default. Turn it off to apply this Count and then ignore subsequent Counts on that path, including Count 0. Count 10 with this option off followed by Count 10 stays at 10 batches; leaving it on produces 100. Existing workflows and Presets without the option keep it enabled.
 
-Protection follows each input through Queue, Matrix, Merge and Presets. For example, A → Count 3 (off) and B → Count 2 (on), joined by Queue → Count 10, produce A three times and B twenty times. The first Queue cycle keeps its original order; remaining cycles contain only paths eligible for multiplication. Queue row repetitions and Matrix/Merge combinations still apply normally. This option does not lock Queue controls.
+Protection follows each input through Queue, Matrix, Merge and Presets. For example, A → Count 3 (off) and B → Count 2 (on), joined by Queue → Count 10, produce A three times and B twenty times. An input-order Queue with **1行の回数** set to 1 finishes each row before the next, including when protected and countable paths are mixed. Alternating Queues and grouped row repetitions keep their cycle: its first pass includes every path, and remaining passes contain only paths eligible for multiplication. Queue row repetitions and Matrix/Merge combinations still apply normally. This option does not lock Queue controls.
+
+v0.11.5 corrects input-order scheduling when protected Count paths are present, without changing the total number of images. **生成経路ノードのみ** PNG replay retains its selected path. An older **ワークフロー全体** PNG retains its saved global index; that index can now select a different row under the corrected order.
 
 For example, connect one-row inputs A and B and set **1行の回数** to 2. A later Count 10 leaves `A,A,B,B` unchanged with **固定**. With **乗算**, it produces `(A,A,B,B) × 10`.
 

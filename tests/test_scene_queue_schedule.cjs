@@ -482,7 +482,17 @@ const hold = (plan, factor = 1) => ctx.sceneScheduleCount(plan, factor, false);
 assert.equal(ctx.sceneScheduleCount(hold(a, 10), 10).stats.total, 10);
 assert.equal(ctx.sceneScheduleCount(hold(ctx.sceneScheduleCount(a, 10), 10), 10).stats.total, 100);
 const partial = queue([hold(a, 2), leaf("B", 2), leaf("C")], controls());
-assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleCount(partial, 3)))), [..."AABBCBBCBBC"]);
+assert.deepEqual(Array.from(prefix(ctx.sceneScheduleCount(partial, 3))), [..."AABBBBBBCCC"]);
+const heldMiddle = queue([a, queue([hold(b, 2), leaf("C")], controls())], controls());
+assert.deepEqual(Array.from(prefix(ctx.sceneScheduleCount(ctx.sceneScheduleCount(heldMiddle, 2), 3))), [..."AAAAAABBCCCCCC"]);
+for (const [mode, block, expected] of [["alternate", 1, "ABB"], ["input_order", 2, "AABBBB"]]) {
+    const cycle = queue([hold(a), b], controls(mode, block));
+    const result = ctx.sceneScheduleCount(queue([leaf("X"), cycle, leaf("Y")], controls()), 2);
+    assert.deepEqual(Array.from(prefix(result)), [...`XX${expected}YY`]);
+}
+const legacyFreeCycle = ctx.sceneSchedulePlan([{ kind: "alternate", plans: [queue([a], controls("input_order", 1, "{}", "fixed")), b],
+    blockSize: 1, total: 2, totalImages: 2, unsetBatches: 2, rows: 2 }]);
+assert.deepEqual(Array.from(prefix(ctx.sceneScheduleCount(queue([hold(leaf("X")), legacyFreeCycle, leaf("Y")], controls()), 3))), [..."XABBBYYY"]);
 assert.deepEqual(JSON.parse(JSON.stringify(prefix(ctx.sceneScheduleCount(partial, 0)))), ["A", "A"]);
 const example = ctx.sceneScheduleCount(queue([hold(a, 3), ctx.sceneScheduleCount(b, 2)], controls()), 10);
 assert.equal(example.stats.total, 23);
@@ -591,6 +601,7 @@ if (process.argv.includes("--compact-count-response")) {
     async function verifyCompactCountResponse() {
         const { preparePresetReference } = await import(require("node:url").pathToFileURL(path.join(__dirname, "..", "web", "scene_llm_presets.js")).href);
         const fixture = JSON.parse(fs.readFileSync(0, "utf8"));
+        vm.runInContext(functionSource("matrixLineLabel"), ctx);
         assert.deepEqual(fixture.response.errors, []);
         ctx.scenePresetDisplayGraphs.clear();
         for (const preset of fixture.response.presets) ctx.scenePresetDisplayGraphs.set(preset.metadata.preset_id, preset);
@@ -602,6 +613,7 @@ if (process.argv.includes("--compact-count-response")) {
             const result = ctx.sceneScheduleCount(plan, entry.factor);
             assert.equal(result.stats.total, entry.total, `${entry.preset_id} * ${entry.factor}: real compact response matches execution`);
             assert.equal(result.stats.error, undefined);
+            if (entry.order) assert.deepEqual(Array.from(prefix(result)), entry.order, `${entry.preset_id}: ordered compact preview ${JSON.stringify(prefix(result))}`);
         }
         console.log("Real compact Preset response Count parity passed.");
     }

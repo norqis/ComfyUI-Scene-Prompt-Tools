@@ -1215,12 +1215,13 @@ NODE_CLASS_MAPPINGS = {
             "2": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "prompt_name": "B", "positive_base": "beta"}},
             "3": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 3, "enable_downstream_count": False}},
             "4": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["2", 0], "count": 2}},
-            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0]}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["11", 0], "scene_prompt2": ["3", 0], "scene_prompt3": ["4", 0]}},
             "6": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["5", 0], "count": 10}},
             "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["6", 0], "current_index": 0, "seed_base": 123, "run_id": "count-policy", "timestamp_dir": False}},
             "8": {"class_type": "EmptyImage", "inputs": {"width": 16, "height": 16, "batch_size": 1, "color": 0}},
             "9": {"class_type": "TestSceneTextImage", "inputs": {"image": ["8", 0], "positive": ["7", 0], "negative": ["7", 1], "log_path": str(marker)}},
             "10": {"class_type": "SceneSaveImage", "inputs": {"images": ["9", 0], "scene_info": ["7", 2], "path": "count-policy-native", "metadata_mode": "生成経路ノードのみ"}},
+            "11": {"class_type": "ScenePrompter", "inputs": {**_scene_prompt_inputs(), "prompt_name": "C", "positive_base": "gamma"}},
         }
         workflow = _workflow_for_graph(graph)
         for node in workflow["nodes"]:
@@ -1231,14 +1232,14 @@ NODE_CLASS_MAPPINGS = {
         handle, workflow = self._prepare_callback_run(graph, "7", workflow)
         try:
             observed = []
-            for index in range(23):
+            for index in range(33):
                 graph["7"]["inputs"]["current_index"] = index
                 self._queue_callback_graph(graph, handle, workflow, claim_run=index == 0)
                 observed.append(json.loads(marker.read_text(encoding="utf-8"))[0])
-            self.assertEqual(observed, ["alpha"] * 3 + ["beta"] * 20)
+            self.assertEqual(observed, ["gamma"] * 10 + ["alpha"] * 3 + ["beta"] * 20)
             files = sorted((self.base / "output" / "count-policy-native").glob("*.png"), key=lambda path: path.stat().st_mtime_ns)
-            self.assertEqual(len(files), 23)
-            for selected, expected, rank in ((files[2], "alpha", 2), (files[-1], "beta", 19)):
+            self.assertEqual(len(files), 33)
+            for selected, expected, rank in ((files[9], "gamma", 9), (files[12], "alpha", 2), (files[-1], "beta", 19)):
                 with Image.open(selected) as image:
                     replay, replay_workflow = json.loads(image.text["prompt"]), json.loads(image.text["workflow"])
                 self.assertEqual(replay["7"]["inputs"]["current_index"], rank)

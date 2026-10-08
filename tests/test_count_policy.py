@@ -63,12 +63,65 @@ class CountPolicyTests(unittest.TestCase):
         self.assertEqual(labels(result), ["A"] * 3 + ["B"] * 20)
         self.assertEqual(result["stats"]["row_count"], 2)
 
-    def test_first_entire_cycle_then_only_free_events(self):
+    def test_input_order_finishes_each_row_before_the_next(self):
         original = queue([hold(branch("A"), 2), branch("B", 2), branch("C")])
         result = multiply_count(original, 3)
-        self.assertEqual(labels(result), list("AABBCBBCBBC"))
+        self.assertEqual(labels(result), list("AA") + ["B"] * 6 + ["C"] * 3)
         self.assertEqual(result["stats"]["row_count"], 3)
-        self.assertEqual(len(result["units"]), 1)
+        self.assertEqual(len(result["units"]), 3)
+
+    def test_input_order_free_rows_before_and_after_nested_held_path(self):
+        rows = [{**empty_row(), "name": name, "enabled": True} for name in ("x", "y")]
+        first = matrix_product(branch("A"), rows, True)
+        original = with_source_node(queue([first, queue([hold(branch("B"), 2), branch("C")])]), "outer")
+        before = json.dumps(original)
+        result = multiply_count(multiply_count(original, 2), 3)
+        expected = ["A / x"] * 6 + ["A / y"] * 6 + ["B"] * 2 + ["C"] * 6
+        self.assertEqual(labels(result), expected)
+        self.assertEqual(json.dumps(original), before)
+        for offset, (name, count) in enumerate((("A / x", 6), ("A / y", 6), ("B", 2), ("C", 6))):
+            matching = [item for item in entries(result) if item["label"] == name]
+            self.assertEqual([item["repeat_index"] for item in matching], list(range(1, count + 1)))
+            self.assertEqual({item["count"] for item in matching}, {count})
+            self.assertEqual({item["row_index"] for item in matching}, {offset})
+
+    def test_composite_cycles_keep_their_boundaries_between_input_order_siblings(self):
+        for mode, block, expected in (("alternate", 1, "ABB"), ("input_order", 2, "AABBBB")):
+            with self.subTest(mode=mode):
+                cycle = queue([hold(branch("A")), branch("B")], order_mode=mode, alternate_block_size=block)
+                result = multiply_count(queue([branch("X"), cycle, branch("Y")]), 2)
+                self.assertEqual(labels(result), list("XX" + expected + "YY"))
+
+    def test_reported_1670_batch_shape_keeps_the_two_rows_contiguous(self):
+        middle = queue([branch("A1"), branch("A2"), hold(branch("held"), 720), branch("other", 32)])
+        result = queue([branch("prefix", 550), multiply_count(middle, 10), branch("suffix", 60)])
+        self.assertEqual(result["total_batches"], 1670)
+        self.assertEqual([item_for_normalized_plan(result, index)["label"] for index in range(550, 570)],
+                         ["A1"] * 10 + ["A2"] * 10)
+        self.assertEqual(item_for_normalized_plan(result, 549)["label"], "prefix")
+        self.assertEqual(item_for_normalized_plan(result, 570)["label"], "held")
+
+    def test_legacy_fixed_and_free_composite_beside_held_sibling(self):
+        fixed = queue([branch("A")], downstream_count_mode="fixed")
+        # A composite retains per-path legacy-fixed policy even without a hold inside it.
+        composite = schedule._plan([schedule._unit("alternate", inputs=[fixed, branch("B")], block_size=1)])
+        original = queue([hold(branch("X")), composite, branch("Y")])
+        self.assertEqual(labels(multiply_count(original, 3)), list("XABBBYYY"))
+        self.assertEqual(labels(multiply_count(original, 0)), ["X"])
+
+    def test_legacy_whole_cycle_plan_and_event_refs_remain_replayable(self):
+        original = queue([branch("A"), hold(branch("B"), 2), branch("C")])
+        old_plan = schedule._plan([schedule._unit("count_scale",
+            unit=schedule._unit("sequence", plan=original), factor=3)])
+        rebuilt = normalize_plan(json.loads(json.dumps(old_plan)))
+        self.assertEqual(labels(rebuilt), list("ABBCACAC"))
+        ranks = {name: 0 for name in "ABC"}
+        for index, item in enumerate(entries(rebuilt)):
+            name = item["label"]
+            ref = json.loads(json.dumps(item["event_ref"]))
+            self.assertEqual(replay_index_for_event(rebuilt, ref, list("ABC"), list("ABC")), index)
+            self.assertEqual(replay_index_for_event(rebuilt, ref, [name], list("ABC")), ranks[name])
+            ranks[name] += 1
 
     def test_false_applies_current_count_then_protects_every_result_path(self):
         original = queue([hold(branch("A"), 2), branch("B", 2), branch("C")], order_mode="alternate")
@@ -256,6 +309,39 @@ class CountNodeAndPresetTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_nested_preset_input_order_matches_compact_preview_and_expand(self):
+        from test_scene_presets import matrix_line
+        child = {"1": {"class_type": "ScenePresetInput", "inputs": {}},
+                 "2": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["1", 0], "count": 2, "enable_downstream_count": False}},
+                 "3": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["2", 0]}}}
+        outer = {str(index): {"class_type": "SceneMatrix", "inputs": {"scene_prompt": ["7", 0],
+                 "matrix_json": json.dumps({"version": 1, "sets": [matrix_line(name, positive_base=name)]})}}
+                 for index, name in enumerate("ABC", 1)}
+        outer.update({
+            "7": {"class_type": "ScenePresetInput", "inputs": {}},
+            "4": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "ordered-held", "scene_prompt": ["2", 0]}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["1", 0], "scene_prompt2": ["4", 0], "scene_prompt3": ["3", 0]}},
+            "6": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["5", 0]}},
+        })
+        for name, nodes, output in (("ordered-held", child, "3"), ("ordered-outer", outer, "6")):
+            self.presets.save_preset({"preset_id": name, "name": name, "output_node_id": output,
+                "api_graph": {"output": nodes}, "workflow": {"version": 1, "nodes": []}})
+        graph = {"reference": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "ordered-outer"}}}
+        resolved = {}
+        occurrences = self.presets.prepare_preset_occurrences(graph, resolved)
+        plan = self.presets._scene_node_value(graph, "reference", {**resolved, "__occurrences__": occurrences}, set())
+        cases = []
+        for factor in (0, 2, 10):
+            expected = ["A"] * factor + ["B"] * 2 + ["C"] * factor
+            result = self.nodes.ScenePromptCounter().count(plan, factor)[0]
+            actual = [self.nodes.ScenePromptExpand().expand(scene_prompt=result, current_index=index, timestamp_dir=False)[0]
+                      for index in range(result["total_batches"])]
+            self.assertEqual(actual, expected)
+            cases.append({"preset_id": "ordered-outer", "factor": factor, "total": len(expected), "order": expected})
+        checked = subprocess.run(["node", str(Path(__file__).with_name("test_scene_queue_schedule.cjs")), "--compact-count-response"],
+            input=json.dumps({"response": self.presets.list_presets(), "cases": cases}), text=True, encoding="utf-8", capture_output=True, timeout=30)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
     def test_count_node_schema_defaults_and_legacy_call_contract(self):
         counter = self.nodes.ScenePromptCounter()

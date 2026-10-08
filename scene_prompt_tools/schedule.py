@@ -696,12 +696,19 @@ def multiply_count(plan, factor, enable_downstream_count=True):
     all_strict = source.has_count_hold and _plan_policy(source)[0] == tuple(source["stats"][key] for key in _POLICY_KEYS)
     if all_strict:
         units = source["units"]
-    elif source.has_count_hold:
-        units = [_unit("count_scale", unit=_unit("sequence", plan=source), factor=amount)]
     else:
         units = []
         for unit in source["units"]:
-            if amount > 0 and unit["kind"] == "count_fixed":
+            # Preserve input-order units; only an actual composite repeats as a cycle.
+            policy = unit.count_policy if source.has_count_hold else None
+            total = tuple(unit["stats"][key] for key in _POLICY_KEYS)
+            if policy is not None and policy[0] == total:
+                units.append(unit)
+            elif policy is not None and policy[2] != total and not (
+                unit["kind"] == "count_fixed" and policy[0] == _POLICY_ZERO
+            ):
+                units.append(_unit("count_scale", unit=unit, factor=amount))
+            elif amount > 0 and unit["kind"] == "count_fixed":
                 units.append(unit)
             elif amount == 0 and unit["kind"] == "count_fixed":
                 units.append(_unit("count_fixed", unit=_repeat(unit["unit"], 0)))
