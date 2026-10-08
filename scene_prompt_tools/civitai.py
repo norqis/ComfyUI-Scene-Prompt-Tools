@@ -100,6 +100,27 @@ def _field(data, key, expected, default):
     return value
 
 
+async def descriptions(model_id, version_id):
+    """Fetch display text only when a local LoRA's details are opened."""
+    if any(type(value) is not int or value <= 0 for value in (model_id, version_id)):
+        raise ValueError("Civitai model_id and version_id must be positive integers.")
+    for host in HOSTS:
+        try:
+            model = await api_get(f"/api/v1/models/{model_id}", host=host)
+            if not isinstance(model, dict) or type(model.get("id")) is not int or model["id"] != model_id:
+                raise ServiceError("Civitai returned an invalid model response.")
+            versions = _field(model, "modelVersions", list, [])
+            version = next((entry for entry in versions if isinstance(entry, dict)
+                            and type(entry.get("id")) is int and entry["id"] == version_id), None)
+            if version is None:
+                raise ServiceError("Selected Civitai version was not found.")
+            return {"description": _field(model, "description", str, ""),
+                    "version_description": _field(version, "description", str, "")}
+        except ServiceError:
+            if host == HOSTS[-1]:
+                raise
+
+
 def normalize(model, mode, host="civitai.red"):
     host = validate_host(host)
     if not isinstance(model, dict) or not isinstance(model.get("modelVersions", []), list):

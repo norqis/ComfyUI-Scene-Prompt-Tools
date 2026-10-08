@@ -90,6 +90,37 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.assertNotIn("private", str(result))
         self.assertNotIn("secret", str(result))
 
+    async def test_descriptions_use_selected_version_without_local_model_access(self):
+        self.model["description"] = "<h2>Outfits</h2><pre><code>blue_coat</code></pre>"
+        self.version["description"] = "<p>Selected version</p>"
+        self.model["modelVersions"].insert(0, {"id": 9, "description": "Other version"})
+        with mock.patch.object(civitai, "lora_root", side_effect=AssertionError("local model access")), \
+                mock.patch.object(civitai, "_sha256", side_effect=AssertionError("local hash")):
+            result = await civitai.descriptions(1, 2)
+        self.assertEqual(result, {"description": self.model["description"], "version_description": self.version["description"]})
+        self.assertEqual(len(self.model_requests), 1)
+        self.assertEqual(self.download_calls, 0)
+        self.model["description"], self.version["description"] = None, None
+        self.assertEqual(await civitai.descriptions(1, 2), {"description": "", "version_description": ""})
+
+    async def test_descriptions_validate_ids_before_http_and_fallback_to_com(self):
+        for invalid in (0, -1, True, "1", None, 1.5):
+            for ids in ((invalid, 2), (1, invalid)):
+                with self.subTest(ids=ids), self.assertRaises(ValueError):
+                    await civitai.descriptions(*ids)
+        self.assertEqual(self.model_requests, [])
+        failures = [civitai.ServiceError("offline"), None, {**self.model, "id": 99},
+                    {**self.model, "id": True}, {**self.model, "modelVersions": {}},
+                    {**self.model, "modelVersions": [{"id": "2"}]},
+                    {**self.model, "description": 7}]
+        for bad in failures:
+            with self.subTest(bad=bad), mock.patch.object(civitai, "api_get", side_effect=[bad, self.model]) as fetched:
+                self.assertEqual(await civitai.descriptions(1, 2), {"description": "", "version_description": ""})
+                self.assertEqual([call.kwargs["host"] for call in fetched.await_args_list], ["civitai.red", "civitai.com"])
+        with mock.patch.object(civitai, "api_get", return_value={**self.model, "modelVersions": []}):
+            with self.assertRaisesRegex(civitai.ServiceError, "version was not found"):
+                await civitai.descriptions(1, 2)
+
     async def test_by_hash_missing_is_explicit_but_other_failures_remain_errors(self):
         self.hash_status = 404
         self.assertEqual(await civitai.by_hash(self.sha), {"found": False, "version": None})

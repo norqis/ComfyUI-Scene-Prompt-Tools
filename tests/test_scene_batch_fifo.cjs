@@ -503,7 +503,7 @@ async function testPresetRunCountDisplay() {
     vm.createContext(displayContext);
     vm.runInContext(functionSource("updateSceneExpandButton"), displayContext);
     displayContext.updateSceneExpandButton(node);
-    assert.equal(node.widgets[0].name, "準備中");
+    assert.equal(node.widgets[0].name, "生成準備中");
     run.preparing = false;
     run.nextIndex = 2;
     displayContext.updateSceneExpandButton(node);

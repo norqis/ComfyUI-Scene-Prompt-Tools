@@ -3,7 +3,7 @@ import { api } from "../../scripts/api.js";
 import { ChangeTracker } from "../../scripts/changeTracker.js";
 import { createLLMController, LLM_TYPE, value as sceneLLMValue } from "./scene_prompt_llm.js";
 import { createGPUController, GPU_HANDOFF_SETTINGS } from "./scene_prompt_gpu.js";
-import { openCivitaiSearch, openLLMSettings, showAPIError, lookupCivitaiByHash } from "./scene_prompt_civitai.js";
+import { openCivitaiSearch, openLLMSettings, showAPIError, lookupCivitaiByHash, renderCivitaiDescription, waitForModalPaint } from "./scene_prompt_civitai.js";
 import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference, createPresetOperation } from "./scene_llm_presets.js";
 import { isSceneSwitch, sceneSwitchNames, sceneSwitchSettings, sceneMakeSwitchValues, sceneLiveSwitchSource, sceneLiveSwitchValue, sceneLiveSwitchSelection, sceneLiveReferenceSwitchValues, createScenePresetSwitchContext } from "./scene_prompt_switches.js";
 import {
@@ -5559,6 +5559,7 @@ async function openSceneLoraPicker(node) {
     const list = document.createElement("div");
     list.className = "pc-lora-list";
     list.textContent = "LoRAを読み込んでいます…";
+    list.setAttribute("role", "status");
     dialog.append(head, search, list);
     overlay.append(dialog);
     document.body.append(overlay);
@@ -5685,6 +5686,8 @@ async function openSceneLoraPicker(node) {
     };
     search.oninput = render;
     try {
+        await waitForModalPaint();
+        if (node.sceneLoraPickerCleanup !== cleanup) return;
         await loadSceneLoraCatalog();
         if (node.sceneLoraPickerCleanup === cleanup) render();
     } catch (error) {
@@ -5699,6 +5702,7 @@ function closeSceneLoraDetails(node) {
 
 async function openSceneLoraDetails(node, previewItem = null, returnFocus = document.activeElement) {
     closeSceneLoraDetails(node);
+    const descriptionRequest = new AbortController();
     injectStyle();
     const overlay = document.createElement("div");
     overlay.className = "pc-lora-overlay";
@@ -5719,6 +5723,7 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
     const content = document.createElement("div");
     content.className = "pc-lora-content";
     content.textContent = "情報を取得しています…";
+    content.setAttribute("role", "status");
     dialog.append(head, content);
     overlay.append(dialog);
     document.body.append(overlay);
@@ -5740,6 +5745,7 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
         }
     };
     const cleanup = () => {
+        descriptionRequest.abort();
         document.removeEventListener("keydown", onKey);
         overlay.remove();
         if (pickerOverlay) pickerOverlay.inert = false;
@@ -5758,6 +5764,8 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
         && sceneLoraPathIdentity(findWidget(node, "lora_name")?.value) === selectedAtOpen
         && (!resultIdentity || sceneLoraFileIdentities.get(sceneLoraPathIdentity(item.path)) === resultIdentity);
     try {
+        await waitForModalPaint();
+        if (node.sceneLoraDetailsCleanup !== cleanup) return;
         if (!item.path) throw new Error("LoRAを選択してください。");
         const result = await resolveSceneLora(item);
         if (node.sceneLoraDetailsCleanup !== cleanup) return;
@@ -5820,6 +5828,34 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
             };
             row.append(text, inject);
             content.append(row);
+        }
+        if (result.status === "found") {
+            const descriptions = document.createElement("section");
+            descriptions.className = "pc-lora-descriptions";
+            descriptions.setAttribute("role", "status");
+            descriptions.textContent = "Civitaiの説明を取得しています…";
+            content.append(descriptions);
+            const ownsDescription = () => node.sceneLoraDetailsCleanup === cleanup && overlay.isConnected
+                && !descriptionRequest.signal.aborted && currentSceneLoraResult(item, result)
+                && sceneLoraFileIdentities.get(sceneLoraPathIdentity(item.path)) === resultIdentity;
+            try {
+                const response = await api.fetchApi(`/scene_prompt/civitai/descriptions?model_id=${result.modelId}&version_id=${result.versionId}`,
+                    { signal: descriptionRequest.signal });
+                const data = await readApiJson(response, "Civitaiの説明を取得できませんでした");
+                if (!response.ok) throw new Error(data.error || "Civitaiの説明を取得できませんでした。");
+                if (!ownsDescription()) return;
+                descriptions.replaceChildren();
+                for (const [heading, html] of [["Civitaiの説明", data.description], ["バージョンの説明", data.version_description]]) {
+                    const body = renderCivitaiDescription(html);
+                    if (!body.textContent.trim()) continue;
+                    const label = document.createElement("strong");
+                    label.textContent = heading;
+                    descriptions.append(label, body);
+                }
+                if (!descriptions.childElementCount) descriptions.textContent = "Civitaiに説明は登録されていません。";
+            } catch (error) {
+                if (ownsDescription() && error.name !== "AbortError") descriptions.textContent = `Civitaiの説明を取得できませんでした。 ${error.message}`;
+            }
         }
     } catch (error) {
         if (node.sceneLoraDetailsCleanup === cleanup) {
@@ -9372,11 +9408,14 @@ function updateSceneExpandButton(node, options = {}) {
     const previousName = button.name;
     const run = sceneBatchRunForNode(node);
     const status = sceneBatchRunStatus(run);
-    if (status === "active") {
+    button.disabled = !!node.sceneBatchStarting;
+    if (node.sceneBatchStarting) {
+        button.name = "生成準備中";
+    } else if (status === "active") {
         if (run.finalizing) {
             button.name = "完了通知中";
         } else if (run.preparing) {
-            button.name = "準備中";
+            button.name = "生成準備中";
         } else {
             const current = Math.min(run.nextIndex + 1, run.total);
             button.name = `停止 ${current}/${run.total}`;
@@ -11235,6 +11274,33 @@ async function queueNextSceneBatchItem() {
     }
 }
 
+async function requestSceneBatchRun(node) {
+    if (node.sceneBatchStarting) return;
+    if (sceneBatchRunForNode(node) || sceneBatchNodeRunId(node)) {
+        startSceneBatchRun(node);
+        return;
+    }
+    const graph = node.graph;
+    const button = findSceneWidget(node, "expand_run_all");
+    const previousName = button?.name;
+    const ownsGraph = () => node.graph === graph && app.graph === graph && sceneNodeHasCurrentOwner(node);
+    node.sceneBatchStarting = true;
+    try {
+        updateSceneExpandButton(node, { graphChange: false });
+        await waitForModalPaint();
+        if (ownsGraph()) startSceneBatchRun(node);
+    } catch (error) {
+        showSceneBatchError("連続生成を開始できませんでした。", error);
+    } finally {
+        delete node.sceneBatchStarting;
+        if (ownsGraph()) updateSceneExpandButton(node, { graphChange: false });
+        else if (button) {
+            button.disabled = false;
+            button.name = previousName;
+        }
+    }
+}
+
 function startSceneBatchRun(node) {
     const existingRun = sceneBatchRunForNode(node);
     const existingStatus = sceneBatchRunStatus(existingRun);
@@ -12055,7 +12121,7 @@ function ensurePromptMatrixControls(node) {
 
 function ensureSceneExpandControls(node) {
     const info = addSceneButton(node, "expand_resources", "生成情報", () => openSceneExpandResources(node));
-    const run = addSceneButton(node, "expand_run_all", "連続生成", () => startSceneBatchRun(node));
+    const run = addSceneButton(node, "expand_run_all", "連続生成", () => requestSceneBatchRun(node));
     const generate = addSceneButton(node, "expand_llm_generate", "プロンプト生成", () => sceneLLMController.generate(node));
     node.widgets.splice(node.widgets.indexOf(generate), 1);
     node.widgets.splice(node.widgets.indexOf(run), 0, generate);
@@ -12109,7 +12175,8 @@ async function openSceneExpandResources(node) {
     head.append(title, close);
     const content = document.createElement("div");
     content.className = "pc-lora-content";
-    content.textContent = "接続情報を確認しています…";
+    content.textContent = "読み込み中…";
+    content.setAttribute("role", "status");
     dialog.append(head, content);
     overlay.append(dialog);
     document.body.append(overlay);
@@ -12165,6 +12232,8 @@ async function openSceneExpandResources(node) {
     };
 
     try {
+        await waitForModalPaint();
+        if (node.sceneExpandResourcesCleanup !== cleanup) return;
         if (typeof app.graphToPrompt !== "function") throw new Error("現在の接続情報を取得できません。");
         const apiGraph = await app.graphToPrompt();
         if (node.sceneExpandResourcesCleanup !== cleanup) return;
@@ -12214,7 +12283,8 @@ async function openSceneExpandResources(node) {
                 ].filter(Boolean);
                 const mode = variant.model_mode ?? (variant.applies === true ? "標準LoRA" : "モデル種別 取得不可");
                 const applicability = variant.applies == null ? "適用可否を取得不可" : variant.applies ? "適用対象" : "モデル種別が異なるため適用外";
-                addText(card, [mode, ...strengths, applicability].join(" / "), `pc-resource-detail${variant.applies === false ? " pc-resource-unapplied" : ""}`);
+                const names = variant.node_names?.join("、");
+                addText(card, [...(names ? [names] : []), mode, ...strengths, applicability].join(" / "), `pc-resource-detail${variant.applies === false ? " pc-resource-unapplied" : ""}`);
             }
             if (!lora.unresolved) addLookup(card, async () => resolveSceneLora(sceneLoraCatalogItem(lora.name)));
             loraSection.append(card);
@@ -12341,15 +12411,23 @@ function sortedScenePresetCandidates(presets) {
 }
 
 async function openScenePresetPicker(node) {
+    const popup = openPopupShell(node, "Scene Presetを選択", { hideReload: true, hideClear: true });
+    const status = document.createElement("div");
+    status.className = "pc-empty";
+    status.setAttribute("role", "status");
+    status.textContent = "読み込み中…";
+    popup.append(status);
+    fitPopupToContent(popup);
+    await waitForModalPaint();
+    if (activePopup !== popup || activePopupContext?.node !== node) return;
     const presets = await loadPopupRequest(
         node,
         () => refreshScenePresetReferenceList(node, false),
         "Preset一覧を取得できませんでした。",
     );
-    if (!presets) {
-        return;
-    }
-    const popup = openPopupShell(node, "Scene Presetを選択", { hideReload: true, hideClear: true });
+    if (activePopup !== popup || activePopupContext?.node !== node) return;
+    if (!presets) { status.textContent = "Preset一覧を取得できませんでした。"; return; }
+    status.remove();
     const toolbar = document.createElement("div");
     toolbar.className = "pc-toolbar";
     const reload = createButton("再読み込み");

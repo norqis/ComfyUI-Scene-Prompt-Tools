@@ -54,6 +54,14 @@ def _filename(nodes, raw, node_id):
     return (str(value), False) if value is not None else (f"取得不可 (#{node_id})", True)
 
 
+def _node_label(node, node_id):
+    metadata = node.get("_meta")
+    for value in (metadata.get("title") if isinstance(metadata, dict) else None, _node_inputs(node).get("source_node_name")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return f"{node.get('class_type', 'LoRA')} #{node_id}"
+
+
 def connected_resources(api_graph, expand_node_id, user_id="default"):
     """Summarize distinct resources in the selected Expand's Scene ancestry."""
     nodes = api_graph.get("output") if isinstance(api_graph, dict) else None
@@ -80,7 +88,7 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
         if role not in models[key]["roles"]:
             models[key]["roles"].append(role)
 
-    def add_lora(name, model_mode, strength_model, strength_clip, role, applies, unresolved=False):
+    def add_lora(name, model_mode, strength_model, strength_clip, role, applies, node_name, unresolved=False):
         name = str(name or "")
         entry = loras.setdefault(_resource_key(name), {"name": name, "variants": [], "unresolved": unresolved})
         variant = next((item for item in entry["variants"] if
@@ -90,10 +98,12 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                         item["applies"] == applies), None)
         if variant is None:
             variant = {"model_mode": model_mode, "strength_model": strength_model,
-                       "strength_clip": strength_clip, "roles": [], "applies": applies}
+                       "strength_clip": strength_clip, "roles": [], "applies": applies, "node_names": []}
             entry["variants"].append(variant)
         if role not in variant["roles"]:
             variant["roles"].append(role)
+        if node_name not in variant["node_names"]:
+            variant["node_names"].append(node_name)
 
     def follow_source(scope, source, role):
         if not is_link(source):
@@ -133,7 +143,7 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                 add_lora(name, None,
                          _literal(scope, inputs.get("strength_model"), 1.0),
                          _literal(scope, inputs.get("strength_clip"), 1.0 if kind == "LoraLoader" else None),
-                         source_role, True, unresolved)
+                         source_role, True, _node_label(node, node_id), unresolved)
                 follow_source(scope, inputs.get(source_role), source_role)
         else:
             add_model("unresolved", kind or f"#{node_id}", role, kind or "Unknown", True)
@@ -157,8 +167,9 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                 if unresolved:
                     lora_name = f"取得不可 (#{node_id})"
                 applies = lora_mode == mode if lora_mode is not None and mode is not None else None
-                add_lora(lora_name, lora_mode, strength_model, strength_clip, "model", applies, unresolved)
-                add_lora(lora_name, lora_mode, strength_model, strength_clip, "clip", applies, unresolved)
+                node_name = _node_label(node, node_id)
+                add_lora(lora_name, lora_mode, strength_model, strength_clip, "model", applies, node_name, unresolved)
+                add_lora(lora_name, lora_mode, strength_model, strength_clip, "clip", applies, node_name, unresolved)
             elif kind == "ScenePresetReference":
                 preset_id = _literal(resource_nodes, inputs.get("preset_id"), "")
                 if preset_id in visiting_presets:

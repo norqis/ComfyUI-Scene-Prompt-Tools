@@ -922,6 +922,8 @@ async function testPresetPickerClearsTheSelectedReferenceError() {
         className: "",
         textContent: "",
         appendChild(child) { this.children.push(child); },
+        append(...children) { this.children.push(...children); },
+        setAttribute() {}, remove() {},
     });
     const context = {
         Array,
@@ -932,7 +934,9 @@ async function testPresetPickerClearsTheSelectedReferenceError() {
         findWidget: (target, name) => target.widgets.find(widget => widget.name === name),
         async loadPopupRequest() { return [{ preset_id: "chosen", name: "Chosen" }]; },
         refreshScenePresetReferenceList() { throw new Error("initial load is supplied by the test"); },
-        openPopupShell() { return createElement("popup"); },
+        openPopupShell() { context.activePopupContext = { node }; return context.activePopup = createElement("popup"); },
+        waitForModalPaint: async () => {},
+        fitPopupToContent() {},
         createButton(label) {
             const button = {
                 label,
@@ -967,6 +971,22 @@ async function testPresetPickerClearsTheSelectedReferenceError() {
     buttons.find(button => button.label === "Chosen").click();
     assert.equal(node.widgets[0].value, "", "a removed popup owner is not changed");
     assert.deepEqual(history, ["before", "change", "after"]);
+    let releasePaint, loads = 0;
+    context.waitForModalPaint = () => new Promise(resolve => { releasePaint = resolve; });
+    context.loadPopupRequest = async () => { loads++; return []; };
+    const closed = context.openScenePresetPicker(node);
+    context.activePopup = null;
+    releasePaint(); await closed;
+    assert.equal(loads, 0, "closing before paint avoids the Preset request");
+    context.waitForModalPaint = async () => {};
+    let releaseLoad;
+    context.loadPopupRequest = () => new Promise(resolve => { releaseLoad = resolve; });
+    const stale = context.openScenePresetPicker(node);
+    await new Promise(setImmediate);
+    context.activePopup = createElement("other popup");
+    const beforeButtons = buttons.length;
+    releaseLoad([{ preset_id: "stale", name: "Stale" }]); await stale;
+    assert.equal(buttons.length, beforeButtons, "a late Preset list cannot replace another popup");
 }
 
 async function testCancelledPickerRequestDoesNotReopenAfterNodeLifecycleChange() {
@@ -1092,7 +1112,47 @@ function testPromptSummariesUseComfyWeights() {
     assert.deepEqual(Array.from(context.uniquePromptParts([deep, "(tag:3)"])), [deep], "deep wrappers are processed without recursion");
 }
 
+async function testBatchStartPaintAndOwnership() {
+    const helper = fs.readFileSync(path.join(__dirname, "..", "web", "scene_prompt_civitai.js"), "utf8")
+        .match(/export function waitForModalPaint\(\) \{[\s\S]*?\n\}/u)[0].replace("export ", "");
+    for (const scenario of ["start", "double", "removed", "other-tab", "throw", "existing", "residual"]) {
+        const frames = [], calls = [], errors = [];
+        const button = { name: "連続生成" };
+        const graph = { getNodeById: () => node };
+        const node = { id: 1, graph };
+        const context = vm.createContext({
+            Promise, requestAnimationFrame: callback => frames.push(callback), app: { graph },
+            sceneBatchRunForNode: () => scenario === "existing" ? {} : null,
+            sceneBatchNodeRunId: () => scenario === "residual" ? "stale" : "",
+            findSceneWidget: (_node, role) => role === "expand_run_all" ? button : null,
+            sceneLLMController: {}, sceneBatchRunStatus: () => "idle",
+            markSceneNodeChanged() {},
+            showSceneBatchError: (...args) => errors.push(args),
+            startSceneBatchRun() { calls.push("start"); if (scenario === "throw") throw new Error("fixture failure"); },
+        });
+        vm.runInContext(helper, context);
+        for (const name of ["sceneNodeHasCurrentOwner", "updateSceneExpandButton", "requestSceneBatchRun"]) vm.runInContext(functionSource(name), context);
+        const pending = context.requestSceneBatchRun(node);
+        if (["existing", "residual"].includes(scenario)) {
+            assert.deepEqual(calls, ["start"]); assert.equal(frames.length, 0); await pending; continue;
+        }
+        assert.equal(button.name, "生成準備中"); assert.equal(button.disabled, true);
+        assert.deepEqual(calls, []);
+        if (scenario === "double") await context.requestSceneBatchRun(node);
+        frames.shift()(); await Promise.resolve();
+        assert.deepEqual(calls, [], "first frame must paint before preparation starts");
+        if (scenario === "removed") node.graph = null;
+        if (scenario === "other-tab") context.app.graph = {};
+        frames.shift()(); await pending;
+        assert.deepEqual(calls, ["removed", "other-tab"].includes(scenario) ? [] : ["start"]);
+        assert.equal(errors.length, scenario === "throw" ? 1 : 0);
+        assert.equal(node.sceneBatchStarting, undefined);
+        assert.equal(button.disabled, false); assert.equal(button.name, "連続生成");
+    }
+}
+
 Promise.resolve()
+    .then(testBatchStartPaintAndOwnership)
     .then(testLLMSettingsAlwaysLeadWithoutChangingStoredWidgets)
     .then(testPromptSummariesUseComfyWeights)
     .then(testPresetReferenceCandidatesAreSortedByDisplayName)

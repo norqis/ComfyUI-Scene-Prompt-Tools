@@ -564,10 +564,20 @@ export function injectStyle() {
         }
         .pc-lora-content {
             display: grid;
+            grid-template-columns: minmax(0, 1fr);
             gap: 10px;
             margin-top: 14px;
         }
         .pc-lora-word span { overflow-wrap: anywhere; }
+        .pc-lora-content > *, .pc-lora-descriptions > * { min-width: 0; }
+        .pc-lora-descriptions { display: grid; gap: 8px; margin-top: 8px; }
+        .pc-civitai-description { min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: pre-wrap; }
+        .pc-civitai-description > :first-child { margin-top: 0; }
+        .pc-civitai-description > :last-child { margin-bottom: 0; }
+        .pc-civitai-description pre, .pc-civitai-description code { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, monospace; background: #14171c; border-radius: 4px; }
+        .pc-civitai-description pre { box-sizing: border-box; padding: 10px; }
+        .pc-civitai-description :not(pre) > code { padding: 1px 4px; }
+        .pc-civitai-description blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #59616e; }
         .pc-lora-dialog a { color: #9db8ec; }
         .pc-random-dialog { width: min(430px, calc(100vw - 24px)); }
         .pc-random-fields { display: grid; gap: 6px; margin-top: 14px; }

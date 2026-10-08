@@ -219,6 +219,10 @@ Connect MODEL, CLIP, and VAE from a checkpoint loader to **Scene Apply Model**. 
 
 On **Scene Prompt Expand**, click **生成情報** above **連続生成** to inspect the resources connected to that Expand's Scene paths, including saved Presets. The read-only dialog lists each model file once: either a checkpoint or a separately loaded diffusion model, plus its CLIP and VAE files. It also groups repeated LoRA files and shows each distinct model type and MODEL/CLIP strength combination. The dialog describes the connected paths as they are now; it does not show a particular generation, prompt, or seed. **Civitaiを確認** looks up links for the model's main file (checkpoint or diffusion model) and LoRA files when requested. These hash lookups request public metadata anonymously through ComfyUI and link to `civitai.red`. A separately loaded CLIP or VAE has no Civitai lookup in this dialog.
 
+LoRA **詳細確認** also loads the Civitai model and selected-version descriptions below Trigger Words. Lists, code blocks and safe web links remain readable. Descriptions are fetched only for the opened detail dialog; a description error leaves Trigger Word injection available.
+
+Each LoRA entry in **生成情報** includes its source node names before the model type and strengths. Identical file/settings entries remain grouped, including repeated nodes inside Presets. Resource, LoRA, Preset selection and LLM settings dialogs display a loading state before their data is prepared. **連続生成** immediately shows **生成準備中** before preparing a new batch; stopping and cancelling queued batches remain immediate.
+
 ## Callbacks
 
 Use a callback to notify another service for a Scene batch. A configuration node creates a `callback` value; **Scene Prompt Callback** decides when it runs and passes `scene_prompt` through unchanged.
