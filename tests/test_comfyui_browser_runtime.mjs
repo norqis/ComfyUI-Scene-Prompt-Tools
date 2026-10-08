@@ -2632,10 +2632,12 @@ window.__sceneSeedRuntimeTest = {
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
         const lora = window.LiteGraph.createNode("SceneApplyLora"); app.graph.add(lora);
         lora.title = "衣装LoRA";
+        field(lora, "model_mode").value = "Illustrious";
         field(lora, "lora_name").value = "runtime-hat.safetensors";
         field(lora, "positive").value = "manual trigger";
         field(lora, "negative").value = "manual negative";
         const expand = window.LiteGraph.createNode("ScenePrompterExpand"); app.graph.add(expand);
+        field(expand, "model_mode").value = "Illustrious";
         const model = window.LiteGraph.createNode("SceneApplyModel"); app.graph.add(model);
         const checkpoint = window.LiteGraph.createNode("CheckpointLoaderSimple"); app.graph.add(checkpoint);
         field(checkpoint, "ckpt_name").value = "runtime-checkpoint.safetensors";
