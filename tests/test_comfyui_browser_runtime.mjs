@@ -1767,13 +1767,14 @@ window.__sceneSeedRuntimeTest = {
         const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
         const link = (from, to, name) => from.connect(0, to, to.inputs.findIndex(input => input.name === name));
-        const a = add('ScenePrompter'), b = add('ScenePrompter'), ca = add('ScenePromptCounter'), cb = add('ScenePromptCounter');
+        const a = add('ScenePrompter'), b = add('ScenePrompter'), c = add('ScenePrompter'), ca = add('ScenePromptCounter'), cb = add('ScenePromptCounter');
         const queue = add('ScenePrompterQueue'), count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
         a.title = 'A'; b.title = 'B'; field(a, 'prompt_name').value = 'A'; field(b, 'prompt_name').value = 'B';
+        c.title = 'C'; field(c, 'prompt_name').value = 'C';
         field(ca, 'count').value = 3; field(ca, 'enable_downstream_count').value = false;
         field(cb, 'count').value = 2; field(count, 'count').value = 10;
         link(a, ca, 'scene_prompt'); link(b, cb, 'scene_prompt');
-        link(ca, queue, 'scene_prompt1'); link(cb, queue, 'scene_prompt2'); link(queue, count, 'scene_prompt'); link(count, expand, 'scene_prompt');
+        link(c, queue, 'scene_prompt1'); link(ca, queue, 'scene_prompt2'); link(cb, queue, 'scene_prompt3'); link(queue, count, 'scene_prompt'); link(count, expand, 'scene_prompt');
         const ids = { ca: ca.id, count: count.id, queue: queue.id, expand: expand.id };
         const current = () => app.graph.getNodeById(ids.ca);
         const snapshot = async () => { await new Promise(done => setTimeout(done, 250)); return {
@@ -1816,17 +1817,17 @@ window.__sceneSeedRuntimeTest = {
     });
     nativeRunChecks = false;
     for (const key of ['initial','undone','resumed','reloaded','named','merged']) {
-        assert.equal(countPolicyRuntime[key].total, 23, JSON.stringify(countPolicyRuntime));
-        assert.equal(countPolicyRuntime[key].displayed, 23);
+        assert.equal(countPolicyRuntime[key].total, 33, JSON.stringify(countPolicyRuntime));
+        assert.equal(countPolicyRuntime[key].displayed, 33);
     }
-    for (const key of ['enabled','redone','legacy']) assert.equal(countPolicyRuntime[key].total, 50);
-    assert.equal(countPolicyRuntime.bypassed.total, 30);
-    assert.deepEqual(countPolicyRuntime.initial.preview, [...Array(3).fill('A'), ...Array(20).fill('B')]);
+    for (const key of ['enabled','redone','legacy']) assert.equal(countPolicyRuntime[key].total, 60);
+    assert.equal(countPolicyRuntime.bypassed.total, 40);
+    assert.deepEqual(countPolicyRuntime.initial.preview, [...Array(10).fill('C'), ...Array(3).fill('A'), ...Array(20).fill('B')]);
     assert.equal(countPolicyRuntime.initial.locked, '');
     assert.equal(countPolicyRuntime.freshFlag, true); assert.deepEqual(countPolicyRuntime.names.slice(0,2), ['count','enable_downstream_count']);
     assert.equal(countPolicyRuntime.legacySources.source_node_id, 'legacy-source');
     assert.equal(countPolicyRuntime.legacySources.source_node_name, 'legacy-title');
-    assert.equal(countPolicyRuntime.apiFlag, false); assert.equal(countPolicyRuntime.total, 23);
+    assert.equal(countPolicyRuntime.apiFlag, false); assert.equal(countPolicyRuntime.total, 33);
     console.log('real ComfyUI Count path policy, cache refresh, native defaults/legacy/named migration, bypass, undo/redo, reload and Merge passed');
     nativeRunChecks = true;
     const primitivePlanRuntime = await page.evaluate(async () => {

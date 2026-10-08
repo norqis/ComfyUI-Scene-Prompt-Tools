@@ -8051,18 +8051,26 @@ function sceneScheduleCount(plan, factor, enableDownstreamCount = true, promptTr
     let units;
     const allStrict = plan.hasCountHold && sceneCountPlanPolicy(plan)[0]?.[0] === plan.stats.total;
     if (allStrict) units = plan.units;
-    else if (plan.hasCountHold) {
-        const child = sceneScheduleSequence(plan);
-        const policy = sceneCountUnitPolicy(child)[factor === 0 ? 0 : 2];
-        if (policy.some((value) => value === null) && factor !== 1) return sceneScheduleError("ランダム分岐の各経路のCount適用後の件数が一致しません。");
-        const original = [child.total, child.totalImages, child.unsetBatches];
-        const totals = factor === 1 ? original : factor === 0 ? policy : original
-            .map((value, index) => value + (factor - 1) * policy[index]);
-        units = [{ kind: "count_scale", unit: child, factor, rows: child.rows,
-            total: totals[0], totalImages: totals[1], unsetBatches: totals[2] }];
-    } else {
-        units = plan.units.map((unit) => factor === 0 ? sceneScheduleWrapper("repeat", unit, 0)
-            : unit.kind === "fixed" ? unit : sceneScheduleWrapper("repeat", unit, factor));
+    else {
+        units = [];
+        for (const unit of plan.units) {
+            // Input-order siblings remain separate; composite units keep their cycle.
+            const policy = plan.hasCountHold ? sceneCountUnitPolicy(unit) : null;
+            const original = [unit.total, unit.totalImages, unit.unsetBatches];
+            const matches = (values, expected) => values.every((value, index) => value === expected[index]);
+            if (policy && matches(policy[0], original)) units.push(unit);
+            else if (policy && !matches(policy[2], original)
+                && !(unit.kind === "fixed" && matches(policy[0], [0, 0, 0]))) {
+                const projection = policy[factor === 0 ? 0 : 2];
+                if (projection.some((value) => value === null) && factor !== 1)
+                    return sceneScheduleError("ランダム分岐の各経路のCount適用後の件数が一致しません。");
+                const totals = factor === 1 ? original : factor === 0 ? projection : original
+                    .map((value, index) => value + (factor - 1) * projection[index]);
+                units.push({ kind: "count_scale", unit, factor, rows: unit.rows,
+                    total: totals[0], totalImages: totals[1], unsetBatches: totals[2] });
+            } else units.push(factor === 0 ? sceneScheduleWrapper("repeat", unit, 0)
+                : unit.kind === "fixed" ? unit : sceneScheduleWrapper("repeat", unit, factor));
+        }
     }
     if (!enableDownstreamCount && !allStrict) {
         const child = units.length === 1 ? units[0] : sceneScheduleSequence(sceneSchedulePlan(units));
