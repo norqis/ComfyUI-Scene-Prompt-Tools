@@ -608,7 +608,7 @@ export function injectStyle() {
             display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; align-items: center;
             width: 100%; box-sizing: border-box; padding: 9px 11px; text-align: left;
             border: 1px solid #3c4553; border-radius: 5px; background: #292f38; color: #edf1f8;
-            font: inherit;
+            font: inherit; cursor: pointer;
         }
         .pc-lora-row:hover, .pc-lora-row:focus-within { border-color: #8db5ef; background: #334052; }
         .pc-lora-row.pc-lora-selected, .pc-lora-row.pc-lora-selected:hover, .pc-lora-row.pc-lora-selected:focus-within { border-color: #63bd83; background: #254333; }
