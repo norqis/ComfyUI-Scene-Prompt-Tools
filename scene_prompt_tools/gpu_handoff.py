@@ -23,6 +23,8 @@ RELEASE_LLM = "ScenePrompt.ReleaseLLMBeforeImage"
 POLICY_KEY = "scene_gpu_policy"
 _REQUEST_OWNER = contextvars.ContextVar("scene_gpu_request_owner", default=None)
 _ADMISSION = contextvars.ContextVar("scene_gpu_admission", default=None)
+
+
 class HandoffError(ValueError):
     def __init__(self, message, status=409):
         super().__init__(message)
