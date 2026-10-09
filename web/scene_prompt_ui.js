@@ -5670,7 +5670,8 @@ async function openSceneLoraPicker(node) {
                 row.sceneLoraJob = { item, row, title, source, revision };
                 observer.observe(row);
             }
-            select.onclick = async () => {
+            row.onclick = async (event) => {
+                if (source.contains(event.target)) return;
                 closeSceneLoraDetails(node);
                 if (findWidget(node, "lora_name")?.value !== item.path) {
                     withSceneUserChange(node, () => {

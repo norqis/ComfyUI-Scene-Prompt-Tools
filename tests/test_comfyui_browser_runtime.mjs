@@ -2716,8 +2716,20 @@ window.__sceneSeedRuntimeTest = {
     await page.setViewportSize({width:360,height:740});
     assert.equal(await nativePicker.getByRole('button',{name:'閉じる',exact:true}).evaluate(button=>button.getBoundingClientRect().right<=innerWidth),true);
     await page.screenshot({path:resolve(screenshotDirectory,'native-local-narrow.png')});
+    const localRow = nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-local.safetensors'});
+    assert.equal(await localRow.evaluate(row => {
+        const box = row.getBoundingClientRect();
+        return document.elementFromPoint(box.x + 3, box.y + 3) === row;
+    }), true, 'native row padding is outside its child buttons');
+    await localRow.click({position:{x:3,y:3}});
+    assert.equal(await nativePicker.count(), 0);
+    assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'lora_name').value, metadataNodes.lora), 'runtime-local.safetensors');
+    await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.sceneRole === 'lora_select').callback(), metadataNodes.lora);
+    await nativePicker.locator('.pc-lora-row.pc-lora-selected').filter({hasText:'runtime-local.safetensors'}).waitFor();
+    await nativePicker.locator('.pc-lora-select').filter({hasText:'runtime-hat.safetensors'}).press('Space');
+    assert.equal(await nativePicker.count(), 0);
+    assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'lora_name').value, metadataNodes.lora), 'runtime-hat.safetensors');
     await page.setViewportSize({width:1280,height:720});
-    await page.keyboard.press('Escape');
     await fetch(`${url}/scene_test/civitai_lookup`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode:"found"}) });
     const directResult = await (await fetch(`${url}/scene_prompt/civitai/by-hash?sha256=${"a".repeat(64)}`)).json();
     assert.deepEqual(directResult, { found: true, version: { id: 23, modelId: 12, name: "Fixture v1", model: { name: "Native metadata" }, trainedWords: ["native_metadata_trigger"] } });
