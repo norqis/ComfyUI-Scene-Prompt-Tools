@@ -98,9 +98,6 @@ def validate_input(description, mode):
 
 async def request_json(settings, method, path, payload=None):
     headers = {"Authorization": "Bearer " + settings["api_key"]} if settings["api_key"] else {}
-    if method == "POST" and path == "/chat/completions":
-        from .gpu_handoff import note_llm_request
-        note_llm_request()
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             async with session.request(method, endpoint(settings) + path, json=payload, headers=headers, allow_redirects=False) as response:

@@ -653,6 +653,7 @@ window.__sceneSeedRuntimeTest = {
         assert.doesNotMatch(promptOperation.state, /session_id|scene_gpu_policy/);
         assert.equal(gpuLoaded, true, "prompt completion keeps the mock LLM loaded");
         assert.equal(gpuEvents.filter(({ path }) => path.endsWith("/unload")).length, 0);
+        await (await import('./scene_llm_queue_runtime.mjs')).verifyNativeLLMQueue(page);
         await setGPU(false, true);
         await fetch(`${url}/scene_test/gpu_checks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: true }) });
         const queueImage = (color) => page.evaluate(async (color) => {
@@ -684,6 +685,12 @@ window.__sceneSeedRuntimeTest = {
         assert.doesNotMatch(JSON.stringify(imageHistory), /scene_gpu_policy/);
         assert.deepEqual(gpuEvents.filter(({ path }) => ["/v1/unload", "/image_started"].includes(path)).map(({ path }) => path),
             ["/v1/unload", "/image_started"], "LLM release is confirmed before the first image node executes");
+        nativeRunChecks = true;
+        try {
+            await (await import('./scene_llm_queue_runtime.mjs')).verifyNativeContinuousRelease(page, {
+                load: () => { gpuLoaded = true; }, loaded: () => gpuLoaded, events: () => gpuEvents,
+            });
+        } finally { nativeRunChecks = false; }
         // A policy prepared from a previously captured ON setting survives OFF.
         const capturedPolicy = await page.evaluate(async (modulePath) => {
             const { app } = await import("/scripts/app.js"); const { api } = await import("/scripts/api.js");

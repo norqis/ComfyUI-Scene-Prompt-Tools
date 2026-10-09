@@ -190,18 +190,55 @@ export function insertLoras(graph, origin, candidates, createNode) {
 export function createLLMController({ app, api, createNode, refresh, presetTargets, presetHasTargets, prepareTargets, onError, onBusy,
     resources,
     beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
-    const busy = new WeakSet();
-    let operationBusy = false;
+    const jobs = new Map(), activeNodes = new Set();
+    const busy = { has: (node) => activeNodes.has(node) || jobs.has(node) };
+    let draining = false;
+    function notify(node, phase = activeNodes.has(node) ? "active" : jobs.has(node) ? "queued" : "idle") {
+        if (phase === "queued") node.sceneLLMStatus = "待機中";
+        if (phase === "idle" && node.sceneLLMStatus === "待機中") node.sceneLLMStatus = "";
+        onBusy?.(node, busy.has(node), phase);
+    }
     function targets(root, operation) { return collectLLMTargets(root.graph || app.graph, root, {
         presetTargets: (reference) => presetTargets?.(reference, operation),
     }); }
     function canGenerate(root) { return hasLLMTargets(root.graph || app.graph, root, presetHasTargets); }
-    async function generate(root, explicit = false) {
-        if (operationBusy) return;
-        operationBusy = true;
-        busy.add(root);
-        onBusy?.(root, true);
-        const ownerGraph = app.graph;
+    function generate(root, explicit = false) {
+        if (jobs.has(root)) return jobs.get(root).promise;
+        let resolve, reject;
+        const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+        jobs.set(root, { root, explicit, ownerGraph: app.graph, promise, resolve, reject });
+        if (!activeNodes.has(root)) notify(root, "queued");
+        void drain();
+        return promise;
+    }
+    async function drain() {
+        if (draining) return;
+        draining = true;
+        try {
+            while (jobs.size) {
+                const job = jobs.values().next().value;
+                try {
+                    await run(job);
+                    job.resolve();
+                } catch (error) { job.reject(error); }
+                finally {
+                    jobs.delete(job.root);
+                    const affected = new Set([job.root, ...activeNodes]);
+                    activeNodes.clear();
+                    for (const node of affected) notify(node);
+                    app.graph?.setDirtyCanvas?.(true, true);
+                }
+            }
+        } finally { draining = false; }
+    }
+    async function run({ root, explicit, ownerGraph }) {
+        if (app.graph !== ownerGraph || ownerGraph.getNodeById(root.id) !== root) {
+            root.sceneLLMStatus = "ワークフローが変更されたため中止しました";
+            return;
+        }
+        activeNodes.add(root);
+        root.sceneLLMStatus = "生成中…";
+        notify(root);
         const initialRoot = captureTarget({ node: root, graph: ownerGraph, ownerGraph }, () => app.graph);
         let list = [];
         let preparation;
@@ -212,10 +249,10 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
         let resourcesPrepared = false;
         try {
             if (!explicit) preparation = await prepareTargets?.(root);
-            if (!initialRoot()) return;
+            if (!initialRoot()) { root.sceneLLMStatus = "変更を検出したため適用しませんでした"; return; }
             list = explicit ? [{ node: root, graph: root.graph || ownerGraph }] : targets(root, preparation);
             let routes = list.map((target) => captureRoute(ownerGraph, root, target.reference || target.node));
-            for (const { node } of list) { busy.add(node); onBusy?.(node, true); }
+            for (const { node } of list) { activeNodes.add(node); if (node !== root) notify(node, "queued"); }
             if (!list.length) root.sceneLLMStatus = "生成対象がありません";
             for (const [index, target] of list.entries()) {
                 if (!routes[index]()) break;
@@ -229,6 +266,7 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                 errorQuery = description;
                 if (!description || !current()) continue;
                 node.sceneLLMStatus = "生成中…";
+                notify(node);
                 const saved = readState(node);
                 const reusable = !explicit && saved.description === description && saved.model_mode === model_mode && saved.template_version === "scene-llm-v1";
                 if (reusable) { node.sceneLLMStatus = "生成済み"; continue; }
@@ -273,6 +311,8 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                 refresh?.(target.reference || node);
                 if (!remainingCurrent) break;
             }
+            if (root.sceneLLMStatus === "生成中…") root.sceneLLMStatus = list.every(({ node }) => ["完了", "生成済み"].includes(node.sceneLLMStatus))
+                ? "完了" : "変更を検出したため適用しませんでした";
         } catch (error) {
             root.sceneLLMStatus = error.message;
             currentNode.sceneLLMStatus = error.message;
@@ -284,14 +324,7 @@ export function createLLMController({ app, api, createNode, refresh, presetTarge
                 try {
                     if (sessionId) await resources.endLLM(sessionId);
                 } catch (error) { resources.onCleanupError(error); }
-                finally {
-                    operationBusy = false;
-                    const affected = new Set([root, ...list.map((target) => target.node)]);
-                    list = [];
-                    for (const node of affected) busy.delete(node);
-                    for (const node of affected) onBusy?.(node, false);
-                    app.graph?.setDirtyCanvas?.(true, true);
-                }
+                finally { list = []; }
             }
         }
     }

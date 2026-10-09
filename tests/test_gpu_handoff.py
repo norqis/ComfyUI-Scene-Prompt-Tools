@@ -45,14 +45,11 @@ async def until(predicate):
 
 
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_off_requests_are_shared_no_control_and_epoch_changes_only_at_actual_completion(self):
+    async def test_off_requests_are_shared_without_resource_control(self):
         owner = coordinator()
         async with owner.llm_request("alice"):
             self.assertEqual(owner.gate.shared, 1)
             self.assertFalse(owner.gate.exclusive)
-            self.assertEqual(owner.epoch, 0)
-            gpu.note_llm_request()
-            self.assertEqual(owner.epoch, 1)
         self.assertEqual(owner.gate.shared, 0)
         self.assertFalse(owner.controls)
 
@@ -121,7 +118,6 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         images = asyncio.create_task(owner.gate.acquire_async())
         async with owner.llm_request("alice", session_id, "a") as session:
             self.assertEqual(session.settings["model"], "snapshot")
-            gpu.note_llm_request()
         async with owner.llm_request("alice", session_id, "a"):
             self.assertTrue(owner.gate.exclusive)
         self.assertFalse(images.done())
@@ -214,25 +210,32 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(owner.policies)
         self.assertFalse(owner.prompt_policies)
 
-    async def test_continuous_release_reuses_epoch_and_actual_request_invalidates_it(self):
+    async def test_continuous_release_checks_external_provider_reload_before_each_image(self):
         owner = coordinator()
         policy_id = owner.prepare("alice", "a", {"model": "first"}, continuous=True)
-        unload = mock.AsyncMock(return_value={"released": True})
+        loaded = True
+        async def release(_settings):
+            nonlocal loaded
+            loaded = False
+            return {"released": True}
+        unload = mock.AsyncMock(side_effect=release)
         resource = types.ModuleType(PACKAGE + ".llm_resources")
         resource.unload_llm = unload
         with mock.patch.dict(sys.modules, {PACKAGE + ".llm_resources": resource}):
             for prompt_id in ("first", "second"):
+                # A different LLM UI can load weights without sending a request
+                # through this extension's LLM endpoint.
+                loaded = True
                 owner.admit(prompt_id, policy_id, "alice", "a")
                 await asyncio.to_thread(owner.start_image, (0, prompt_id, {}, {}, []), prompt_id)
                 self.assertTrue(owner.gate.exclusive)
                 owner.finish_image(prompt_id)
-            self.assertEqual(unload.await_count, 1)
-            async with owner.llm_request("alice"):
-                gpu.note_llm_request()
+                self.assertFalse(loaded, "external model reload must be released before the next image")
+            self.assertEqual(unload.await_count, 2)
             owner.admit("third", policy_id, "alice", "a")
             await asyncio.to_thread(owner.start_image, (0, "third", {}, {}, []), "third")
             owner.finish_image("third")
-            self.assertEqual(unload.await_count, 2)
+            self.assertEqual(unload.await_count, 3)
         owner.retire_policy(policy_id)
         self.assertFalse(owner.policies)
 
@@ -249,6 +252,24 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             owner.finish_image("failure")
             self.assertFalse(owner.gate.exclusive)
             self.assertFalse(owner.policies)
+
+    async def test_later_continuous_release_failure_does_not_block_following_jobs(self):
+        owner = coordinator()
+        policy_id = owner.prepare("alice", "a", {}, continuous=True)
+        resource = types.ModuleType(PACKAGE + ".llm_resources")
+        resource.unload_llm = mock.AsyncMock(side_effect=[{"released": True}, RuntimeError("provider busy"), {"already_unloaded": True}])
+        with mock.patch.dict(sys.modules, {PACKAGE + ".llm_resources": resource}):
+            for index in range(3):
+                prompt_id = str(index)
+                owner.admit(prompt_id, policy_id, "alice", "a")
+                await asyncio.to_thread(owner.start_image, (0, prompt_id, {}, {}, []), prompt_id)
+                self.assertEqual(owner.failures.get(prompt_id), "provider busy" if index == 1 else None)
+                self.assertFalse(owner.unload_tasks)
+                owner.finish_image(prompt_id)
+                self.assertFalse(owner.gate.exclusive)
+                self.assertFalse(owner.image_leases)
+        owner.retire_policy(policy_id)
+        self.assertFalse(owner.policies)
 
     async def test_interrupt_pending_image_unblocks_without_nodes_or_exclusive_release(self):
         owner = coordinator()

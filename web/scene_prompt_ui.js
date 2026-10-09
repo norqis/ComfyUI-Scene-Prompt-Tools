@@ -5118,9 +5118,9 @@ const sceneLLMController = createLLMController({
     presetHasTargets: (node) => presetReferenceHasLLM(node),
     prepareTargets: prepareSceneLLMPresetSources,
     onError: showAPIError,
-    onBusy: (node, busy) => {
+    onBusy: (node, busy, phase) => {
         const button = findSceneWidget(node, isSceneLLMNode(node) ? "llm_generate" : "expand_llm_generate");
-        if (button) { button.disabled = busy || (isSceneLLMNode(node) ? !String(sceneLLMValue(node, "description")).trim() : !sceneLLMController.canGenerate(node)); button.name = busy ? "プロンプト生成中…" : "プロンプト生成"; }
+        if (button) { button.disabled = busy || (isSceneLLMNode(node) ? !String(sceneLLMValue(node, "description")).trim() : !sceneLLMController.canGenerate(node)); button.name = phase === "queued" ? "待機中" : busy ? "プロンプト生成中…" : "プロンプト生成"; }
         node.setDirtyCanvas?.(true, true);
     },
 });
@@ -5139,7 +5139,7 @@ function attachSceneLLM(node) {
     if (!findSceneWidget(node, "llm_status")) {
         const status = node.addCustomWidget({ name: "LLM status", sceneRole: "llm_status", serialize: false,
             computeSize: () => [node.size?.[0] || 300, 24],
-            draw: (ctx, _node, width, y) => { ctx.fillStyle = "#bbb"; ctx.font = "12px sans-serif"; ctx.fillText(node.sceneLLMStatus || "待機", 10, y + 16, width - 20); } });
+            draw: (ctx, _node, width, y) => { ctx.fillStyle = "#bbb"; ctx.font = "12px sans-serif"; ctx.fillText(node.sceneLLMStatus || "", 10, y + 16, width - 20); } });
         status.serialize = false;
     }
     for (const name of ["description", "model_mode", "positive", "negative"]) {
