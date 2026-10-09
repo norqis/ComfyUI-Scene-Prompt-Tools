@@ -23,16 +23,6 @@ RELEASE_LLM = "ScenePrompt.ReleaseLLMBeforeImage"
 POLICY_KEY = "scene_gpu_policy"
 _REQUEST_OWNER = contextvars.ContextVar("scene_gpu_request_owner", default=None)
 _ADMISSION = contextvars.ContextVar("scene_gpu_admission", default=None)
-_LLM_COORDINATOR = contextvars.ContextVar("scene_gpu_llm_coordinator", default=None)
-
-
-def note_llm_request():
-    coordinator = _LLM_COORDINATOR.get()
-    if coordinator is not None:
-        with coordinator.lock:
-            coordinator.epoch += 1
-
-
 class HandoffError(ValueError):
     def __init__(self, message, status=409):
         super().__init__(message)
@@ -147,7 +137,6 @@ class Policy:
     run_handle: str = ""
     prompts: set = field(default_factory=set)
     retired: bool = False
-    last_epoch: int | None = None
 
 
 @dataclass
@@ -203,7 +192,6 @@ class Coordinator:
         self.image_leases = {}
         self.failures = {}
         self.controls = deque()
-        self.epoch = 0
         self.waiting_images = set()
         self.unload_tasks = {}
 
@@ -405,7 +393,6 @@ class Coordinator:
             await self.gate.acquire_async()
         else:
             session.requests.add(task)
-        token = _LLM_COORDINATOR.set(self)
         failed = False
         try:
             yield session
@@ -413,7 +400,6 @@ class Coordinator:
             failed = True
             raise
         finally:
-            _LLM_COORDINATOR.reset(token)
             if session is None:
                 self.gate.release(False)
             else:
@@ -433,26 +419,26 @@ class Coordinator:
             self.image_leases[item_id] = (prompt_id, exclusive if acquired else None)
         if policy is not None and acquired:
             try:
-                if policy.last_epoch != self.epoch:
-                    from .llm_resources import unload_llm
+                from .llm_resources import unload_llm
 
-                    async def unload():
-                        task = asyncio.current_task()
-                        with self.lock:
-                            self.unload_tasks[prompt_id] = task
-                            cancelled = self.failures.get(prompt_id) is False
+                # Another LLM client can reload weights between images. Only
+                # the provider's current state can confirm they remain freed.
+                async def unload():
+                    task = asyncio.current_task()
+                    with self.lock:
+                        self.unload_tasks[prompt_id] = task
+                        cancelled = self.failures.get(prompt_id) is False
+                    try:
                         if cancelled:
                             raise asyncio.CancelledError
-                        try:
-                            return await unload_llm(copy.deepcopy(policy.settings))
-                        finally:
-                            with self.lock:
-                                self.unload_tasks.pop(prompt_id, None)
+                        return await unload_llm(copy.deepcopy(policy.settings))
+                    finally:
+                        with self.lock:
+                            self.unload_tasks.pop(prompt_id, None)
 
-                    result = asyncio.run(unload())
-                    if not isinstance(result, dict) or not (result.get("released") or result.get("already_unloaded")):
-                        raise HandoffError("The LLM provider did not confirm that its model was released.", 502)
-                    policy.last_epoch = self.epoch
+                result = asyncio.run(unload())
+                if not isinstance(result, dict) or not (result.get("released") or result.get("already_unloaded")):
+                    raise HandoffError("The LLM provider did not confirm that its model was released.", 502)
             except asyncio.CancelledError:
                 with self.lock:
                     self.failures[prompt_id] = False

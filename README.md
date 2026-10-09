@@ -23,6 +23,8 @@ An OpenAI-compatible server such as Strata can be configured directly; no MCP se
 
 **Prompt Generate** on Scene Prompt Expand converts the reachable LLM descriptions before **Continuous Generate**. It reuses matching saved results, including your manual edits; use the LLM node's own Generate button to regenerate deliberately. Changing the model mode replaces the saved output pair when you generate again. Loading a workflow and generating images use the saved prompts and never start LLM inference.
 
+Prompt-generation requests in the same ComfyUI page run in click order, one node at a time. Queued nodes and Expand buttons display **待機中**; idle nodes have no waiting label. Duplicate clicks on the same pending request do not add another job. A queued job reads current input when it starts, and a removed/replaced node or switched workflow is cancelled without applying stale results.
+
 Prompt generation sends descriptions to the configured LLM service; it does not queue image generation or execute connected Checkpoint, diffusion model, CLIP, VAE or LoRA loaders. Full Preset definitions and local customizations are shared only within the operation that needs them. Current prompt responses and file metadata replace their obsolete revisions, without arbitrary cache count or memory limits. Concurrent requests for the same file share one hash read within each metadata service, while different files can be read in parallel. Active generation snapshots remain fixed until their run is released. With the optional GPU settings below disabled, ComfyUI model residency is unchanged.
 
 ### Sharing GPU memory with a local LLM
@@ -30,7 +32,7 @@ Prompt generation sends descriptions to the configured LLM service; it does not 
 After updating, restart ComfyUI and reload the browser. Open **ComfyUI Settings → Scene Prompt Tools → GPU** to choose either option. Both are off by default and are saved per ComfyUI user, separately from workflows:
 
 - **プロンプト生成前にComfyUIモデルを解放** waits for active image generation, releases ComfyUI's cached models, then starts the requested LLM prompts. All reachable LLM nodes and LoRA selections stay in the same operation. Fully reused prompts need no release. The LLM stays loaded when prompt generation finishes.
-- **画像生成前にLLMモデル・KVキャッシュを解放** releases the configured LLM before an accepted image job starts executing nodes. A continuous run keeps the setting captured when you click Generate, including while it waits behind another run. Its following images reuse the released state until a later LLM request loads the model again.
+- **画像生成前にLLMモデル・KVキャッシュを解放** releases the configured LLM before an accepted image job starts executing nodes. A continuous run keeps the setting captured when you click Generate, including while it waits behind another run. Each image checks the provider's current state, including models reloaded from another LLM application. Already-unloaded models need no additional unload operation.
 
 LLM release supports **Strata, Ollama and LM Studio** through their resource APIs. It keeps the API server running and targets the configured model or uniquely matching loaded instance. Unsupported release APIs, ambiguous model instances, busy providers and failed release confirmations produce an execution error before image nodes run. Prompt generation remains available through other OpenAI-compatible servers with the image release option disabled. LLM connection settings apply when the next operation starts.
 

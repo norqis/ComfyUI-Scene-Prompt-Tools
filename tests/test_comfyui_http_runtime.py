@@ -967,7 +967,7 @@ NODE_CLASS_MAPPINGS = {
             "port": provider.port, "model": "gpu-fixture", "api_key": "gpu-private-secret"})
 
 
-    def test_gpu_handoff_real_worker_order_continuous_epoch_and_private_history(self):
+    def test_gpu_handoff_real_worker_order_external_reload_and_private_history(self):
         with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-owner"):
             self._gpu_settings(provider)
             marker = provider.marker = self.base / "gpu-image.log"
@@ -1002,8 +1002,9 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(provider.calls.count("/v1/unload"), 1)
             self.assertEqual(marker.read_text(encoding="utf-8").splitlines(),
                 ["llm-unload", "first-start", "first-done", "second-start", "second-done"])
-            self._request("/scene_prompt/llm/settings", {"model": "gpu-fixture"})
-            self._request("/scene_prompt/llm/generate", {"description": "fixture", "model_mode": "Illustrious"})
+            # Simulate a different UI loading the LLM. No Scene Prompt request
+            # announces this change; the next image must read provider state.
+            provider.loaded = True
             queued = self._request("/prompt", {"client_id": "gpu-owner", "prompt": self._gpu_graph(marker, "third"),
                 "extra_data": {"scene_gpu_policy": policy_id}})
             self._wait_for_prompt(queued["prompt_id"])

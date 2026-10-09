@@ -251,14 +251,78 @@ for (const startWithExpand of [true, false]) {
     const api = { fetchApi: () => { requests++; return new Promise((done) => { resolve = done; }); } };
     const controller = createLLMController({ app, api, createNode: create });
     const operation = controller.generate(startWithExpand ? expand : target, !startWithExpand);
-    await controller.generate(startWithExpand ? target : expand, startWithExpand);
+    const queued = controller.generate(startWithExpand ? target : expand, startWithExpand);
+    while (!resolve) await new Promise((done) => setImmediate(done));
     assert.equal(requests, 1, "own and Expand operations cannot overlap");
     assert.equal(controller.busy.has(target), true, "upstream own button is busy during Expand");
     resolve(reply({ error: "Service unavailable" }, false));
     await operation;
+    while (requests < 2) await new Promise((done) => setImmediate(done));
+    assert.equal(controller.busy.has(startWithExpand ? target : expand), true, "queued operation starts after failure");
+    resolve(reply({ error: "Service unavailable" }, false));
+    await queued;
     assert.equal(target.sceneLLMStatus, "API /scene_prompt/llm/generate · HTTP 503: Service unavailable", "failing target displays the API, HTTP status and settled error");
     assert.equal(controller.busy.has(target), false);
     assert.equal(controller.busy.has(expand), false);
+}
+{
+    const { graph, node } = fixture(), app = { graph };
+    const first = node("ScenePromptLLM", "first"), second = node("ScenePromptLLM", "second"), third = node("ScenePromptLLM", "third");
+    const requests = [], finish = [], notifications = [];
+    const controller = createLLMController({ app,
+        api: { fetchApi(_path, options) { requests.push(JSON.parse(options.body)); return new Promise(done => finish.push(done)); } },
+        onBusy: (node, busy, phase) => notifications.push([node.id, busy, phase]),
+    });
+    const a = controller.generate(first, true), b = controller.generate(second, true), c = controller.generate(third, true);
+    assert.strictEqual(controller.generate(second, true), b, "duplicate pending click returns the same operation");
+    assert.strictEqual(controller.generate(first, true), a, "duplicate active click returns the same operation");
+    assert.deepEqual(requests.map(item => item.description), ["first"]);
+    assert.equal(second.sceneLLMStatus, "待機中"); assert.equal(third.sceneLLMStatus, "待機中");
+    field(second, "description").value = "edited while queued";
+    finish.shift()(reply({positive:"first",negative:"",lora_queries:[],template_version:"scene-llm-v1"})); await a;
+    assert.equal(requests[1].description, "edited while queued", "queued requests read latest input at start");
+    finish.shift()(reply({error:"failed"}, false)); await b;
+    assert.equal(requests[2].description, "third", "failure does not drop the next job");
+    finish.shift()(reply({positive:"third",negative:"",lora_queries:[],template_version:"scene-llm-v1"})); await c;
+    for (const target of [first,second,third]) assert.equal(controller.busy.has(target), false);
+    assert.equal(field(third,"positive").value, "third");
+    assert.deepEqual(notifications.filter(([,busy])=>!busy).map(([id])=>id), [first.id,second.id,third.id]);
+}
+for (const cleanupFails of [false, true]) {
+    const { graph, node } = fixture(), app = { graph };
+    const target = node("ScenePromptLLM", "target"), expand = node("ScenePrompterExpand"); target.connect(0, expand, 0);
+    let finishRequest, finishCleanup, requests = 0, cleanupCalls = 0;
+    const events = [], errors = [];
+    const controller = createLLMController({app,
+        api:{fetchApi(){requests++;return new Promise(done=>finishRequest=done);}},
+        resources:{snapshot:()=>({}),beginLLM:async()=>"session",endLLM:async()=>{
+            cleanupCalls++; if(cleanupCalls===1){await new Promise(done=>finishCleanup=done);if(cleanupFails)throw Error("cleanup failed");}
+        },onCleanupError:error=>errors.push(error)},
+        onBusy:(node,busy,phase)=>events.push([node.id,busy,phase]),
+    });
+    const a=controller.generate(expand), b=controller.generate(target,true);
+    while(!finishRequest)await new Promise(done=>setImmediate(done));
+    finishRequest(reply({positive:"target",negative:"",lora_queries:[],template_version:"scene-llm-v1"}));
+    while(!finishCleanup)await new Promise(done=>setImmediate(done));
+    assert.equal(requests,1,"next job waits for resource cleanup");
+    assert.strictEqual(controller.generate(expand),a,"active root stays registered through cleanup");
+    assert(controller.busy.has(target)); finishCleanup(); await a;
+    while(requests<2)await new Promise(done=>setImmediate(done));
+    assert(!events.some(([id,busy])=>id===target.id&&!busy),"overlapping queued root never becomes idle between jobs");
+    finishRequest(reply({positive:"second pass",negative:"",lora_queries:[],template_version:"scene-llm-v1"})); await b;
+    assert.equal(field(target,"positive").value,"second pass");
+    assert.equal(errors.length,Number(cleanupFails));
+    assert.equal(controller.busy.has(target),false);
+}
+for (const change of ["delete", "tab"]) {
+    const {graph,node}=fixture(),app={graph},a=node("ScenePromptLLM","a"),b=node("ScenePromptLLM","b");
+    let finish,requests=0;
+    const controller=createLLMController({app,api:{fetchApi(){requests++;return new Promise(done=>finish=done);}}});
+    const first=controller.generate(a,true),second=controller.generate(b,true);
+    if(change==="delete")graph._nodes=graph._nodes.filter(node=>node!==b);else app.graph={};
+    finish(reply({positive:"generated",negative:"",lora_queries:[],template_version:"scene-llm-v1"}));await Promise.all([first,second]);
+    assert.equal(requests,1,"stale queued root never sends inference");
+    assert.match(b.sceneLLMStatus,/中止/); assert.equal(controller.busy.has(b),false);
 }
 for (const change of ["mode", "tab", "connection"]) {
     const { graph, node, create } = fixture(), app = { graph }, reference = node("ScenePresetReference"), expand = node("ScenePrompterExpand");
