@@ -6357,9 +6357,8 @@ function installScenePromptWidgetSyncHandlers(node) {
         const originalCallback = widget.callback;
         widget.callback = function () {
             const result = originalCallback?.apply(this, arguments);
-            clearSceneComputedCaches(node);
+            // Prompt content does not change row counts, labels, or Queue boundaries.
             scheduleSceneNodeRefresh(node, { fitHeight: false }, 80);
-            refreshDownstreamSceneNodes(node);
             return result;
         };
         widget.scenePromptSyncWrapped = true;

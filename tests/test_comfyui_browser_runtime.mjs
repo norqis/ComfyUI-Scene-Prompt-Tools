@@ -3160,13 +3160,15 @@ window.__sceneSeedRuntimeTest = {
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
         const link = (from, to) => { if (!from.connect(0, to, to.inputs.findIndex(input => input.name === 'scene_prompt'))) throw new Error('Cannot connect live Count fixture'); };
         const source = add('ScenePrompter', [1600, 160]), first = add('ScenePromptCounter', [120, 160]);
+        const queue = add('ScenePrompterQueue', [1600, 800]);
         const second = add('ScenePromptCounter', [440, 160]), expand = add('ScenePrompterExpand', [760, 160]);
         const text = add('ScenePromptToText', [2000, 160]), positive = add('PreviewAny', [2400, 160]), negative = add('PreviewAny', [2800, 160]);
         for (const node of [first, second]) { field(node, 'count').value = 10; field(node, 'enable_downstream_count').value = true; }
-        link(source, first); link(first, second); link(second, expand);
+        source.connect(0, queue, queue.inputs.findIndex(input => input.name === 'scene_prompt1'));
+        link(queue, first); link(first, second); link(second, expand);
         link(second, text); text.connect(0, positive, positive.inputs.findIndex(input => input.name === 'source'));
         text.connect(1, negative, negative.inputs.findIndex(input => input.name === 'source'));
-        const ids = { source: source.id, first: first.id, second: second.id, expand: expand.id, positive: positive.id, negative: negative.id };
+        const ids = { source: source.id, queue: queue.id, first: first.id, second: second.id, expand: expand.id, positive: positive.id, negative: negative.id };
         await app.loadGraphData(app.graph.serialize(), true, true);
         app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0]; app.canvas.draw(true, true);
         return ids;
@@ -3178,26 +3180,54 @@ window.__sceneSeedRuntimeTest = {
     await clickCountWidget(liveCounts.second, 'count', 11, true); await prepareAfterDisplay(liveCounts.expand, 121);
     await clickCountWidget(liveCounts.first, 'enable_downstream_count', false); await prepareAfterDisplay(liveCounts.expand, 11);
 
+    // Finish the preceding Count edit's downstream refresh before warming body-edit caches.
+    await page.waitForTimeout(200);
     const editedBody = { positive: 'fresh positive 本文', negative: 'fresh negative 除外' };
-    const bodyCache = await page.evaluate(({ ids, body }) => {
+    const bodyCache = await page.evaluate(async ({ ids, body }) => {
         const app = window.app, hook = window.__sceneSeedRuntimeTest;
         const source = app.graph.getNodeById(ids.source), downstream = app.graph.getNodeById(ids.second);
         const display = app.graph.getNodeById(ids.expand).widgets.find(widget => widget.sceneRole === 'expand_total_count');
-        hook.sourceKey(source); hook.sourceKey(downstream);
+        const queue = app.graph.getNodeById(ids.queue);
+        const stats = hook.countStats(downstream), plan = queue.sceneQueueScheduleCache;
         const before = { value: display.value, total: display.sceneTotalCount };
-        // Deliberately bypass callbacks and cache clearing: display-only cache reuse
-        // must never make the API or execution reuse the previous prompt body.
-        // Native widget setters can still dispatch their ordinary change notifications.
-        source.widgets.find(widget => widget.name === 'positive_base').value = body.positive;
-        source.widgets.find(widget => widget.name === 'negative_base').value = body.negative;
+        hook.tracker().captureCanvasState();
+        app.graph.beforeChange();
+        app.canvas.emitBeforeChange();
+        for (const [name, value] of Object.entries({ positive_base: body.positive, negative_base: body.negative,
+            filename_enabled: true, category_order: 'Camera, Background' })) {
+            const widget = source.widgets.find(widget => widget.name === name);
+            widget.value = value; widget.callback?.(value);
+        }
+        app.graph.afterChange();
+        app.canvas.emitAfterChange();
+        // Include the deferred local refresh and any accidentally scheduled downstream work.
+        await new Promise(resolve => setTimeout(resolve, 200));
+        app.canvas.draw(true, true);
         const after = { value: display.value, total: display.sceneTotalCount };
-        return { before, after };
+        return { before, after, reusedStats: hook.countStats(downstream) === stats,
+            reusedPlan: !!plan && queue.sceneQueueScheduleCache === plan };
     }, { ids: liveCounts, body: editedBody });
     assert.deepEqual(bodyCache.after, bodyCache.before, 'body-only edits leave the Count display unchanged');
+    assert.equal(bodyCache.reusedStats, true, 'ordinary widget callbacks preserve warmed downstream counts');
+    assert.equal(bodyCache.reusedPlan, true, 'ordinary widget callbacks preserve the Queue plan after redraw');
+    const bodyHistory = await page.evaluate(async ids => {
+        const hook = window.__sceneSeedRuntimeTest, tracker = hook.tracker();
+        const read = () => Object.fromEntries(window.app.graph.getNodeById(ids.source).widgets
+            .filter(widget => ['positive_base', 'negative_base', 'filename_enabled', 'category_order'].includes(widget.name))
+            .map(widget => [widget.name, widget.value]));
+        const edited = read();
+        await tracker.undo(); const undone = read();
+        await tracker.redo(); const redone = read();
+        return { edited, undone, redone };
+    }, liveCounts);
+    assert.notDeepEqual(bodyHistory.undone, bodyHistory.edited, 'native Undo restores the previous prompt settings');
+    assert.deepEqual(bodyHistory.redone, bodyHistory.edited, 'native Redo restores all four prompt settings');
     await waitExpandDisplay(liveCounts.expand, 11);
     const bodyPrompt = await page.evaluate(async () => window.app.graphToPrompt());
     assert.equal(bodyPrompt.output[String(liveCounts.source)].inputs.positive_base, editedBody.positive);
     assert.equal(bodyPrompt.output[String(liveCounts.source)].inputs.negative_base, editedBody.negative);
+    assert.equal(bodyPrompt.output[String(liveCounts.source)].inputs.filename_enabled, true);
+    assert.equal(bodyPrompt.output[String(liveCounts.source)].inputs.category_order, 'Camera, Background');
     const nativeBodyRequest = async (path, payload) => {
         // Node fetch reaches the real isolated server, bypassing the browser's
         // legacy fake /prompt route used by unrelated seed UI tests.
