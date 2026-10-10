@@ -21,6 +21,96 @@ def labels(plan):
 
 
 class LazyScheduleTests(unittest.TestCase):
+    def test_operation_fingerprints_preserve_v7_and_serialized_event_results(self):
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from test_node_plan_semantics import load_nodes
+        from scene_prompt_tools import schedule
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        nodes, _prompt = load_nodes(Path(directory.name))
+        module_patch = patch.dict(sys.modules, {"scene_prompt_tools.nodes": nodes})
+        module_patch.start()
+        self.addCleanup(module_patch.stop)
+
+        # The v7 encoding before operation sharing; persisted plans must still
+        # validate against exactly the same change_key, including nested config.
+        def old_public(value, root=False):
+            if isinstance(value, schedule.ScheduleUnit) and not root:
+                return {"unit_digest": value.digest}
+            if isinstance(value, schedule.ScenePlan) and not root:
+                return {"plan_change_key": value["change_key"]}
+            if isinstance(value, dict):
+                return {key: old_public(item) for key, item in value.items() if key != "change_key"}
+            if isinstance(value, (list, tuple)):
+                return [old_public(item) for item in value]
+            return value
+
+        payloads = {
+            "prompt_add": ["tail", ["(test:1.4)"], ["excluded"], True],
+            "path_add": ("部屋", "フォルダに分ける"),
+            "reverse": "直前のノード", "delete": ("a", "excluded"),
+            "model_set": {key: ["loader", index] for index, key in enumerate(("model", "clip", "vae"))},
+            "lora_add": {"name": "test.safetensors", "model_mode": "Illustrious", "strength_model": 1.0,
+                         "strength_clip": 0.5, "positive_parts": ["trigger"], "negative_parts": []},
+            "prompt_passthrough": None, "prompt_whole": None, "source_node": ("tail", "末尾"),
+            "callback": ["cb", {"type": "request", "nested": {"change_key": "ignored", "text": ("日本語",)}},
+                         "毎回", 10, "続行"],
+            "latent_set": {"width": 512, "height": 512, "batch_size": 2},
+        }
+        self.assertEqual(set(payloads), schedule.OPERATION_KINDS)
+        base = queue([branch("a"), branch("b")], order_mode="alternate")
+        for kind, payload in payloads.items():
+            with self.subTest(kind=kind):
+                plan = transform(base, operation={"kind": kind, "payload": payload})
+                unit = plan["units"][0]
+                encoded = json.dumps(old_public(unit, root=True), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                self.assertEqual(unit.digest, "scene-prompt:v7:" + hashlib.blake2b(encoded.encode(), digest_size=16).hexdigest())
+                restored = normalize_plan(json.loads(json.dumps(plan)))
+                self.assertEqual(plan["change_key"], restored["change_key"])
+                # JSON turns callback config tuples into lists in both versions.
+                for index in range(2):
+                    self.assertEqual(json.loads(json.dumps(item_for_index(plan, index))),
+                                     json.loads(json.dumps(item_for_index(restored, index))))
+
+        plan = transform(base, operation={"kind": "prompt_add", "payload": payloads["prompt_add"]})
+        plan = append_callback(plan, "cb", {"type": "request", "url": "https://example.com",
+                               "nested": {"change_key": "private", "text": "ok"}}, "毎回", 10, "続行")
+        self.assertEqual(plan["change_key"], "scene-prompt:v7:dd856971bcb6e0e14449b6de0580e4a9")
+
+    def test_long_operation_chains_share_owned_payloads_and_release_them(self):
+        import gc
+        import weakref
+        from unittest.mock import patch
+        from scene_prompt_tools import schedule
+
+        base = queue([branch("a"), branch("b")], order_mode="alternate")
+        original = json.dumps(base)
+        payload = ["tail", [f"tag{index}" for index in range(100)], [], False]
+        first = transform(base, operation={"kind": "prompt_add", "payload": payload})
+        operation = first["units"][0]["operations"][-1]
+        reference = weakref.ref(operation)
+        payload[1].append("outside-change")
+        plan = first
+        with patch.object(schedule, "_validate_operation", wraps=schedule._validate_operation) as validate:
+            for index in range(40):
+                plan = with_source_node(plan, str(index), f"Node {index}")
+            self.assertLessEqual(validate.call_count, 80, "Validation must grow linearly instead of revisiting the entire operation chain")
+        self.assertIs(plan["units"][0]["operations"][len(first["units"][0]["operations"]) - 1], operation)
+        self.assertIsNot(plan["units"][0]["operations"], first["units"][0]["operations"])
+        self.assertEqual(json.dumps(base), original)
+        self.assertNotIn("outside-change", item_for_index(plan, 0)["row"]["positive_parts"])
+        self.assertEqual(item_for_index(first, 0)["row"]["source_node_ids"], ["a"])
+        selected = item_for_index(plan, 0)
+        selected["row"]["positive_parts"].append("selected-change")
+        self.assertNotIn("selected-change", item_for_index(plan, 0)["row"]["positive_parts"])
+        del operation, plan, first
+        gc.collect()
+        self.assertIsNone(reference(), "No global cache may retain discarded operations")
+
     def test_random_replay_sources_stay_scoped_and_do_not_retain_large_shared_plans(self):
         import gc
         import weakref

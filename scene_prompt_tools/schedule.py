@@ -99,18 +99,32 @@ def _sum_stats(parts):
     return result
 
 
+class _ScheduleOperation(dict):
+    """Owned, immutable operation shared by downstream schedule units."""
+
+    def __init__(self, operation):
+        _validate_operation(operation)
+        super().__init__(kind=operation["kind"], payload=copy.deepcopy(operation["payload"]))
+        self.fingerprint_value = _fingerprint_value(self, root=True)
+
+
+def _fingerprint_value(value, root=False):
+    if isinstance(value, dict):
+        if not root:
+            if isinstance(value, ScheduleUnit):
+                return {"unit_digest": value.digest}
+            if isinstance(value, ScenePlan):
+                return {"plan_change_key": value["change_key"]}
+            if isinstance(value, _ScheduleOperation):
+                return value.fingerprint_value
+        return {key: _fingerprint_value(item) for key, item in value.items() if key != "change_key"}
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_value(item) for item in value]
+    return value
+
+
 def _fingerprint(value):
-    def public(value, root=False):
-        if isinstance(value, ScheduleUnit) and not root:
-            return {"unit_digest": value.digest}
-        if isinstance(value, ScenePlan) and not root:
-            return {"plan_change_key": value["change_key"]}
-        if isinstance(value, dict):
-            return {key: public(item) for key, item in value.items() if key != "change_key"}
-        if isinstance(value, (list, tuple)):
-            return [public(item) for item in value]
-        return value
-    payload = json.dumps(public(value, root=True), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(_fingerprint_value(value, root=True), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "scene-prompt:v7:" + hashlib.blake2b(payload.encode("utf-8"), digest_size=16).hexdigest()
 
 
@@ -378,8 +392,6 @@ def _validate_unit(value, depth, ancestors):
     elif kind == "map":
         if not isinstance(data["operations"], list) or any(not isinstance(op, dict) or set(op) != {"kind", "payload"} for op in data["operations"]):
             raise ScenePlanError("Scene Prompt map operations are invalid.")
-        for operation in data["operations"]:
-            _validate_operation(operation)
         data["operations"] = [_clone_operation(operation) for operation in data["operations"]]
         data["unit"] = _validate_unit(data["unit"], depth + 1, ancestors)
     else:
@@ -497,8 +509,7 @@ def _validate_operation(operation):
 
 
 def _clone_operation(operation):
-    _validate_operation(operation)
-    return {"kind": operation["kind"], "payload": copy.deepcopy(operation["payload"])}
+    return operation if isinstance(operation, _ScheduleOperation) else _ScheduleOperation(operation)
 
 
 def _map_unit(unit, operation):
@@ -619,7 +630,6 @@ def transform(plan, transform_row=None, *, latent=None, operation=None):
     if latent is not None:
         operation = {"kind": "latent_set", "payload": _old._clone_latent(latent)}
     if operation is not None:
-        _validate_operation(operation)
         return _map_plan(source, operation)
     if not callable(transform_row):
         raise ScenePlanError("Scene Prompt transform must be callable.")
