@@ -1,6 +1,7 @@
 export const SELECTION_STATE_VERSION = 1;
 export const MATRIX_STATE_VERSION = 1;
 export const MATRIX_LINE_TYPE = "SCENE_MATRIX_LINE";
+export const SCENE_MODEL_MODES = ["Illustrious", "Anima", "NoobAI", "Pony"];
 
 export const DEFAULT_SELECTED_JSON = "{\"version\":1,\"categories\":{}}";
 export const MATRIX_DEFAULT_JSON = "{\"version\":1,\"sets\":[]}";

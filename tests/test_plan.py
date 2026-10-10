@@ -37,7 +37,7 @@ class ScenePlanTests(unittest.TestCase):
     def test_lora_descriptors_require_a_known_model_mode_in_version_seven(self):
         self.assertEqual(plan_module.PLAN_VERSION, 7)
         descriptor = {"name": "lora", "strength_model": 1.0, "strength_clip": 1.0, "model_mode": "Anima", "positive_parts": [], "negative_parts": []}
-        for mode in ("Illustrious", "Anima"):
+        for mode in ("Illustrious", "Anima", "NoobAI", "Pony"):
             row = {**empty_row(), "loras": [{**descriptor, "model_mode": mode}]}
             self.assertEqual(make_plan([{"row": row, "count": 1}])["rows"][0]["row"]["loras"][0]["model_mode"], mode)
         for mode in (None, "Unknown", "", 1):

@@ -1,4 +1,5 @@
 import { requestJSON, identity, value, applyCandidate, captureTarget } from "./scene_prompt_llm.js";
+import { SCENE_MODEL_MODES } from "./scene_prompt_state.js";
 
 let settingsModalID = 0;
 const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated"];
@@ -113,7 +114,7 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
         select.value = names.includes(selected) ? selected : names[0];
     }
     options(sort, "並び順", SORTS, state.sort);
-    options(model, "Base Model", ["Illustrious", "Anima"], value(node, "model_mode"));
+    options(model, "Base Model", SCENE_MODEL_MODES, value(node, "model_mode"));
     options(host, "接続先", ["civitai.red", "civitai.com"], state.host);
     const search = element("button", "検索", "pc-button"), status = element("p", "", "pc-civitai-status"),
         list = element("div", undefined, "pc-civitai-results"), detail = element("div", undefined, "pc-civitai-detail");

@@ -150,10 +150,13 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(expanded["result"][7], ["checkpoint", 2])
 
     def test_lora_model_modes_filter_both_chain_orders_without_loading_other_modes(self):
-        for order in (("Anima", "Illustrious"), ("Illustrious", "Anima")):
+        for order in (("Pony", "NoobAI", "Anima", "Illustrious"), ("Illustrious", "Anima", "NoobAI", "Pony")):
             plan = None
             for mode in order:
-                plan = self.nodes.SceneApplyLora().apply_lora(f"{mode}.safetensors", scene_prompt=plan, model_mode=mode)[0]
+                plan = self.nodes.SceneApplyLora().apply_lora(
+                    f"{mode}.safetensors", 0.8, 0.6, scene_prompt=plan, model_mode=mode,
+                    positive=f"{mode} trigger", negative=f"{mode} exclusion",
+                )[0]
             plan = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0], plan)[0]
             for mode in order:
                 with self.subTest(order=order, mode=mode):
@@ -163,6 +166,9 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
                     self.assertEqual(loaders[0]["inputs"]["lora_name"], f"{mode}.safetensors")
                     self.assertEqual(loaders[0]["inputs"]["model"], ["model", 0])
                     self.assertEqual(loaders[0]["inputs"]["clip"], ["clip", 0])
+                    self.assertEqual(loaders[0]["inputs"]["strength_model"], 0.8)
+                    self.assertEqual(loaders[0]["inputs"]["strength_clip"], 0.6)
+                    self.assertEqual(result["result"][:2], (f"{mode} trigger", f"{mode} exclusion"))
 
     def test_lora_filter_preserves_relative_order_and_zero_match_returns_original_links(self):
         plan = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0])[0]
@@ -183,16 +189,21 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         lora = self.nodes.SceneApplyLora
         schema = lora.INPUT_TYPES()
         self.assertEqual(list(schema["required"]), ["lora_name", "strength_model", "strength_clip"])
-        self.assertEqual(schema["optional"]["model_mode"][0], ("Illustrious", "Anima"))
+        self.assertEqual(schema["optional"]["model_mode"][0], ("Illustrious", "Anima", "NoobAI", "Pony"))
         self.assertEqual(schema["optional"]["model_mode"][1]["default"], "Illustrious")
         self.assertNotEqual(lora.IS_CHANGED("lora", model_mode="Illustrious"), lora.IS_CHANGED("lora", model_mode="Anima"))
         keys = {
             self.nodes.ScenePromptExpand.IS_CHANGED(seed_base=7, model_mode=mode, replace_underscores=replace, convert_anima_weights=convert)
-            for mode in ("Illustrious", "Anima") for replace in (False, True) for convert in (False, True)
+            for mode in ("Illustrious", "Anima", "NoobAI", "Pony") for replace in (False, True) for convert in (False, True)
         }
-        self.assertEqual(len(keys), 8)
+        self.assertEqual(len(keys), 16)
         self.assertEqual(self.nodes.ScenePromptExpand.IS_CHANGED(seed_base=7, model_mode=" Anima "),
                          self.nodes.ScenePromptExpand.IS_CHANGED(seed_base=7, model_mode="Anima"))
+        self.assertEqual(len({lora.IS_CHANGED("lora", model_mode=mode) for mode in self.nodes.MODEL_MODE_CHOICES}), 4)
+        for mode in self.nodes.MODEL_MODE_CHOICES:
+            self.assertEqual(self.nodes._normalize_model_mode(f" {mode} "), mode)
+        for mode in (None, "", "unknown"):
+            self.assertEqual(self.nodes._normalize_model_mode(mode), "Illustrious")
 
     def test_model_specific_loras_survive_matrix_merge_and_queue(self):
         left = self.nodes.SceneApplyLora().apply_lora("anima", model_mode="Anima")[0]
@@ -366,7 +377,7 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         self.assertEqual(input_types["optional"]["convert_anima_weights"][0], "BOOLEAN")
         self.assertFalse(input_types["optional"]["convert_anima_weights"][1]["default"])
         self.assertEqual(input_types["optional"]["counter_position"][0], ("先頭", "最後"))
-        self.assertEqual(input_types["optional"]["model_mode"][0], ("Illustrious", "Anima"))
+        self.assertEqual(input_types["optional"]["model_mode"][0], ("Illustrious", "Anima", "NoobAI", "Pony"))
         self.assertEqual(input_types["optional"]["model_mode"][1]["default"], "Illustrious")
         plan = self.prompt.ScenePrompt().build(
             "A", "blue_hair", '{"version":1,"categories":{}}', "", '{"version":1,"categories":{}}', "", 0, True,

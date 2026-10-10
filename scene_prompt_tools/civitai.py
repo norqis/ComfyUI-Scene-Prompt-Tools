@@ -27,9 +27,9 @@ _HASH_CATALOG_GENERATION = 0
 
 def compatible(base_model, mode):
     if mode not in MODES:
-        raise ValueError("model_mode must be Illustrious or Anima.")
+        raise ValueError("model_mode must be one of: " + ", ".join(MODES) + ".")
     base = str(base_model).lower()
-    return base in ("illustrious", "illustrious xl", "noobai", "noobai xl") if mode == "Illustrious" else base == "anima"
+    return base == mode.lower() or (mode in ("Illustrious", "NoobAI") and base == mode.lower() + " xl")
 
 
 HOSTS = ("civitai.red", "civitai.com")
@@ -319,7 +319,7 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red"):
     if model_mode not in MODES:
         raise ValueError("Unsupported model_mode.")
     data = await api_get("/api/v1/models", {"query": query, "types": "LORA", "limit": 30, "period": "AllTime", "sort": sort,
-        "baseModels": ["Illustrious", "NoobAI"] if model_mode == "Illustrious" else ["Anima"], "nsfw": "false"}, host=host)
+        "baseModels": [model_mode], "nsfw": "false"}, host=host)
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ServiceError("Civitai returned an invalid search response.")
     items = []

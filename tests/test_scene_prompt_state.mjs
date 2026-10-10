@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+    SCENE_MODEL_MODES,
     createMatrixLine,
     createMatrixState,
     createSelectionState,
@@ -11,6 +12,7 @@ import {
     serializeSelectionState,
 } from "../web/scene_prompt_state.js";
 
+assert.deepEqual(SCENE_MODEL_MODES, ["Illustrious", "Anima", "NoobAI", "Pony"]);
 assert.deepEqual(parseSelectionState(null), createSelectionState());
 assert.deepEqual(parseMatrixState(""), createMatrixState());
 assert.throws(() => parseSelectionState('{"version":0,"categories":{}}'), /schema version/u);

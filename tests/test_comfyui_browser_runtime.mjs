@@ -845,11 +845,11 @@ window.__sceneSeedRuntimeTest = {
         const savedWidgets = savedExpand?.widgets_values || [];
         const hasCounter = ["先頭", "最後"].includes(savedWidgets[5])
             || (savedWidgets[5] == null && savedExpand?.inputs?.some((input) => input.name === "counter_position"));
-        const hasCurrentMode = hasCounter && (["Illustrious", "Anima"].includes(savedWidgets[6])
+        const hasCurrentMode = hasCounter && (["Illustrious", "Anima", "NoobAI", "Pony"].includes(savedWidgets[6])
             || (savedWidgets[6] == null && savedExpand?.inputs?.some((input) => input.name === "model_mode")));
         const expectedConversionOptions = hasCounter
             ? savedWidgets.slice(hasCurrentMode ? 7 : 6, hasCurrentMode ? 9 : 8)
-            : ["Illustrious", "Anima"].includes(savedWidgets[5])
+            : ["Illustrious", "Anima", "NoobAI", "Pony"].includes(savedWidgets[5])
                 ? [savedWidgets[5] === "Anima", savedWidgets[5] === "Anima"]
                 : savedWidgets.slice(5, 7);
         const dropResult = await page.evaluate(async ({ content, name, expectedNodes }) => {
@@ -900,7 +900,7 @@ window.__sceneSeedRuntimeTest = {
         if (expectedConversionOptions.length === 2 && expectedConversionOptions.every((value) => typeof value === "boolean")) {
             assert.deepEqual(dropResult.conversionOptions, expectedConversionOptions, "drag-style PNG loading must preserve Expand conversion options");
         }
-        assert.ok(["Illustrious", "Anima"].includes(dropResult.modelMode), "Expand restores a model selector");
+        assert.ok(["Illustrious", "Anima", "NoobAI", "Pony"].includes(dropResult.modelMode), "Expand restores a model selector");
         assert.equal(dropResult.currentIndex, 0, "PNG loading resets a transient Expand cursor to its first Scene row");
         assert.equal(dropResult.promptCurrentIndex, 0, "normal Queue after PNG loading serializes the first Scene row");
         assert.deepEqual(pageErrors, [], `PNG handling raised browser errors:\n${pageErrors.join("\n")}`);
@@ -1116,7 +1116,7 @@ window.__sceneSeedRuntimeTest = {
             visible: [expand, lora].map((node) => !node.widgets.find((widget) => widget.name === "model_mode").hidden),
         };
         const linked = [];
-        for (const legacy of [true, false]) {
+        for (const mode of ["Illustrious", "Anima", "NoobAI", "Pony"]) for (const legacy of [true, false]) {
             app.graph.clear();
             const node = window.LiteGraph.createNode("ScenePrompterExpand");
             const primitive = window.LiteGraph.createNode("PrimitiveNode");
@@ -1135,7 +1135,7 @@ window.__sceneSeedRuntimeTest = {
             workflow.last_link_id = link;
             const sourceNode = workflow.nodes.find((item) => String(item.id) === String(primitive.id));
             sourceNode.outputs[0] = { ...sourceNode.outputs[0], name: "COMBO", type: "COMBO", links: [link] };
-            sourceNode.widgets_values = ["Anima"];
+            sourceNode.widgets_values = [mode];
             const original = JSON.stringify(stored);
             await app.loadGraphData(workflow, true, true);
             await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1145,12 +1145,30 @@ window.__sceneSeedRuntimeTest = {
             await new Promise((resolve) => setTimeout(resolve, 250));
             const second = await app.graphToPrompt();
             const restored = app.graph.getNodeById(node.id);
-            linked.push({ legacy, first: first.output[String(node.id)].inputs, second: second.output[String(node.id)].inputs,
+            linked.push({ legacy, mode, first: first.output[String(node.id)].inputs, second: second.output[String(node.id)].inputs,
                 sameInput: JSON.stringify(stored) === original,
                 literal: restored.widgets.find((widget) => widget.name === "seed_base_literal").value,
                 linked: restored.inputs.find((input) => input.name === "model_mode")?.link != null });
         }
-        return { contract, linked };
+        const literal = [];
+        for (const mode of ["Illustrious", "Anima", "NoobAI", "Pony"]) {
+            app.graph.clear();
+            const nodes = ["ScenePrompterExpand", "SceneApplyLora", "ScenePromptLLM"].map((type) => {
+                const node = window.LiteGraph.createNode(type);
+                app.graph.add(node);
+                node.widgets.find((widget) => widget.name === "model_mode").value = mode;
+                return node;
+            });
+            const options = nodes.map((node) => node.widgets.find((widget) => widget.name === "model_mode").options.values);
+            const workflow = app.graph.serialize();
+            await app.loadGraphData(workflow, true, true);
+            const prompt = await app.graphToPrompt();
+            literal.push({ mode, options, restored: nodes.map((node) => ({
+                ui: app.graph.getNodeById(node.id).widgets.find((widget) => widget.name === "model_mode").value,
+                api: prompt.output[String(node.id)].inputs.model_mode,
+            })) });
+        }
+        return { contract, linked, literal };
     });
     assert.deepEqual(modelModes.contract.expandWidgets.slice(0, 11), ["current_index", "run_id", "seed_base", "timestamp_dir", "prefix",
         "counter_position", "model_mode", "replace_underscores", "convert_anima_weights", "callback_failure_mode", "seed_base_literal"]);
@@ -1160,13 +1178,17 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(modelModes.contract.visible, [true, true]);
     for (const result of modelModes.linked) {
         for (const inputs of [result.first, result.second]) {
-            assert.equal(inputs.model_mode, "Anima");
+            assert.equal(inputs.model_mode, result.mode);
             assert.equal(inputs.replace_underscores, false);
             assert.equal(inputs.convert_anima_weights, !result.legacy);
         }
         assert.equal(result.sameInput, true);
         assert.equal(result.literal, true);
         assert.equal(result.linked, true);
+    }
+    for (const result of modelModes.literal) {
+        for (const options of result.options) assert.deepEqual(options, ["Illustrious", "Anima", "NoobAI", "Pony"]);
+        for (const restored of result.restored) assert.deepEqual(restored, { ui: result.mode, api: result.mode });
     }
     console.log("real ComfyUI model widgets and linked old/current model mode round trips passed");
     const toTextMigration = await page.evaluate(async () => {

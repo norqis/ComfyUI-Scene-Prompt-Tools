@@ -23,6 +23,22 @@ class ResourceInfoTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_four_modes_keep_only_matching_lora_variants_active(self):
+        modes = ("Illustrious", "Anima", "NoobAI", "Pony")
+        nodes = {}
+        for index, mode in enumerate(modes):
+            inputs = {"lora_name": f"{mode}.safetensors", "model_mode": mode,
+                      "strength_model": 0.8, "strength_clip": 0.6}
+            if index:
+                inputs["scene_prompt"] = [str(index - 1), 0]
+            nodes[str(index)] = node("SceneApplyLora", **inputs)
+        for mode in modes:
+            nodes["expand"] = node("ScenePrompterExpand", scene_prompt=["3", 0], model_mode=mode)
+            result = self.info.connected_resources({"output": nodes}, "expand")
+            self.assertEqual(len(result["loras"]), 4)
+            active = [item["name"] for item in result["loras"] if item["variants"][0]["applies"]]
+            self.assertEqual(active, [f"{mode}.safetensors"])
+
     def test_connected_models_and_loras_are_deduplicated_without_unrelated_nodes(self):
         graph = {"output": {
             "1": node("ScenePrompter"),

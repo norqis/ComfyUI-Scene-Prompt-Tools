@@ -86,6 +86,16 @@ class LocalHttpTest(HttpFixture):
         self.assertEqual((await service.test_connection(self.settings))["models"], [{"id": "local"}])
         self.assertEqual([call[0] for call in self.calls], ["/v1/chat/completions", "/v1/models"])
 
+    async def test_noobai_and_pony_use_tag_instructions_with_selected_mode(self):
+        for mode in ("NoobAI", "Pony"):
+            await service.generate(self.settings, "a cat in a garden", mode)
+            payload = self.calls[-1][1]
+            self.assertIn("known Danbooru tags and short English phrases", payload["messages"][0]["content"])
+            self.assertNotIn("concise natural English", payload["messages"][0]["content"])
+            self.assertEqual(json.loads(payload["messages"][1]["content"])["model_mode"], mode)
+        with self.assertRaises(ValueError):
+            service.validate_input("cat", "Pony V7")
+
     async def test_unique_model_discovered_only_after_explicit_required_error(self):
         self.settings["model"] = ""
         self.responses = [(422, {"detail": [{"loc": ["body", "model"], "msg": "Field required"}]})]

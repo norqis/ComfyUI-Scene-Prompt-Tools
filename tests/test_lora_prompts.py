@@ -57,7 +57,7 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(self.plan.normalize_plan(json.loads(json.dumps(changed)))["rows"][0]["row"]["loras"][0]["positive_parts"], ["one", "two"])
 
     def test_shared_lora_fork_loads_once_after_two_prompt_branches_in_both_modes(self):
-        for mode in ("Illustrious", "Anima"):
+        for mode in ("Illustrious", "Anima", "NoobAI", "Pony"):
             with self.subTest(mode=mode):
                 shared = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0])[0]
                 shared = self.nodes.SceneApplyLora().apply_lora(
@@ -96,7 +96,7 @@ class SceneLoraPromptTests(unittest.TestCase):
         self.assertEqual(result["result"][:2], ("shared, left, right", ""))
 
     def test_branch_delete_reverse_union_does_not_rewrite_callback_snapshot(self):
-        for mode in ("Illustrious", "Anima"):
+        for mode in ("Illustrious", "Anima", "NoobAI", "Pony"):
             for operation in ("delete", "reverse"):
                 with self.subTest(mode=mode, operation=operation):
                     shared = self.nodes.SceneApplyLora().apply_lora(

@@ -280,7 +280,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
                     "SceneFixtureResourceSink": ResourceSink, "LoraLoader": Loader}
         with mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, mappings), \
              mock.patch.object(folder_paths, "get_filename_list", side_effect=lambda category: ["fixture.safetensors"] if category == "loras" else original_catalog(category)):
-            for mode in ("Illustrious", "Anima"):
+            for mode in ("Illustrious", "Anima", "NoobAI", "Pony"):
                 for shared in (True, False):
                     with self.subTest(mode=mode, shared=shared):
                         loaded.clear()
