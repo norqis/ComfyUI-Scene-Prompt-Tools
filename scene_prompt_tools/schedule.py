@@ -618,7 +618,7 @@ def _apply_operation(row, operation):
 
 
 def _map_plan(plan, operation):
-    operation = _clone_operation(operation)
+    _validate_operation(operation)
     source = normalize_plan(plan)
     if source["random_guards"] and operation["kind"] == "latent_set" and not _inert_random_arm(source):
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Empty Latent は使えません。")
