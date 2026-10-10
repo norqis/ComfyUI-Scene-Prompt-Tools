@@ -61,7 +61,7 @@ const core = ["nodeClassName", "nodeClassNames", "isRerouteNode", "liteGraphNode
     "scenePromptStats", "scenePromptInputNumber", "scenePromptQueueInputIndexes", "connectedScenePromptSourcesForQueue",
     "connectedScenePromptSourcesForMerge", "sceneScheduleForLinkedInput", "sceneScheduleForNode", "sceneRandomJoinReady", "sceneRandomChoicePlan",
     "clearSceneComputedCaches", "collectDownstreamSceneNodes", "downstreamNodes", "flushDownstreamSceneRefreshes",
-    "installSceneNodeRemovalCleanup"];
+    "installSceneNodeRemovalCleanup", "installScenePromptWidgetSyncHandlers"];
 const scalarFunctions = [...source.matchAll(/^function (emptyScenePromptStats|sceneStat\w+|sceneStats\w+|sceneCount\w+|sceneSchedule\w+|sceneRandomGuard|sceneRandomZeroArm)\(/gm)]
     .map(match => match[1]).filter(name => !["sceneCounterConfiguredValues", "sceneCounterConfigureValues", "sceneScheduleForPreset"].includes(name));
 for (const name of new Set([...core, ...scalarFunctions])) vm.runInContext(functionSource(name), ctx);
@@ -89,6 +89,34 @@ function connect(from, to, name, type = "SCENE_PROMPT", originSlot = 0) {
 const set = (node, name, value) => { ctx.findWidget(node, name).value = value; };
 const key = node => ctx.scenePromptSourceCacheKey(node);
 const snapshot = node => JSON.parse(JSON.stringify(ctx.scenePromptStats(node)));
+
+// Editing prompt content keeps the warmed Queue/Count plan and forwards native callbacks.
+{
+    const g = graph(), values = { filename_enabled: false, positive_base: "old positive", negative_base: "old negative", category_order: "" };
+    const prompt = add(g, "ScenePrompter", values), queue = add(g, "ScenePrompterQueue", {
+        order_mode: "alternate", alternate_block_size: 3, downstream_count_mode: "multiply",
+    });
+    const count = add(g, "ScenePromptCounter", { count: 10 });
+    connect(prompt, queue, "scene_prompt1"); connect(queue, count, "scene_prompt");
+    const stats = ctx.scenePromptStats(count), plan = queue.sceneQueueScheduleCache;
+    assert.equal(stats.total, 30);
+    assert.ok(plan);
+    const calls = [];
+    for (const widget of prompt.widgets) widget.callback = function (value) { calls.push([this.name, value]); return value; };
+    ctx.installScenePromptWidgetSyncHandlers(prompt);
+    ctx.installScenePromptWidgetSyncHandlers(prompt);
+    const changes = { filename_enabled: true, positive_base: "new positive", negative_base: "new negative", category_order: "Camera, Background" };
+    for (const [name, value] of Object.entries(changes)) {
+        const widget = ctx.findWidget(prompt, name);
+        widget.value = value;
+        assert.equal(widget.callback(value), value);
+        assert.strictEqual(ctx.scenePromptStats(count), stats, `${name} keeps the existing counts`);
+        assert.strictEqual(queue.sceneQueueScheduleCache, plan, `${name} does not rebuild the Queue plan`);
+    }
+    assert.deepEqual(calls, Object.entries(changes), "native callbacks run exactly once with their widget context");
+    set(count, "count", 11);
+    assert.equal(snapshot(count).total, 33, "actual count edits still invalidate the display");
+}
 
 // Converted Queue repetition inputs participate in both planning and cache identity.
 {
