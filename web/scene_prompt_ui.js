@@ -9,6 +9,7 @@ import { isSceneSwitch, sceneSwitchNames, sceneSwitchSettings, sceneMakeSwitchVa
 import {
     DEFAULT_SELECTED_JSON,
     MATRIX_DEFAULT_JSON,
+    SCENE_MODEL_MODES,
     createMatrixLine,
     createMatrixState,
     createSelectionState,
@@ -5183,13 +5184,13 @@ function sceneExpandConfigureValues(config) {
     let modelMode = "Illustrious";
     if (converted[5] === "先頭" || converted[5] === "最後"
         || (converted[5] == null && config.inputs?.some((input) => input.name === "counter_position"))) {
-        const hasMode = converted[6] === "Illustrious" || converted[6] === "Anima"
+        const hasMode = SCENE_MODEL_MODES.includes(converted[6])
             || (converted[6] == null && linkedMode);
         if (hasMode) {
             return { ...config, widgets_values: converted };
         }
         // v0.5.10 has conversion widgets immediately after counter position.
-    } else if (converted[5] === "Illustrious" || converted[5] === "Anima"
+    } else if (SCENE_MODEL_MODES.includes(converted[5])
         || (converted[5] == null && linkedMode)) {
         modelMode = converted[5];
         const enabled = modelMode === "Anima";
@@ -5237,7 +5238,7 @@ function sceneLoraStoredValues(node) {
 function sceneLoraConfiguredValues(config) {
     const stored = Array.isArray(config?.widgets_values) ? config.widgets_values : [];
     const displayOrder = stored.length >= SCENE_LORA_STORED_WIDGET_NAMES.length
-        && (stored[0] === "Illustrious" || stored[0] === "Anima");
+        && SCENE_MODEL_MODES.includes(stored[0]);
     const names = displayOrder ? SCENE_LORA_DISPLAY_WIDGET_NAMES : SCENE_LORA_STORED_WIDGET_NAMES;
     const named = Object.fromEntries(names.slice(0, stored.length).map((name, index) => [name, stored[index]]));
     const savedNames = config?.widgets_values_named;

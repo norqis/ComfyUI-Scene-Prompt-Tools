@@ -43,7 +43,6 @@ from .plan import (
     MIN_BATCH_SIZE,
     MIN_DIMENSION,
     MODEL_MODE_ILLUSTRIOUS,
-    MODEL_MODE_ANIMA,
     MODEL_MODE_CHOICES,
     ScenePlanError,
     empty_row,
@@ -166,7 +165,8 @@ def _normalize_path_mode(value):
 
 
 def _normalize_model_mode(value):
-    return MODEL_MODE_ANIMA if str(value or "").strip() == MODEL_MODE_ANIMA else MODEL_MODE_ILLUSTRIOUS
+    mode = str(value or "").strip()
+    return mode if mode in MODEL_MODE_CHOICES else MODEL_MODE_ILLUSTRIOUS
 
 
 def _expand_conversion_options(replace_underscores=None, convert_anima_weights=None):
@@ -760,7 +760,7 @@ def _apply_replay_expand_values(prompt, workflow, scene_info, values, source_ali
             # older timeout widget, places the literal seed flag at index 10.
             indexes["seed_base_literal"] = 10 if len(widgets) > 10 else 9
         elif len(widgets) > 5 and (
-            widgets[5] in (MODEL_MODE_ILLUSTRIOUS, MODEL_MODE_ANIMA)
+            widgets[5] in MODEL_MODE_CHOICES
             or (widgets[5] is None and any(input.get("name") == "model_mode" for input in node.get("inputs", [])))
         ):
             indexes["seed_base_literal"] = 8

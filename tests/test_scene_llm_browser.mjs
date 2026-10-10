@@ -126,6 +126,17 @@ try {
 
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     await modal.getByRole('combobox',{name:'並び順'}).selectOption('Highest Rated');
+    assert.deepEqual(await modal.getByRole('combobox',{name:'Base Model',exact:true}).locator('option').evaluateAll(items=>items.map(item=>item.value)),
+        ['Illustrious','Anima','NoobAI','Pony']);
+    for (const mode of ['NoobAI','Pony']) {
+        await modal.getByRole('combobox',{name:'Base Model',exact:true}).selectOption(mode);
+        await page.waitForFunction(mode=>document.querySelector('.pc-civitai-card')?.textContent.includes(mode),mode);
+        await cards.first().click();
+        await detail.getByRole('button',{name:/取得.*選択/}).click();
+        await page.waitForFunction(mode=>window.node.widgets.find(widget=>widget.name==='model_mode').value===mode,mode);
+        assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.model_mode),mode);
+        await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    }
     await page.waitForFunction(()=>window.calls.some(call=>call.path.includes('sort=Highest+Rated')));
     await modal.getByRole('searchbox',{name:'検索語'}).fill('different');
     await page.evaluate(()=>window.fail=true); await modal.getByRole('button',{name:'検索',exact:true}).click();

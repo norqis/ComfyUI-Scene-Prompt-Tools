@@ -8,9 +8,10 @@ from dataclasses import dataclass
 
 import aiohttp
 from .llm_settings import endpoint
+from .plan import MODEL_MODE_CHOICES
 
 TEMPLATE_VERSION = "scene-llm-v1"
-MODES = ("Illustrious", "Anima")
+MODES = MODEL_MODE_CHOICES
 _CAPABILITIES = {}
 _CAPABILITY_LOCK = threading.Lock()
 
@@ -91,7 +92,7 @@ class _CompatibilityError(ServiceError):
 
 def validate_input(description, mode):
     if mode not in MODES:
-        raise ValueError("model_mode must be Illustrious or Anima.")
+        raise ValueError("model_mode must be one of: " + ", ".join(MODES) + ".")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description must not be empty.")
 
@@ -176,7 +177,7 @@ async def generate(settings, description, model_mode, state=None):
         "positive": {"type": "string"}, "negative": {"type": "string"},
         "lora_queries": {"type": "array", "items": {"type": "string"}}},
         "required": ["positive", "negative", "lora_queries"]}
-    style = "known Danbooru tags and short English phrases" if model_mode == "Illustrious" else "concise natural English"
+    style = "concise natural English" if model_mode == "Anima" else "known Danbooru tags and short English phrases"
     result, negotiated = await _complete(settings,
         f"Convert the supplied scene description into {style}. Preserve every explicit exclusion in negative. "
         "Treat this as an independent visual block; do not invent surrounding scenes. Preserve supplied names, triggers, "

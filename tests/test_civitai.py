@@ -171,7 +171,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertEqual(params["period"], "AllTime")
             self.assertEqual(params["sort"], sort)
             self.assertEqual(authorization, None)
-            self.assertEqual(self.base_model_parameters[-1], ["Illustrious", "NoobAI"])
+            self.assertEqual(self.base_model_parameters[-1], ["Illustrious"])
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])
 
     async def test_metadata_gallery_and_host_are_bound_to_selected_version(self):
@@ -246,14 +246,25 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
             self.assertEqual(timeout.call_args_list, [mock.call(total=None)] * 3)
 
-    async def test_noobai_family_search_and_anima_parameters(self):
-        self.version["baseModel"] = "NoobAI"
-        result = await civitai.search("cat", "Illustrious")
-        self.assertEqual(result["items"][0]["base_model"], "NoobAI")
-        self.version["baseModel"] = "Anima"
-        result = await civitai.search("cat", "Anima")
-        self.assertEqual(result["items"][0]["base_model"], "Anima")
-        self.assertEqual(self.base_model_parameters[-1], ["Anima"])
+    async def test_four_model_families_search_and_download_are_separate(self):
+        identity = {"model_id": 1, "version_id": 2, "file_id": 3}
+        for mode in ("Illustrious", "Anima", "NoobAI", "Pony"):
+            for family in ("Illustrious", "Anima", "NoobAI", "Pony", "Pony V7"):
+                with self.subTest(mode=mode, family=family):
+                    self.version["baseModel"] = family
+                    result = await civitai.search("cat", mode)
+                    self.assertEqual(self.base_model_parameters[-1], [mode])
+                    self.assertEqual(len(result["items"]), int(mode == family))
+                    if mode == family:
+                        self.assertEqual(result["items"][0]["base_model"], family)
+                        self.assertTrue((await civitai.download(identity, mode))["lora_name"])
+                    else:
+                        with self.assertRaises(ValueError):
+                            await civitai.download(identity, mode)
+        for family in ("Illustrious", "NoobAI"):
+            self.assertTrue(civitai.compatible(f"{family} XL", family))
+            other = "NoobAI" if family == "Illustrious" else "Illustrious"
+            self.assertFalse(civitai.compatible(f"{family} XL", other))
 
     async def test_download_safe_path_atomic_hash_dedup_and_incompatible(self):
         identity = {"model_id": 1, "version_id": 2, "file_id": 3}

@@ -283,6 +283,32 @@ class ScenePresetTests(unittest.TestCase):
             self.assertEqual(result["result"][:2], expected)
             self.assertEqual(len(result["expand"]), count)
 
+    def test_mixed_four_mode_preset_save_reload_and_repeated_expand(self):
+        modes = ("Illustrious", "Anima", "NoobAI", "Pony")
+        nodes = basic_nodes("base")
+        upstream_id = "2"
+        for index, mode in enumerate(modes, 4):
+            nodes[str(index)] = {"class_type": "SceneApplyLora", "inputs": {
+                "scene_prompt": [upstream_id, 0], "lora_name": "style/example.safetensors",
+                "model_mode": mode, "strength_model": index / 10, "strength_clip": 0.7,
+                "positive": f"{mode} trigger", "negative": f"{mode} excluded",
+            }}
+            upstream_id = str(index)
+        nodes["3"]["inputs"]["scene_prompt"] = [upstream_id, 0]
+        self.save("four-modes", nodes)
+        loaded = self.module.load_preset("four-modes")
+        upstream = self.nodes.SceneApplyModel().apply_model(["model", 0], ["clip", 0], ["vae", 0])[0]
+        plan = self.module._evaluate_preset_scene(loaded, {}, upstream)
+        plan = self.nodes.ScenePromptCounter().count(count=3, scene_prompt=plan)[0]
+        for index, mode in enumerate(modes, 4):
+            for current_index in range(3):
+                result = self.nodes.ScenePromptExpand().expand(
+                    current_index=current_index, seed_base=7, timestamp_dir=False, scene_prompt=plan, model_mode=mode)
+                self.assertEqual(result["result"][:2], (f"base, {mode} trigger", f"{mode} excluded"))
+                loaders = list(result["expand"].values())
+                self.assertEqual(len(loaders), 1)
+                self.assertEqual(loaders[0]["inputs"]["strength_model"], index / 10)
+
     def test_save_prunes_root_and_extra_reroutes_for_removed_links(self):
         workflow = {
             "version": 1,

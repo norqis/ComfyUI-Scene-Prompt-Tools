@@ -27,6 +27,7 @@ function functionSource(name) {
 
 const context = {
     Set,
+    SCENE_MODEL_MODES: ["Illustrious", "Anima", "NoobAI", "Pony"],
     SCENE_SAVE_IMAGE_NODE_NAMES: new Set(["SceneSaveImage"]),
     SCENE_APPLY_LORA_NODE_NAMES: new Set(["SceneApplyLora"]),
     isSceneExpandNodeName(nodeName) { return nodeName === "ScenePrompterExpand"; },
@@ -91,6 +92,28 @@ context.hideSceneUtilityWidgets({ widgets: loraWidgets }, "SceneApplyLora");
 assert.deepEqual(loraWidgets.map((widget) => widget.hidden), [true, false, false, false, true]);
 
 vm.runInContext(functionSource("sceneExpandConfigureValues"), context);
+for (const name of ["SCENE_LORA_STORED_WIDGET_NAMES", "SCENE_LORA_DISPLAY_WIDGET_NAMES"]) {
+    vm.runInContext(source.match(new RegExp(`const ${name} = \\[.*?\\];`, "u"))[0], context);
+}
+vm.runInContext(functionSource("sceneLoraConfiguredValues"), context);
+for (const mode of context.SCENE_MODEL_MODES) {
+    const current = { widgets_values: [0, "", 7, false, "", "最後", mode, false, true, "停止", true] };
+    assert.deepEqual(JSON.parse(JSON.stringify(context.sceneExpandConfigureValues(current))), current);
+    const legacy = { widgets_values: [0, "", 7, false, "", mode, 13, "停止", true] };
+    assert.deepEqual(JSON.parse(JSON.stringify(context.sceneExpandConfigureValues(legacy).widgets_values)),
+        [0, "", 7, false, "", "最後", mode, mode === "Anima", mode === "Anima", "停止", true]);
+    for (const values of [
+        ["NoobAI.safetensors", 0.8, 0.6, mode, "positive", "negative", "{}", "{}", ""],
+        [mode, 0.8, 0.6, "positive", "negative", "NoobAI.safetensors", "{}", "{}", ""],
+    ]) {
+        const restored = context.sceneLoraConfiguredValues({ widgets_values: values });
+        assert.equal(restored.model_mode, mode, "saved model stays explicit, independent of filename");
+        assert.equal(restored.lora_name, "NoobAI.safetensors");
+        assert.equal(restored.positive, "positive");
+        assert.equal(restored.negative, "negative");
+        assert.equal(restored.strength_model, 0.8);
+    }
+}
 for (const seed of [0, 42]) {
     const literal = seed === 0;
     const legacyReplay = {
