@@ -400,6 +400,9 @@ async function prepareFavoriteFixture(page, url) {
 
 async function checkFavorites(browser, url) {
     const page = await browser.newPage();
+    const candidateKeys = (scope = page) => scope.locator('.pc-candidate .pc-favorite')
+        .evaluateAll(buttons => buttons.map(button => button.dataset.favoriteKey));
+    const summerOrder = ['Outfit::summer', ...Array.from({ length: 60 }, (_, index) => `Outfit::summer-${index}`), 'Other::summer'];
     await prepareFavoriteFixture(page, url);
     await page.evaluate(async () => {
         window.__favoriteMock.loadStatuses = [503];
@@ -459,6 +462,9 @@ async function checkFavorites(browser, url) {
     assert.equal(await page.locator('.pc-favorite[data-favorite-key="Other::summer"]').getAttribute("aria-pressed"), "false");
     await page.locator('.pc-favorite[data-favorite-key="Other::summer"]').click();
     await page.waitForFunction(() => window.__favoriteMock.writes === 8 && window.__favoriteMock.activeWrites === 0);
+    await page.waitForFunction(() => document.querySelectorAll('.pc-candidate').length === 62);
+    assert.deepEqual(await candidateKeys(), ['Outfit::summer', 'Other::summer', ...summerOrder.slice(1, -1)],
+        'favorites come first while each group retains catalog order');
     await page.getByRole("button", { name: "お気に入り", exact: true }).click();
     assert.equal(await search.inputValue(), "");
     assert.equal(await page.locator(".pc-candidate").count(), 2);
@@ -468,6 +474,8 @@ async function checkFavorites(browser, url) {
     await page.getByText("一致なし", { exact: true }).waitFor();
     await page.getByRole("button", { name: "検索", exact: true }).click();
     assert.equal(await search.inputValue(), "Summer", "normal search retains its own query");
+    await page.waitForFunction(() => document.querySelectorAll('.pc-candidate').length === 62);
+    assert.deepEqual(await candidateKeys(), summerOrder, 'removing a favorite restores its ordinary position');
     await search.fill("Search Detail");
     await page.locator(".pc-favorite").click();
     await page.waitForFunction(() => window.__favoriteMock.activeWrites === 0 && document.querySelector(".pc-favorite")?.getAttribute("aria-pressed") === "true");
@@ -505,12 +513,38 @@ async function checkFavorites(browser, url) {
     await page.waitForFunction((scroll) => document.querySelector(".pc-popup-list")?.scrollTop === scroll, scroll);
     assert.equal(await search.inputValue(), "Summer");
 
+    await page.getByRole('button', { name: '検索', exact: true }).click();
+    await page.waitForFunction(() => document.querySelectorAll('.pc-candidate').length === 62);
+    const lateStar = page.locator('.pc-favorite[data-favorite-key="Outfit::summer-59"]');
+    const preferredOrder = [...summerOrder.slice(0, 15), 'Outfit::summer-59', ...summerOrder.slice(15, 60), 'Other::summer'];
+    await page.evaluate(() => { window.__favoriteMock.delayNextSave = true; });
+    await lateStar.click();
+    await page.waitForFunction(() => window.__favoriteMock.activeWrites === 1);
+    assert.deepEqual(await candidateKeys(), summerOrder, 'pending favorite saves never move candidates');
+    await page.evaluate(() => window.__releaseFavoriteSave());
+    await page.waitForFunction(() => document.querySelector('.pc-favorite[data-favorite-key="Outfit::summer-59"]')?.getAttribute('aria-pressed') === 'true');
+    await page.waitForFunction(() => document.querySelectorAll('.pc-candidate').length === 62);
+    assert.deepEqual(await candidateKeys(), preferredOrder, 'a committed favorite moves ahead of ordinary candidates');
+    await page.evaluate(() => { window.__favoriteMock.saveStatuses = [500]; });
+    await lateStar.click();
+    await page.getByText(/お気に入りを保存できませんでした。HTTP 500/).waitFor();
+    assert.deepEqual(await candidateKeys(), preferredOrder, 'failed removal preserves the committed order');
+    await lateStar.click();
+    await page.waitForFunction(() => document.querySelector('.pc-favorite[data-favorite-key="Outfit::summer-59"]')?.getAttribute('aria-pressed') === 'false');
+    await page.waitForFunction(() => document.querySelectorAll('.pc-candidate').length === 62);
+    assert.deepEqual(await candidateKeys(), summerOrder, 'successful removal demotes the candidate immediately');
+    await lateStar.click();
+    await page.waitForFunction(() => document.querySelector('.pc-favorite[data-favorite-key="Outfit::summer-59"]')?.getAttribute('aria-pressed') === 'true');
+
     await page.evaluate(async () => {
-        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { favorites: true, stateWidgetName: "negative_json" });
+        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { stateWidgetName: "negative_json" });
     });
     assert.equal(await search.inputValue(), "", "the negative side starts with an independent query");
+    await search.fill('Summer');
+    await page.waitForFunction(() => document.querySelectorAll('.pc-candidate').length === 62);
+    assert.deepEqual(await candidateKeys(), preferredOrder, 'negative search uses the same favorite priority');
     assert.equal(await baseStar.getAttribute("aria-pressed"), "true", "positive and negative use the same saved favorites");
-    await page.locator('.pc-candidate[title="summer dress"] input[type="checkbox"]').click();
+    await page.locator('.pc-candidate:has(.pc-favorite[data-favorite-key="Outfit::summer"]) input[type="checkbox"]').click();
     assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteNode.widgets[1].value).categories.Outfit[0].id), "summer");
     assert.equal(await page.evaluate(() => window.__favoriteNode.widgets[0].value), '{"version":1,"categories":{}}');
 
@@ -518,11 +552,14 @@ async function checkFavorites(browser, url) {
         const draft = { row_id: "favorites-matrix", positive_json: '{"version":1,"categories":{}}', negative_json: '{"version":1,"categories":{}}' };
         window.__favoriteMatrixDraft = draft;
         const stateWidgetName = window.__scenePromptPopupTestHooks.setMatrixLineDraftContext(window.__favoriteNode, 0, draft, "positive", () => {}, () => {});
-        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { favorites: true, stateWidgetName });
+        await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { stateWidgetName });
     });
     const matrixPopup = page.locator(".pc-popup").last();
+    await matrixPopup.locator('input.pc-searchbox').fill('Summer');
+    await page.waitForFunction(() => [...document.querySelectorAll('.pc-popup')].at(-1)?.querySelectorAll('.pc-candidate').length === 62);
+    assert.deepEqual(await candidateKeys(matrixPopup), preferredOrder, 'Matrix draft search uses the same favorite priority');
     assert.equal(await matrixPopup.locator('.pc-favorite[data-favorite-key="Outfit::summer"]').getAttribute("aria-pressed"), "true");
-    await matrixPopup.locator('.pc-candidate[title="summer dress"] input[type="checkbox"]').click();
+    await matrixPopup.locator('.pc-candidate:has(.pc-favorite[data-favorite-key="Outfit::summer"]) input[type="checkbox"]').click();
     assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteMatrixDraft.positive_json).categories.Outfit[0].id), "summer", "favorites use the existing Matrix row draft path");
     assert.equal(await page.evaluate(() => window.__favoriteNode.widgets[0].value), '{"version":1,"categories":{}}', "the Matrix picker does not write normal selections");
     await matrixPopup.getByRole("button", { name: "行編集へ戻る", exact: true }).click();
@@ -557,7 +594,21 @@ async function checkFavorites(browser, url) {
     await page.close();
 
     const reloadedPage = await browser.newPage();
+    let releaseFavorites;
+    const favoriteGate = new Promise(resolve => { releaseFavorites = resolve; });
+    await reloadedPage.route('**/userdata/scene_prompt_tools%2Ffavorites.json', async route => {
+        await favoriteGate;
+        await route.continue();
+    });
     await prepareFavoriteFixture(reloadedPage, url);
+    await reloadedPage.evaluate(() => window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode));
+    await reloadedPage.locator('.pc-searchbox').fill('Summer');
+    await reloadedPage.waitForFunction(() => document.querySelectorAll('.pc-candidate').length === 61);
+    assert.deepEqual(await candidateKeys(reloadedPage), summerOrder.slice(0, -1), 'unloaded favorites retain original order');
+    releaseFavorites();
+    await reloadedPage.waitForFunction(() => document.querySelector('.pc-favorite[data-favorite-key="Outfit::summer-59"]')?.getAttribute('aria-pressed') === 'true');
+    await reloadedPage.waitForFunction(() => document.querySelectorAll('.pc-candidate').length === 61);
+    assert.deepEqual(await candidateKeys(reloadedPage), preferredOrder.slice(0, -1), 'delayed favorites load reorders the open search without duplicates');
     await reloadedPage.evaluate(async () => {
         await Promise.all(Array.from({ length: 5 }, () => window.__scenePromptPopupTestHooks.loadFavorites()));
         await window.__scenePromptPopupTestHooks.openSearchPopup(window.__favoriteNode, { favorites: true });
@@ -695,7 +746,8 @@ async function checkProgressiveCandidates(browser, url) {
             const input = document.querySelector(".pc-searchbox"); input.value = "chunk"; input.dispatchEvent(new Event("input"));
             document.querySelector('.pc-candidate input[type="checkbox"]').click();
         }); await ready();
-        assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteNode.widgets[1].value).categories["Bulk > Leaf"][0].id), "0");
+        assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteNode.widgets[1].value).categories["Bulk > Leaf"][0].id), "1",
+            "the first negative search result is the starred candidate even in a large chunked list");
         assert.equal(await page.evaluate(() => JSON.parse(window.__favoriteNode.widgets[0].value).categories["Bulk > Leaf"][0].weight), 1.25,
             "negative chunked selection keeps the positive weight");
         await page.evaluate(async () => {

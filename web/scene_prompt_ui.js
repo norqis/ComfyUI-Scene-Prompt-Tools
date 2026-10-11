@@ -3986,10 +3986,16 @@ async function openSearchPopup(node, options = {}) {
         const query = input.value.trim().toLowerCase();
         const matchedCategories = query && !favorites ? searchCategoryPaths(data, query, 1) : [];
         const matchedSubcategories = query && !favorites ? searchCategoryPaths(data, query, 2) : [];
-        const matchedItems = data.filter((item) => (
-            (favorites ? favoriteKeys?.has(itemKey(item)) : !!query)
-            && (!query || itemSearchHaystack(item).includes(query))
-        ));
+        const favoriteItems = [];
+        const otherItems = [];
+        if (query || favorites) {
+            for (const item of data) {
+                if (query && !itemSearchHaystack(item).includes(query)) continue;
+                if (favoriteKeys?.has(itemKey(item))) favoriteItems.push(item);
+                else if (!favorites) otherItems.push(item);
+            }
+        }
+        const matchedItems = favoriteItems.concat(otherItems);
 
         const scrollTop = list.scrollTop;
         list.scenePendingScrollRestore ||= { top: scrollTop, appliedTop: scrollTop };
@@ -4050,7 +4056,7 @@ async function openSearchPopup(node, options = {}) {
         session[queryKey] = input.value;
         renderResults();
     });
-    if (favorites && activePopupContext?.popup === popup) {
+    if (activePopupContext?.popup === popup) {
         activePopupContext.refreshFavorites = renderResults;
     }
     renderResults();
