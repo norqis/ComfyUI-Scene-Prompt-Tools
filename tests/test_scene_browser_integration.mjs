@@ -1426,6 +1426,25 @@ try {
     assert.equal(await loraPicker.locator(".pc-lora-row").count(), 1, "path search narrows the list");
     await loraPicker.getByRole("searchbox", { name: "パス・取得済みCivitai名で検索" }).fill("Civitai Style");
     assert.ok(await loraPicker.locator(".pc-lora-row").count() >= 1, "resolved Civitai-name search finds rows");
+    const loraSearch = loraPicker.getByRole("searchbox");
+    const searchBefore = await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values);
+    const searchLookupsBefore = civitaiLookupCount;
+    const searchInfoBefore = await page.evaluate(() => window.__scenePromptCalls.filter(call => call.url.startsWith("/scene_prompt/loras/info?")).length);
+    for (const query of ["civitaistyle", "CIVITAI STYLE", " CiViTai\u3000StYle ", "civi\ttai st yle", "versionone", "VERSION ONE", "", " \u3000\t"]) {
+        await loraSearch.fill(query);
+        assert.deepEqual(await pickerRows.locator(".pc-lora-path").allTextContents(), ["style.safetensors", "folder/other.safetensors"],
+            `query ${JSON.stringify(query)} ignores whitespace and case without changing selected-first order`);
+    }
+    await loraSearch.fill(" FOLDER / O T H E R .SAFETENSORS ");
+    assert.deepEqual(await pickerRows.locator(".pc-lora-path").allTextContents(), ["folder/other.safetensors"]);
+    for (const query of ["safetensorscivitai", "missing-lora"]) {
+        await loraSearch.fill(query);
+        assert.equal(await pickerRows.count(), 0, "unrelated fields are not concatenated into a search match");
+        await loraPicker.getByText("該当するLoRAはありません。", { exact: true }).waitFor();
+    }
+    assert.deepEqual(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values), searchBefore);
+    assert.equal(civitaiLookupCount, searchLookupsBefore, "searching cached rows never starts a Civitai lookup");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter(call => call.url.startsWith("/scene_prompt/loras/info?")).length), searchInfoBefore);
     await loraPicker.getByRole("searchbox", { name: "パス・取得済みCivitai名で検索" }).fill("style.safetensors");
     await loraPicker.locator(".pc-lora-select").click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]").some((entry) => entry.title === "Civitai Style"));

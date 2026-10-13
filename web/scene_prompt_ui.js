@@ -5618,16 +5618,18 @@ async function openSceneLoraPicker(node) {
         if (status === "not_found") { source.setAttribute("role", "status"); source.setAttribute("aria-label", "Local: Civitaiに登録なし"); }
         else source.removeAttribute("role");
     }
+    const normalizeSearchText = (text) => text.replace(/\s+/gu, "").toLowerCase();
     const render = () => {
         generation += 1;
         pending = [];
         observer?.disconnect();
         const revision = generation;
-        const query = search.value.trim().toLocaleLowerCase();
+        const query = normalizeSearchText(search.value);
         const selectedPath = sceneLoraPathIdentity(findWidget(node, "lora_name")?.value);
         const shown = sceneLoraCatalog.filter((item) => {
             const cached = cachedSceneLora(item);
-            return `${item.path} ${cached?.title || ""} ${cached?.versionName || ""}`.toLocaleLowerCase().includes(query);
+            return [item.path, cached?.title || "", cached?.versionName || ""]
+                .some((text) => normalizeSearchText(text).includes(query));
         }).sort((a, b) => Number(sceneLoraPathIdentity(b.path) === selectedPath) - Number(sceneLoraPathIdentity(a.path) === selectedPath));
         list.replaceChildren();
         if (!shown.length) { list.textContent = "該当するLoRAはありません。"; return; }
