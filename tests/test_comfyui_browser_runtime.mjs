@@ -2734,6 +2734,15 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-unknown.safetensors'}).locator('.pc-lora-title').textContent(),'runtime-unknown.safetensors');
     assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-hat.safetensors'}).locator('.pc-lora-title').textContent(),'Native metadata');
     assert.deepEqual(await nativePicker.locator('.pc-lora-head-actions button').allTextContents(),['Civitai Search','閉じる']);
+    for (const query of ['nativemetadata', 'NATIVE METADATA', 'NaTiVe\u3000MeTa DaTa']) {
+        await nativePicker.getByRole('searchbox').fill(query);
+        assert.deepEqual(await nativePicker.locator('.pc-lora-path').allTextContents(), ['runtime-hat.safetensors'],
+            'native LoRA title search ignores whitespace on both sides and letter case');
+    }
+    await nativePicker.getByRole('searchbox').fill('RUNTIME - LOCAL .SAFETENSORS');
+    assert.deepEqual(await nativePicker.locator('.pc-lora-path').allTextContents(), ['runtime-local.safetensors']);
+    await nativePicker.getByRole('searchbox').fill(' \u3000 ');
+    assert.equal(await nativePicker.locator('.pc-lora-row').count(), 3);
     await page.screenshot({path:resolve(screenshotDirectory,'native-local-fallback.png')});
     await page.setViewportSize({width:360,height:740});
     assert.equal(await nativePicker.getByRole('button',{name:'閉じる',exact:true}).evaluate(button=>button.getBoundingClientRect().right<=innerWidth),true);
