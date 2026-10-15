@@ -1665,7 +1665,9 @@ window.__sceneSeedRuntimeTest = {
         const a = add('ScenePrompter'), b = add('ScenePrompter'), queue = add('ScenePrompterQueue');
         const count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
         field(random, 'weights_json').value = '[5000,5000,0,0,0,0,0,0,0,0]';
-        for (const [node, name] of [[a, 'A'], [b, 'B']]) { field(node, 'prompt_name').value = name; field(node, 'positive_base').value = name; }
+        for (const [node, name] of [[a, 'QueueArmA'], [b, 'QueueArmB']]) {
+            node.title = name; field(node, 'prompt_name').value = name; field(node, 'positive_base').value = name;
+        }
         field(queue, 'order_mode').value = 'alternate'; field(queue, 'alternate_block_size').value = 5;
         field(queue, 'downstream_count_mode').value = 'multiply'; field(count, 'count').value = 3;
         field(count, 'enable_downstream_count').value = false;
@@ -1678,7 +1680,8 @@ window.__sceneSeedRuntimeTest = {
             displayed: app.graph.getNodeById(ids.expand).widgets.find(widget => widget.sceneRole === 'expand_total_count')?.sceneTotalCount,
             lock: app.graph.getNodeById(ids.queue).sceneQueueControlLock,
             disabled: field(app.graph.getNodeById(ids.queue), 'alternate_block_size').disabled,
-            labels: window.__sceneSeedRuntimeTest.countPreview(app.graph.getNodeById(ids.count)).map(label => label.endsWith('A') ? 'A' : 'B'),
+            labels: window.__sceneSeedRuntimeTest.countPreview(app.graph.getNodeById(ids.count))
+                .map(label => label.includes('QueueArmA') ? 'A' : label.includes('QueueArmB') ? 'B' : label),
         }; };
         const initial = await snapshot();
         await app.loadGraphData(app.graph.serialize(), true, true);
