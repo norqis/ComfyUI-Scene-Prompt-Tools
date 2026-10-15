@@ -348,6 +348,28 @@ for (const saved of [randomPreset, outputPreset]) {
 assert.equal(outputPlan.units[0].kind, "random_choice");
 assert.equal(ctx.sceneScheduleCount(outputPlan, 10).stats.total, 10);
 assert.equal(ctx.sceneScheduleCount(outputPlan, 1_000_000).units.length, 1);
+assert.equal(outputPlan.boundary, false, "Random Output alone does not create a Queue boundary");
+const outputBranches = ["A", "B"].map((label) => ctx.sceneScheduleMap(outputPlan,
+    (entry) => ({ ...entry, parts: [label] })));
+const afterOutputQueue = queue(outputBranches, controls("alternate", 5));
+const afterOutputCount = ctx.sceneScheduleCount(afterOutputQueue, 3, false);
+assert.deepEqual(Array.from(prefix(afterOutputCount)), [..."AAAAABBBBB".repeat(3)]);
+assert.equal(ctx.sceneScheduleCount(afterOutputCount, 10).stats.total, 30);
+assert.equal(ctx.sceneScheduleForPreset("real-queue-input", queue([a], controls()), new Set(), outputPreset).boundary, true,
+    "Random Output inside a Preset preserves a real upstream Queue boundary");
+const queueAfterOutputPreset = { api_graph: { output: {
+    1: { class_type: "ScenePresetInput", inputs: {} },
+    2: { class_type: "ScenePresetReference", inputs: { scene_prompt: ["1", 0], preset_id: "output-inner" } },
+    3: { class_type: "ScenePrompter", inputs: { scene_prompt: ["2", 0], prompt_name: "A" } },
+    4: { class_type: "ScenePrompter", inputs: { scene_prompt: ["2", 0], prompt_name: "B" } },
+    5: { class_type: "ScenePrompterQueue", inputs: { scene_prompt1: ["3", 0], scene_prompt2: ["4", 0],
+        order_mode: "alternate", alternate_block_size: 5, downstream_count_mode: "multiply" } },
+    6: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["5", 0], count: 3, enable_downstream_count: false } },
+    7: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["6", 0] } },
+} } };
+ctx.scenePresetDisplayGraphs.set("output-inner", outputPreset);
+assert.equal(ctx.sceneScheduleForPreset("queue-after-output", leaf("X"), new Set(), queueAfterOutputPreset).stats.total, 30,
+    "a nested Random Output Preset does not disable alternate-five and Count-three");
 const innerOutputPreset = structuredClone(outputPreset);
 innerOutputPreset.api_graph.output[7] = { class_type: "ScenePromptRandomRoute", inputs: {
     scene_prompt: ["2", 0], weights_json: JSON.stringify([10000, 0, 0, 0, 0, 0, 0, 0, 0, 0]), preserve_join: true } };
@@ -413,6 +435,9 @@ Object.assign(ctx, {
 });
 for (const name of ["isScenePromptJoinNode", "sceneQueueBoundaryInNode", "sceneQueuePendingInNode", "sceneQueueLockState", "syncSceneQueueControls"])
     vm.runInContext(functionSource(name), ctx);
+vm.runInContext(functionSource("sceneQueueBoundaryInPreset"), ctx);
+assert.equal(ctx.sceneQueueBoundaryInPreset("output-inner", false), false);
+assert.equal(ctx.sceneQueueBoundaryInPreset("output-inner", true), true);
 const previous = { id: "previous", kind: "queue" };
 const middle = { id: "middle", kind: "prompt", upstream: previous };
 const widgets = [
@@ -421,6 +446,15 @@ const widgets = [
     { name: "downstream_count_mode", value: "fixed" },
 ];
 const receiving = { id: "receiving", kind: "queue", sources: [middle], widgets };
+const randomOutputSource = { id: "random-output", kind: "random_output", sources: [{ kind: "prompt" }] };
+receiving.sources = [randomOutputSource];
+assert.equal(ctx.syncSceneQueueControls(receiving), "", "Random Output alone leaves downstream Queue controls enabled");
+randomOutputSource.sources = [middle];
+assert.equal(ctx.syncSceneQueueControls(receiving), "upstream", "a real Queue before Random Output still locks downstream Queue controls");
+previous.mode = 4;
+assert.equal(ctx.syncSceneQueueControls(receiving), "", "bypassing the real Queue unlocks controls through Random Output");
+previous.mode = 0;
+receiving.sources = [middle];
 assert.equal(ctx.syncSceneQueueControls(receiving), "upstream", "Queue → Prompt → Queue locks all controls");
 assert.deepEqual(widgets.map((widget) => widget.value), ["alternate", 3, "{}", "fixed"]);
 assert.ok(widgets.filter((widget) => widget.name !== "input_repeats_json")
