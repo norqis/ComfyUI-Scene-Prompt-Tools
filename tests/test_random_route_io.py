@@ -48,6 +48,63 @@ class RandomRouteIOTests(unittest.TestCase):
             "7": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["6", 0]}},
         }
 
+    def test_output_before_alternating_queue_keeps_five_row_repeats_and_count_three(self):
+        arms = self.route()
+        upstream = self.join(arms[0], arms[1])
+        queued = self.nodes.ScenePromptQueue().queue(
+            scene_prompt1=self.branch(upstream, "A"), scene_prompt2=self.branch(upstream, "B"),
+            order_mode="alternate", alternate_block_size=5, downstream_count_mode="multiply")[0]
+        counted = self.nodes.ScenePromptCounter().count(
+            scene_prompt=queued, count=3, enable_downstream_count=False)[0]
+        self.assertEqual(counted["stats"]["total_batches"], 30)
+        self.assertEqual([self.nodes.ScenePromptExpand().expand(
+            scene_prompt=counted, current_index=index, seed_base=123)[0] for index in range(30)],
+            (["A"] * 5 + ["B"] * 5) * 3)
+        self.assertEqual(self.nodes.ScenePromptCounter().count(scene_prompt=counted, count=10)[0]["stats"]["total_batches"], 30)
+
+    def test_output_inherits_only_real_queue_boundaries(self):
+        for actual_queue in (False, True):
+            with self.subTest(actual_queue=actual_queue):
+                upstream = self.branch(None, "base")
+                if actual_queue:
+                    upstream = self.nodes.ScenePromptQueue().queue(scene_prompt1=upstream)[0]
+                arms = self.route(upstream)
+                self.assertEqual(self.join(arms[0], arms[1])["contains_queue_boundary"], actual_queue)
+                self.assertEqual(self.join(upstream)["contains_queue_boundary"], actual_queue)
+                self.assertTrue(self.nodes.ScenePromptQueue().queue(scene_prompt1=arms[0], scene_prompt2=arms[1])[0]["contains_queue_boundary"])
+                args = {"scene_prompt1": self.join(arms[0], arms[1]), "order_mode": "alternate"}
+                keys = [self.nodes.ScenePromptQueue.IS_CHANGED(**args, alternate_block_size=repeat) for repeat in (1, 5)]
+                self.assertEqual(keys[0] == keys[1], actual_queue)
+
+    def test_nested_output_preset_before_queue_preserves_order_and_downstream_count_hold(self):
+        inner = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePromptRandomRoute", "inputs": {
+                "scene_prompt": ["1", 0], "weights_json": json.dumps([5000, 5000] + [0] * 8), "preserve_join": True}},
+            "3": {"class_type": "ScenePromptRandomRouteOutput", "inputs": {"scene_prompt1": ["2", 0], "scene_prompt2": ["2", 1]}},
+            "4": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["3", 0]}},
+        }
+        saved = self.presets.save_preset({"preset_id": "random-inner", "output_node_id": "4",
+            "api_graph": {"output": inner}, "workflow": outer_workflow(inner)})
+        outer = {
+            "1": {"class_type": "ScenePresetInput", "inputs": {}},
+            "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "random-inner", "scene_prompt": ["1", 0]}},
+            "3": {**scene_prompt("A"), "inputs": {**scene_prompt("A")["inputs"], "scene_prompt": ["2", 0]}},
+            "4": {**scene_prompt("B"), "inputs": {**scene_prompt("B")["inputs"], "scene_prompt": ["2", 0]}},
+            "5": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["3", 0], "scene_prompt2": ["4", 0],
+                "order_mode": "alternate", "alternate_block_size": 5, "downstream_count_mode": "multiply"}},
+            "6": {"class_type": "ScenePromptCounter", "inputs": {"scene_prompt": ["5", 0], "count": 3, "enable_downstream_count": False}},
+            "7": {"class_type": "ScenePresetOutput", "inputs": {"scene_prompt": ["6", 0]}},
+        }
+        nested = self.presets.save_preset({"preset_id": "random-outer", "output_node_id": "7",
+            "api_graph": {"output": outer}, "workflow": outer_workflow(outer)})
+        snapshots = {"random-inner": saved, "random-outer": nested}
+        api = {"ref": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "random-outer"}}}
+        plan = self.presets._scene_node_value(api, "ref", snapshots, set())
+        self.assertEqual(plan["stats"]["total_batches"], 30)
+        self.assertEqual([self.nodes.ScenePromptExpand().expand(scene_prompt=plan, current_index=i)[0] for i in range(30)],
+            (["A"] * 5 + ["B"] * 5) * 3)
+
     def prepare(self, api):
         handle = self.runs.create_run_context("default")
         return self.presets.snapshot_presets_for_run(handle, {"output": api}, "7")

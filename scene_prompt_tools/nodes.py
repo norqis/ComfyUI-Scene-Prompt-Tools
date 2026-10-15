@@ -2232,7 +2232,7 @@ class ScenePromptRandomRouteOutput:
         values = [kwargs.get(name) for name in SCENE_PROMPT_INPUT_NAMES]
         if not any(value is not None for value in values):
             raise ScenePlanError("Scene Prompt Random Route Output に経路が接続されていません。")
-        result = queue(values)
+        result = queue(values, queue_boundary=False)
         return (with_source_node(result, source_node_id or unique_id, source_node_name),)
 
 

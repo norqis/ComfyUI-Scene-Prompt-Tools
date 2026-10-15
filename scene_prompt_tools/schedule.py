@@ -791,7 +791,7 @@ def _validate_queue_controls(order_mode, alternate_block_size, input_repeats_jso
     return order_mode, block, downstream_count_mode
 
 
-def queue(values, *, order_mode="input_order", alternate_block_size=1, input_repeats_json="{}", downstream_count_mode="multiply"):
+def queue(values, *, order_mode="input_order", alternate_block_size=1, input_repeats_json="{}", downstream_count_mode="multiply", queue_boundary=True):
     mode, block, count_mode = _validate_queue_controls(order_mode, alternate_block_size, input_repeats_json, downstream_count_mode)
     slots = [(index, normalize_plan(value)) for index, value in enumerate(values, start=1) if value is not None]
     zero_guards = [plan["random_guards"][-1] for _, plan in slots if _inert_random_arm(plan)]
@@ -826,7 +826,8 @@ def queue(values, *, order_mode="input_order", alternate_block_size=1, input_rep
         inputs = [plan if plan is not None else empty for plan in inputs]
         unit = _unit("random_choice", gate_id=gate["gate_id"], weights=gate["weights"], inputs=inputs, selected_arm=None,
                      **({"seed_id": gate["seed_id"]} if "seed_id" in gate else {}))
-        return mark_prompt_whole(_plan([unit], boundary=True, guards=stack[:-1]))
+        return mark_prompt_whole(_plan([unit], boundary=queue_boundary or any(
+            plan["contains_queue_boundary"] for _, plan in slots), guards=stack[:-1]))
     locked = any(plan["contains_queue_boundary"] for _, plan in slots)
     sources = [{
         "index": index, "row_count": plan["stats"]["row_count"],
@@ -853,7 +854,7 @@ def queue(values, *, order_mode="input_order", alternate_block_size=1, input_rep
                 units = [_unit("sequence", plan=_plan(units))]
         if count_mode == "fixed":
             units = [_unit("count_fixed", unit=unit) for unit in units]
-    return mark_prompt_whole(_plan(units, sources, True))
+    return mark_prompt_whole(_plan(units, sources, queue_boundary or locked))
 
 
 def _matrix_row(base, matrix_row):

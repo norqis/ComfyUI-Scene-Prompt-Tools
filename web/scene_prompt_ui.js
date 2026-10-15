@@ -7955,12 +7955,12 @@ function sceneRandomGuard(plan) {
     return plan?.randomGuards?.at(-1) || null;
 }
 
-function sceneRandomChoicePlan(plans) {
+function sceneRandomChoicePlan(plans, queueBoundary = true) {
     const first = plans[0];
     const unit = { kind: "random_choice", plans,
         total: first.stats.total, totalImages: first.stats.totalImages,
         unsetBatches: first.stats.unsetBatches, rows: first.stats.rows };
-    return sceneSchedulePlan([unit], true, first.randomGuards.slice(0, -1));
+    return sceneSchedulePlan([unit], queueBoundary || plans.some((plan) => plan.boundary), first.randomGuards.slice(0, -1));
 }
 
 function sceneRandomZeroArm(plan) {
@@ -8218,7 +8218,7 @@ function sceneScheduleMerge(left, right) {
     return sceneSchedulePlan([unit], boundary);
 }
 
-function sceneScheduleQueue(plans, socketNames, controls) {
+function sceneScheduleQueue(plans, socketNames, controls, queueBoundary = true) {
     const factor = controls.alternate_block_size ?? 1;
     if (!Number.isSafeInteger(factor) || factor < 1)
         return sceneScheduleError("Queueの1行の回数は1以上の整数で指定してください。");
@@ -8228,27 +8228,27 @@ function sceneScheduleQueue(plans, socketNames, controls) {
         ? plans.filter((plan) => !sceneRandomZeroArm(plan)) : plans;
     if (!active.length && plans.length)
         return sceneScheduleError("ランダム分岐の0%を超える出力を同じQueueへ接続してください。");
-    if (sceneRandomJoinReady(active)) return sceneRandomChoicePlan(active);
+    if (sceneRandomJoinReady(active)) return sceneRandomChoicePlan(active, queueBoundary);
     if (active.some((plan) => sceneRandomGuard(plan)))
         return sceneScheduleError("ランダム分岐の0%を超える出力を同じQueueへ接続してください。");
     if (!plans.length) {
         const seed = sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() });
         const repeated = factor === 1 ? seed : sceneScheduleRepeatEach(sceneSchedulePlan([seed]), factor).units[0];
         return sceneSchedulePlan([controls.downstream_count_mode === "fixed"
-            ? sceneScheduleWrapper("fixed", repeated) : repeated], true);
+            ? sceneScheduleWrapper("fixed", repeated) : repeated], queueBoundary);
     }
     if (plans.some((plan) => plan.boundary)) return sceneSchedulePlan(plans.flatMap((plan) => plan.units), true);
     const adjusted = factor === 1 ? plans : plans.map((plan) => sceneScheduleRepeatEach(plan, factor));
     if (factor === 1 && controls.order_mode !== "alternate") {
         const units = adjusted.flatMap((plan) => plan.units);
         return sceneSchedulePlan(controls.downstream_count_mode === "fixed"
-            ? units.map((unit) => sceneScheduleWrapper("fixed", unit)) : units, true);
+            ? units.map((unit) => sceneScheduleWrapper("fixed", unit)) : units, queueBoundary);
     }
     const cycle = controls.order_mode === "alternate"
         ? sceneScheduleAlternate(adjusted, factor)
         : sceneScheduleSequence(sceneSchedulePlan(adjusted.flatMap((plan) => plan.units)));
     return sceneSchedulePlan([controls.downstream_count_mode === "fixed"
-        ? sceneScheduleWrapper("fixed", cycle) : cycle], true);
+        ? sceneScheduleWrapper("fixed", cycle) : cycle], queueBoundary);
 }
 
 function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferredPreset = null, instancePath = String(presetId || ""), switchValues) {
@@ -8289,7 +8289,7 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                     : sceneScheduleQueue(connected.map(({ plan: child }) => child), connected.map(({ name }) => name),
                         entry.class_type === "ScenePromptRandomRouteOutput" ? {} : Object.fromEntries(SCENE_QUEUE_CONTROL_NAMES.map((name) =>
                             [name, switches.scalar(entry, name, name === "alternate_block_size" ? "number" : "string",
-                                SCENE_QUEUE_CONTROL_DEFAULTS[name])])));
+                                SCENE_QUEUE_CONTROL_DEFAULTS[name])])), entry.class_type === "ScenePrompterQueue");
             } else if (entry.class_type === "ScenePromptCounter") {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 plan = sceneScheduleCount(base, clampSceneCount(switches.scalar(entry, "count", "number", 1), 1), switches.scalar(entry, "enable_downstream_count", "boolean", true), apiInput(entry, "prompt_trace_kind"));
@@ -8388,7 +8388,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
                 if (linked !== undefined) controls[name] = linked;
             }
         }
-        return finish(sceneScheduleQueue(plans, sources.map(({ input }) => input.name), controls));
+        return finish(sceneScheduleQueue(plans, sources.map(({ input }) => input.name), controls, isScenePromptQueueNode(node)));
     }
     const upstream = scenePromptInputSource(node);
     if (isScenePromptCounterNode(node)) {
@@ -8489,7 +8489,7 @@ function sceneQueueBoundaryInPreset(presetId, upstream, stack = new Set(), prefe
         const finish = (value) => { visiting.delete(nodeId); completed.set(nodeId, value); return value; };
         const entry = nodes[String(nodeId)];
         if (!entry) return finish(false);
-        if (["ScenePrompterQueue", "ScenePromptRandomRouteOutput"].includes(entry.class_type)) return finish(true);
+        if (entry.class_type === "ScenePrompterQueue") return finish(true);
         if (entry.class_type === "ScenePresetInput") return finish(upstream);
         if (isSceneSwitch(entry)) {
             try { return finish(visit(apiLink(apiInput(entry, switches.selection(entry))))); }
@@ -8515,7 +8515,9 @@ function sceneQueueBoundaryInNode(node, visiting = new Set(), completed = new Ma
     visiting.add(node);
     const finish = (value) => { visiting.delete(node); completed.set(node, value); return value; };
     if (isSceneNodeBypassed(node)) return finish(sceneQueueBoundaryInNode(sceneBypassInputSource(node), visiting, completed));
-    if (isScenePromptJoinNode(node)) return finish(true);
+    if (isScenePromptQueueNode(node)) return finish(true);
+    if (isScenePromptRandomRouteOutputNode(node)) return finish(connectedScenePromptSourcesForQueue(node)
+        .some(({ source }) => sceneQueueBoundaryInNode(source, visiting, completed)));
     if (isScenePresetReferenceNode(node)) {
         const inherited = sceneQueueBoundaryInNode(scenePromptInputSource(node), visiting, completed);
         const inPreset = sceneQueueBoundaryInPreset(findWidget(node, "preset_id")?.value,

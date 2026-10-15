@@ -1655,6 +1655,46 @@ window.__sceneSeedRuntimeTest = {
     assert(randomOutputRuntime.restoredInputs.includes('scene_prompt10'));
     assert(randomOutputRuntime.missingStatus>=400); assert.match(JSON.stringify(randomOutputRuntime.missing),/出力1|ランダム分岐/u);
     console.log('real ComfyUI nested 100% Input/Output UI, Count10, preflight and serialization passed');
+    nativeRunChecks = true;
+    const randomBeforeQueue = await page.evaluate(async () => {
+        const app = window.app, { api } = await import('/scripts/api.js'); app.graph.clear();
+        const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const link = (from, slot, to, name) => from.connect(slot, to, to.inputs.findIndex(input => input.name === name));
+        const random = add('ScenePromptRandomRoute'), output = add('ScenePromptRandomRouteOutput');
+        const a = add('ScenePrompter'), b = add('ScenePrompter'), queue = add('ScenePrompterQueue');
+        const count = add('ScenePromptCounter'), expand = add('ScenePrompterExpand');
+        field(random, 'weights_json').value = '[5000,5000,0,0,0,0,0,0,0,0]';
+        for (const [node, name] of [[a, 'A'], [b, 'B']]) { field(node, 'prompt_name').value = name; field(node, 'positive_base').value = name; }
+        field(queue, 'order_mode').value = 'alternate'; field(queue, 'alternate_block_size').value = 5;
+        field(queue, 'downstream_count_mode').value = 'multiply'; field(count, 'count').value = 3;
+        field(count, 'enable_downstream_count').value = false;
+        link(random, 0, output, 'scene_prompt1'); link(random, 1, output, 'scene_prompt10');
+        link(output, 0, a, 'scene_prompt'); link(output, 0, b, 'scene_prompt');
+        link(a, 0, queue, 'scene_prompt1'); link(b, 0, queue, 'scene_prompt2');
+        link(queue, 0, count, 'scene_prompt'); link(count, 0, expand, 'scene_prompt');
+        const ids = {queue:queue.id,count:count.id,expand:expand.id};
+        const snapshot = async () => { await new Promise(done => setTimeout(done, 300)); return {
+            displayed: app.graph.getNodeById(ids.expand).widgets.find(widget => widget.sceneRole === 'expand_total_count')?.sceneTotalCount,
+            lock: app.graph.getNodeById(ids.queue).sceneQueueControlLock,
+            disabled: field(app.graph.getNodeById(ids.queue), 'alternate_block_size').disabled,
+            labels: window.__sceneSeedRuntimeTest.countPreview(app.graph.getNodeById(ids.count)).map(label => label.endsWith('A') ? 'A' : 'B'),
+        }; };
+        const initial = await snapshot();
+        await app.loadGraphData(app.graph.serialize(), true, true);
+        const restored = await snapshot(), graph = await app.graphToPrompt();
+        const response = await api.fetchApi('/scene_prompt/runs/prepare', {method:'POST',body:JSON.stringify({api_graph:graph,workflow:graph.workflow,expand_node_id:String(ids.expand)})});
+        const prepared = await response.json(); if (!response.ok) throw new Error(JSON.stringify(prepared));
+        await api.fetchApi('/scene_prompt/runs/release', {method:'POST',body:JSON.stringify({run_handle:prepared.run_handle})});
+        return {initial,restored,total:prepared.total_batches};
+    });
+    nativeRunChecks = false;
+    for (const state of [randomBeforeQueue.initial, randomBeforeQueue.restored]) {
+        assert.equal(state.displayed, 30); assert.equal(state.lock, ''); assert.equal(state.disabled, false);
+        assert.deepEqual(state.labels, [...'AAAAABBBBB'.repeat(3)]);
+    }
+    assert.equal(randomBeforeQueue.total, 30);
+    console.log('real ComfyUI Random Output before alternate-five Queue and Count-three preserves controls, order, live count, preflight and reload');
     const randomErrorPropagation = await page.evaluate(async () => {
         const results = [];
         for (const joinType of ['ScenePrompterQueue', 'ScenePromptRandomRouteOutput']) {
