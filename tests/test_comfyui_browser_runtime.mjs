@@ -1764,9 +1764,11 @@ window.__sceneSeedRuntimeTest = {
                 }
             } else {
                 const count = add('ScenePromptCounter');
+                count.widgets.find(widget => widget.name === 'enable_downstream_count').value = true;
                 count.widgets.find(widget => widget.name === 'count').value = mode.startsWith('overflow') ? 100_000_000 : 2;
                 if (mode.startsWith('overflow')) {
                     const upstream = add('ScenePromptCounter');
+                    upstream.widgets.find(widget => widget.name === 'enable_downstream_count').value = true;
                     upstream.widgets.find(widget => widget.name === 'count').value = 100_000_000;
                     link(upstream, 0, count, 'scene_prompt');
                 }
