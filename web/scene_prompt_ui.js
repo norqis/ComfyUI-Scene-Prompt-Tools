@@ -12428,7 +12428,6 @@ async function openScenePresetPicker(node) {
     status.setAttribute("role", "status");
     status.textContent = "読み込み中…";
     popup.append(status);
-    fitPopupToContent(popup);
     await waitForModalPaint();
     if (activePopup !== popup || activePopupContext?.node !== node) return;
     const presets = await loadPopupRequest(
@@ -12491,6 +12490,7 @@ async function openScenePresetPicker(node) {
         list.appendChild(button);
     }
     popup.appendChild(list);
+    fitPopupToContent(popup);
 }
 
 async function loadFullSceneLLMPreset(presetId) {

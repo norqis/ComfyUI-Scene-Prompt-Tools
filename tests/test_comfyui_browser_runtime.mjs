@@ -3423,6 +3423,28 @@ window.__sceneSeedRuntimeTest = {
     await verifySceneModalHistory(page);
     await verifyCandidateEditHistory(page);
     await verifyCandidateReloadSelections(page);
+    await page.route('**/scene_presets/list', route => route.fulfill({ json: {
+        presets: Array.from({ length: 60 }, (_, index) => ({ metadata: {
+            preset_id: `height-${index}`, name: `Preset ${String(index).padStart(2, '0')}`,
+        } })), errors: [],
+    } }));
+    await page.setViewportSize({ width: 1100, height: 900 });
+    const heightReferenceId = await page.evaluate(async () => {
+        const node = window.LiteGraph.createNode('ScenePresetReference'); window.app.graph.add(node);
+        await window.__sceneSeedRuntimeTest.refreshPresetReference(node);
+        node.widgets.find(widget => widget.sceneRole === 'scene_preset_select').callback();
+        return node.id;
+    });
+    await page.waitForFunction(() => document.querySelector('.pc-popup.pc-fit-content')?.getBoundingClientRect().height >= 500);
+    const nativePresetPicker = page.locator('.pc-popup');
+    assert.equal(await nativePresetPicker.locator('.pc-popup-list button').count(), 60);
+    assert.equal(await nativePresetPicker.locator('.pc-popup-list').evaluate(list => list.scrollHeight > list.clientHeight), true);
+    const nativePresetRect = await nativePresetPicker.boundingBox();
+    assert(nativePresetRect.y >= 12 && nativePresetRect.y + nativePresetRect.height <= 888);
+    await nativePresetPicker.locator('[title="Preset ID: height-59"]').click();
+    assert.equal(await nativePresetPicker.count(), 0);
+    assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'preset_id').value, heightReferenceId), 'height-59');
+    await page.unroute('**/scene_presets/list');
     await page.waitForTimeout(100);
     assert.deepEqual(pageErrors, []);
     console.log("real ComfyUI local metadata HTTP, model/LoRA dialogs, retry, red links and weighted Matrix input preservation passed");
