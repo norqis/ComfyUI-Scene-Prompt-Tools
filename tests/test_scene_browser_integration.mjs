@@ -227,7 +227,10 @@ export const api = {
     if (url.includes("/runs/claim")) payload = { claimed: true };
     if (url.includes("/runs/release")) payload = { released: true };
     if (url.includes("saved_prompts")) payload = { saved_prompts: [savedPrompt], saved_prompt: savedPrompt };
-    if (url.includes("/scene_presets/list")) payload = { presets: [{ metadata: { preset_id: "browser-preset", name: "Browser Preset" } }], errors: [] };
+    if (url.includes("/scene_presets/list")) {
+      if (window.__scenePresetListWait) await window.__scenePresetListWait;
+      payload = window.__scenePresetListFixture || { presets: [{ metadata: { preset_id: "browser-preset", name: "Browser Preset" } }], errors: [] };
+    }
     if (url.includes("/scene_presets/load")) payload = {
       metadata: { preset_id: "browser-preset", name: "Browser Preset" },
       schema_version: 1,
@@ -351,7 +354,7 @@ const server = http.createServer(async (request, response) => {
                 + `  openCreatePromptPopup,\n`
                 + `  openSearchPopup, openPromptCandidatePopup, openCategoryLevelPicker, loadFavorites, setMatrixLineDraftContext,\n`
                 + `  attachMatrixTextAreaAutocomplete, readMatrixState,\n`
-                + `  openScenePresetSwitchNames, openScenePresetSwitchSettings, refreshScenePresetSwitchLabels, applyScenePresetSwitchBindings,\n`
+                + `  openScenePresetPicker, loadScenePresetList, openScenePresetSwitchNames, openScenePresetSwitchSettings, refreshScenePresetSwitchLabels, applyScenePresetSwitchBindings,\n`
                 + `  syncAllScenePromptNames,\n`
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset, installScenePresetSwitchBindings, prepareSceneRunContext, syncSceneMatrixPromptInputs,\n`
@@ -922,6 +925,48 @@ async function checkPresetSwitchModals(browser, url) {
     });
     assert.deepEqual(binding, { values: Array.from({ length: 10 }, (_, i) => i === 2) });
     assert.equal(await page.evaluate(() => window.__scenePromptExtension.settings.every(setting => setting.category[0] === "Scene Prompt Tools")), true);
+    await names.getByRole("button", { name: "閉じる", exact: true }).click();
+    await page.evaluate(async () => {
+        const hooks = window.__scenePromptPopupTestHooks;
+        await hooks.loadScenePresetList();
+        window.__scenePresetListFixture = { presets: Array.from({ length: 60 }, (_, index) => ({
+            metadata: { preset_id: `height-${index}`, name: `Preset ${String(index).padStart(2, "0")}` },
+        })), errors: [] };
+        window.__scenePresetListWait = new Promise(resolve => { window.__releasePresetList = resolve; });
+        void hooks.loadScenePresetList(true);
+        window.__presetOpening = hooks.openScenePresetPicker(window.__switchReference);
+    });
+    const picker = page.locator(".pc-popup");
+    await picker.getByRole("status").getByText("読み込み中…", { exact: true }).waitFor();
+    const loadingHeight = await picker.evaluate(async popup => {
+        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+        return popup.getBoundingClientRect().height;
+    });
+    assert(loadingHeight >= 600, `loading preserves normal popup height, got ${loadingHeight}`);
+    await page.evaluate(async () => {
+        window.__scenePresetListWait = null; window.__releasePresetList(); await window.__presetOpening;
+    });
+    const assertPickerHeight = async (minimum) => {
+        await page.waitForFunction(min => document.querySelector(".pc-popup.pc-fit-content")?.getBoundingClientRect().height >= min, minimum);
+        const rect = await picker.boundingBox(), viewport = page.viewportSize();
+        assert(rect.y >= 12 && rect.y + rect.height <= viewport.height - 12);
+        assert.equal(await picker.locator(".pc-popup-list").evaluate(list => list.scrollHeight > list.clientHeight), true);
+        assert.equal(await picker.locator('.pc-popup-list button').count(), 60);
+    };
+    await assertPickerHeight(500);
+    if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR) await page.screenshot({ path: resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, "preset-picker-height.png") });
+    await page.evaluate(() => { window.__presetBeforeReload = document.querySelector(".pc-popup"); });
+    await picker.getByRole("button", { name: "再読み込み", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector(".pc-popup") !== window.__presetBeforeReload);
+    await assertPickerHeight(500);
+    await picker.getByRole("button", { name: "閉じる", exact: true }).click();
+    await page.setViewportSize({ width: 1100, height: 400 });
+    await page.evaluate(() => window.__scenePromptPopupTestHooks.openScenePresetPicker(window.__switchReference));
+    await assertPickerHeight(250);
+    if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR) await page.screenshot({ path: resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, "preset-picker-short.png") });
+    await picker.locator('[title="Preset ID: height-59"]').click();
+    assert.equal(await picker.count(), 0);
+    assert.equal(await page.evaluate(() => window.__switchReference.widgets.find(widget => widget.name === "preset_id").value), "height-59");
     await page.close();
     console.log("Chromium Preset switch names/mapping, source/target labels, no-op/history balance, stale owner, legacy migration and replay binding passed.");
 }
