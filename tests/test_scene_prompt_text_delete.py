@@ -253,11 +253,22 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
         plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=self.build('A'), scene_prompt2=self.build('B'))[0]
         expand = self.nodes.ScenePromptExpand()
         for index, seed in ((0, 7), (1, 11)):
-            expand.expand(scene_prompt=plan, current_index=index, seed_base=seed, run_handle=handle, unique_id='expand')
+            expand.expand(scene_prompt=plan, current_index=index, seed_base=seed, run_id='active-batch', run_handle=handle, unique_id='expand')
         self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand')[:2], (1, 12))
         with self.assertRaises(IndexError):
-            expand.expand(scene_prompt=plan, current_index=2, seed_base=100, run_handle=handle, unique_id='expand')
+            expand.expand(scene_prompt=plan, current_index=2, seed_base=100, run_id='active-batch', run_handle=handle, unique_id='expand')
         self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand')[:2], (1, 12))
+
+    def test_normal_expand_recovery_records_the_effective_selection_for_replay(self):
+        handle = self.runs.create_run_context('default')
+        plan = self.nodes.ScenePromptQueue().queue(scene_prompt1=self.build('A'), scene_prompt2=self.build('B'))[0]
+        expand = self.nodes.ScenePromptExpand()
+        expand.expand(scene_prompt=plan, current_index=1, seed_base=7, run_handle=handle, unique_id='expand')
+        self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand')[:2], (1, 8))
+        result = expand.expand(scene_prompt=plan, current_index=39, seed_base=100, run_handle=handle, unique_id='expand')
+        self.assertEqual(result[0], 'A')
+        self.assertEqual(result[2]['file_index'], 1)
+        self.assertEqual(self.runs.get_run_consumer_selection(handle, 'expand')[:2], (0, 100))
 
     def test_mapped_scene_inputs_keep_their_actual_plan_and_save_call_selection(self):
         handle = self.runs.create_run_context('default', continuous=True)
