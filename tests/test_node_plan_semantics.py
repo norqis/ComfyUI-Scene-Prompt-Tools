@@ -5,6 +5,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from comfy_stubs import install_comfy_execution_stub, install_torch_stub
 
@@ -553,7 +554,30 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         output = self.nodes.ScenePromptExpand().expand(current_index=1, timestamp_dir=False, scene_prompt=plan)
         self.assertEqual(output[4]["samples"].shape[0], 3)
         with self.assertRaisesRegex(IndexError, "生成番号 2 は生成計画の範囲外"):
-            self.nodes.ScenePromptExpand().expand(current_index=2, timestamp_dir=False, scene_prompt=plan)
+            self.nodes.ScenePromptExpand().expand(current_index=2, run_id="active-batch", timestamp_dir=False, scene_prompt=plan)
+
+    def test_normal_expand_recovers_only_an_out_of_range_index(self):
+        plan = self.nodes.SceneMatrix().build(json.dumps({"version": 1, "sets": [
+            {"row_id": "first", "name": "First", "path_label": "First", "positive_base": "first"},
+            {"row_id": "second", "name": "Second", "path_label": "Second", "positive_base": "second"},
+        ]}))[0]
+        original = json.dumps(plan)
+        expand = self.nodes.ScenePromptExpand()
+        for requested, expected in [(0, 0), (1, 1), (2, 0), (39, 0)]:
+            with self.subTest(requested=requested):
+                with patch.object(self.nodes, "_dispatch_expand_callback") as callbacks, patch.object(self.nodes, "_record_consumer_selection") as selection:
+                    actual = expand.expand(current_index=requested, seed_base=7, timestamp_dir=False, scene_prompt=plan, unique_id="expand")
+                    self.assertEqual(selection.call_args.args[2], expected)
+                    self.assertTrue(all(call.args[4]["exec_current_count"] == expected + 1 for call in callbacks.call_args_list))
+                reference = expand.expand(current_index=expected, seed_base=7, timestamp_dir=False, scene_prompt=plan, unique_id="expand")
+                self.assertEqual(actual[:4], reference[:4])
+        self.assertEqual(json.dumps(plan), original)
+        longer_plan = self.nodes.ScenePromptCounter().count(count=40)[0]
+        valid = expand.expand(current_index=39, seed_base=7, timestamp_dir=False, scene_prompt=longer_plan)
+        self.assertEqual(valid[2]["file_index"], 40)
+        self.assertEqual(valid[3], 46)
+        with self.assertRaisesRegex(IndexError, "生成番号 39 は生成計画の範囲外"):
+            expand.expand(current_index=39, run_id="active-batch", timestamp_dir=False, scene_prompt=plan)
 
     def test_expand_distinguishes_an_empty_plan_from_a_stale_index(self):
         empty = self.nodes.SceneMatrix().build(json.dumps({
@@ -565,8 +589,9 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
                 "enabled": False,
             }],
         }))[0]
-        with self.assertRaisesRegex(IndexError, "生成計画に生成対象がありません"):
-            self.nodes.ScenePromptExpand().expand(current_index=0, timestamp_dir=False, scene_prompt=empty)
+        for index in [0, 39]:
+            with self.subTest(index=index), self.assertRaisesRegex(IndexError, "生成計画に生成対象がありません"):
+                self.nodes.ScenePromptExpand().expand(current_index=index, timestamp_dir=False, scene_prompt=empty)
 
     def test_nested_maximum_counts_keep_the_exact_derived_total(self):
         first = self.nodes.ScenePromptCounter().count(count=10_000)[0]

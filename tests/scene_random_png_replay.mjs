@@ -45,6 +45,25 @@ export async function testRandomPngReplay(page) {
             await app.handleFile(new File([blob], 'random-replay.png', { type: 'image/png' }));
         };
 
+        const validIndexReplays = [];
+        for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) {
+            app.graph.clear();
+            const first = add('ScenePrompter'), second = add('ScenePrompter'), queue = add('ScenePrompterQueue');
+            const expand = add('ScenePrompterExpand'), image = add('TestSceneTextImage'), save = add('SceneSaveImage');
+            set(first, 'positive_base', 'UNSELECTED_PRELUDE'); set(second, 'positive_base', 'VALID_SELECTED_ROW');
+            set(queue, 'order_mode', 'input_order'); set(queue, 'alternate_block_size', 1); set(queue, 'downstream_count_mode', 'multiply');
+            connect(first, queue, 'scene_prompt1'); connect(second, queue, 'scene_prompt2'); connect(queue, expand);
+            set(expand, 'current_index', 1); set(expand, 'timestamp_dir', false);
+            connect(expand, image, 'positive'); connect(expand, image, 'negative', 1);
+            connect(image, save, 'images'); connect(expand, save, 'scene_info', 2); set(save, 'metadata_mode', mode);
+            let execution = await execute(true);
+            const rows = [execution[image.id].text];
+            await reloadPng(execution[save.id].images[0]);
+            const captured = await app.graphToPrompt();
+            const index = captured.output[String(expand.id)].inputs.current_index;
+            execution = await execute(true); rows.push(execution[image.id].text);
+            validIndexReplays.push({ mode, index, rows });
+        }
         const switches = [];
         const linkedText = [];
         for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) {
@@ -175,8 +194,13 @@ export async function testRandomPngReplay(page) {
                 index: captured.output[String(first.id)].inputs.current_index,
                 weights: captured.output[String(random.id)].inputs.weights_json });
         }
-        return { random: results, switches, linkedRandom, linkedText };
+        return { random: results, switches, linkedRandom, linkedText, validIndexReplays };
     });
+    for (const entry of result.validIndexReplays) {
+        assert.equal(entry.index, entry.mode === 'ワークフロー全体' ? 1 : 0);
+        assert.deepEqual(entry.rows, [['VALID_SELECTED_ROW', ''], ['VALID_SELECTED_ROW', '']],
+            `${entry.mode}: ordinary Queue preserves a valid saved Scene row`);
+    }
     for (const entry of result.linkedText) {
         assert.deepEqual(entry.rows.map(row => row[0]), ['SAVED_B, RED', 'SAVED_B, RED']);
         if (entry.mode === '生成経路ノードのみ') {

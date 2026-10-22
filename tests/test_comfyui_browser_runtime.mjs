@@ -426,6 +426,65 @@ window.__sceneSeedRuntimeTest = {
         nativeRunChecks = false;
         await page.unroute('**/prompt', allowPreviewQueue);
     }
+    const staleIndexRequests = [];
+    const allowStaleIndexQueue = async route => {
+        staleIndexRequests.push(route.request().postDataJSON());
+        await route.continue();
+    };
+    await page.route('**/prompt', allowStaleIndexQueue);
+    nativeRunChecks = true;
+    try {
+        const ids = await page.evaluate(async () => {
+            const app = window.app; app.graph.clear();
+            const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+            const set = (node, name, value) => { node.widgets.find(widget => widget.name === name).value = value; };
+            const connect = (source, target, name) => source.connect(0, target, target.inputs.findIndex(input => input.name === name));
+            const input = add('ScenePresetInput'), scene = add('ScenePrompter'), output = add('ScenePresetOutput');
+            set(scene, 'positive_base', 'cold_normal_execution');
+            connect(input, scene, 'scene_prompt'); connect(scene, output, 'scene_prompt');
+            const graph = await app.graphToPrompt();
+            const response = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ preset_id: 'native-stale-index', output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow }) });
+            if (!response.ok) throw new Error(await response.text());
+            app.graph.clear();
+            const reference = add('ScenePresetReference'), expand = add('ScenePrompterExpand'), preview = add('PreviewAny');
+            set(reference, 'preset_id', 'native-stale-index');
+            await window.__sceneSeedRuntimeTest.refreshPresetReference(reference);
+            connect(reference, expand, 'scene_prompt'); connect(expand, preview, 'source');
+            return { expand: expand.id, preview: preview.id };
+        });
+        for (const runId of ['', 'saved-old-run']) {
+            const before = runRequests.length;
+            await page.evaluate(async ({ id, runId }) => {
+                const expand = window.app.graph.getNodeById(id);
+                expand.widgets.find(widget => widget.name === 'current_index').value = 39;
+                expand.widgets.find(widget => widget.name === 'run_id').value = runId;
+                await window.app.queuePrompt(0, 1);
+            }, { id: ids.expand, runId });
+            const request = staleIndexRequests.at(-1);
+            assert(request, 'native ordinary Queue sends a prompt without starting a batch');
+            const historyDeadline = Date.now() + 30_000;
+            let history;
+            while (Date.now() < historyDeadline) {
+                const histories = await (await fetch(`${url}/history`)).json();
+                history = Object.values(histories).find(entry => entry.prompt[2][String(ids.expand)]?.inputs?.run_handle === request.prompt[String(ids.expand)].inputs.run_handle);
+                if (history?.status?.completed || history?.status?.status_str === 'error') break;
+                await new Promise(resolveTimer => setTimeout(resolveTimer, 50));
+            }
+            assert.equal(history?.status?.status_str, 'success', JSON.stringify(history?.status));
+            assert.deepEqual(history.outputs[String(ids.preview)].text, ['cold_normal_execution']);
+            assert.equal(request.prompt[String(ids.expand)].inputs.current_index, 39, 'ordinary submission preserves the saved workflow controls');
+            assert.equal(request.prompt[String(ids.expand)].inputs.run_id, '');
+            assert.equal(runRequests.slice(before).filter(path => path.endsWith('/prepare')).length, 1);
+            assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'current_index').value,
+                ids.expand), 39, 'recovery does not edit the live workflow');
+        }
+        assert.equal(staleIndexRequests.length, 2);
+        console.log('real ComfyUI cold normal Queue with Preset and stale index 39 succeeds without warming a continuous run');
+    } finally {
+        nativeRunChecks = false;
+        await page.unroute('**/prompt', allowStaleIndexQueue);
+    }
     let releaseBatchPost;
     const batchPostGate = new Promise(resolveGate => { releaseBatchPost = resolveGate; });
     const collisionRequests = [];
