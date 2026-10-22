@@ -3083,6 +3083,10 @@ class ScenePromptExpand:
         if run_handle and unique_id is not None and isinstance(prompt, dict):
             set_run_prompt_reference(run_handle, unique_id, prompt)
         plan = _scene_run_plan(run_handle, scene_prompt, unique_id)
+        # A normal run can retain progress from a longer, previous Scene plan.
+        total_batches = plan["stats"]["total_batches"]
+        if not str(run_id or "").strip() and total_batches > 0 and current_index >= total_batches:
+            current_index = 0
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + current_index) % SEED_MODULO
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True, seed=seed)
