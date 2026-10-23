@@ -85,7 +85,7 @@ Normal Queue submissions use the latest Scene Matrix enabled state and row order
 
 ### Matrix Preset rows (v0.11.18)
 
-The Matrix editor provides **通常行を追加** and **Preset行を追加**. A Preset row selects a saved Preset and its switch settings; it also supports the usual row name, enabled state, move-up, filename, duplicate and delete controls. Connect a switch bundle to the Matrix's optional **スイッチ一式** input to map incoming switches separately for each Preset row. Changes save immediately.
+The Matrix editor provides **通常行を追加** and **Preset行を追加**. A Preset row selects a saved Preset and its switch settings; it also supports the usual positive/negative candidates and manual text, row name, enabled state, move-up, filename, duplicate and delete controls. Row prompts are added after the Preset's own output. Connect a switch bundle to the Matrix's optional **スイッチ一式** input to map incoming switches separately for each Preset row. Changes save immediately. On the node, Preset output rows have light purple outlines; normal output rows remain blue. Rows with filename inclusion enabled show **ファイル名ON** at the right edge.
 
 Every scene produced by a Preset row combines with each upstream scene. For upstream A/B and rows X plus Preset Y/Z, the order is **AX, AY, AZ, BX, BY, BZ**. A Preset runs independently: its Delete, Reverse and Callback operate on its own prompt, then that result combines with the Matrix's upstream prompt. Runs retain the Preset and switch snapshot captured at their start. Disabling all configured rows produces zero scenes; an empty Matrix still passes its input through. Existing normal-only Matrix data keeps its original behavior.
 
