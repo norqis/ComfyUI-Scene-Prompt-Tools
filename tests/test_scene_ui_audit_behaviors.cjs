@@ -365,7 +365,8 @@ async function testCurrentDisplayAndRasterOwnership() {
         scenePromptInputSource: node => node.inputSource || null, linkedInputKey: node => node.inputLink || "",
         ensureMatrixJsonWidget: node => ctx.findWidget(node, "matrix_json"),
         matrixInputItems: node => node.inputSource ? [{ label: node.inputSource.title }] : [],
-        matrixOutputLabels(node) { calls.matrixParse++; return stateModule.parseMatrixState(ctx.findWidget(node, "matrix_json").value).sets.map(row => row.name); },
+        matrixLinesForNode(node) { calls.matrixParse++; return stateModule.parseMatrixState(ctx.findWidget(node, "matrix_json").value).sets; },
+        matrixLineLabel: row => row.name,
         sceneWorkflowLoadDepth: 0, activePopupContext: null, sceneTitleSyncNodes: new Set(), sceneLoadedRefreshNodes: new Set(), sceneDownstreamRefreshSources: new Set(),
         clearSceneFitHeightTimer() {}, clearTimeout() {}, invalidatePopupRequests() {}, closeSceneLoraDetails() {},
         closeSceneExpandResources() {}, closeSceneLoraPicker() {}, popupContextReferencesNode: () => false, isSceneExpandNodeName: () => false,
@@ -377,7 +378,7 @@ async function testCurrentDisplayAndRasterOwnership() {
         "estimateChipWidth", "estimateChipWidthWithContext", "selectedListLayout", "selectedListLayoutWidth", "selectedListLayoutCacheKey",
         "cachedSelectedListLayout", "selectedListHeight", "selectedListRenderCacheName", "roundedRect", "fitCanvasText", "drawSelectedListContent", "drawSelectedList",
         "sceneWidgetDrawHeight", "sceneWidgetDrawWidth", "sceneWidgetCanvasRatio", "cachedSceneWidgetCanvas",
-        "matrixDisplayCacheKey", "compactMatrixLabels", "matrixSectionHeight", "computeMatrixDisplayCache", "matrixDisplayCache", "drawMatrixSection", "drawMatrixList",
+        "matrixDisplayCacheKey", "compactMatrixLabels", "matrixOutputItems", "matrixSectionHeight", "computeMatrixDisplayCache", "matrixDisplayCache", "drawMatrixSection", "drawMatrixList",
         "clearSceneSelectedListLayoutCaches", "clearSceneComputedCaches", "installSceneNodeRemovalCleanup"]) vm.runInContext(functionSource(name), ctx);
     const item = (label, weight = 1.1, id = "one") => ({ id, label, prompt: label, category_path: ["Canvas"], category_key: "Canvas", category_label: "Canvas", weight });
     const selection = (label, weight = 1.1, id) => JSON.stringify({ version: 1, categories: { Canvas: [item(label, weight, id)] } });

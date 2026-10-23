@@ -6541,10 +6541,10 @@ function matrixInputItems(node) {
     return items;
 }
 
-function matrixOutputLabels(node) {
-    return matrixLinesForNode(node)
-        .map((line) => matrixLineLabel(line))
-        .filter(Boolean);
+function matrixOutputItems(node) {
+    const lines = matrixLinesForNode(node).filter(line => matrixLineLabel(line));
+    return compactMatrixLabels(lines.map(line => matrixLineLabel(line))).map((item, index) =>
+        !item.muted && lines[index].row_kind === "preset" ? { ...item, color: "#c4a7e7" } : item);
 }
 
 function matrixSectionHeight(section) {
@@ -6573,7 +6573,7 @@ function computeMatrixDisplayCache(node, width = null, cacheKey = null) {
             title: "出力 matrix",
             color: "#6da0c2",
             empty: "",
-            items: compactMatrixLabels(matrixOutputLabels(node)),
+            items: matrixOutputItems(node),
         },
     ];
     const naturalHeight = Math.max(56, 8 + sections.reduce((total, section) => total + matrixSectionHeight(section), 0));
@@ -6621,7 +6621,7 @@ function drawMatrixSection(ctx, section, width, cursorY) {
     ctx.font = "11px sans-serif";
     for (const item of section.items) {
         ctx.fillStyle = item.muted ? "#b7bdc8" : "#30343b";
-        ctx.strokeStyle = item.muted ? "#59616e" : section.color;
+        ctx.strokeStyle = item.muted ? "#59616e" : item.color || section.color;
         ctx.beginPath();
         roundedRect(ctx, 10, cursorY + 1, itemWidth, 15, 4);
         ctx.fill();
