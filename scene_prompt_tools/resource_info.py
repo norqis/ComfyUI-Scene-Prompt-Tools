@@ -18,6 +18,7 @@ from .presets import (
     _effective_scene_closure,
     _validate_preset_graph,
     prepare_preset_occurrences,
+    matrix_row_references,
 )
 from .switches import safe_control, resolve_switches
 
@@ -170,6 +171,8 @@ def connected_resources(api_graph, expand_node_id, user_id="default"):
                 node_name = _node_label(node, node_id)
                 add_lora(lora_name, lora_mode, strength_model, strength_clip, "model", applies, node_name, unresolved)
                 add_lora(lora_name, lora_mode, strength_model, strength_clip, "clip", applies, node_name, unresolved)
+            elif kind == "SceneMatrix":
+                visit_scene(matrix_row_references(str(node_id), node), resource_nodes, path, bindings)
             elif kind == "ScenePresetReference":
                 preset_id = _literal(resource_nodes, inputs.get("preset_id"), "")
                 if preset_id in visiting_presets:

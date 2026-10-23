@@ -746,6 +746,10 @@ def _contains_composite(unit):
 
 def merge(left, right):
     first, second = normalize_plan(left), normalize_plan(right)
+    if _inert_random_arm(first) and not second["random_guards"]:
+        return mark_prompt_whole(first)
+    if _inert_random_arm(second) and not first["random_guards"]:
+        return mark_prompt_whole(second)
     if first["random_guards"] or second["random_guards"]:
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Prompt Merge は使えません。")
     boundary = first["contains_queue_boundary"] or second["contains_queue_boundary"]

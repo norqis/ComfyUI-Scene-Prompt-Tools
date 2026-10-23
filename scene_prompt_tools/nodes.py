@@ -97,6 +97,7 @@ MATRIX_LINE_KEYS = {
     "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled", "filename_enabled",
     "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
     "positive_parts", "negative_parts", "display_labels", "display_label_groups",
+    "row_kind", "preset_id", "switch_settings_json",
 }
 MATRIX_LINE_REQUIRED_LEGACY_KEYS = {"row_id", "name", "path_label"}
 SCENE_SAVE_INFO_TYPE = "SCENE_SAVE_INFO"
@@ -1442,6 +1443,16 @@ def _normalize_matrix_line_set(value):
         raise ValueError("Scene Matrix entry enabled must be a boolean.")
     if not isinstance(value.get("filename_enabled", False), bool):
         raise ValueError("Scene Matrix entry filename_enabled must be a boolean.")
+    row_kind = value.get("row_kind", "normal")
+    if row_kind not in {"normal", "preset"}:
+        raise ValueError("Scene Matrix row_kind is invalid.")
+    if row_kind == "preset":
+        from .switches import switch_settings
+        if not isinstance(value.get("preset_id", ""), str):
+            raise ValueError("Scene Matrix preset_id must be a string.")
+        switch_settings(value.get("switch_settings_json", "[]"))
+        if value.get("enabled", True) and not value.get("preset_id", "").strip():
+            raise ValueError(f"Scene Matrix行「{value['name']}」でPresetが選択されていません。")
 
     node_id = value.get("node_id", "").strip()
     category = value.get("category", "").strip()
@@ -1490,6 +1501,8 @@ def _normalize_matrix_line_set(value):
     )
 
     return {
+        **({"row_kind": "preset", "preset_id": value.get("preset_id", "").strip(),
+            "switch_settings_json": value.get("switch_settings_json", "[]")} if row_kind == "preset" else {}),
         "type": MATRIX_LINE_TYPE,
         "version": 1,
         "row_id": value["row_id"].strip(),
@@ -2059,6 +2072,7 @@ class SceneMatrix:
     def INPUT_TYPES(cls):
         optional = {
             "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"}),
+            "switches": ("SCENE_SWITCHES", {"display_name": "スイッチ一式"}),
         }
 
         return {
@@ -2101,11 +2115,19 @@ class SceneMatrix:
         unique_id=None,
         source_node_id="",
         source_node_name="",
+        switches=None,
         **kwargs,
     ):
-        del kwargs
         matrix_data = _parse_matrix_data(matrix_json)
         matrix_sets = _normalize_matrix_sets(matrix_data["sets"])
+        if any(row.get("row_kind") == "preset" and row["enabled"] for row in matrix_sets):
+            source = normalize_plan(scene_prompt)
+            guard = source["random_guards"][-1] if source["random_guards"] else None
+            if guard and (source["stats"]["total_batches"] != 0 or guard["weights"][guard["arm_index"]] != 0):
+                raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Matrix は使えません。")
+            from .presets import matrix_preset_plan
+            return (matrix_preset_plan(matrix_json, scene_prompt, run_handle, source_node_id or unique_id,
+                                       source_node_name, switches, **kwargs),)
         return (
             with_source_node(matrix_product(
                 scene_prompt,

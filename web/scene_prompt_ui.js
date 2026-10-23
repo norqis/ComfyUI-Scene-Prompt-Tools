@@ -5,7 +5,7 @@ import { createLLMController, LLM_TYPE, value as sceneLLMValue } from "./scene_p
 import { createGPUController, GPU_HANDOFF_SETTINGS } from "./scene_prompt_gpu.js";
 import { openCivitaiSearch, openLLMSettings, showAPIError, lookupCivitaiByHash, renderCivitaiDescription, waitForModalPaint } from "./scene_prompt_civitai.js";
 import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference, createPresetOperation } from "./scene_llm_presets.js";
-import { isSceneSwitch, sceneSwitchNames, sceneSwitchSettings, sceneMakeSwitchValues, sceneLiveSwitchSource, sceneLiveSwitchValue, sceneLiveSwitchSelection, sceneLiveReferenceSwitchValues, createScenePresetSwitchContext } from "./scene_prompt_switches.js";
+import { isSceneSwitch, sceneSwitchNames, sceneSwitchSettings, sceneMakeSwitchValues, sceneLiveSwitchSource, sceneLiveSwitchValue, sceneLiveSwitchSelection, sceneLiveReferenceSwitchValues, createScenePresetSwitchContext, resolveSceneSwitchSettings } from "./scene_prompt_switches.js";
 import {
     DEFAULT_SELECTED_JSON,
     MATRIX_DEFAULT_JSON,
@@ -318,6 +318,7 @@ let sceneLoadedRefreshTimer = null;
 let sceneLastPromptValidationErrorKey = "";
 let sceneLastPromptValidationErrorAt = 0;
 let scenePresetDisplayGraphs = new Map();
+const sceneMatrixPreparedPresets = new WeakMap();
 let scenePresetList = null;
 let scenePresetListErrors = [];
 let scenePresetListRequestGeneration = 0;
@@ -4449,9 +4450,11 @@ function normalizeSceneMatrixSockets(node) {
     }
     ensureScenePromptInput(node, "scene_prompt");
     removeInternalInputSockets(node, {
-        visibleNames: new Set(["scene_prompt"]),
+        visibleNames: new Set(["scene_prompt", "switches"]),
         removeAllExceptVisible: true,
     });
+    if (!linkedInput(node, "switches")) node.addInput?.("switches", "SCENE_SWITCHES", { shape: 7 });
+    if (linkedInput(node, "switches")) linkedInput(node, "switches").label = "スイッチ一式";
     syncInputLinkTargetSlots(node);
 
     const sceneOutput = ensureScenePromptOutput(node, "scene_prompt");
@@ -6254,6 +6257,7 @@ function normalizeMatrixWidgetValues(node, widget) {
     }
     if (cachedMatrixState(node, widget)) return;
     node.sceneMatrixStateCache = null;
+    node.sceneMatrixPresetDependencies = null;
     node.widgets_values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
     node.properties = node.properties || {};
 
@@ -6904,6 +6908,7 @@ function clearSceneComputedCaches(node) {
     node.scenePromptPreviewCache = null;
     node.sceneQueueScheduleCache = null;
     node.sceneMatrixStateCache = null;
+    node.sceneMatrixPresetDependencies = null;
 }
 
 function flushDownstreamSceneRefreshes() {
@@ -7291,8 +7296,15 @@ function scenePromptSourceLocalCacheKey(node) {
         return finish({ type: "prompt", title: scenePromptTitle(node) });
     }
     if (isPromptMatrixNode(node)) {
+        const matrixJson = String(ensureMatrixJsonWidget(node)?.value || MATRIX_DEFAULT_JSON);
+        if (node.sceneMatrixPresetDependencies?.serialized !== matrixJson) node.sceneMatrixPresetDependencies = {
+            serialized: matrixJson, rows: matrixLinesForNode(node).filter(row => row.row_kind === "preset"),
+        };
         return finish({ type: "matrix",
-            matrix_json: String(ensureMatrixJsonWidget(node)?.value || MATRIX_DEFAULT_JSON) });
+            matrix_json: matrixJson,
+            preset_revisions: node.sceneMatrixPresetDependencies.rows.map(row =>
+                `${row.preset_id}:${scenePresetDisplayGraphs.get(row.preset_id)?.metadata?.sha256 || ""}`).join("|"),
+        });
     }
     if (isScenePathNode(node)) {
         return finish({ type: "path", title: scenePathTitle(node),
@@ -7417,6 +7429,7 @@ function scenePresetStats(presetId, upstream, stack = new Set(), preferredPreset
             } else if (node.class_type === "SceneMatrix") {
                 const base = source("scene_prompt") || sceneStatsSeed();
                 const sets = parseMatrixStateValue(apiInput(node, "matrix_json")).sets;
+                if (sets.some(row => row.enabled && row.row_kind === "preset")) requiresSchedule = true;
                 const count = sets.filter((set) => set.enabled).length;
                 result = sets.length ? sceneStatsMatrix(base, count) : base;
             } else if (node.class_type === "ScenePath") {
@@ -7619,6 +7632,7 @@ function scenePromptStats(node, seen = new Set(), memo = new Map()) {
         return finish(upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed());
     }
     if (isPromptMatrixNode(node)) {
+        if (matrixLinesForNode(node).some(row => row.row_kind === "preset")) return finish(sceneScheduleForNode(node).stats);
         const matrixCount = matrixLinesForNode(node).length;
         const base = upstream ? scenePromptStats(upstream, new Set(seen), memo) : sceneStatsSeed();
         return finish(matrixCount || matrixConfiguredLineCount(node) ? sceneStatsMatrix(base, matrixCount) : base);
@@ -8181,6 +8195,8 @@ function sceneScheduleHasComposite(plan) {
 function sceneScheduleMerge(left, right) {
     if (left.stats.error) return left;
     if (right.stats.error) return right;
+    if (sceneRandomZeroArm(left) && !right.randomGuards.length) return left;
+    if (sceneRandomZeroArm(right) && !left.randomGuards.length) return right;
     if (left.randomGuards?.length || right.randomGuards?.length)
         return sceneScheduleError("ランダム分岐はOutputまたはQueueで合流してからMergeを接続してください。");
     const boundary = left.boundary || right.boundary;
@@ -8249,6 +8265,28 @@ function sceneScheduleQueue(plans, socketNames, controls, queueBoundary = true) 
         : sceneScheduleSequence(sceneSchedulePlan(adjusted.flatMap((plan) => plan.units)));
     return sceneSchedulePlan([controls.downstream_count_mode === "fixed"
         ? sceneScheduleWrapper("fixed", cycle) : cycle], queueBoundary);
+}
+
+function sceneScheduleMatrixPresets(base, rows, stack, instancePath, incoming) {
+    if (base.stats.error) return base;
+    if (incoming === null) return sceneScheduleError("接続されたスイッチ一式を確定できません。");
+    const plans = [];
+    for (const row of rows) {
+        const seed = sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
+        let child = seed;
+        if (row.row_kind === "preset") {
+            if (!row.preset_id) return sceneScheduleError(`Matrix行「${row.name}」でPresetが選択されていません。`);
+            if (stack.has(row.preset_id)) return sceneScheduleError(`Preset参照が循環しています: ${row.preset_id}`);
+            if (!scenePresetDisplayGraphs.has(row.preset_id)) return sceneScheduleError(`Preset「${row.preset_id}」を読み込めません。`);
+            const definition = scenePresetDisplayGraphs.get(row.preset_id);
+            if (!sceneMatrixPreparedPresets.has(definition)) sceneMatrixPreparedPresets.set(definition,
+                preparePresetReference({ widgets: [{ name: "preset_id", value: row.preset_id }] }, scenePresetDisplayGraphs).root);
+            child = sceneScheduleForPreset(row.preset_id, seed, stack, sceneMatrixPreparedPresets.get(definition), `${instancePath}/rows/${row.row_id}`,
+                resolveSceneSwitchSettings(incoming, row.switch_settings_json));
+        }
+        plans.push(sceneScheduleMatrix(child, [row], true));
+    }
+    return sceneScheduleMerge(base, sceneScheduleQueue(plans, plans.map((_, index) => `scene_prompt${index + 1}`), {}, false));
 }
 
 function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferredPreset = null, instancePath = String(presetId || ""), switchValues) {
@@ -8323,7 +8361,9 @@ function sceneScheduleForPreset(presetId, upstream, stack = new Set(), preferred
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 const configured = parseMatrixStateValue(apiInput(entry, "matrix_json")).sets;
                 const enabled = configured.filter((row) => row.enabled);
-                plan = sceneScheduleMatrix(base, enabled, configured.length > 0);
+                plan = enabled.some(row => row.row_kind === "preset")
+                    ? sceneScheduleMatrixPresets(base, enabled, nextStack, `${instancePath}/${nodeId}`, switches.childValues(entry))
+                    : sceneScheduleMatrix(base, enabled, configured.length > 0);
             } else if (entry.class_type === "ScenePrompter") {
                 const base = source("scene_prompt") || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
                 const title = String(apiInput(entry, "prompt_name") || "Scene Prompt");
@@ -8391,6 +8431,12 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
         return finish(sceneScheduleQueue(plans, sources.map(({ input }) => input.name), controls, isScenePromptQueueNode(node)));
     }
     const upstream = scenePromptInputSource(node);
+    if (isPromptMatrixNode(node) && matrixLinesForNode(node).some(row => row.row_kind === "preset")) {
+        const base = sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
+            || sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
+        return finish(sceneScheduleMatrixPresets(base, matrixLinesForNode(node), new Set(), String(node.id),
+            sceneLiveSwitchValue(node, "switches", "bundle")));
+    }
     if (isScenePromptCounterNode(node)) {
         const base = upstream ? sceneScheduleForLinkedInput(node, "scene_prompt", new Set(seen))
             : sceneSchedulePlan([sceneScheduleRun({ parts: [], count: 1, row: emptyMatrixRow() })]);
@@ -8516,6 +8562,8 @@ function sceneQueueBoundaryInNode(node, visiting = new Set(), completed = new Ma
     const finish = (value) => { visiting.delete(node); completed.set(node, value); return value; };
     if (isSceneNodeBypassed(node)) return finish(sceneQueueBoundaryInNode(sceneBypassInputSource(node), visiting, completed));
     if (isScenePromptQueueNode(node)) return finish(true);
+    if (isPromptMatrixNode(node) && matrixLinesForNode(node).some(row => row.row_kind === "preset"))
+        return finish(sceneScheduleForNode(node).boundary);
     if (isScenePromptRandomRouteOutputNode(node)) return finish(connectedScenePromptSourcesForQueue(node)
         .some(({ source }) => sceneQueueBoundaryInNode(source, visiting, completed)));
     if (isScenePresetReferenceNode(node)) {
@@ -8812,7 +8860,7 @@ function scenePromptLineageKey(node) {
             : isSceneEmptyLatentNode(current) ? ["width", "height", "batch_size"]
                 : isScenePromptQueueNode(current) ? SCENE_QUEUE_CONTROL_NAMES
                     : isScenePathNode(current) ? ["path_mode"]
-                    : isSceneSwitch(current) ? ["switch"] : isScenePresetReferenceNode(current) ? ["switches"] : [];
+                    : isSceneSwitch(current) ? ["switch"] : isScenePresetReferenceNode(current) || isPromptMatrixNode(current) ? ["switches"] : [];
         let selectedBranch = "";
         if (isSceneSwitch(current)) { try { selectedBranch = sceneLiveSwitchSelection(current); } catch { /* The control edge carries the unresolved provider. */ } }
         const edges = [];
@@ -8892,7 +8940,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
     if (stats.error) return finish([]);
     if (stats.hasCountHold) return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
 
-    if (isScenePresetReferenceNode(node)) {
+    if (isScenePresetReferenceNode(node) || (isPromptMatrixNode(node) && matrixLinesForNode(node).some(row => row.row_kind === "preset"))) {
         return finish(sceneSchedulePrefix(sceneScheduleForNode(node), maxEntries));
     }
     if (isSceneSwitch(node)) {
@@ -12011,13 +12059,21 @@ function openSceneMatrixLinesPopup(node) {
     list.className = "pc-popup-list";
     popup.appendChild(list);
 
-    const add = createButton("行を追加");
+    const add = createButton("通常行を追加");
     add.addEventListener("click", () => {
         drafts.push(createMatrixLineDraft(null, drafts.length));
         commitStructuralChange();
         renderRows();
     });
     toolbar.appendChild(add);
+    const addPreset = createButton("Preset行を追加");
+    addPreset.addEventListener("click", () => {
+        const draft = createMatrixLineDraft(null, drafts.length);
+        Object.assign(draft, { row_kind: "preset", preset_id: "", switch_settings_json: "[]" });
+        drafts.push(draft);
+        commitStructuralChange(); renderRows();
+    });
+    toolbar.appendChild(addPreset);
 
     const renderRows = () => {
         list.textContent = "";
@@ -12067,6 +12123,25 @@ function openSceneMatrixLinesPopup(node) {
             });
             actions.appendChild(moveUp);
 
+            if (draft.row_kind === "preset") {
+                const preset = scenePresetList?.find(entry => entry.preset_id === draft.preset_id);
+                const choose = createButton(preset ? `Preset: ${preset.name || preset.preset_id}` : "Presetを選択");
+                choose.addEventListener("click", () => openScenePresetPicker(node, { secondary: true, presetId: draft.preset_id,
+                    onSelect: (selected) => {
+                        draft.preset_id = selected.preset_id;
+                        if (!draft.preset_id || /^行 \d+$/.test(draft.name)) draft.name = draft.path_label = selected.name || selected.preset_id;
+                        commitDrafts(); renderRows();
+                    } }));
+                actions.appendChild(choose);
+                const settings = createButton("スイッチ設定"); settings.disabled = !draft.preset_id;
+                settings.addEventListener("click", () => openScenePresetSwitchSettings(node, { secondary: true,
+                    presetId: draft.preset_id, settings: draft.switch_settings_json,
+                    onChange: (index, value) => {
+                        const values = sceneSwitchSettings(draft.switch_settings_json); values[index] = value;
+                        draft.switch_settings_json = JSON.stringify(values); commitDrafts();
+                    } }));
+                actions.appendChild(settings);
+            } else {
             const positive = createButton("ポジティブ候補");
             positive.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "positive", renderRows, commitDrafts));
             actions.appendChild(positive);
@@ -12074,6 +12149,7 @@ function openSceneMatrixLinesPopup(node) {
             const negative = createButton("ネガティブ候補");
             negative.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "negative", renderRows, commitDrafts));
             actions.appendChild(negative);
+            }
 
             const filename = createButton(draft.filename_enabled === true ? "ファイル名付与: ON" : "ファイル名付与: OFF", draft.filename_enabled === true ? "pc-on" : "");
             filename.addEventListener("click", () => {
@@ -12102,7 +12178,7 @@ function openSceneMatrixLinesPopup(node) {
             actions.appendChild(remove);
             row.appendChild(actions);
 
-            const positiveSummary = matrixLineDraftSummary(draft, "positive");
+            const positiveSummary = draft.row_kind === "preset" ? "" : matrixLineDraftSummary(draft, "positive");
             if (positiveSummary) {
                 const summary = document.createElement("div");
                 summary.className = "pc-candidate-desc";
@@ -12111,7 +12187,7 @@ function openSceneMatrixLinesPopup(node) {
                 row.appendChild(summary);
             }
 
-            const negativeSummary = matrixLineDraftSummary(draft, "negative");
+            const negativeSummary = draft.row_kind === "preset" ? "" : matrixLineDraftSummary(draft, "negative");
             if (negativeSummary) {
                 const summary = document.createElement("div");
                 summary.className = "pc-candidate-desc";
@@ -12340,6 +12416,9 @@ async function loadScenePresetList(force = false) {
             scenePresetListCacheCurrent = true;
             for (const sceneNode of sceneGraphNodes()) {
                 if (isScenePromptQueueNode(sceneNode)) syncSceneQueueControls(sceneNode);
+                if (isPromptMatrixNode(sceneNode) && matrixLinesForNode(sceneNode).some(row => row.row_kind === "preset")) {
+                    clearSceneComputedCaches(sceneNode); refreshDownstreamSceneNodes(sceneNode);
+                }
             }
             return scenePresetList;
         } catch (error) {
@@ -12423,8 +12502,8 @@ function sortedScenePresetCandidates(presets) {
     ));
 }
 
-async function openScenePresetPicker(node) {
-    const popup = openPopupShell(node, "Scene Presetを選択", { hideReload: true, hideClear: true });
+async function openScenePresetPicker(node, options = {}) {
+    const popup = openPopupShell(node, "Scene Presetを選択", { hideReload: true, hideClear: true, secondary: options.secondary });
     const status = document.createElement("div");
     status.className = "pc-empty";
     status.setAttribute("role", "status");
@@ -12451,7 +12530,7 @@ async function openScenePresetPicker(node) {
         );
         if (!refreshed) return;
         refreshAllScenePresetReferences(refreshed);
-        openScenePresetPicker(node);
+        openScenePresetPicker(node, options);
     });
     toolbar.appendChild(reload);
     popup.appendChild(toolbar);
@@ -12472,10 +12551,11 @@ async function openScenePresetPicker(node) {
     for (const preset of sortedScenePresetCandidates(presets)) {
         const button = createButton(preset.name || preset.preset_id);
         button.title = `Preset ID: ${preset.preset_id}`;
-        if (selectedScenePreset(node, presets)?.preset_id === preset.preset_id) {
+        if ((options.presetId ?? selectedScenePreset(node, presets)?.preset_id) === preset.preset_id) {
             button.classList.add("pc-on");
         }
         button.addEventListener("click", () => {
+            if (options.onSelect) { options.onSelect(preset); closePopup(); return; }
             if (findWidget(node, "preset_id")?.value !== preset.preset_id) {
                 withSceneUserChange(node, () => {
                     setWidgetValue(node, "preset_id", preset.preset_id);
@@ -12721,8 +12801,8 @@ function openScenePresetSwitchNames(node) {
     popup.appendChild(list);
 }
 
-function scenePresetSwitchMappingLabels(node) {
-    const presetId = String(findWidget(node, "preset_id")?.value || "");
+function scenePresetSwitchMappingLabels(node, selectedId = undefined) {
+    const presetId = String(selectedId ?? findWidget(node, "preset_id")?.value ?? "");
     const preset = node.scenePresetGraph || scenePresetDisplayGraphs.get(presetId);
     const target = Object.values(scenePresetGraphNodes(preset) || {}).find((entry) => entry.class_type === "ScenePresetInput");
     const origin = sceneLiveSwitchSource(node, "switches");
@@ -12735,11 +12815,11 @@ function scenePresetSwitchMappingLabels(node) {
     };
 }
 
-function openScenePresetSwitchSettings(node) {
-    const popup = openPopupShell(node, "スイッチ設定", { hideReload: true, hideClear: true });
+function openScenePresetSwitchSettings(node, options = {}) {
+    const popup = openPopupShell(node, "スイッチ設定", { hideReload: true, hideClear: true, secondary: options.secondary });
     popup.dataset.scenePresetSwitchModal = "settings";
-    const labels = scenePresetSwitchMappingLabels(node);
-    const settings = sceneSwitchSettings(findWidget(node, "switch_settings_json")?.value);
+    const labels = scenePresetSwitchMappingLabels(node, options.presetId);
+    const settings = sceneSwitchSettings(options.settings ?? findWidget(node, "switch_settings_json")?.value);
     const list = document.createElement("div");
     list.className = "pc-popup-list";
     const note = document.createElement("p");
@@ -12757,7 +12837,7 @@ function openScenePresetSwitchSettings(node) {
             const option = document.createElement("option"); option.value = value; option.textContent = text; select.appendChild(option);
         }
         select.value = String(setting);
-        select.addEventListener("change", () => commitScenePresetSwitchValue(node, "switch_settings_json", index,
+        select.addEventListener("change", () => (options.onChange || ((index, value) => commitScenePresetSwitchValue(node, "switch_settings_json", index, value)))(index,
             select.value === "true" ? true : select.value === "false" ? false : Number(select.value)));
         row.appendChild(select); list.appendChild(row);
     });
@@ -12932,6 +13012,9 @@ function attachSceneMatrix(node) {
     ensurePromptMatrixControls(node);
     hidePromptMatrixWidgets(node);
     scheduleHideInternalDomWidgets();
+    if (matrixLinesForNode(node).some(row => row.row_kind === "preset")) loadScenePresetList(false).then(() => {
+        if (sceneNodeHasCurrentOwner(node)) { clearSceneComputedCaches(node); refreshDownstreamSceneNodes(node); }
+    }).catch(error => console.warn("[Scene Prompt]", error));
 
     installSceneResizeHandler(node, "simple");
 

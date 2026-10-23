@@ -112,6 +112,9 @@ for (const merge of [
 assert.equal(ctx.sceneScheduleMerge(randomJoined, leaf("B")).stats.total, 1,
     "connecting the missing arm restores a valid Merge count");
 const zeroArm = ctx.sceneSchedulePlan([], false, [{ gateId: "random-1", armIndex: 2, weights: randomWeights }]);
+assert.equal(ctx.sceneScheduleMerge(zeroArm, leaf("preset")).randomGuards[0].armIndex, 2);
+assert.equal(ctx.sceneScheduleMerge(leaf("preset"), zeroArm).stats.total, 0);
+assert.match(ctx.sceneScheduleMerge(zeroArm, guarded(leaf("active"), 0)).stats.error, /Merge/u);
 assert.equal(ctx.sceneScheduleMatrix(zeroArm, [], false).stats.error, undefined, "an inert zero-probability arm stays valid");
 assert.match(queue([zeroArm], controls()).stats.error, /0%を超える出力/u,
     "a Queue containing only zero-percent arms cannot close a missing positive-probability route");
@@ -423,6 +426,7 @@ Object.assign(ctx, {
     isScenePromptQueueNode: (node) => node.kind === "queue",
     isScenePromptRandomRouteOutputNode: (node) => node.kind === "random_output",
     isScenePresetReferenceNode: () => false,
+    isPromptMatrixNode: () => false,
     isScenePromptMergeNode: () => false,
     scenePromptInputSource: (node) => node.upstream || null,
     connectedScenePromptSourcesForQueue: (node) => (node.sources || []).map((source, index) =>
@@ -630,6 +634,31 @@ function verifyPresetMatrixMergeParity() {
     assert.equal(ctx.sceneScheduleMerge(latent, leaf("C", 1, 5)).stats.totalImages, 10);
 }
 verifyPresetMatrixMergeParity();
+
+async function verifyMatrixEmbeddedOverrides() {
+    const { preparePresetReference } = await import(require("node:url").pathToFileURL(path.join(__dirname, "..", "web", "scene_llm_presets.js")).href);
+    const child = { metadata: { preset_id: "matrix-child" }, workflow: { nodes: [] }, api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0], prompt_name: "Y" } },
+        3: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["2", 0], count: 2 } },
+        4: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["3", 0] } },
+    } } };
+    const local = structuredClone(child); local.api_graph.output[3].inputs.count = 3;
+    const parent = { metadata: { preset_id: "matrix-parent" }, workflow: { nodes: [] }, api_graph: { output: {
+        1: { class_type: "ScenePresetReference", inputs: { preset_id: "matrix-child", llm_presets_json: JSON.stringify({ version: 1, presets: { ".": local } }) } },
+        2: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["1", 0] } },
+    } } };
+    Object.assign(ctx, { preparePresetReference, sceneMatrixPreparedPresets: new WeakMap(),
+        scenePresetDisplayGraphs: new Map([["matrix-child", child], ["matrix-parent", parent]]) });
+    vm.runInContext(functionSource("sceneScheduleMatrixPresets"), ctx);
+    const rows = [{ row_kind: "preset", preset_id: "matrix-parent", row_id: "p", label: "P", switch_settings_json: "[]" }];
+    const plan = ctx.sceneScheduleMatrixPresets(leaf("A"), rows, new Set(), "matrix-7");
+    assert.equal(plan.stats.total, 3, "embedded child override replaces the shared Count2 with Count3");
+    assert.deepEqual(Array.from(prefix(plan)), ["AYP", "AYP", "AYP"]);
+    assert.equal(ctx.sceneMatrixPreparedPresets.has(parent), true, "warm preview reuses prepared definitions");
+    console.log("Matrix embedded Preset overrides count/preview parity passed.");
+}
+if (!process.argv.includes("--compact-count-response")) verifyMatrixEmbeddedOverrides().catch(error => { console.error(error); process.exitCode = 1; });
 
 if (process.argv.includes("--compact-count-response")) {
     async function verifyCompactCountResponse() {

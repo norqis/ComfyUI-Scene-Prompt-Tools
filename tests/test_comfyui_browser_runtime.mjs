@@ -300,6 +300,7 @@ window.__sceneSeedRuntimeTest = {
         return insertLoras(graph, graph.getNodeById(id), candidates, (type) => globalThis.LiteGraph.createNode(type));
     },
     countPreview(node) { return sceneSchedulePrefix(sceneScheduleForNode(node), 40).map(entry => entry.parts.join("")); },
+    nodePreview(node) { return scenePromptPreviewEntries(node, 40).map(entry => entry.parts.join("")); },
     presetSourceSnapshot() { return JSON.stringify([...scenePresetDisplayGraphs]); },
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
     openCandidatePicker(id, side = "positive") { return openPromptCandidatePopup(app.graph.getNodeById(id), ["Modal Undo Runtime"], { stateWidgetName: side + "_json" }); },
@@ -885,6 +886,7 @@ window.__sceneSeedRuntimeTest = {
     await page.route('**/prompt', allowPngReplayQueue);
     nativeRunChecks = true;
     try {
+        await (await import('./scene_matrix_presets_runtime.mjs')).testMatrixPresetRows(page);
         await (await import('./scene_random_png_replay.mjs')).testPresetReferenceFilenames(page);
         await (await import('./scene_random_png_replay.mjs')).testRandomPngReplay(page);
     } finally {
@@ -2294,8 +2296,8 @@ window.__sceneSeedRuntimeTest = {
         matrix.widgets.find(widget=>widget.sceneRole==='matrix_rows').callback();
         return {matrix:matrix.id,expand:expand.id};
     });
-    await page.getByRole('button',{name:'行を追加',exact:true}).click();
-    await page.getByRole('button',{name:'行を追加',exact:true}).click();
+    await page.getByRole('button',{name:'通常行を追加',exact:true}).click();
+    await page.getByRole('button',{name:'通常行を追加',exact:true}).click();
     await page.getByPlaceholder('名前').nth(0).fill('Native One'); await page.getByPlaceholder('名前').nth(1).fill('Native Two');
     await page.getByRole('button',{name:'ポジティブ候補',exact:true}).nth(0).click();
     await page.getByPlaceholder('ポジティブ基本文').fill('(native prompt:1.25)');
@@ -3468,7 +3470,7 @@ window.__sceneSeedRuntimeTest = {
         matrix.widgets.find(widget => widget.sceneRole === "matrix_rows").callback();
         return matrix.id;
     });
-    await page.getByRole("button", { name: "行を追加", exact: true }).click();
+    await page.getByRole("button", { name: "通常行を追加", exact: true }).click();
     await page.getByRole("button", { name: "ポジティブ候補", exact: true }).click();
     await page.getByPlaceholder("ポジティブ基本文").fill(weightedInput);
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
