@@ -635,6 +635,31 @@ function verifyPresetMatrixMergeParity() {
 }
 verifyPresetMatrixMergeParity();
 
+async function verifyMatrixEmbeddedOverrides() {
+    const { preparePresetReference } = await import(require("node:url").pathToFileURL(path.join(__dirname, "..", "web", "scene_llm_presets.js")).href);
+    const child = { metadata: { preset_id: "matrix-child" }, workflow: { nodes: [] }, api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} },
+        2: { class_type: "ScenePrompter", inputs: { scene_prompt: ["1", 0], prompt_name: "Y" } },
+        3: { class_type: "ScenePromptCounter", inputs: { scene_prompt: ["2", 0], count: 2 } },
+        4: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["3", 0] } },
+    } } };
+    const local = structuredClone(child); local.api_graph.output[3].inputs.count = 3;
+    const parent = { metadata: { preset_id: "matrix-parent" }, workflow: { nodes: [] }, api_graph: { output: {
+        1: { class_type: "ScenePresetReference", inputs: { preset_id: "matrix-child", llm_presets_json: JSON.stringify({ version: 1, presets: { ".": local } }) } },
+        2: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["1", 0] } },
+    } } };
+    Object.assign(ctx, { preparePresetReference, sceneMatrixPreparedPresets: new WeakMap(),
+        scenePresetDisplayGraphs: new Map([["matrix-child", child], ["matrix-parent", parent]]) });
+    vm.runInContext(functionSource("sceneScheduleMatrixPresets"), ctx);
+    const rows = [{ row_kind: "preset", preset_id: "matrix-parent", row_id: "p", label: "P", switch_settings_json: "[]" }];
+    const plan = ctx.sceneScheduleMatrixPresets(leaf("A"), rows, new Set(), "matrix-7");
+    assert.equal(plan.stats.total, 3, "embedded child override replaces the shared Count2 with Count3");
+    assert.deepEqual(Array.from(prefix(plan)), ["AYP", "AYP", "AYP"]);
+    assert.equal(ctx.sceneMatrixPreparedPresets.has(parent), true, "warm preview reuses prepared definitions");
+    console.log("Matrix embedded Preset overrides count/preview parity passed.");
+}
+if (!process.argv.includes("--compact-count-response")) verifyMatrixEmbeddedOverrides().catch(error => { console.error(error); process.exitCode = 1; });
+
 if (process.argv.includes("--compact-count-response")) {
     async function verifyCompactCountResponse() {
         const { preparePresetReference } = await import(require("node:url").pathToFileURL(path.join(__dirname, "..", "web", "scene_llm_presets.js")).href);

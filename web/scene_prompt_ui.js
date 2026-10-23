@@ -318,6 +318,7 @@ let sceneLoadedRefreshTimer = null;
 let sceneLastPromptValidationErrorKey = "";
 let sceneLastPromptValidationErrorAt = 0;
 let scenePresetDisplayGraphs = new Map();
+const sceneMatrixPreparedPresets = new WeakMap();
 let scenePresetList = null;
 let scenePresetListErrors = [];
 let scenePresetListRequestGeneration = 0;
@@ -8277,7 +8278,10 @@ function sceneScheduleMatrixPresets(base, rows, stack, instancePath, incoming) {
             if (!row.preset_id) return sceneScheduleError(`Matrix行「${row.name}」でPresetが選択されていません。`);
             if (stack.has(row.preset_id)) return sceneScheduleError(`Preset参照が循環しています: ${row.preset_id}`);
             if (!scenePresetDisplayGraphs.has(row.preset_id)) return sceneScheduleError(`Preset「${row.preset_id}」を読み込めません。`);
-            child = sceneScheduleForPreset(row.preset_id, seed, stack, null, `${instancePath}/rows/${row.row_id}`,
+            const definition = scenePresetDisplayGraphs.get(row.preset_id);
+            if (!sceneMatrixPreparedPresets.has(definition)) sceneMatrixPreparedPresets.set(definition,
+                preparePresetReference({ widgets: [{ name: "preset_id", value: row.preset_id }] }, scenePresetDisplayGraphs).root);
+            child = sceneScheduleForPreset(row.preset_id, seed, stack, sceneMatrixPreparedPresets.get(definition), `${instancePath}/rows/${row.row_id}`,
                 resolveSceneSwitchSettings(incoming, row.switch_settings_json));
         }
         plans.push(sceneScheduleMatrix(child, [row], true));
