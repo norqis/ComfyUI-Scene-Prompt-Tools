@@ -2253,7 +2253,7 @@ try {
     await page.getByRole("button", { name: "ポジティブ候補" }).nth(0).click();
     await page.evaluate(() => {
         const root = [...document.querySelectorAll(".pc-popup")].find((popup) => !popup.sceneSecondaryPopup);
-        [...root.querySelectorAll("button")].find((button) => button.textContent === "行を追加").click();
+        [...root.querySelectorAll("button")].find((button) => button.textContent === "通常行を追加").click();
     });
     assert.equal(await page.locator(".pc-popup").count(), 1, "a structural action closes its Matrix picker before committing");
     assert.deepEqual(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets.map((line) => line.name)), ["Reopen Name", "Line Two", "行 3"], "the structural action preserves root drafts and commits the new row");
@@ -2320,7 +2320,7 @@ try {
     assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[0].enabled), false, "toggling a Matrix row commits without a Save button");
     await page.getByRole("button", { name: "ファイル名付与: OFF", exact: true }).nth(0).click();
     assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets[0].filename_enabled), true, "filename toggles commit without a Save button");
-    await page.getByRole("button", { name: "行を追加", exact: true }).click();
+    await page.getByRole("button", { name: "通常行を追加", exact: true }).click();
     assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets.length), 3, "adding a Matrix row commits without a Save button");
     await page.getByRole("button", { name: "削除", exact: true }).nth(2).click();
     assert.equal(await page.evaluate(() => JSON.parse(window.__sceneMatrixTestNode.widgets.find((widget) => widget.name === "matrix_json").value).sets.length), 2, "deleting a Matrix row commits without a Save button");

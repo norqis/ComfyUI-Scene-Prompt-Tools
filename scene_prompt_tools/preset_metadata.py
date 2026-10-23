@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping
 from itertools import chain
-from .switches import safe_control, resolve_switches
+from .switches import safe_control, resolve_switches, make_switch_values
 
 
 PRESET_REFERENCE = "ScenePresetReference"
@@ -605,9 +605,13 @@ def _expand_workflow_only_reference(workflow, reference_id, preset, frozen_vecto
                     break
                 source_id, source_slot = edges[(source_id, input_slot)]
             source = by_id.get(source_id, {})
-            if source.get("type") != PRESET_INPUT or source_slot != 11:
+            if source.get("type") == "ScenePromptMakeSwitch" and source_slot == 0:
+                saved = source.get("widgets_values", [])
+                incoming_bundle = make_switch_values(source.get("widgets_values_named", {}).get("switch_values_json", saved[1] if len(saved) > 1 else "[]"))
+            elif source.get("type") == PRESET_INPUT and source_slot == 11:
+                incoming_bundle = source.get("properties", {}).get("scene_switch_values")
+            else:
                 raise ValueError("Presetのswitches入力を安全に取得できません。")
-            incoming_bundle = source.get("properties", {}).get("scene_switch_values")
     widgets = reference.get("widgets_values", [])
     settings = widgets[3] if len(widgets) > 3 else "[]"
     vector = tuple(frozen_vector) if frozen_vector is not None else resolve_switches(incoming_bundle, settings)
@@ -704,6 +708,16 @@ def _expand_workflow_only_references(workflow, preset_snapshots, display_only_re
     source_ids = {} if source_ids is None else source_ids
     display_only_references = set(display_only_references)
     while True:
+        matrix = next((node for node in workflow.get("nodes", [])
+                       if node.get("type") == "SceneMatrix" and node.get("mode") not in {2, 4}
+                       and _workflow_matrix_api(node, workflow) is not None), None)
+        if matrix is not None:
+            node_id = str(matrix["id"])
+            prompt = {node_id: _workflow_matrix_api(matrix, workflow)}
+            state = {"inserted": set(), "references": {}, "physical_links": []}
+            _inline_matrix_presets(prompt, workflow, node_id, source_ids, state)
+            _rebuild_expanded_workflow_links(prompt, workflow, state)
+            continue
         reference = next(
             (
                 node for node in workflow.get("nodes", [])
@@ -739,6 +753,78 @@ def _expand_workflow_only_references(workflow, preset_snapshots, display_only_re
                 display_only_references.add(copied_id)
 
 
+def _workflow_matrix_api(node, workflow):
+    from .presets import matrix_row_references
+    values = node.get("widgets_values", [])
+    serialized = node.get("widgets_values_named", {}).get("matrix_json", values[0] if values else "")
+    api = {"class_type": "SceneMatrix", "inputs": {"matrix_json": serialized},
+           "_meta": {"title": node.get("title", "Scene Matrix")}}
+    if not matrix_row_references(str(node["id"]), api):
+        return None
+    links = {parts[0]: parts for link in workflow.get("links", []) if (parts := _workflow_link_parts(link)) is not None}
+    for socket in node.get("inputs", []):
+        parts = links.get(socket.get("link"))
+        if parts is not None and socket.get("name") in {"scene_prompt", "switches"}:
+            api["inputs"][socket["name"]] = [parts[1], parts[2]]
+    return api
+
+
+def _inline_matrix_presets(prompt, workflow, node_id, source_ids, state):
+    from .presets import matrix_execution_graph, matrix_row_references
+    node = prompt[node_id]
+    if node.get("class_type") != "SceneMatrix" or not matrix_row_references(node_id, node):
+        return False
+    original = next(node for node in workflow["nodes"] if str(node.get("id")) == node_id)
+    source_id = source_ids.get(node_id, node_id)
+    graph = matrix_execution_graph(node_id, node, source_id)
+    allocate = _new_node_ids(prompt, workflow)
+    mapping = {key: node_id if key == node_id else allocate() for key in graph}
+    by_id = {str(node["id"]): node for node in workflow["nodes"]}
+    scene_slot = next((slot for slot, value in enumerate(original.get("inputs", [])) if value.get("name") == "scene_prompt"), None)
+    retained = []
+    for link in workflow.get("links", []):
+        parts = _workflow_link_parts(link)
+        if parts and parts[3] == node_id:
+            _remove_link_from_slots(by_id, link)
+            if parts[4] == scene_slot:
+                state["physical_links"].append((parts[1], parts[2], node_id, 0, parts[5]))
+        else:
+            retained.append(link)
+    workflow["links"] = retained
+    workflow["nodes"] = [value for value in workflow["nodes"] if str(value.get("id")) != node_id]
+    for index, (key, value) in enumerate(graph.items()):
+        new_id = mapping[key]
+        copied = copy.deepcopy(value)
+        inputs = copied["inputs"]
+        for name, raw in list(inputs.items()):
+            if _link(raw) and str(raw[0]) in mapping:
+                inputs[name] = [mapping[str(raw[0])], raw[1]]
+        prompt[new_id] = copied
+        source_ids[new_id] = str(inputs.get("source_node_id") or source_id)
+        kind = copied["class_type"]
+        if kind == PRESET_REFERENCE:
+            names = ["scene_prompt", "switches", "filename_enabled"]
+            widgets = [inputs["preset_id"], "", "{}", inputs.get("switch_settings_json", "[]"), False]
+        elif kind == "SceneMatrix":
+            names = ["scene_prompt", "switches"]
+            widgets = [inputs["matrix_json"], ""]
+        elif kind == "ScenePrompterMerge":
+            names = ["scene_prompt1", "scene_prompt2"]
+            widgets = []
+        else:
+            names = [f"scene_prompt{number}" for number in range(1, 11)]
+            widgets = []
+        workflow["nodes"].append({"id": _workflow_id(new_id), "type": kind, "mode": 0,
+            "title": original.get("title", "Scene Matrix") if key == node_id else copied.get("_meta", {}).get("title", kind),
+            "pos": [original.get("pos", [0, 0])[0] + 180 * (index % 4), original.get("pos", [0, 0])[1] + 120 * (index // 4)],
+            "size": [240, 120], "properties": {"Node name for S&R": kind}, "widgets_values": widgets,
+            "inputs": [{"name": name, "type": "SCENE_SWITCHES" if name == "switches" else "BOOLEAN" if name == "filename_enabled" else "SCENE_PROMPT", "link": None} for name in names],
+            "outputs": [{"name": "scene_prompt", "type": "SCENE_PROMPT", "links": list(original.get("outputs", [{}])[0].get("links", []) or []) if key == node_id else []}],
+        })
+    state["inserted"].update(mapping.values())
+    return True
+
+
 def expand_preset_references(prompt, workflow, preset_snapshots, expand_workflow_references=False):
     """Return an expanded prompt/workflow plus source-id aliases for path slicing."""
     if not isinstance(prompt, dict):
@@ -751,14 +837,17 @@ def expand_preset_references(prompt, workflow, preset_snapshots, expand_workflow
     state = {"inserted": set(), "references": {}, "physical_links": [], "display_only_references": set(),
              "switch_values": preset_snapshots.get("__switch_values__", {})}
     while True:
-        reference_id = next(
-            (
-                str(node_id)
-                for node_id, node in expanded_prompt.items()
-                if isinstance(node, dict) and node.get("class_type") == PRESET_REFERENCE
-            ),
-            None,
-        )
+        reference_id = None
+        lowered_matrix = False
+        for node_id, node in expanded_prompt.items():
+            if node.get("class_type") == PRESET_REFERENCE:
+                reference_id = str(node_id)
+                break
+            if _inline_matrix_presets(expanded_prompt, expanded_workflow, str(node_id), source_ids, state):
+                lowered_matrix = True
+                break
+        if lowered_matrix:
+            continue
         if reference_id is None:
             break
         inputs = expanded_prompt[reference_id].get("inputs")

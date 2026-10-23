@@ -19,6 +19,7 @@ const MATRIX_LINE_KEYS = [
     "type", "version", "row_id", "node_id", "category", "name", "path_label", "enabled", "filename_enabled",
     "positive_base", "positive_json", "negative_base", "negative_json", "category_order",
     "positive_parts", "negative_parts", "display_labels", "display_label_groups",
+    "row_kind", "preset_id", "switch_settings_json",
 ];
 const MATRIX_LINE_REQUIRED_LEGACY_KEYS = ["row_id", "name", "path_label"];
 
@@ -267,6 +268,8 @@ export function parseMatrixLine(value) {
     if (Object.hasOwn(value, "filename_enabled") && typeof value.filename_enabled !== "boolean") {
         throw new Error("Scene Matrix entry filename_enabled must be a boolean.");
     }
+    const rowKind = value.row_kind ?? "normal";
+    if (!["normal", "preset"].includes(rowKind)) throw new Error("Scene Matrix row_kind is invalid.");
 
     const name = requireString(value.name, "Scene Matrix line name", { allowEmpty: false }).trim();
     const pathLabel = requireString(value.path_label, "Scene Matrix line path label", { allowEmpty: false }).trim();
@@ -274,6 +277,11 @@ export function parseMatrixLine(value) {
     const fieldOrDefault = (field, fallback) => Object.hasOwn(value, field) ? value[field] : fallback;
 
     return {
+        ...(rowKind === "preset" ? {
+            row_kind: "preset",
+            preset_id: requireString(value.preset_id ?? "", "Scene Matrix preset id"),
+            switch_settings_json: requireString(value.switch_settings_json ?? "[]", "Scene Matrix switch settings"),
+        } : {}),
         type: MATRIX_LINE_TYPE,
         version: MATRIX_STATE_VERSION,
         row_id: rowId,

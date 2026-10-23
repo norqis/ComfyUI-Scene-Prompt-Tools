@@ -112,6 +112,9 @@ for (const merge of [
 assert.equal(ctx.sceneScheduleMerge(randomJoined, leaf("B")).stats.total, 1,
     "connecting the missing arm restores a valid Merge count");
 const zeroArm = ctx.sceneSchedulePlan([], false, [{ gateId: "random-1", armIndex: 2, weights: randomWeights }]);
+assert.equal(ctx.sceneScheduleMerge(zeroArm, leaf("preset")).randomGuards[0].armIndex, 2);
+assert.equal(ctx.sceneScheduleMerge(leaf("preset"), zeroArm).stats.total, 0);
+assert.match(ctx.sceneScheduleMerge(zeroArm, guarded(leaf("active"), 0)).stats.error, /Merge/u);
 assert.equal(ctx.sceneScheduleMatrix(zeroArm, [], false).stats.error, undefined, "an inert zero-probability arm stays valid");
 assert.match(queue([zeroArm], controls()).stats.error, /0%を超える出力/u,
     "a Queue containing only zero-percent arms cannot close a missing positive-probability route");
@@ -423,6 +426,7 @@ Object.assign(ctx, {
     isScenePromptQueueNode: (node) => node.kind === "queue",
     isScenePromptRandomRouteOutputNode: (node) => node.kind === "random_output",
     isScenePresetReferenceNode: () => false,
+    isPromptMatrixNode: () => false,
     isScenePromptMergeNode: () => false,
     scenePromptInputSource: (node) => node.upstream || null,
     connectedScenePromptSourcesForQueue: (node) => (node.sources || []).map((source, index) =>

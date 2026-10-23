@@ -2121,6 +2121,10 @@ class SceneMatrix:
         matrix_data = _parse_matrix_data(matrix_json)
         matrix_sets = _normalize_matrix_sets(matrix_data["sets"])
         if any(row.get("row_kind") == "preset" and row["enabled"] for row in matrix_sets):
+            source = normalize_plan(scene_prompt)
+            guard = source["random_guards"][-1] if source["random_guards"] else None
+            if guard and (source["stats"]["total_batches"] != 0 or guard["weights"][guard["arm_index"]] != 0):
+                raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Matrix は使えません。")
             from .presets import matrix_preset_plan
             return (matrix_preset_plan(matrix_json, scene_prompt, run_handle, source_node_id or unique_id,
                                        source_node_name, switches, **kwargs),)

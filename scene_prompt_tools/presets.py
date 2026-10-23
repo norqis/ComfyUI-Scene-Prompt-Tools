@@ -220,6 +220,8 @@ def _compact_matrix_json(value):
             return value
         name = str(line.get("name") or f"row-{index + 1}")
         compact.append({
+            **({key: line.get(key, "[]" if key == "switch_settings_json" else "")
+                for key in ("row_kind", "preset_id", "switch_settings_json")} if line.get("row_kind") == "preset" else {}),
             "row_id": str(line.get("row_id") or f"row-{index + 1}"),
             "name": name,
             "path_label": str(line.get("path_label") or name),
@@ -980,6 +982,11 @@ def _workflow_references(workflow):
         return []
     references = []
     for node in nodes:
+        if isinstance(node, dict) and node.get("type") == "SceneMatrix" and node.get("mode") not in {2, 4}:
+            values = node.get("widgets_values", [])
+            serialized = node.get("widgets_values_named", {}).get("matrix_json", values[0] if values else node.get("properties", {}).get("scene_matrix_json", ""))
+            for reference_id, reference in matrix_row_references(str(node.get("id")), {"inputs": {"matrix_json": serialized}}).items():
+                references.append((reference_id, reference["inputs"]["preset_id"], reference))
         if (
             not isinstance(node, dict)
             or node.get("type") != "ScenePresetReference"
