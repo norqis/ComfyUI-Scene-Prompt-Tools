@@ -35,6 +35,7 @@ from .nodes import (
     ScenePromptCallbackRequest,
     ScenePromptCallbackDesktop,
     _prune_workflow_reroutes,
+    _parse_matrix_data, _normalize_matrix_sets,
 )
 from .runs import get_run_user_id, require_run_context
 from .switches import (SCENE_SWITCHES_TYPE, switch_values as normalize_switch_values,
@@ -892,7 +893,85 @@ def _find_references(nodes):
         if isinstance(node, dict) and node.get("class_type") == "ScenePresetReference":
             preset_id = str(_node_inputs(node).get("preset_id") or "").strip()
             references.append((str(node_id), preset_id, node))
+        elif isinstance(node, dict) and node.get("class_type") == "SceneMatrix":
+            for reference_id, reference in matrix_row_references(str(node_id), node).items():
+                references.append((reference_id, reference["inputs"]["preset_id"], reference))
     return references
+
+
+def matrix_row_references(node_id, node):
+    inputs = _node_inputs(node)
+    serialized = inputs.get("matrix_json", "")
+    if not isinstance(serialized, str) or '"row_kind"' not in serialized:
+        return {}
+    rows = _normalize_matrix_sets(_parse_matrix_data(serialized)["sets"])
+    return {f"{node_id}/rows/{row['row_id']}": {
+        "class_type": "ScenePresetReference", "_meta": {"title": row["name"]}, "inputs": {
+            "preset_id": row["preset_id"], "switch_settings_json": row["switch_settings_json"],
+            **({"switches": inputs["switches"]} if "switches" in inputs else {}),
+        }} for row in rows if row.get("row_kind") == "preset" and row["enabled"]}
+
+
+def matrix_execution_graph(node_id, node, source_id=None):
+    """Lower Preset rows to the existing Scene graph, without expanding its events."""
+    inputs = _node_inputs(node)
+    raw_rows = _parse_matrix_data(inputs.get("matrix_json", ""))["sets"]
+    rows = _normalize_matrix_sets(raw_rows)
+    source_id = str(source_id or node_id)
+    graph = matrix_row_references(node_id, node)
+    sources = []
+    for raw, row in zip(raw_rows, rows):
+        if not row["enabled"]:
+            continue
+        reference_id = f"{node_id}/rows/{row['row_id']}"
+        marker_id = reference_id + "/line"
+        marker_row = {key: value for key, value in raw.items() if key not in {"row_kind", "preset_id", "switch_settings_json"}}
+        if row.get("row_kind") == "preset":
+            graph[reference_id]["inputs"].update(source_node_id=f"{source_id}/rows/{row['row_id']}", source_node_name=row["name"])
+        graph[marker_id] = {"class_type": "SceneMatrix", "inputs": {
+            "matrix_json": _canonical_json({"version": 1, "sets": [marker_row]}),
+            "source_node_id": f"{source_id}/rows/{row['row_id']}/line", "source_node_name": "",
+            **({"scene_prompt": [reference_id, 0]} if row.get("row_kind") == "preset" else {}),
+        }}
+        sources.append(marker_id)
+    level = 0
+    while len(sources) > 1:
+        next_sources = []
+        for index in range(0, len(sources), 10):
+            join_id = f"{node_id}/join/{level}/{index}"
+            graph[join_id] = {"class_type": "ScenePromptRandomRouteOutput", "inputs": {
+                **{f"scene_prompt{slot + 1}": [child, 0] for slot, child in enumerate(sources[index:index + 10])},
+                "source_node_id": f"{source_id}/join/{level}/{index}", "source_node_name": "",
+            }}
+            next_sources.append(join_id)
+        sources = next_sources
+        level += 1
+    graph[node_id] = {"class_type": "ScenePrompterMerge", "_meta": node.get("_meta", {}), "inputs": {
+        "scene_prompt2": [sources[0], 0], "source_node_id": source_id,
+        "source_node_name": _source_node_name(node),
+        **({"scene_prompt1": inputs["scene_prompt"]} if inputs.get("scene_prompt") is not None else {}),
+    }}
+    return graph
+
+
+def matrix_preset_plan(matrix_json, upstream, run_handle, source_id, source_name, switches=None,
+                       _resolved_presets=None, _preset_stack=(), _preset_value_memo=None, _matrix_node_id=None):
+    node_id = str(_matrix_node_id or source_id or "matrix")
+    node = {"class_type": "SceneMatrix", "inputs": {"matrix_json": matrix_json,
+        "scene_prompt": ["__matrix_input__", 0], "source_node_name": source_name,
+        "switches": switch_binding(switches)}}
+    resolved = _resolved_presets
+    user_id = get_run_user_id(run_handle) if run_handle else "default"
+    if resolved is None:
+        if run_handle:
+            resolved = snapshot_presets_for_metadata(run_handle, user_id)
+        else:
+            resolved = {}
+            occurrences = prepare_preset_occurrences({node_id: node}, resolved, user_id)
+            resolved = {**resolved, "__occurrences__": occurrences}
+    graph = matrix_execution_graph(node_id, node, source_id)
+    return _scene_node_value(graph, node_id, resolved, set(), {"__matrix_input__": upstream if upstream is not None else seed_plan()},
+                             user_id, run_handle, preset_stack=_preset_stack, preset_value_memo=_preset_value_memo)
 
 
 def _workflow_references(workflow):
@@ -1202,6 +1281,9 @@ def _scene_node_value_impl(
         kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
     if class_type in {"ScenePrompter", "SceneMatrix"}:
         kwargs["run_handle"] = run_handle
+    if class_type == "SceneMatrix":
+        kwargs.update(_resolved_presets=resolved, _preset_stack=preset_stack,
+                      _preset_value_memo=preset_value_memo, _matrix_node_id=node_id)
     if class_type in SAFE_NODE_CLASSES and class_type not in {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop", "ScenePromptMakeSwitch"}:
         path = "/".join(part.split("@", 1)[1] for part in preset_stack)
         kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
