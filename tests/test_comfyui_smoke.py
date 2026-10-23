@@ -545,11 +545,10 @@ class RealComfyUISmokeTests(unittest.TestCase):
         from comfy_execution.graph_utils import GraphBuilder
         from server import PromptServer
 
-        presets = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.presets"]
-        routes = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.routes"]
+        nodes = sys.modules["scene_prompt_tools_smoke.scene_prompt_tools.nodes"]
         paths = {route.path for route in PromptServer.instance.routes._items}
 
-        self.assertIs(presets.GraphBuilder, GraphBuilder)
+        self.assertIs(nodes.GraphBuilder, GraphBuilder)
         self.assertEqual(GraphBuilder.__module__, "comfy_execution.graph_utils")
         self.assertIn("/scene_prompt/items", paths)
         self.assertIn("/scene_prompt/runs/prepare", paths)
