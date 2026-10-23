@@ -83,7 +83,7 @@ Continuous runs, progress highlights, and Scene image previews stay with the wor
 
 Normal Queue submissions use the latest Scene Matrix enabled state and row order. Scene Save Image also avoids reusing deleted output filenames during the current ComfyUI session, and execution-path-only PNG metadata keeps reroute references consistent so the saved workflow can be reopened safely.
 
-### Matrix Preset rows (v0.11.18)
+### Matrix Preset rows (v0.11.18, enhanced in v0.11.19)
 
 The Matrix editor provides **通常行を追加** and **Preset行を追加**. A Preset row selects a saved Preset and its switch settings; it also supports the usual positive/negative candidates and manual text, row name, enabled state, move-up, filename, duplicate and delete controls. Row prompts are added after the Preset's own output. Connect a switch bundle to the Matrix's optional **スイッチ一式** input to map incoming switches separately for each Preset row. Changes save immediately. On the node, Preset output rows have light purple outlines; normal output rows remain blue. Rows with filename inclusion enabled show **ファイル名ON** at the right edge.
 
