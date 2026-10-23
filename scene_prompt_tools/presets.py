@@ -10,11 +10,11 @@ from collections import OrderedDict
 from pathlib import Path
 from types import MappingProxyType
 
-from comfy_execution.graph_utils import GraphBuilder, is_link
+from comfy_execution.graph_utils import is_link
 
 from .llm_node import ScenePromptLLM
 from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
-from .plan import mark_prompt_whole, seed_plan, transform
+from .plan import mark_prompt_whole, seed_plan, transform, with_source_node
 from .storage import public_user_directory, is_windows_reserved_name
 from .nodes import (
     SceneEmptyLatent,
@@ -1245,7 +1245,7 @@ def _scene_node_value_impl(
         preset = resolved.get("__occurrences__", {}).get(reference_path, resolved.get(preset_id))
         if not preset:
             raise ScenePresetError(f"Preset「{preset_id}」のスナップショットがありません。")
-        upstream = value(_node_inputs(node).get("scene_prompt")) if is_link(_node_inputs(node).get("scene_prompt")) else None
+        upstream = value(_node_inputs(node).get("scene_prompt"))
         frozen = resolved.get("__switch_values__", {})
         if reference_path in frozen:
             effective = normalize_switch_values(frozen[reference_path])
@@ -1254,7 +1254,7 @@ def _scene_node_value_impl(
             incoming = value(raw_switches) if raw_switches is not None else None
             effective = resolve_switches(incoming, _node_inputs(node).get("switch_settings_json", "[]"))
             frozen[reference_path] = effective
-        result = mark_prompt_whole(_evaluate_preset_scene(
+        result = _reference_scene_plan(
             preset,
             resolved,
             upstream,
@@ -1264,9 +1264,9 @@ def _scene_node_value_impl(
             preset_value_memo,
             node_id,
             effective,
-        ))
-        if value(_node_inputs(node).get("filename_enabled", False)):
-            result = transform(result, operation={"kind": "filename_add", "payload": _source_node_name(node)})
+            _source_node_name(node),
+            value(_node_inputs(node).get("filename_enabled", False)),
+        )
         memo[node_id] = result
         return result
     if class_type == "ScenePromptToText" and not preset_stack:
@@ -1293,9 +1293,10 @@ def _scene_node_value_impl(
                       _preset_value_memo=preset_value_memo, _matrix_node_id=node_id)
     if class_type in SAFE_NODE_CLASSES and class_type not in {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop", "ScenePromptMakeSwitch"}:
         path = "/".join(part.split("@", 1)[1] for part in preset_stack)
-        kwargs.setdefault("source_node_id", f"{path}/{node_id}" if path else node_id)
-        if class_type == "SceneApplyLora" and path:
+        if path:
             kwargs["source_node_id"] = f"{path}/{node_id}"
+        else:
+            kwargs.setdefault("source_node_id", node_id)
         if class_type != "ScenePromptCallback":
             kwargs.setdefault("source_node_name", _source_node_name(node))
     if class_type == "ScenePromptRandomRoute":
@@ -1424,6 +1425,19 @@ def _evaluate_preset_scene(
     result = _output_value(nodes, output_link, result)
     preset_value_memo[memo_key] = result
     return result
+
+
+def _reference_scene_plan(preset, resolved, upstream, user_id, run_handle, preset_stack,
+                          preset_value_memo, reference_node_id, switches, source_name, filename_enabled):
+    source_name = source_name or DEFAULT_SOURCE_NODE_NAMES["ScenePresetReference"]
+    plan = mark_prompt_whole(_evaluate_preset_scene(
+        preset, resolved, upstream, user_id, run_handle, preset_stack,
+        preset_value_memo, reference_node_id, switches,
+    ))
+    if filename_enabled:
+        plan = transform(plan, operation={"kind": "filename_add", "payload": source_name})
+    path = "/".join(part for part in [*(part.split("@", 1)[1] for part in preset_stack), str(reference_node_id)] if part)
+    return with_source_node(plan, path, source_name)
 
 
 def snapshot_presets_for_run(run_id, api_graph, expand_node_id=None, user_id="default", workflow=None):
@@ -1638,110 +1652,31 @@ def list_presets(user_id="default"):
         return value
 
 
-def _replace_link(value, input_id, upstream_link, graph):
-    if not is_link(value):
-        return value
-    source_id, output_index = str(value[0]), value[1]
-    if source_id == input_id:
-        if output_index == 0 and upstream_link is not None:
-            return upstream_link
-        source = graph.lookup_node(input_id)
-        if source is None:
-            raise ScenePresetError("Scene Preset Inputを展開できません。")
-        return source.out(output_index)
-    source = graph.lookup_node(source_id)
-    if source is None:
-        raise ScenePresetError(f"Presetの接続先 #{source_id} が見つかりません。")
-    return source.out(output_index)
-
-
 def expand_preset_reference(
-    preset_id,
-    scene_prompt=None,
-    run_handle="",
-    _require_context=False,
-    source_node_id="",
-    source_node_name="",
-    unique_id=None,
-    llm_presets_json="{}",
-    switches=None,
-    switch_settings_json="[]",
-    filename_enabled=False,
+    preset_id, scene_prompt=None, run_handle="", _require_context=False,
+    source_node_id="", source_node_name="", unique_id=None, llm_presets_json="{}",
+    switches=None, switch_settings_json="[]", filename_enabled=False,
 ):
+    """Evaluate a Reference using the same immutable plan engine as preflight."""
     preset_id = _clean_preset_id(preset_id)
-    reference_path = str(source_node_id or unique_id or "")
-    if _require_context:
-        user_id = require_run_context(run_handle)["user_id"]
-        preset = _snapshot_preset(run_handle, preset_id, user_id, reference_path)
-    elif run_handle:
-        preset = _snapshot_preset(run_handle, preset_id, reference_path=reference_path)
-    else:
-        user_id = "default"
-        resolved = {}
-        reference = {"class_type": "ScenePresetReference", "inputs": {"preset_id": preset_id, "llm_presets_json": llm_presets_json}}
-        occurrences = prepare_preset_occurrences({reference_path: reference}, resolved, user_id)
-        preset = occurrences[reference_path]
-    validation = preset.get("_validation") or _validate_preset_graph(_preset_nodes(preset))
-    nodes = _preset_nodes(preset)
-    input_id = validation["input_id"]
-    output_id = validation["output_id"]
+    reference_id = str(source_node_id or unique_id or "")
+    user_id = require_run_context(run_handle)["user_id"] if _require_context else "default"
     if run_handle:
-        snapshot_user = user_id if _require_context else "default"
-        with _PRESET_LOCK:
-            frozen = _RUN_SNAPSHOTS[_run_cache_key(run_handle, snapshot_user)].get("switch_values", {})
-            effective = normalize_switch_values(frozen[reference_path]) if reference_path in frozen else resolve_switches(switches, switch_settings_json)
+        preset = _snapshot_preset(run_handle, preset_id, user_id, reference_id)
+        resolved = snapshot_presets_for_metadata(run_handle, user_id)
     else:
-        effective = resolve_switches(switches, switch_settings_json)
-    graph = GraphBuilder()
-    reference_source_id = str(source_node_id or unique_id or "").strip()
-
-    graph.node(BOUNDARY_INPUT, input_id, switch_values={"values": list(effective)},
-               switch_names_json=_node_inputs(nodes[input_id]).get("switch_names_json", "[]"))
-    for node_id, node in nodes.items():
-        class_type = node.get("class_type")
-        if class_type not in BOUNDARY_CLASSES:
-            graph.node(class_type, str(node_id))
-
-    for node_id, node in nodes.items():
-        class_type = node.get("class_type")
-        if class_type in BOUNDARY_CLASSES:
-            continue
-        target = graph.lookup_node(str(node_id))
-        for name, value in _node_inputs(node).items():
-            target.set_input(name, _replace_link(value, input_id, scene_prompt, graph))
-        if class_type in (set(SAFE_NODE_CLASSES) - {"ScenePromptCallbackDiscord", "ScenePromptCallbackRequest", "ScenePromptCallbackDesktop", "ScenePromptMakeSwitch"}) or class_type == "ScenePresetReference":
-            target.set_input("source_node_id", f"{reference_source_id}/{node_id}" if reference_source_id else str(node_id))
-            if class_type != "ScenePromptCallback":
-                target.set_input("source_node_name", _source_node_name(node))
-        if class_type in {"ScenePrompter", "SceneMatrix"}:
-            target.set_input("run_handle", str(run_handle))
-        if class_type == "ScenePromptRandomRoute":
-            seed_source = _node_inputs(node).get("seed_source_id") or node_id
-            target.set_input("seed_source_id", f"{reference_source_id}/{seed_source}" if reference_source_id else str(seed_source))
-        if class_type == "ScenePresetReference":
-            target.set_input("run_handle", str(run_handle))
-            if not run_handle:
-                child_path = f"{reference_path}/{node_id}"
-                prefix = child_path + "/"
-                subtree = {("." if path == child_path else path[len(prefix):]):
-                           {key: value for key, value in definition.items() if key != "_validation"}
-                           for path, definition in occurrences.items() if path == child_path or path.startswith(prefix)}
-                target.set_input("llm_presets_json", _canonical_json({"version": 1, "presets": subtree}))
-
-    output_link = validation["output_link"]
-    result = _replace_link(output_link, input_id, scene_prompt, graph)
-    if is_link(result) and str(result[0]) == output_id:
-        raise ScenePresetError("Scene Preset Outputの接続が不正です。")
-    marker = graph.node("ScenePromptCounter", "__scene_preset_source")
-    marker.set_input("scene_prompt", result)
-    marker.set_input("count", 1)
-    marker.set_input("prompt_trace_kind", "whole")
-    marker.set_input("source_node_id", reference_source_id)
-    marker.set_input("source_node_name", str(source_node_name or ""))
-    if filename_enabled:
-        marker.set_input("filename_part", str(source_node_name or "Scene Preset Reference"))
-    result = marker.out(0)
-    return {"result": (result,), "expand": graph.finalize()}
+        resolved = {}
+        reference = {"class_type": "ScenePresetReference", "inputs": {
+            "preset_id": preset_id, "llm_presets_json": llm_presets_json,
+        }}
+        occurrences = prepare_preset_occurrences({reference_id: reference}, resolved, user_id)
+        preset = occurrences[reference_id]
+        resolved = {**resolved, "__occurrences__": occurrences}
+    frozen = resolved.get("__switch_values__", {})
+    effective = (normalize_switch_values(frozen[reference_id]) if reference_id in frozen
+                 else resolve_switches(switches, switch_settings_json))
+    return _reference_scene_plan(preset, resolved, scene_prompt, user_id, run_handle, (), {},
+                                 reference_id, effective, source_node_name, filename_enabled)
 
 
 class ScenePresetInput:
@@ -1788,7 +1723,7 @@ class ScenePresetOutput:
 
 
 class ScenePresetReference:
-    DESCRIPTION = """保存済みのScene Presetを参照します。画像生成を開始した時点のPreset内容を検証して固定し、その実行中は同じ内容を使います。Preset内のScene Matrix、Queue、Mergeなどは元のノードとして展開・実行されます。"""
+    DESCRIPTION = """保存済みのScene Presetを参照します。画像生成を開始した時点のPreset内容を検証して固定し、その実行中は同じ内容を使います。Preset内のScene Matrix、Queue、Mergeなどを共通のScene計画として評価します。"""
     CATEGORY = "Scene/preset"
     RETURN_TYPES = (SCENE_PROMPT_TYPE,)
     RETURN_NAMES = ("scene_prompt",)
@@ -1801,7 +1736,7 @@ class ScenePresetReference:
                 "preset_id": ("STRING", {"default": "", "display_name": "Preset ID"}),
             },
             "optional": {
-                "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "rawLink": True}),
+                "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt"}),
                 "run_handle": ("STRING", {"default": "", "hidden": True}),
                 "llm_presets_json": ("STRING", {"default": "{}", "hidden": True}),
                 "switches": (SCENE_SWITCHES_TYPE,),
@@ -1829,16 +1764,9 @@ class ScenePresetReference:
         return f"{metadata['preset_id']}:{metadata['sha256']}:{run_handle}:{tuple(vector)}" + (f":{filename}" if filename else "")
 
     def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id="", source_node_name="", llm_presets_json="{}", switches=None, switch_settings_json="[]", filename_enabled=False):
-        return expand_preset_reference(
-            preset_id,
-            scene_prompt,
-            run_handle,
-            _require_context=True,
-            source_node_id=source_node_id,
-            source_node_name=source_node_name,
-            unique_id=unique_id,
-            llm_presets_json=llm_presets_json,
-            switches=switches,
-            switch_settings_json=switch_settings_json,
-            filename_enabled=filename_enabled,
-        )
+        return (expand_preset_reference(
+            preset_id, scene_prompt, run_handle, _require_context=True,
+            source_node_id=source_node_id, source_node_name=source_node_name, unique_id=unique_id,
+            llm_presets_json=llm_presets_json, switches=switches,
+            switch_settings_json=switch_settings_json, filename_enabled=filename_enabled,
+        ),)

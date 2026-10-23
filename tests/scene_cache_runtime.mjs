@@ -95,3 +95,91 @@ export async function verifyLinkedControlCache(page) {
     assert.notEqual(result.automaticFirst.text[2], result.automaticSecond.text[2], 'automatic Expand seeds stay fresh');
     console.log('real ComfyUI linked controls reuse cache, ancestor edits invalidate it, and linked zero seeds remain automatic');
 }
+
+export async function verifyCompactPresetRuntime(page) {
+    const result = await page.evaluate(async () => {
+        const post = async (path, data) => {
+            const response = await fetch(path, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(JSON.stringify(result));
+            return result;
+        };
+        const node = (class_type, inputs) => ({ class_type, inputs });
+        const leaf = { input: node('ScenePresetInput', {}) };
+        let source = 'input';
+        for (let index = 0; index < 18; index++) {
+            const id = `tag${index}`;
+            leaf[id] = node('ScenePrompter', {
+                scene_prompt: [source, 0], positive_base: `probe_${index}`, positive_json: '{"version":1,"categories":{}}',
+                negative_base: '', negative_json: '{"version":1,"categories":{}}', category_order: '',
+                prompt_name: id, seed: 0, randomize: true, source_node_id: id,
+            });
+            source = id;
+        }
+        leaf.lora = node('SceneApplyLora', {
+            scene_prompt: [source, 0], lora_name: 'runtime-hat.safetensors', strength_model: 0.7, strength_clip: 0.4,
+        });
+        leaf.output = node('ScenePresetOutput', { scene_prompt: ['lora', 0] });
+        await post('/scene_presets/save', {
+            preset_id: 'native-compact-leaf', name: 'Compact leaf', output_node_id: 'output',
+            api_graph: { output: leaf }, workflow: { nodes: [] },
+        });
+        const parent = { input: node('ScenePresetInput', {}) };
+        source = 'input';
+        for (let index = 0; index < 6; index++) {
+            const id = `ref${index}`;
+            parent[id] = node('ScenePresetReference', {
+                preset_id: 'native-compact-leaf', scene_prompt: [source, 0], source_node_name: id,
+            });
+            source = id;
+        }
+        parent.count = node('ScenePromptCounter', { count: 1400, scene_prompt: [source, 0] });
+        parent.output = node('ScenePresetOutput', { scene_prompt: ['count', 0] });
+        await post('/scene_presets/save', {
+            preset_id: 'native-compact-parent', name: 'Compact parent', output_node_id: 'output',
+            api_graph: { output: parent }, workflow: { nodes: [] },
+        });
+        const graph = {
+            checkpoint: node('CheckpointLoaderSimple', { ckpt_name: 'runtime-checkpoint.safetensors' }),
+            model: node('SceneApplyModel', { model: ['checkpoint', 0], clip: ['checkpoint', 1], vae: ['checkpoint', 2] }),
+            reference: node('ScenePresetReference', { preset_id: 'native-compact-parent', scene_prompt: ['model', 0] }),
+            expand: node('ScenePrompterExpand', { scene_prompt: ['reference', 0], seed_base: 7 }),
+            text: node('ScenePromptToText', { scene_prompt: ['reference', 0], scope: '全てのノード', seed_base: 7 }),
+            probe: node('SceneCacheProbe', { scene_prompt: ['reference', 0], positive: ['text', 0] }),
+        };
+        const prepared = await post('/scene_prompt/runs/prepare', { api_graph: { output: graph }, expand_node_id: 'expand' });
+        for (const id of ['reference', 'text']) graph[id].inputs.run_handle = prepared.run_handle;
+        await post('/scene_test/execution_probe', { enabled: true });
+        try {
+            const queued = await post('/prompt', { prompt: graph });
+            const started = performance.now();
+            while (performance.now() - started < 15_000) {
+                const history = (await (await fetch('/history/' + queued.prompt_id)).json())[queued.prompt_id];
+                if (history?.status) {
+                    if (history.status.status_str !== 'success') throw new Error(JSON.stringify(history));
+                    const executed = await post('/scene_test/execution_probe', { enabled: false });
+                    return { prepared, text: history.outputs.probe.text, executed, rootIds: Object.keys(graph) };
+                }
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            throw new Error('Compact Preset runtime timed out');
+        } finally {
+            await post('/scene_test/execution_probe', { enabled: false });
+            await post('/scene_prompt/runs/release', { run_handle: prepared.run_handle });
+        }
+    });
+    assert.equal(result.prepared.total_batches, 1400);
+    assert.equal(JSON.parse(result.text[0]).total_batches, 1400);
+    assert(result.executed.includes('reference') && result.executed.includes('probe'));
+    assert(result.executed.every(id => result.rootIds.includes(id)), 'Preset planning never registers internal nodes with ComfyUI');
+    const details = JSON.parse(result.text[3]);
+    assert.deepEqual(details.model_links, { model: ['checkpoint', 0], clip: ['checkpoint', 1], vae: ['checkpoint', 2] });
+    assert.equal(details.loras.length, 6);
+    assert.deepEqual(details.loras.map(lora => lora.source_node_id), Array.from({ length: 6 }, (_, i) => `reference/ref${i}/lora`));
+    assert(details.source_node_ids.includes('reference/ref5/tag17'));
+    assert(!details.source_node_ids.includes('tag17'), 'saved source IDs are scoped to their Reference occurrence');
+    assert.deepEqual(await (await page.request.get(new URL('/scene_test/model_executions', page.url()).href)).json(), [], 'Reference planning never loads image models');
+    console.log('real ComfyUI nested 1400-scene Preset plan stays compact, preserves model links and ordered LoRAs, and never registers internal nodes');
+}

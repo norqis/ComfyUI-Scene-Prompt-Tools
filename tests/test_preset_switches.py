@@ -118,8 +118,8 @@ class PresetSwitchTests(unittest.TestCase):
             self.assertEqual(compact["output"]["8"]["inputs"]["switch_names_json"], '["背景"]')
             with mock.patch.object(self.module, "prepare_preset_occurrences", return_value={"ref": loaded, "ref/9": child}):
                 expanded = self.module.expand_preset_reference("parent", source_node_id="ref")
-            maker = next(item for item in expanded["expand"].values() if item["class_type"] == "ScenePromptMakeSwitch")
-            self.assertEqual(set(maker["inputs"]), {"switch_names_json", "switch_values_json"})
+            self.assertEqual(expanded["stats"]["total_images"], total)
+            self.assertIn("ref/2", expanded["rows"][0]["row"]["source_node_ids"])
 
     def test_make_switch_reference_mapping_and_run_snapshot(self):
         choice = self.preset("choice", switched_nodes())
@@ -134,8 +134,7 @@ class PresetSwitchTests(unittest.TestCase):
         nodes["10"]["inputs"]["switch_values_json"] = "[]"
         self.assertEqual(self.module._scene_node_value(nodes, "20", {"choice": choice}, set())["stats"]["total_images"], 3)
         expanded = self.module.expand_preset_reference("choice", run_handle="maker-frozen", source_node_id="20", switches=[False] * 10)
-        values = next(item["inputs"]["switch_values"] for item in expanded["expand"].values() if item["class_type"] == "ScenePresetInput")
-        self.assertEqual(values["values"], [True] + [False] * 9)
+        self.assertEqual(expanded["stats"]["total_images"], 7)
         self.module.release_scene_preset_snapshot("maker-frozen")
 
     def test_all_ten_input_slots_choose_only_one_branch_and_memo_distinguishes_vectors(self):
@@ -216,18 +215,15 @@ class PresetSwitchTests(unittest.TestCase):
         self.assertEqual(compact["7"]["inputs"]["switch"], ["1", 1])
         self.assertNotIn("positive_base", compact["2"]["inputs"])
 
-    def test_graph_expansion_replaces_only_scene_slot_and_never_injects_standard_node_hidden_args(self):
+    def test_reference_plan_preserves_upstream_and_evaluates_only_selected_switch_branch(self):
         choice = self.preset("choice", switched_nodes())
         with mock.patch.object(self.module, "prepare_preset_occurrences", return_value={"ref": choice}):
-            expanded = self.module.expand_preset_reference("choice", ["outside", 0], source_node_id="ref", switches=[True] * 10)
-        graph = expanded["expand"]
-        input_id = next(key for key, item in graph.items() if item["class_type"] == "ScenePresetInput")
-        standard = next(item for item in graph.values() if item["class_type"] == "ComfySwitchNode")
-        self.assertEqual(standard["inputs"]["switch"], [input_id, 1])
-        self.assertEqual(set(standard["inputs"]), {"switch", "on_false", "on_true"})
-        self.assertEqual(graph[input_id]["inputs"]["switch_values"], {"values": [True] * 10})
-        scenes = [item for item in graph.values() if item["class_type"] == "ScenePrompter"]
-        self.assertTrue(all(item["inputs"]["scene_prompt"] == ["outside", 0] for item in scenes))
+            upstream = self.module.ScenePromptCounter().count(count=2)[0]
+            expanded = self.module.expand_preset_reference("choice", upstream, source_node_id="ref", switches=[True] * 10)
+        self.assertEqual(expanded["stats"]["total_images"], 14)
+        ids = expanded["rows"][0]["row"]["source_node_ids"]
+        self.assertIn("ref/4", ids)
+        self.assertNotIn("ref/2", ids)
 
     def test_snapshot_freezes_effective_vector_and_release_removes_it(self):
         choice = self.preset("choice", switched_nodes())
@@ -238,8 +234,7 @@ class PresetSwitchTests(unittest.TestCase):
         self.assertEqual(response["total_images"], 7)
         expanded = self.module.expand_preset_reference("choice", run_handle="frozen", source_node_id="20",
                                                        switch_settings_json=json.dumps([False] * 10))
-        values = next(item["inputs"]["switch_values"] for item in expanded["expand"].values() if item["class_type"] == "ScenePresetInput")
-        self.assertEqual(values, {"values": [True] * 10})
+        self.assertEqual(expanded["stats"]["total_images"], 7)
         self.module.release_scene_preset_snapshot("frozen")
         self.assertFalse(self.module._RUN_SNAPSHOTS)
 
@@ -383,9 +378,8 @@ class PresetSwitchTests(unittest.TestCase):
         self.assertEqual(self.evaluate(choice)["stats"]["total_images"], 3)
         self.assertEqual(self.evaluate(choice, (True,) * 10)["stats"]["total_images"], 7)
         with mock.patch.object(self.module, "prepare_preset_occurrences", return_value={"ref": choice}):
-            graph = self.module.expand_preset_reference("replayed", source_node_id="ref", switch_settings_json=json.dumps([False] * 10))["expand"]
-        binding = next(value["inputs"]["switch_values"] for value in graph.values() if value["class_type"] == "ScenePresetInput")
-        self.assertEqual(binding, {"values": [False] * 10})
+            plan = self.module.expand_preset_reference("replayed", source_node_id="ref", switch_settings_json=json.dumps([False] * 10))
+        self.assertEqual(plan["stats"]["total_images"], 3)
 
     def test_workflow_only_bundle_resolves_known_reroute_and_bypassed_nodes(self):
         choice = self.preset("choice", switched_nodes())

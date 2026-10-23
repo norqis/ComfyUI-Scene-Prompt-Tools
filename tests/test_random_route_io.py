@@ -363,9 +363,11 @@ class RandomRouteIOTests(unittest.TestCase):
                         sequence.append(after['row']['positive_parts'])
                     sequences.append(sequence)
                 self.assertNotEqual(*sequences, 'separate Reference instances keep independent draws')
-                runtime = self.presets.expand_preset_reference('seed-inner', source_node_id='30')['expand']
-                runtime_gate = next(node for node in runtime.values() if node['class_type'] == 'ScenePromptRandomRoute')
-                self.assertEqual(runtime_gate['inputs']['seed_source_id'], f'30/{preserved_seed or "2"}')
+                runtime = self.presets.expand_preset_reference('seed-inner', source_node_id='30')
+                expected = self.presets._scene_node_value({"30": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "seed-inner"}}}, "30", {"seed-inner": saved}, set())
+                for seed in range(1, 33):
+                    self.assertEqual(self.plan.item_for_normalized_plan(runtime, seed % 10, seed),
+                                     self.plan.item_for_normalized_plan(expected, seed % 10, seed))
 
     def test_preset_save_reference_nested_namespace_and_frozen_replay_keep_output(self):
         preset = self.api()
@@ -389,9 +391,9 @@ class RandomRouteIOTests(unittest.TestCase):
         self.assertEqual(choice[1:], ("10/2/2", 0 if item["row"]["positive_parts"] == ["A"] else 1))
         self.assertIn("10/2/5", item["row"]["source_node_ids"])
         expanded = self.presets.expand_preset_reference("io", source_node_id="10")
-        output = next(node for node in expanded["expand"].values() if node["class_type"] == "ScenePromptRandomRouteOutput")
-        self.assertEqual(output["inputs"]["source_node_id"], "10/5")
-        self.assertEqual(output["inputs"]["source_node_name"], "Scene Prompt Random Route Output")
+        row = self.plan.item_for_normalized_plan(expanded, 0, 123)["row"]
+        self.assertIn("10/5", row["source_node_ids"])
+        self.assertEqual(row["source_node_names"]["10/5"], "Scene Prompt Random Route Output")
         snapshot = {"nested_io": nested, "io": saved}
         replay, workflow, aliases = self.metadata.expand_preset_references(copy.deepcopy(api), outer_workflow(api), snapshot)
         self.nodes._freeze_random_routes(replay, workflow, [{"_event_ref": item["event_ref"]}], aliases)

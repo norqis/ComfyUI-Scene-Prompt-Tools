@@ -13,6 +13,8 @@ git clone https://github.com/norqis/ComfyUI-Scene-Prompt-Tools.git
 
 This package has no separate Python dependency installation step.
 
+Version 0.11.20 evaluates Preset References through the same Scene plan engine used during preparation. Nested Presets no longer register their internal planning nodes with ComfyUI for each execution. Model links, LoRA order, switches, Queue/Count scheduling, callbacks and PNG workflow expansion are preserved. Planning does not load image models. Linked Count, Queue, LoRA strength and To Text controls also reuse ComfyUI's cache until their connected inputs change; automatic seeds still rerun.
+
 ## LLM prompts and Civitai LoRAs (v0.10.0)
 
 Add **Scene Prompt (LLM)** as the first prompt node, or connect an existing Scene plan to its `scene_prompt` input. Select **Illustrious**, **Anima**, **NoobAI**, or **Pony**, describe the content you want, then press **Generate**. The saved positive and negative fields are editable. Illustrious, NoobAI, and Pony conversion favors English tags; Anima conversion favors concise English descriptions. Generation preserves your exclusions without adding a generic style or quality prompt.

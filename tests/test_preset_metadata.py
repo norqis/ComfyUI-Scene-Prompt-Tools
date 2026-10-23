@@ -1012,10 +1012,9 @@ class PresetMetadataTests(unittest.TestCase):
         value["metadata"]["sha256"] = self.presets._content_hash(value["api_graph"], value["workflow"])
         self.put_snapshots({"one": value})
         expanded = self.presets.expand_preset_reference(
-            "one", ["outer", 0], self.run_handle, source_node_id="2"
-        )["expand"]
-        self.assertEqual(expanded["11"]["inputs"]["source_node_id"], "2/11")
-        self.assertEqual(expanded["__scene_preset_source"]["inputs"]["source_node_id"], "2")
+            "one", run_handle=self.run_handle, source_node_id="2"
+        )
+        self.assertEqual(expanded["rows"][0]["row"]["source_node_ids"], ["2/11", "2"])
 
     def test_png_metadata_contains_a_reloadable_expanded_graph(self):
         self.put_snapshots({"one": simple_preset("one")})

@@ -68,7 +68,7 @@ class LLMNodePresetTests(unittest.TestCase):
                          ['scene_prompt', 'run_handle', 'llm_presets_json', 'switches', 'switch_settings_json', 'filename_enabled'])
         self.assertEqual(self.llm.INPUT_TYPES()['optional']['generation_state_json'][1]['default'], '{}')
 
-    def test_two_instances_local_output_count_snapshot_graphbuilder_and_metadata(self):
+    def test_two_instances_local_output_count_snapshot_runtime_and_metadata(self):
         shared = self.save('shared', basic_nodes('original'))
         a, b = self.definition(shared, 'apple', 2), self.definition(shared, 'banana', 3)
         nodes = {'10': self.reference('shared', {'.': a}), '20': self.reference('shared', {'.': b}),
@@ -83,9 +83,9 @@ class LLMNodePresetTests(unittest.TestCase):
         evaluation = {'__occurrences__': occurrences}
         plan = self.presets._scene_node_value(nodes, '30', evaluation, set())
         self.assertEqual([self.text(plan, current_index=i)[0] for i in range(5)], ['apple'] * 2 + ['banana'] * 3)
-        expanded = self.presets.expand_preset_reference('shared', run_handle='local', source_node_id='20')['expand']
-        self.assertEqual(expanded['2']['inputs']['positive'], 'banana')
-        self.assertEqual(expanded['2']['inputs']['source_node_id'], '20/2')
+        expanded = self.presets.expand_preset_reference('shared', run_handle='local', source_node_id='20')
+        self.assertEqual([self.text(expanded, current_index=i)[0] for i in range(3)], ['banana'] * 3)
+        self.assertIn('20/2', expanded['rows'][0]['row']['source_node_ids'])
         metadata = importlib.import_module(self.presets.__package__ + '.preset_metadata')
         workflow = {'nodes': [{'id': 10, 'type': 'ScenePresetReference', 'pos': [0, 0]},
                              {'id': 20, 'type': 'ScenePresetReference', 'pos': [300, 0]}], 'links': []}

@@ -190,6 +190,22 @@ class TestSceneTextImage:
     def render(self, positive, negative):
         return {"ui": {"text": [positive, negative]}, "result": nodes.EmptyImage().generate(16, 16, 1, 0)}
 cache_probe_counts = {}
+import execution
+execution_probe_nodes = []
+execution_probe_enabled = False
+original_node_execute = execution.execute
+async def probe_node_execute(*args, **kwargs):
+    if execution_probe_enabled:
+        execution_probe_nodes.append(str(args[3]))
+    return await original_node_execute(*args, **kwargs)
+execution.execute = probe_node_execute
+@PromptServer.instance.routes.post("/scene_test/execution_probe")
+async def execution_probe(request):
+    global execution_probe_enabled
+    execution_probe_enabled = (await request.json())["enabled"]
+    if execution_probe_enabled:
+        execution_probe_nodes.clear()
+    return web.json_response(list(execution_probe_nodes))
 @PromptServer.instance.routes.post("/scene_test/cache_probe_start")
 async def cache_probe_start(request):
     for name in ("ScenePromptCounter", "ScenePromptToText", "ScenePrompterQueue", "SceneEmptyLatent", "SceneApplyLora", "ScenePrompterExpand"):
@@ -212,7 +228,11 @@ class SceneCacheProbe:
     OUTPUT_NODE = True
     FUNCTION = "probe"
     def probe(self, scene_prompt, positive, seed=0):
-        return {"ui": {"text": [json.dumps(scene_prompt["stats"]), positive, str(seed)]}, "result": ()}
+        package = nodes.NODE_CLASS_MAPPINGS["SceneApplyLora"].__module__.rsplit(".", 1)[0]
+        plan = importlib.import_module(package + ".plan")
+        row = plan.item_for_normalized_plan(scene_prompt, 0, 7)["row"]
+        details = {key: row.get(key) for key in ("model_links", "loras", "source_node_ids", "source_node_names")}
+        return {"ui": {"text": [json.dumps(scene_prompt["stats"]), positive, str(seed), json.dumps(details)]}, "result": ()}
 NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "SceneCacheProbe": SceneCacheProbe}
 `);
     child = spawn(python, [
@@ -379,7 +399,11 @@ window.__sceneSeedRuntimeTest = {
     finally { nativeRunChecks = false; }
     nativeRunChecks = true;
     nativeGPUChecks = true;
-    try { await (await import('./scene_cache_runtime.mjs')).verifyLinkedControlCache(page); }
+    try {
+        const checks = await import('./scene_cache_runtime.mjs');
+        await checks.verifyLinkedControlCache(page);
+        await checks.verifyCompactPresetRuntime(page);
+    }
     finally { nativeRunChecks = false; nativeGPUChecks = false; }
     const removedInitialization = await page.evaluate(async () => {
         const graph = window.app.graph, removed = [];

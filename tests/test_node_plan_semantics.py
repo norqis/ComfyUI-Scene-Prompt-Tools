@@ -562,6 +562,15 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.nodes.ScenePromptToText().to_text(scope=None)
 
+    def test_callback_names_keep_distinct_nodes_with_the_same_display_name(self):
+        plan = self.nodes.with_source_node(None, "first", "Scene Preset Reference")
+        plan = self.nodes.with_source_node(plan, "second", "Scene Preset Reference")
+        plan = self.nodes.with_source_node(plan, "first", "Scene Preset Reference")
+        row = plan["rows"][0]["row"]
+        self.assertEqual(row["source_node_ids"], ["first", "second"])
+        self.assertEqual(self.nodes._callback_names(row, row["source_node_ids"]),
+                         "Scene Preset Reference_Scene Preset Reference")
+
     def test_counter_rejects_non_integer_or_out_of_range_counts(self):
         counter = self.nodes.ScenePromptCounter()
         for invalid in ("2", True, -1, self.nodes.MAX_SAFE_INTEGER + 1):
