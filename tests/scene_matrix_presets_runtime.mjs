@@ -44,7 +44,13 @@ export async function testMatrixPresetRows(page) {
     assert.equal(await stats(), 6);
     assert.deepEqual(await page.evaluate(id => window.__sceneSeedRuntimeTest.nodePreview(window.app.graph.getNodeById(id)), ids.target),
         ['AX', 'AYPresetRow', 'AZPresetRow', 'BX', 'BYPresetRow', 'BZPresetRow']);
-    assert.deepEqual(await row.getByRole('button').allTextContents(), ['有効', '↑', 'Preset: MatrixChild', 'スイッチ設定', 'ファイル名付与: OFF', '複製', '削除']);
+    assert.deepEqual(await row.getByRole('button').allTextContents(), ['有効', '↑', 'Preset: MatrixChild', 'スイッチ設定', 'ポジティブ候補', 'ネガティブ候補', 'ファイル名付与: OFF', '複製', '削除']);
+    for (const [button, placeholder, value] of [['ポジティブ候補', 'ポジティブ基本文', '(extra:1.3)'], ['ネガティブ候補', 'ネガティブ基本文', 'blocked']]) {
+        await row.getByRole('button', { name: button, exact: true }).click();
+        await page.getByPlaceholder(placeholder).fill(value);
+        await page.locator('.pc-popup').last().getByRole('button', { name: '閉じる', exact: true }).click();
+    }
+    assert.match(await row.textContent(), /extra:1.3/); assert.match(await row.textContent(), /blocked/);
     await row.getByRole('button', { name: '複製', exact: true }).click();
     assert.equal(await stats(), 10);
     const copied = await page.evaluate(id => {
@@ -61,6 +67,31 @@ export async function testMatrixPresetRows(page) {
     await switches.locator('[data-scene-switch-index="1"]').selectOption('false');
     await switches.getByRole('button', { name: '閉じる', exact: true }).click();
     await editor.getByRole('button', { name: '閉じる', exact: true }).click();
+    const colors = await page.evaluate(id => {
+        const node = window.app.graph.getNodeById(id);
+        window.app.canvas.ds.scale = 1; node.size = [499, 500];
+        const canvas = document.createElement('canvas'); canvas.width = 499; canvas.height = 300;
+        const context = canvas.getContext('2d');
+        const prototype = CanvasRenderingContext2D.prototype, fillText = prototype.fillText, badges = [];
+        try {
+            prototype.fillText = function (text, x, ...args) {
+                if (text === 'ファイル名ON') badges.push({ right: x + this.measureText(text).width });
+                return fillText.call(this, text, x, ...args);
+            };
+            node.widgets.find(widget => widget.sceneRole === 'matrix_connected_list').draw(context, node, 499, 0, 300);
+        } finally { prototype.fillText = fillText; }
+        const pixels = context.getImageData(0, 0, 499, 300).data;
+        const counts = { blue: 0, purple: 0, yellow: 0 };
+        for (let offset = 0; offset < pixels.length; offset += 4) {
+            const rgb = `${pixels[offset]},${pixels[offset + 1]},${pixels[offset + 2]}`;
+            if (rgb === '109,160,194') counts.blue++;
+            if (rgb === '196,167,231') counts.purple++;
+            if (rgb === '216,184,70') counts.yellow++;
+        }
+        return { ...counts, badges };
+    }, ids.target);
+    assert(colors.blue > 0 && colors.purple > 0 && colors.yellow > 0, `native Matrix row colors ${JSON.stringify(colors)}`);
+    assert.equal(colors.badges.length, 1); assert.equal(colors.badges[0].right, 483, 'filename ON is right-aligned inside the native node row');
     const result = await page.evaluate(async ids => {
         const app = window.app, { api } = await import('/scripts/api.js');
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
@@ -79,10 +110,11 @@ export async function testMatrixPresetRows(page) {
             }
             throw new Error('Matrix Preset execution did not complete');
         };
-        const order = [];
+        const order = [], negatives = [];
         for (let index = 0; index < 6; index++) {
             field(app.graph.getNodeById(ids.expand), 'current_index').value = index;
-            order.push((await execute())[String(ids.image)].text[0]);
+            const text = (await execute())[String(ids.image)].text;
+            order.push(text[0]); negatives.push(text[1]);
         }
         const replay = [];
         for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) for (const expanded of [false, true]) {
@@ -91,11 +123,11 @@ export async function testMatrixPresetRows(page) {
             field(app.graph.getNodeById(ids.save), 'metadata_mode').value = mode;
             field(app.graph.getNodeById(ids.save), 'expand_preset_contents').value = expanded;
             let outputs = await execute();
-            const first = outputs[String(ids.image)].text[0], saved = outputs[String(ids.save)].images[0];
+            const first = outputs[String(ids.image)].text[0], firstNegative = outputs[String(ids.image)].text[1], saved = outputs[String(ids.save)].images[0];
             const blob = await (await fetch(`/view?${new URLSearchParams(saved)}`)).blob();
             await app.handleFile(new File([blob], 'matrix-preset.png', { type: 'image/png' }));
             outputs = await execute();
-            replay.push({ mode, expanded, first, second: outputs[String(ids.image)].text[0], filenames: [saved.filename, outputs[String(ids.save)].images[0].filename] });
+            replay.push({ mode, expanded, first, firstNegative, second: outputs[String(ids.image)].text[0], secondNegative: outputs[String(ids.image)].text[1], filenames: [saved.filename, outputs[String(ids.save)].images[0].filename] });
         }
         await app.loadGraphData(original, true, true);
         await window.__sceneSeedRuntimeTest.refreshPresetReference(app.graph.getNodeById(ids.target));
@@ -110,13 +142,15 @@ export async function testMatrixPresetRows(page) {
         if (!response.ok) throw new Error(await response.text());
         await window.__sceneSeedRuntimeTest.refreshPresetReference(app.graph.getNodeById(ids.target));
         const afterUpdate = window.__sceneSeedRuntimeTest.countStats(app.graph.getNodeById(ids.target)).total;
-        return { order, replay, beforeUpdate, afterUpdate };
+        return { order, negatives, replay, beforeUpdate, afterUpdate };
     }, ids);
-    assert.deepEqual(result.order, ['A, X', 'A, Y', 'A, Z', 'B, X', 'B, Y', 'B, Z']);
+    assert.deepEqual(result.order, ['A, X', 'A, Y, (extra:1.3)', 'A, Z, (extra:1.3)', 'B, X', 'B, Y, (extra:1.3)', 'B, Z, (extra:1.3)']);
+    assert.deepEqual(result.negatives, ['', 'blocked', 'blocked', '', 'blocked', 'blocked']);
     assert.equal(result.beforeUpdate, 6); assert.equal(result.afterUpdate, 8, 'Preset updates invalidate the visible total');
     for (const entry of result.replay) {
-        assert.equal(entry.first, 'B, Y', JSON.stringify(entry));
+        assert.equal(entry.first, 'B, Y, (extra:1.3)', JSON.stringify(entry));
         assert.equal(entry.second, entry.first, JSON.stringify(entry));
+        assert.equal(entry.firstNegative, 'blocked'); assert.equal(entry.secondNegative, 'blocked');
         assert(entry.filenames.every(name => name.includes('PresetRow')), JSON.stringify(entry));
     }
     console.log('real ComfyUI Matrix normal/Preset rows, picker, immediate switch mapping, duplicate/delete, counts, AX..BZ order and all four PNG replay modes passed');

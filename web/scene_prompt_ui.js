@@ -6541,10 +6541,11 @@ function matrixInputItems(node) {
     return items;
 }
 
-function matrixOutputLabels(node) {
-    return matrixLinesForNode(node)
-        .map((line) => matrixLineLabel(line))
-        .filter(Boolean);
+function matrixOutputItems(node) {
+    const lines = matrixLinesForNode(node).filter(line => matrixLineLabel(line));
+    return compactMatrixLabels(lines.map(line => matrixLineLabel(line))).map((item, index) =>
+        item.muted ? item : { ...item, filenameEnabled: lines[index].filename_enabled === true,
+            ...(lines[index].row_kind === "preset" ? { color: "#c4a7e7" } : {}) });
 }
 
 function matrixSectionHeight(section) {
@@ -6573,7 +6574,7 @@ function computeMatrixDisplayCache(node, width = null, cacheKey = null) {
             title: "出力 matrix",
             color: "#6da0c2",
             empty: "",
-            items: compactMatrixLabels(matrixOutputLabels(node)),
+            items: matrixOutputItems(node),
         },
     ];
     const naturalHeight = Math.max(56, 8 + sections.reduce((total, section) => total + matrixSectionHeight(section), 0));
@@ -6600,6 +6601,7 @@ function matrixDisplayCache(node, width = null) {
 
 function drawMatrixSection(ctx, section, width, cursorY) {
     ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
     if (section.title) {
         ctx.font = "bold 12px sans-serif";
         ctx.fillStyle = section.color;
@@ -6621,13 +6623,18 @@ function drawMatrixSection(ctx, section, width, cursorY) {
     ctx.font = "11px sans-serif";
     for (const item of section.items) {
         ctx.fillStyle = item.muted ? "#b7bdc8" : "#30343b";
-        ctx.strokeStyle = item.muted ? "#59616e" : section.color;
+        ctx.strokeStyle = item.muted ? "#59616e" : item.color || section.color;
         ctx.beginPath();
         roundedRect(ctx, 10, cursorY + 1, itemWidth, 15, 4);
         ctx.fill();
         ctx.stroke();
         ctx.fillStyle = item.muted ? "#b7bdc8" : "#e7edf7";
-        ctx.fillText(fitCanvasText(ctx, item.label, Math.max(20, itemWidth - 12)), 16, cursorY + 9);
+        const badge = item.filenameEnabled ? fitCanvasText(ctx, "ファイル名ON", itemWidth - 12) : "";
+        const badgeWidth = badge ? ctx.measureText(badge).width : 0;
+        const labelWidth = itemWidth - 12 - (badge ? badgeWidth + 6 : 0);
+        const label = labelWidth >= ctx.measureText("...").width ? fitCanvasText(ctx, item.label, labelWidth) : "";
+        ctx.fillText(label, 16, cursorY + 9);
+        if (badge) ctx.fillText(badge, 10 + itemWidth - 6 - badgeWidth, cursorY + 9);
         cursorY += 18;
     }
     return cursorY + 6;
@@ -12141,7 +12148,7 @@ function openSceneMatrixLinesPopup(node) {
                         draft.switch_settings_json = JSON.stringify(values); commitDrafts();
                     } }));
                 actions.appendChild(settings);
-            } else {
+            }
             const positive = createButton("ポジティブ候補");
             positive.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "positive", renderRows, commitDrafts));
             actions.appendChild(positive);
@@ -12149,7 +12156,6 @@ function openSceneMatrixLinesPopup(node) {
             const negative = createButton("ネガティブ候補");
             negative.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "negative", renderRows, commitDrafts));
             actions.appendChild(negative);
-            }
 
             const filename = createButton(draft.filename_enabled === true ? "ファイル名付与: ON" : "ファイル名付与: OFF", draft.filename_enabled === true ? "pc-on" : "");
             filename.addEventListener("click", () => {
@@ -12178,7 +12184,7 @@ function openSceneMatrixLinesPopup(node) {
             actions.appendChild(remove);
             row.appendChild(actions);
 
-            const positiveSummary = draft.row_kind === "preset" ? "" : matrixLineDraftSummary(draft, "positive");
+            const positiveSummary = matrixLineDraftSummary(draft, "positive");
             if (positiveSummary) {
                 const summary = document.createElement("div");
                 summary.className = "pc-candidate-desc";
@@ -12187,7 +12193,7 @@ function openSceneMatrixLinesPopup(node) {
                 row.appendChild(summary);
             }
 
-            const negativeSummary = draft.row_kind === "preset" ? "" : matrixLineDraftSummary(draft, "negative");
+            const negativeSummary = matrixLineDraftSummary(draft, "negative");
             if (negativeSummary) {
                 const summary = document.createElement("div");
                 summary.className = "pc-candidate-desc";

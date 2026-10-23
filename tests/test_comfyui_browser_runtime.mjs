@@ -1463,6 +1463,7 @@ window.__sceneSeedRuntimeTest = {
             body: JSON.stringify({ category: "Favorites Runtime", name: "Runtime favorite", prompt: "runtime favorite prompt", description: "Isolated browser fixture" }),
         });
         if (!response.ok) throw new Error(await response.text());
+        await window.__sceneSeedRuntimeTest.reloadCandidateItems();
     });
     const favorite = await page.evaluate(() => window.__sceneSeedRuntimeTest.openFavoritePicker());
     await page.waitForFunction((key) => [...document.querySelectorAll(".pc-favorite")].some((button) => button.dataset.favoriteKey === key && !button.disabled), favorite.key);
