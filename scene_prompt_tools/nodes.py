@@ -2495,6 +2495,7 @@ class ScenePromptCounter:
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
                 "source_node_name": ("STRING", {"default": "", "hidden": True}),
                 "prompt_trace_kind": ("STRING", {"default": "", "hidden": True}),
+                "filename_part": ("STRING", {"default": "", "hidden": True}),
             },
         }
 
@@ -2505,6 +2506,7 @@ class ScenePromptCounter:
                 _scene_prompt_change_key(scene_prompt),
                 str(_scene_count(count)),
                 str(enable_downstream_count),
+                str(kwargs.get("filename_part", "")),
             ]
         )
 
@@ -2517,6 +2519,7 @@ class ScenePromptCounter:
         source_node_name="",
         prompt_trace_kind="",
         enable_downstream_count=True,
+        filename_part="",
     ):
         # Runtime/PNG Preset boundaries mark a whole prompt without changing
         # its schedule, including an open Random branch.
@@ -2526,6 +2529,8 @@ class ScenePromptCounter:
             plan = multiply_count(scene_prompt, count, enable_downstream_count)
         if prompt_trace_kind == "whole":
             plan = mark_prompt_whole(plan)
+        if filename_part:
+            plan = transform(plan, operation={"kind": "filename_add", "payload": filename_part})
         return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
 
 

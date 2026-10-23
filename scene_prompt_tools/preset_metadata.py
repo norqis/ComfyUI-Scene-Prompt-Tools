@@ -184,7 +184,7 @@ def _preset_physical_boundaries(preset, mapping, input_id, output_id):
     return entries, output
 
 
-def _clone_preset_workflow_nodes(preset, mapping, reference_node, reference_source):
+def _clone_preset_workflow_nodes(preset, mapping, reference_node, reference_source, filename_part=""):
     templates = _workflow_template_index(_workflow_nodes(preset))
     api_nodes = _nodes(preset)
     internal_ids = list(mapping)
@@ -214,6 +214,8 @@ def _clone_preset_workflow_nodes(preset, mapping, reference_node, reference_sour
             copied["inputs"] = [{"name": "scene_prompt", "type": "SCENE_PROMPT", "link": None}]
             copied["outputs"] = [{"name": "scene_prompt", "type": "SCENE_PROMPT", "links": []}]
             copied["properties"] = {"Node name for S&R": "ScenePromptCounter", "scene_prompt_trace_kind": "whole"}
+            if filename_part:
+                copied["properties"]["scene_filename_part"] = filename_part
         for slot in copied.get("inputs", []) if isinstance(copied.get("inputs"), list) else []:
             if isinstance(slot, dict):
                 slot["link"] = None
@@ -232,6 +234,7 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
     input_id, _output_id, output_link = _boundary_ids(nodes)
     allocate = _new_node_ids(prompt, workflow)
     inputs = reference.get("inputs") if isinstance(reference.get("inputs"), dict) else {}
+    filename_part = str(inputs.get("source_node_name") or reference.get("_meta", {}).get("title") or "Scene Preset Reference") if safe_control(prompt, inputs.get("filename_enabled", False)) else ""
     upstream = inputs.get("scene_prompt")
     upstream = list(upstream) if _link(upstream) else None
     mapping = {node_id: allocate() for node_id in _preset_internal_ids(preset, retain_input=upstream is None)}
@@ -255,6 +258,8 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
                 "prompt_trace_kind": "whole",
                 "source_node_name": inputs.get("source_node_name", ""),
             }}
+            if filename_part:
+                copied["inputs"]["filename_part"] = filename_part
         copied_inputs = copied.get("inputs")
         if not isinstance(copied_inputs, dict):
             copied_inputs = {}
@@ -290,7 +295,7 @@ def _inline_reference(prompt, workflow, reference_id, preset, source_ids, state)
     if not isinstance(workflow_reference, dict):
         raise ValueError(f"workflow にPreset参照ノード #{reference_id} がありません。")
     workflow["nodes"] = [node for node in outer_nodes if str(node.get("id")) != reference_id]
-    copied_workflow_nodes = _clone_preset_workflow_nodes(preset, mapping, workflow_reference, reference_source)
+    copied_workflow_nodes = _clone_preset_workflow_nodes(preset, mapping, workflow_reference, reference_source, filename_part)
     if input_id in mapping:
         for copied_node in copied_workflow_nodes:
             if str(copied_node["id"]) == mapping[input_id]:
@@ -642,7 +647,10 @@ def _expand_workflow_only_reference(workflow, reference_id, preset, frozen_vecto
         {parts[0] for link in removed if (parts := _workflow_link_parts(link)) is not None},
     )
     workflow["nodes"] = [node for node in nodes if str(node.get("id")) != reference_id]
-    copied_nodes = _clone_preset_workflow_nodes(preset, mapping, reference, reference_path or reference_id)
+    named = reference.get("widgets_values_named", {})
+    filename_enabled = named.get("filename_enabled", widgets[4] if len(widgets) > 4 else False)
+    filename_part = str(reference.get("title") or "Scene Preset Reference") if filename_enabled and reference.get("mode", 0) not in (2, 4) else ""
+    copied_nodes = _clone_preset_workflow_nodes(preset, mapping, reference, reference_path or reference_id, filename_part)
     if input_id in mapping:
         for copied in copied_nodes:
             if str(copied["id"]) == mapping[input_id]:

@@ -1,5 +1,87 @@
 import assert from 'node:assert/strict';
 
+export async function testPresetReferenceFilenames(page) {
+    const result = await page.evaluate(async () => {
+        const app = window.app, { api } = await import('/scripts/api.js');
+        const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
+        const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        const set = (node, name, value) => { field(node, name).value = value; };
+        const link = (from, to, name = 'scene_prompt', slot = 0) => from.connect(slot, to, to.inputs.findIndex(input => input.name === name));
+        const savePreset = async (id, output) => {
+            const graph = await app.graphToPrompt();
+            const response = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ preset_id: id, output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow }) });
+            if (!response.ok) throw new Error(await response.text());
+        };
+        app.graph.clear();
+        let input = add('ScenePresetInput'), inner = add('ScenePrompter'), output = add('ScenePresetOutput');
+        inner.title = 'Inner'; set(inner, 'prompt_name', 'Inner'); set(inner, 'filename_enabled', true); set(inner, 'positive_base', 'neutral_scene');
+        link(input, inner); link(inner, output); await savePreset('filename-child', output);
+        app.graph.clear();
+        input = add('ScenePresetInput'); const child = add('ScenePresetReference'); output = add('ScenePresetOutput');
+        child.title = 'Child'; set(child, 'preset_id', 'filename-child'); set(child, 'filename_enabled', true);
+        link(input, child); link(child, output); await savePreset('filename-parent', output);
+        const migration = [];
+        for (const length of [3, 4]) {
+            const node = add('ScenePresetReference'), saved = node.serialize();
+            set(node, 'filename_enabled', true);
+            delete saved.widgets_values_named;
+            saved.widgets_values = ['filename-parent', 'old-run', '{}', '[true,false,3,4,5,6,7,8,9,10]'].slice(0, length);
+            node.configure(saved);
+            migration.push({ enabled: field(node, 'filename_enabled').value, switches: field(node, 'switch_settings_json').value,
+                preset: field(node, 'preset_id').value, widgets: node.serialize().widgets_values });
+        }
+        const rows = [];
+        for (const mode of ['ワークフロー全体', '生成経路ノードのみ']) for (const expandPresets of [false, true]) {
+            app.graph.clear();
+            const before = add('ScenePrompter'), reference = add('ScenePresetReference'), after = add('ScenePrompter');
+            const control = add('PrimitiveBoolean'), expand = add('ScenePrompterExpand'), image = add('TestSceneTextImage'), save = add('SceneSaveImage');
+            before.title = 'Before'; after.title = 'After'; reference.title = 'Outer';
+            set(before, 'prompt_name', 'Before'); set(after, 'prompt_name', 'After');
+            for (const node of [before, after]) set(node, 'filename_enabled', true);
+            set(reference, 'preset_id', 'filename-parent'); set(control, 'value', true);
+            await window.__sceneSeedRuntimeTest.refreshPresetReference(reference);
+            const firstWidget = reference.widgets[0].name;
+            link(control, reference, 'filename_enabled'); link(before, reference); link(reference, after); link(after, expand);
+            link(expand, image, 'positive'); link(expand, image, 'negative', 1); link(image, save, 'images'); link(expand, save, 'scene_info', 2);
+            set(expand, 'timestamp_dir', false); set(expand, 'prefix', 'PFX'); set(expand, 'counter_position', '先頭');
+            set(save, 'metadata_mode', mode); set(save, 'expand_preset_contents', expandPresets);
+            const execute = async () => {
+                const prompt = await app.graphToPrompt();
+                const queued = await api.queuePrompt(0, prompt);
+                const deadline = Date.now() + 20_000;
+                while (Date.now() < deadline) {
+                    const history = (await (await fetch(`/history/${queued.prompt_id}`)).json())[queued.prompt_id];
+                    if (history?.status) {
+                        if (history.status.status_str !== 'success') throw new Error(JSON.stringify(history.status));
+                        return history.outputs[String(save.id)].images[0];
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                }
+                throw new Error('Reference filename execution did not complete');
+            };
+            const first = await execute();
+            const blob = await (await fetch(`/view?${new URLSearchParams(first)}`)).blob();
+            await app.handleFile(new File([blob], 'filename.png', { type: 'image/png' }));
+            const second = await execute();
+            rows.push({ mode, expandPresets, firstWidget, filenames: [first.filename, second.filename] });
+        }
+        return { rows, migration };
+    });
+    for (const entry of result.migration) {
+        assert.equal(entry.enabled, false, 'old References default filename to OFF even when configured over an ON widget');
+        assert.equal(entry.preset, 'filename-parent');
+        assert.equal(entry.widgets.length, 5);
+    }
+    assert.equal(result.migration[0].switches, '[]');
+    assert.equal(result.migration[1].switches, '[true,false,3,4,5,6,7,8,9,10]');
+    for (const entry of result.rows) {
+        assert.equal(entry.firstWidget, 'filename_enabled');
+        assert(entry.filenames.every(name => /^PFX\d+BeforeInnerChildOuterAfter\.png$/.test(name)), JSON.stringify(entry));
+    }
+    console.log('real ComfyUI nested Reference filenames, linked BOOL, old 3/4-widget migration and full/selected expanded/reference PNG replay passed');
+}
+
 export async function testRandomPngReplay(page) {
     const result = await page.evaluate(async () => {
         const app = window.app;

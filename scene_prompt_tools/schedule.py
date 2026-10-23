@@ -42,7 +42,7 @@ UNIT_KEYS = {
 }
 OPERATION_KINDS = {
     "prompt_add", "path_add", "reverse", "delete", "model_set", "lora_add",
-    "prompt_passthrough", "prompt_whole", "source_node", "callback", "latent_set",
+    "prompt_passthrough", "prompt_whole", "source_node", "callback", "latent_set", "filename_add",
 }
 
 
@@ -479,6 +479,8 @@ def _validate_operation(operation):
                  and all(isinstance(parts, list) and all(isinstance(item, str) for item in parts) for parts in payload[1:3]))
     elif kind in {"path_add", "delete", "source_node"}:
         valid = isinstance(payload, (list, tuple)) and len(payload) == 2 and all(isinstance(item, str) for item in payload)
+    elif kind == "filename_add":
+        valid = isinstance(payload, str)
     elif kind == "reverse":
         valid = isinstance(payload, str) and payload in ("全てのノード", "直前のノード")
     elif kind == "model_set":
@@ -534,6 +536,8 @@ def _apply_operation(row, operation):
                     "positive_parts": positive, "negative_parts": negative,
                     "filename_parts": [*row["filename_parts"], *([label] if filename_enabled else [])]}
         next_row = _old.with_prompt_trace(next_row, row, positive_parts, negative_parts)
+    elif kind == "filename_add":
+        next_row = {**row, "filename_parts": [*row["filename_parts"], payload]}
     elif kind == "path_add":
         from .nodes import _append_path_part
         label, path_mode = payload

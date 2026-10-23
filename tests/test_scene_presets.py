@@ -119,6 +119,43 @@ class ScenePresetTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_reference_filename_option_matches_runtime_expansion_and_route_order(self):
+        inner = basic_nodes()
+        inner["2"]["inputs"].update(prompt_name="内側", filename_enabled=True)
+        saved = self.save("filename", inner)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                source = basic_nodes()["2"]
+                source["inputs"].pop("scene_prompt")
+                source["inputs"].update(prompt_name="前", filename_enabled=True)
+                reference = {"class_type": "ScenePresetReference", "_meta": {"title": "参照名"}, "inputs": {
+                    "preset_id": "filename", "scene_prompt": ["outer", 0], "filename_enabled": enabled,
+                }}
+                nodes = {"outer": source, "reference": reference}
+                plan = self.module._scene_node_value(nodes, "reference", {"filename": saved}, set())
+                expected = ["前", "内側", *(["参照名"] if enabled else [])]
+                self.assertEqual(plan["rows"][0]["row"]["filename_parts"], expected)
+                expansion = self.module.expand_preset_reference("filename", ["outer", 0], source_node_name="参照名", filename_enabled=enabled)
+                runtime_nodes = {"outer": source, **expansion["expand"]}
+                actual = self.module._scene_node_value(runtime_nodes, expansion["result"][0][0], {}, set())
+                self.assertEqual(actual["rows"][0]["row"]["filename_parts"], expected)
+                self.assertEqual(actual["stats"], plan["stats"])
+
+    def test_nested_reference_filename_is_local_to_each_occurrence(self):
+        saved = self.save("filename-child", basic_nodes())
+        parent = basic_nodes()
+        parent["2"] = {"class_type": "ScenePresetReference", "_meta": {"title": "子の名前"}, "inputs": {
+            "preset_id": "filename-child", "scene_prompt": ["1", 0], "filename_enabled": True,
+        }}
+        outer = self.save("filename-parent", parent)
+        nodes = {"a": {"class_type": "ScenePresetReference", "_meta": {"title": "参照A"}, "inputs": {
+            "preset_id": "filename-parent", "filename_enabled": True,
+        }}, "b": {"class_type": "ScenePresetReference", "_meta": {"title": "参照B"}, "inputs": {
+            "preset_id": "filename-parent", "filename_enabled": False,
+        }}, "queue": {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["a", 0], "scene_prompt2": ["b", 0]}}}
+        plan = self.module._scene_node_value(nodes, "queue", {"filename-child": saved, "filename-parent": outer}, set())
+        self.assertEqual([item["row"]["filename_parts"] for item in plan["rows"]], [["子の名前", "参照A"], ["子の名前"]])
+
     def test_desktop_callback_producer_is_preset_safe_and_pure(self):
         nodes = basic_nodes()
         nodes["4"] = {"class_type": "ScenePromptCallbackDesktop", "inputs": {"title": "Ready", "text": "{all_positive}"}}

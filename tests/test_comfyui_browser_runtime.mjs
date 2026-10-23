@@ -885,6 +885,7 @@ window.__sceneSeedRuntimeTest = {
     await page.route('**/prompt', allowPngReplayQueue);
     nativeRunChecks = true;
     try {
+        await (await import('./scene_random_png_replay.mjs')).testPresetReferenceFilenames(page);
         await (await import('./scene_random_png_replay.mjs')).testRandomPngReplay(page);
     } finally {
         nativeRunChecks = false;

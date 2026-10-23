@@ -189,6 +189,8 @@ Each saved Preset requires one connected Input and one connected Output. Scene p
 
 In a regular workflow, add **Scene Preset Reference**, choose the saved Preset, and connect its `scene_prompt` output to the next Scene node or to Scene Prompt Expand. Its **Preset編集 (Preset Edit)** button opens the saved fragment in a new workflow tab.
 
+Enable **ファイル名付与** on a Reference to append that Reference's node title to the filename, after any filename parts inside its Preset. It defaults to OFF and does not disable filename parts from other nodes. Each nested Reference has its own setting; Expand's prefix and counter position keep their existing behavior.
+
 ### Named switches and nested Presets (v0.11.0)
 
 Use ComfyUI's standard **If/Else Switch** (Japanese **スイッチ**, marked BETA) to choose a Scene path. Connect the path with the optional Prompt, Matrix or LoRA to **on_true**, and its original upstream Scene to **on_false** to bypass that addition when false. Both sides should supply a Scene plan. Expand's plan, counts and connected-resource information follow the selected Scene side.
