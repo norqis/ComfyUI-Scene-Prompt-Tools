@@ -60,6 +60,7 @@ class LazyScheduleTests(unittest.TestCase):
             "callback": ["cb", {"type": "request", "nested": {"change_key": "ignored", "text": ("日本語",)}},
                          "毎回", 10, "続行"],
             "latent_set": {"width": 512, "height": 512, "batch_size": 2},
+            "filename_add": "参照名",
         }
         self.assertEqual(set(payloads), schedule.OPERATION_KINDS)
         base = queue([branch("a"), branch("b")], order_mode="alternate")
