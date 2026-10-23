@@ -473,6 +473,20 @@ async function testCurrentDisplayAndRasterOwnership() {
     const matrixWarm1000ms = Number((performance.now() - matrixStart).toFixed(2));
     assert.deepEqual(calls, { stringify: 0, selectionParse: 0, matrixParse: 0 }, "warm Matrix display checks never copy or parse its large JSON");
     assert.strictEqual(ctx.matrixDisplayCacheKey(matrix, 340), matrixWarm.cacheKey);
+    const colorRows = [stateModule.createMatrixLine("Normal"), { ...stateModule.createMatrixLine("Preset"),
+        row_kind: "preset", preset_id: "child", filename_enabled: true }];
+    const colored = { ...matrix, widgets: [{ name: "matrix_json", value: stateModule.serializeMatrixState({ version: 1, sets: colorRows }) }] };
+    const output = ctx.matrixDisplayCache(colored, 340).sections[1];
+    const paint = textContext(), texts = [], strokes = [];
+    paint.fillText = (value, x) => texts.push({ value, right: x + paint.measureText(value).width });
+    paint.stroke = () => strokes.push(paint.strokeStyle);
+    ctx.drawMatrixSection(paint, output, 340, 0);
+    assert.deepEqual(strokes, ["#6da0c2", "#c4a7e7"]);
+    assert.deepEqual(texts.filter(item => item.value === "ファイル名ON"), [{ value: "ファイル名ON", right: 324 }]);
+    texts.length = 0;
+    ctx.drawMatrixSection(paint, { items: [output.items[1]], color: output.color }, 90, 0);
+    assert.equal(texts[0].value, "", "a narrow filename badge never overlaps a truncated row label");
+    assert.equal(texts[1].right, 74, "the badge stays at the right padding even in a narrow row");
     matrix.widgets[0].value = rawMatrix("after"); ctx.drawMatrixList(outer, matrix, 340, 0, 200);
     assert.notStrictEqual(matrix.sceneMatrixRenderCache.canvas, matrixRaster);
     assert(matrix.sceneMatrixRenderCache.canvas.context.texts.includes("after-0"));

@@ -6544,7 +6544,8 @@ function matrixInputItems(node) {
 function matrixOutputItems(node) {
     const lines = matrixLinesForNode(node).filter(line => matrixLineLabel(line));
     return compactMatrixLabels(lines.map(line => matrixLineLabel(line))).map((item, index) =>
-        !item.muted && lines[index].row_kind === "preset" ? { ...item, color: "#c4a7e7" } : item);
+        item.muted ? item : { ...item, filenameEnabled: lines[index].filename_enabled === true,
+            ...(lines[index].row_kind === "preset" ? { color: "#c4a7e7" } : {}) });
 }
 
 function matrixSectionHeight(section) {
@@ -6600,6 +6601,7 @@ function matrixDisplayCache(node, width = null) {
 
 function drawMatrixSection(ctx, section, width, cursorY) {
     ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
     if (section.title) {
         ctx.font = "bold 12px sans-serif";
         ctx.fillStyle = section.color;
@@ -6627,7 +6629,12 @@ function drawMatrixSection(ctx, section, width, cursorY) {
         ctx.fill();
         ctx.stroke();
         ctx.fillStyle = item.muted ? "#b7bdc8" : "#e7edf7";
-        ctx.fillText(fitCanvasText(ctx, item.label, Math.max(20, itemWidth - 12)), 16, cursorY + 9);
+        const badge = item.filenameEnabled ? fitCanvasText(ctx, "ファイル名ON", itemWidth - 12) : "";
+        const badgeWidth = badge ? ctx.measureText(badge).width : 0;
+        const labelWidth = itemWidth - 12 - (badge ? badgeWidth + 6 : 0);
+        const label = labelWidth >= ctx.measureText("...").width ? fitCanvasText(ctx, item.label, labelWidth) : "";
+        ctx.fillText(label, 16, cursorY + 9);
+        if (badge) ctx.fillText(badge, 10 + itemWidth - 6 - badgeWidth, cursorY + 9);
         cursorY += 18;
     }
     return cursorY + 6;

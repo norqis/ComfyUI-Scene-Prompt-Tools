@@ -63,11 +63,18 @@ export async function testMatrixPresetRows(page) {
     await editor.getByRole('button', { name: '閉じる', exact: true }).click();
     const colors = await page.evaluate(id => {
         const node = window.app.graph.getNodeById(id);
-        window.app.canvas.ds.scale = 1; node.size = [500, 500];
-        const canvas = document.createElement('canvas'); canvas.width = 500; canvas.height = 300;
+        window.app.canvas.ds.scale = 1; node.size = [499, 500];
+        const canvas = document.createElement('canvas'); canvas.width = 499; canvas.height = 300;
         const context = canvas.getContext('2d');
-        node.widgets.find(widget => widget.sceneRole === 'matrix_connected_list').draw(context, node, 500, 0, 300);
-        const pixels = context.getImageData(0, 0, 500, 300).data;
+        const prototype = CanvasRenderingContext2D.prototype, fillText = prototype.fillText, badges = [];
+        try {
+            prototype.fillText = function (text, x, ...args) {
+                if (text === 'ファイル名ON') badges.push({ right: x + this.measureText(text).width });
+                return fillText.call(this, text, x, ...args);
+            };
+            node.widgets.find(widget => widget.sceneRole === 'matrix_connected_list').draw(context, node, 499, 0, 300);
+        } finally { prototype.fillText = fillText; }
+        const pixels = context.getImageData(0, 0, 499, 300).data;
         const counts = { blue: 0, purple: 0, yellow: 0 };
         for (let offset = 0; offset < pixels.length; offset += 4) {
             const rgb = `${pixels[offset]},${pixels[offset + 1]},${pixels[offset + 2]}`;
@@ -75,9 +82,10 @@ export async function testMatrixPresetRows(page) {
             if (rgb === '196,167,231') counts.purple++;
             if (rgb === '216,184,70') counts.yellow++;
         }
-        return counts;
+        return { ...counts, badges };
     }, ids.target);
     assert(colors.blue > 0 && colors.purple > 0 && colors.yellow > 0, `native Matrix row colors ${JSON.stringify(colors)}`);
+    assert.equal(colors.badges.length, 1); assert.equal(colors.badges[0].right, 483, 'filename ON is right-aligned inside the native node row');
     const result = await page.evaluate(async ids => {
         const app = window.app, { api } = await import('/scripts/api.js');
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
