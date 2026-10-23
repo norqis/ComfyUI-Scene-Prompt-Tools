@@ -536,6 +536,32 @@ class SceneNodePlanSemanticsTests(unittest.TestCase):
         second = self.nodes.ScenePromptCounter().count(first, 2)[0]
         self.assertEqual(second["total_batches"], 20)
 
+    def test_linked_controls_have_stable_change_keys(self):
+        # ComfyUI supplies None here and includes the connected ancestors in
+        # its cache signature. These are unknown values, not invalid literals.
+        cases = [
+            (self.nodes.ScenePromptCounter, {"count": None, "enable_downstream_count": None}),
+            (self.nodes.SceneEmptyLatent, {"width": None}),
+            (self.nodes.SceneEmptyLatent, {"height": None, "batch_size": None}),
+            (self.nodes.SceneApplyLora, {"lora_name": None, "strength_model": None, "strength_clip": None}),
+            (self.nodes.ScenePromptQueue, {"alternate_block_size": None}),
+            (self.nodes.ScenePromptQueue, {"order_mode": None, "downstream_count_mode": None}),
+            (self.nodes.ScenePromptToText, {"scope": None, "seed_base": 7}),
+        ]
+        for node, inputs in cases:
+            with self.subTest(node=node.__name__, inputs=inputs):
+                self.assertEqual(node.IS_CHANGED(**inputs), node.IS_CHANGED(**inputs))
+
+    def test_linked_controls_are_still_validated_at_execution(self):
+        with self.assertRaises(self.nodes.ScenePlanError):
+            self.nodes.ScenePromptCounter().count(count=None)
+        with self.assertRaises(TypeError):
+            self.nodes.SceneApplyLora().apply_lora("style/example.safetensors", strength_model=None)
+        with self.assertRaises(self.nodes.ScenePlanError):
+            self.nodes.ScenePromptQueue().queue(alternate_block_size=None)
+        with self.assertRaises(ValueError):
+            self.nodes.ScenePromptToText().to_text(scope=None)
+
     def test_counter_rejects_non_integer_or_out_of_range_counts(self):
         counter = self.nodes.ScenePromptCounter()
         for invalid in ("2", True, -1, self.nodes.MAX_SAFE_INTEGER + 1):

@@ -189,7 +189,31 @@ class TestSceneTextImage:
     CATEGORY = "test"
     def render(self, positive, negative):
         return {"ui": {"text": [positive, negative]}, "result": nodes.EmptyImage().generate(16, 16, 1, 0)}
-NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage}
+cache_probe_counts = {}
+@PromptServer.instance.routes.post("/scene_test/cache_probe_start")
+async def cache_probe_start(request):
+    for name in ("ScenePromptCounter", "ScenePromptToText", "ScenePrompterQueue", "SceneEmptyLatent", "SceneApplyLora", "ScenePrompterExpand"):
+        cls = nodes.NODE_CLASS_MAPPINGS[name]
+        original = getattr(cls, cls.FUNCTION)
+        def counted(self, *args, _original=original, _name=name, **kwargs):
+            cache_probe_counts[_name] = cache_probe_counts.get(_name, 0) + 1
+            return _original(self, *args, **kwargs)
+        setattr(cls, cls.FUNCTION, counted)
+    return web.json_response({"ready": True})
+@PromptServer.instance.routes.get("/scene_test/cache_probe_counts")
+async def get_cache_probe_counts(request):
+    return web.json_response(cache_probe_counts)
+class SceneCacheProbe:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"scene_prompt": ("SCENE_PROMPT",), "positive": ("STRING",)},
+                "optional": {"seed": ("INT",)}}
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "probe"
+    def probe(self, scene_prompt, positive, seed=0):
+        return {"ui": {"text": [json.dumps(scene_prompt["stats"]), positive, str(seed)]}, "result": ()}
+NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "SceneCacheProbe": SceneCacheProbe}
 `);
     child = spawn(python, [
         "main.py",
@@ -353,6 +377,10 @@ window.__sceneSeedRuntimeTest = {
     nativeRunChecks = true;
     try { await (await import('./scene_public_widget_inputs.mjs')).verifyLinkedInputSemantics(page); }
     finally { nativeRunChecks = false; }
+    nativeRunChecks = true;
+    nativeGPUChecks = true;
+    try { await (await import('./scene_cache_runtime.mjs')).verifyLinkedControlCache(page); }
+    finally { nativeRunChecks = false; nativeGPUChecks = false; }
     const removedInitialization = await page.evaluate(async () => {
         const graph = window.app.graph, removed = [];
         graph.clear();
