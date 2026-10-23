@@ -12148,7 +12148,7 @@ function openSceneMatrixLinesPopup(node) {
                         draft.switch_settings_json = JSON.stringify(values); commitDrafts();
                     } }));
                 actions.appendChild(settings);
-            } else {
+            }
             const positive = createButton("ポジティブ候補");
             positive.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "positive", renderRows, commitDrafts));
             actions.appendChild(positive);
@@ -12156,7 +12156,6 @@ function openSceneMatrixLinesPopup(node) {
             const negative = createButton("ネガティブ候補");
             negative.addEventListener("click", () => openMatrixLineSelectionPopup(node, drafts, index, "negative", renderRows, commitDrafts));
             actions.appendChild(negative);
-            }
 
             const filename = createButton(draft.filename_enabled === true ? "ファイル名付与: ON" : "ファイル名付与: OFF", draft.filename_enabled === true ? "pc-on" : "");
             filename.addEventListener("click", () => {
@@ -12185,7 +12184,7 @@ function openSceneMatrixLinesPopup(node) {
             actions.appendChild(remove);
             row.appendChild(actions);
 
-            const positiveSummary = draft.row_kind === "preset" ? "" : matrixLineDraftSummary(draft, "positive");
+            const positiveSummary = matrixLineDraftSummary(draft, "positive");
             if (positiveSummary) {
                 const summary = document.createElement("div");
                 summary.className = "pc-candidate-desc";
@@ -12194,7 +12193,7 @@ function openSceneMatrixLinesPopup(node) {
                 row.appendChild(summary);
             }
 
-            const negativeSummary = draft.row_kind === "preset" ? "" : matrixLineDraftSummary(draft, "negative");
+            const negativeSummary = matrixLineDraftSummary(draft, "negative");
             if (negativeSummary) {
                 const summary = document.createElement("div");
                 summary.className = "pc-candidate-desc";

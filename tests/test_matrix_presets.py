@@ -51,6 +51,18 @@ class MatrixPresetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Pending.*Preset"):
             self.nodes.SceneMatrix().build(self.state([row("Pending", row_kind="preset", preset_id="")]))
 
+    def test_preset_row_prompts_keep_weights_and_both_sides_in_expanded_metadata(self):
+        state = self.state([row("P", row_kind="preset", preset_id="child", positive_base="(extra:1.3)", negative_base="blocked")])
+        nodes = {"4": {"class_type": "SceneMatrix", "inputs": {"matrix_json": state}}}
+        loaded = {"child": self.presets.load_preset("child")}
+        runtime = self.presets._scene_node_value(nodes, "4", loaded, set())
+        metadata = importlib.import_module(self.presets.__package__ + ".preset_metadata")
+        expanded, _workflow, _aliases = metadata.expand_preset_references(nodes, outer_workflow(nodes), loaded)
+        replay = self.presets._scene_node_value(expanded, "4", {}, set())
+        for plan in (runtime, replay):
+            self.assertEqual([self.nodes.ScenePromptExpand().expand(scene_prompt=plan, current_index=index)[:2] for index in range(2)],
+                             [("Y, (extra:1.3)", "blocked"), ("Z, (extra:1.3)", "blocked")])
+
     def test_more_than_ten_rows_keep_order_without_extra_queue_boundary(self):
         rows = [row(str(index), row_kind="preset", preset_id="child") for index in range(12)]
         actual = self.nodes.SceneMatrix().build(self.state(rows), unique_id="matrix")[0]
