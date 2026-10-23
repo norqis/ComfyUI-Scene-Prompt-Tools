@@ -206,6 +206,30 @@ class PresetMetadataTests(unittest.TestCase):
             expand,
         )
 
+    def test_reference_filename_survives_inline_metadata_with_a_linked_boolean(self):
+        definition = simple_preset("reference-name")
+        definition["api_graph"]["output"]["11"]["inputs"]["filename_enabled"] = True
+        self.put_snapshots({"reference-name": definition})
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                source = scene_prompt("before")
+                source["inputs"]["filename_enabled"] = True
+                prompt = {"1": source, "2": {"class_type": "ScenePresetReference", "inputs": {
+                    "preset_id": "reference-name", "scene_prompt": ["1", 0], "filename_enabled": ["6", 0], "source_node_name": "表の参照",
+                }}, "6": {"class_type": "PrimitiveBoolean", "inputs": {"value": enabled}},
+                    "8": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["2", 0]}},
+                    "9": {"class_type": "SceneSaveImage", "inputs": {"scene_info": ["8", 2]}}}
+                before = copy.deepcopy(prompt)
+                saved, extra = self.metadata(prompt, self.nodes.SAVE_METADATA_WORKFLOW, ["1", "2"])
+                markers = [node for node in saved.values() if node["class_type"] == "ScenePromptCounter"]
+                self.assertEqual([node["inputs"].get("filename_part", "") for node in markers], ["表の参照" if enabled else ""])
+                workflow_markers = [node for node in extra["workflow"]["nodes"] if node["type"] == "ScenePromptCounter"]
+                self.assertEqual([node["properties"].get("scene_filename_part", "") for node in workflow_markers], ["表の参照" if enabled else ""])
+                source_id = saved["8"]["inputs"]["scene_prompt"][0]
+                actual = self.presets._scene_node_value(saved, source_id, {}, set())
+                self.assertEqual(actual["rows"][0]["row"]["filename_parts"], ["before", "inside", *(["表の参照"] if enabled else [])])
+                self.assertEqual(prompt, before)
+
     def test_off_returns_the_existing_metadata_objects(self):
         prompt = {"1": scene_prompt("outside"), "9": {"class_type": "SceneSaveImage", "inputs": {}}}
         extra = {"workflow": outer_workflow(prompt)}

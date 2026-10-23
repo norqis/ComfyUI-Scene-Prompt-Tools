@@ -9685,6 +9685,7 @@ function applyScenePresetSwitchBindings(apiGraph, graph) {
         if (promptNode?.class_type === "ScenePromptCounter" && properties?.scene_prompt_trace_kind === "whole") {
             promptNode.inputs ||= {};
             promptNode.inputs.prompt_trace_kind = "whole";
+            if (properties.scene_filename_part) promptNode.inputs.filename_part = properties.scene_filename_part;
         }
         const randomSeed = properties?.scene_random_seed;
         if (promptNode?.class_type === "ScenePromptRandomRoute" && String(randomSeed?.node_id) === nodeId) {
@@ -9705,6 +9706,7 @@ function installScenePresetSwitchBindings() {
             .map((node) => [String(node.id), { properties: {
                 scene_switch_values: node.properties?.scene_switch_values?.slice(),
                 scene_prompt_trace_kind: node.properties?.scene_prompt_trace_kind,
+                scene_filename_part: node.properties?.scene_filename_part,
                 scene_random_seed: node.properties?.scene_random_seed ? { ...node.properties.scene_random_seed } : undefined,
             } }]));
         return applyScenePresetSwitchBindings(await original.apply(this, args), { getNodeById: (id) => bindings.get(String(id)) });
@@ -12844,7 +12846,8 @@ function attachScenePresetReference(node) {
     applySceneWidgetLabels(node);
     node.resizable = true;
     installSceneConnectionWatcher(node);
-    removeInternalInputSockets(node, { visibleNames: new Set(["scene_prompt", "switches"]), removeAllExceptVisible: true });
+    removeInternalInputSockets(node, { visibleNames: new Set(["scene_prompt", "switches", "filename_enabled"]), removeAllExceptVisible: true });
+    ensureSceneFilenameToggle(node);
     const switchesInput = linkedInput(node, "switches");
     if (switchesInput) switchesInput.label = "スイッチ一式";
     hideWidget(findWidget(node, "preset_id"));
@@ -13856,7 +13859,7 @@ app.registerExtension({
             const configure = nodeType.prototype.configure, serialize = nodeType.prototype.serialize;
             const names = nodeData.name === "ScenePresetInput" ? ["switch_names_json"]
                 : nodeData.name === "ScenePromptMakeSwitch" ? ["switch_names_json", "switch_values_json"]
-                : ["preset_id", "run_handle", "llm_presets_json", "switch_settings_json"];
+                : ["preset_id", "run_handle", "llm_presets_json", "switch_settings_json", "filename_enabled"];
             nodeType.prototype.configure = function (config, ...args) {
                 if (nodeData.name === "ScenePresetInput") {
                     const outputs = Array.from({ length: 12 }, (_, slot) => ({ ...config?.outputs?.[slot],
@@ -13866,7 +13869,8 @@ app.registerExtension({
                     config = { ...config, outputs };
                 }
                 const named = { ...Object.fromEntries(names.map((name, index) => [name, config?.widgets_values?.[index]])), ...config?.widgets_values_named };
-                const jsonName = names.at(-1);
+                if (nodeData.name === "ScenePresetReference") named.filename_enabled ??= false;
+                const jsonName = nodeData.name === "ScenePresetReference" ? "switch_settings_json" : names.at(-1);
                 if (!Object.hasOwn(config?.widgets_values_named || {}, jsonName)
                     && (typeof named[jsonName] !== "string" || !named[jsonName].trim().startsWith("["))) named[jsonName] = "[]";
                 const values = (this.widgets || []).map((widget) => named[widget.name] ?? widget.value);

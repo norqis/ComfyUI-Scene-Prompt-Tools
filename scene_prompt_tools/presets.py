@@ -14,7 +14,7 @@ from comfy_execution.graph_utils import GraphBuilder, is_link
 
 from .llm_node import ScenePromptLLM
 from .prompt import SCENE_PROMPT_TYPE, ScenePrompt
-from .plan import mark_prompt_whole, seed_plan
+from .plan import mark_prompt_whole, seed_plan, transform
 from .storage import public_user_directory, is_windows_reserved_name
 from .nodes import (
     SceneEmptyLatent,
@@ -1179,6 +1179,8 @@ def _scene_node_value_impl(
             node_id,
             effective,
         ))
+        if value(_node_inputs(node).get("filename_enabled", False)):
+            result = transform(result, operation={"kind": "filename_add", "payload": _source_node_name(node)})
         memo[node_id] = result
         return result
     if class_type == "ScenePromptToText" and not preset_stack:
@@ -1575,6 +1577,7 @@ def expand_preset_reference(
     llm_presets_json="{}",
     switches=None,
     switch_settings_json="[]",
+    filename_enabled=False,
 ):
     preset_id = _clean_preset_id(preset_id)
     reference_path = str(source_node_id or unique_id or "")
@@ -1646,6 +1649,8 @@ def expand_preset_reference(
     marker.set_input("prompt_trace_kind", "whole")
     marker.set_input("source_node_id", reference_source_id)
     marker.set_input("source_node_name", str(source_node_name or ""))
+    if filename_enabled:
+        marker.set_input("filename_part", str(source_node_name or "Scene Preset Reference"))
     result = marker.out(0)
     return {"result": (result,), "expand": graph.finalize()}
 
@@ -1712,6 +1717,7 @@ class ScenePresetReference:
                 "llm_presets_json": ("STRING", {"default": "{}", "hidden": True}),
                 "switches": (SCENE_SWITCHES_TYPE,),
                 "switch_settings_json": ("STRING", {"default": "[]", "hidden": True}),
+                "filename_enabled": ("BOOLEAN", {"default": False, "display_name": "ファイル名付与", "label": "ファイル名付与"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1730,9 +1736,10 @@ class ScenePresetReference:
         with _PRESET_LOCK:
             frozen = _RUN_SNAPSHOTS[_run_cache_key(run_handle, user_id)].get("switch_values", {})
             vector = frozen[reference_path] if reference_path in frozen else resolve_switches(kwargs.get("switches"), kwargs.get("switch_settings_json", "[]"))
-        return f"{metadata['preset_id']}:{metadata['sha256']}:{run_handle}:{tuple(vector)}"
+        filename = str(kwargs.get("source_node_name") or "Scene Preset Reference") if kwargs.get("filename_enabled", False) else ""
+        return f"{metadata['preset_id']}:{metadata['sha256']}:{run_handle}:{tuple(vector)}" + (f":{filename}" if filename else "")
 
-    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id="", source_node_name="", llm_presets_json="{}", switches=None, switch_settings_json="[]"):
+    def expand(self, preset_id, scene_prompt=None, run_handle="", unique_id=None, source_node_id="", source_node_name="", llm_presets_json="{}", switches=None, switch_settings_json="[]", filename_enabled=False):
         return expand_preset_reference(
             preset_id,
             scene_prompt,
@@ -1744,4 +1751,5 @@ class ScenePresetReference:
             llm_presets_json=llm_presets_json,
             switches=switches,
             switch_settings_json=switch_settings_json,
+            filename_enabled=filename_enabled,
         )
