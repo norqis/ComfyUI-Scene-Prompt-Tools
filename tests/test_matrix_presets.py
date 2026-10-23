@@ -120,6 +120,10 @@ class MatrixPresetTests(unittest.TestCase):
         nodes = {"4": {"class_type": "SceneMatrix", "inputs": {"matrix_json": state}}}
         workflow = outer_workflow(nodes)
         workflow["nodes"][0]["widgets_values"] = [state, ""]
+        workflow["nodes"][0]["inputs"].append({"name": "switches", "type": "SCENE_SWITCHES", "link": 1})
+        workflow["nodes"].append({"id": 5, "type": "ScenePromptMakeSwitch", "widgets_values": ["[]", "[true]"],
+                                  "outputs": [{"name": "switches", "type": "SCENE_SWITCHES", "links": [1]}]})
+        workflow["links"] = [[1, 5, 0, 4, 1, "SCENE_SWITCHES"]]
         metadata = importlib.import_module(self.presets.__package__ + ".preset_metadata")
         child = self.presets.load_preset("child")
         expanded, workflow, aliases = metadata.expand_preset_references({}, workflow, {"child": child}, True)
