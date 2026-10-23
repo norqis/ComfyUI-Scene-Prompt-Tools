@@ -189,7 +189,51 @@ class TestSceneTextImage:
     CATEGORY = "test"
     def render(self, positive, negative):
         return {"ui": {"text": [positive, negative]}, "result": nodes.EmptyImage().generate(16, 16, 1, 0)}
-NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage}
+cache_probe_counts = {}
+import execution
+execution_probe_nodes = []
+execution_probe_enabled = False
+original_node_execute = execution.execute
+async def probe_node_execute(*args, **kwargs):
+    if execution_probe_enabled:
+        execution_probe_nodes.append(str(args[3]))
+    return await original_node_execute(*args, **kwargs)
+execution.execute = probe_node_execute
+@PromptServer.instance.routes.post("/scene_test/execution_probe")
+async def execution_probe(request):
+    global execution_probe_enabled
+    execution_probe_enabled = (await request.json())["enabled"]
+    if execution_probe_enabled:
+        execution_probe_nodes.clear()
+    return web.json_response(list(execution_probe_nodes))
+@PromptServer.instance.routes.post("/scene_test/cache_probe_start")
+async def cache_probe_start(request):
+    for name in ("ScenePromptCounter", "ScenePromptToText", "ScenePrompterQueue", "SceneEmptyLatent", "SceneApplyLora", "ScenePrompterExpand"):
+        cls = nodes.NODE_CLASS_MAPPINGS[name]
+        original = getattr(cls, cls.FUNCTION)
+        def counted(self, *args, _original=original, _name=name, **kwargs):
+            cache_probe_counts[_name] = cache_probe_counts.get(_name, 0) + 1
+            return _original(self, *args, **kwargs)
+        setattr(cls, cls.FUNCTION, counted)
+    return web.json_response({"ready": True})
+@PromptServer.instance.routes.get("/scene_test/cache_probe_counts")
+async def get_cache_probe_counts(request):
+    return web.json_response(cache_probe_counts)
+class SceneCacheProbe:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"scene_prompt": ("SCENE_PROMPT",), "positive": ("STRING",)},
+                "optional": {"seed": ("INT",)}}
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "probe"
+    def probe(self, scene_prompt, positive, seed=0):
+        package = nodes.NODE_CLASS_MAPPINGS["SceneApplyLora"].__module__.rsplit(".", 1)[0]
+        plan = importlib.import_module(package + ".plan")
+        row = plan.item_for_normalized_plan(scene_prompt, 0, 7)["row"]
+        details = {key: row.get(key) for key in ("model_links", "loras", "source_node_ids", "source_node_names")}
+        return {"ui": {"text": [json.dumps(scene_prompt["stats"]), positive, str(seed), json.dumps(details)]}, "result": ()}
+NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "SceneCacheProbe": SceneCacheProbe}
 `);
     child = spawn(python, [
         "main.py",
@@ -353,6 +397,14 @@ window.__sceneSeedRuntimeTest = {
     nativeRunChecks = true;
     try { await (await import('./scene_public_widget_inputs.mjs')).verifyLinkedInputSemantics(page); }
     finally { nativeRunChecks = false; }
+    nativeRunChecks = true;
+    nativeGPUChecks = true;
+    try {
+        const checks = await import('./scene_cache_runtime.mjs');
+        await checks.verifyLinkedControlCache(page);
+        await checks.verifyCompactPresetRuntime(page);
+    }
+    finally { nativeRunChecks = false; nativeGPUChecks = false; }
     const removedInitialization = await page.evaluate(async () => {
         const graph = window.app.graph, removed = [];
         graph.clear();

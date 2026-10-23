@@ -2293,9 +2293,15 @@ class ScenePromptQueue:
     def IS_CHANGED(cls, **kwargs):
         parts = []
         from .plan import _validate_queue_controls
-        mode, block, count_mode = _validate_queue_controls(
+        controls = (
             kwargs.get("order_mode", "input_order"), kwargs.get("alternate_block_size", 1),
             kwargs.get("input_repeats_json", "{}"), kwargs.get("downstream_count_mode", "multiply"),
+        )
+        # ComfyUI passes None for linked inputs while computing cache keys.
+        # Their values are tracked through the ancestor node signatures.
+        mode, block, count_mode = (
+            _validate_queue_controls(*controls) if all(value is not None for value in controls)
+            else (controls[0], controls[1], controls[3])
         )
         locked = any(
             isinstance(kwargs.get(name), dict) and kwargs[name].get("contains_queue_boundary") is True
@@ -2459,8 +2465,8 @@ class ScenePromptToText:
 
     @classmethod
     def IS_CHANGED(cls, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", model_mode=None, **kwargs):
-        return "|".join([_scene_prompt_change_key(scene_prompt), scope, str(current_index),
-                         _seed_change_key(seed_base), str(_scene_bool(seed_base_literal)), str(run_handle)])
+        return json.dumps([_scene_prompt_change_key(scene_prompt), scope, current_index,
+                           _seed_change_key(seed_base), _scene_bool(seed_base_literal), run_handle])
 
     def to_text(self, scene_prompt=None, scope=TEXT_SCOPE_ALL, current_index=0, seed_base=0, seed_base_literal=False, run_handle="", unique_id=None, model_mode=None):
         if scope not in TEXT_SCOPE_CHOICES:
@@ -2523,11 +2529,11 @@ class ScenePromptCounter:
 
     @classmethod
     def IS_CHANGED(cls, scene_prompt=None, count=1, enable_downstream_count=True, **kwargs):
-        return "|".join(
+        return json.dumps(
             [
                 _scene_prompt_change_key(scene_prompt),
-                str(_scene_count(count)),
-                str(enable_downstream_count),
+                _scene_count(count) if count is not None else None,
+                enable_downstream_count,
                 str(kwargs.get("filename_part", "")),
             ]
         )
@@ -2696,7 +2702,10 @@ class SceneApplyLora:
     @classmethod
     def IS_CHANGED(cls, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative="", positive_json=DEFAULT_SELECTED_JSON, negative_json=DEFAULT_SELECTED_JSON, category_order=DEFAULT_CATEGORY_ORDER, **kwargs):
         del kwargs
-        return "|".join([_scene_prompt_change_key(scene_prompt), str(lora_name), str(float(strength_model)), str(float(strength_clip)), _normalize_model_mode(model_mode), str(positive), str(negative), str(positive_json), str(negative_json), str(category_order)])
+        return json.dumps([_scene_prompt_change_key(scene_prompt), lora_name,
+                           float(strength_model) if strength_model is not None else None,
+                           float(strength_clip) if strength_clip is not None else None,
+                           _normalize_model_mode(model_mode), positive, negative, positive_json, negative_json, category_order])
 
     def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative="", positive_json=DEFAULT_SELECTED_JSON, negative_json=DEFAULT_SELECTED_JSON, category_order=DEFAULT_CATEGORY_ORDER):
         name = str(lora_name or "").strip()

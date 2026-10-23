@@ -166,8 +166,8 @@ class OpenIssueRegressionTests(unittest.TestCase):
         path.write_bytes(original_bytes)
 
         expanded = self.presets.expand_preset_reference("legacy")
-        self.assertIn("result", expanded)
-        self.assertIn("expand", expanded)
+        self.assertEqual(expanded["stats"]["total_batches"], 1)
+        self.assertNotIn("expand", expanded)
         self.assertEqual(path.read_bytes(), original_bytes)
 
         loaded = self.presets.load_preset("legacy", "default")

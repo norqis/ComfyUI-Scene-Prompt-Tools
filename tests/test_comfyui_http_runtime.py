@@ -2354,7 +2354,7 @@ NODE_CLASS_MAPPINGS = {
                     "1": {"class_type": "ScenePresetInput", "inputs": {}},
                     "2": {
                         "class_type": "ScenePresetReference",
-                        "inputs": {"preset_id": "callback-preset", "scene_prompt": ["1", 0]},
+                        "inputs": {"preset_id": "callback-preset", "scene_prompt": ["1", 0], "source_node_name": "Nested reference"},
                     },
                     "3": {
                         "class_type": "ScenePresetOutput",
@@ -2374,8 +2374,8 @@ NODE_CLASS_MAPPINGS = {
                 "workflow": _workflow_for_graph(wrapper_graph["output"]),
             })
             graph = {
-                "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-preset"}},
-                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-wrapper"}},
+                "1": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-preset", "source_node_name": "First reference"}},
+                "2": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "callback-wrapper", "source_node_name": "Wrapper reference"}},
                 "3": {
                     "class_type": "ScenePrompterQueue",
                     "inputs": {
@@ -2443,6 +2443,8 @@ NODE_CLASS_MAPPINGS = {
                 for request in received:
                     names = json.loads(request["body"].decode("utf-8"))["all_node_names"].split("_")
                     self.assertEqual(names, list(dict.fromkeys(names)))
+                self.assertEqual(json.loads(received[0]["body"])["all_node_names"], "Preset source_First reference_Preset queue")
+                self.assertEqual(json.loads(received[1]["body"])["all_node_names"], "Preset source_Nested reference_Wrapper reference_Preset queue")
             finally:
                 self.assertTrue(self._request("/scene_prompt/runs/release", {"run_handle": handle})["released"])
 

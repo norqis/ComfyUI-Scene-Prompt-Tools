@@ -552,9 +552,7 @@ class ScenePromptTextDeleteTests(unittest.TestCase):
                         self.assertEqual([entry['preset_id'] for entry in resolved['presets']], ['text-plan'])
                         snapshots = self.presets.snapshot_presets_for_metadata(handle)
                         # Runtime preset expansion namespaces every Scene source.
-                        graph = self.presets.expand_preset_reference('text-plan', run_handle=handle, source_node_id='22')['expand']
-                        source = '__scene_preset_source'
-                        plans['22'] = self.presets._scene_node_value(graph, source, snapshots, set())
+                        plans['22'] = self.presets.expand_preset_reference('text-plan', run_handle=handle, source_node_id='22')
                     expected_text = self.nodes.ScenePromptToText().to_text(plans['22'], current_index=2, seed_base=100, run_handle=handle, unique_id='31')
                     expanded = self.nodes.ScenePromptExpand().expand(scene_prompt=plans['21'], current_index=expand_index, seed_base=100, run_handle=handle, unique_id='30', prompt=prompt)
                     workflow = self.workflow(prompt)

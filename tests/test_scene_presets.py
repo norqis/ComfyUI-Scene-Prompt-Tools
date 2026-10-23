@@ -135,11 +135,11 @@ class ScenePresetTests(unittest.TestCase):
                 plan = self.module._scene_node_value(nodes, "reference", {"filename": saved}, set())
                 expected = ["前", "内側", *(["参照名"] if enabled else [])]
                 self.assertEqual(plan["rows"][0]["row"]["filename_parts"], expected)
-                expansion = self.module.expand_preset_reference("filename", ["outer", 0], source_node_name="参照名", filename_enabled=enabled)
-                runtime_nodes = {"outer": source, **expansion["expand"]}
-                actual = self.module._scene_node_value(runtime_nodes, expansion["result"][0][0], {}, set())
+                upstream = self.module._scene_node_value({"outer": source}, "outer", {}, set())
+                actual = self.module.expand_preset_reference("filename", upstream, source_node_id="reference", source_node_name="参照名", filename_enabled=enabled)
                 self.assertEqual(actual["rows"][0]["row"]["filename_parts"], expected)
                 self.assertEqual(actual["stats"], plan["stats"])
+                self.assertEqual(list(actual["rows"]), list(plan["rows"]))
 
     def test_nested_reference_filename_is_local_to_each_occurrence(self):
         saved = self.save("filename-child", basic_nodes())
@@ -225,15 +225,8 @@ class ScenePresetTests(unittest.TestCase):
                 result = self.nodes.ScenePromptExpand().expand(scene_prompt=plan, timestamp_dir=False)
                 self.assertEqual(len(result["expand"]), 2)
                 self.assertEqual(result["result"][0], "base, left, right, trigger")
-                parent_expansion = self.module.expand_preset_reference("lora-parent", source_node_id="outer")
-                reference_sources = [node["inputs"]["source_node_id"] for node in parent_expansion["expand"].values()
-                                     if node["class_type"] == "ScenePresetReference"]
-                actual_sources = []
-                for reference_source in reference_sources:
-                    expansion = self.module.expand_preset_reference("lora-child", source_node_id=reference_source)
-                    actual_sources.extend(node["inputs"]["source_node_id"] for node in expansion["expand"].values()
-                                          if node["class_type"] == "SceneApplyLora")
-                self.assertEqual(actual_sources, [descriptor["source_node_id"] for descriptor in descriptors])
+                runtime = self.module.expand_preset_reference("lora-parent", upstream, source_node_id="outer")
+                self.assertEqual(runtime["rows"][0]["row"]["loras"], descriptors)
                 shared = self.module._evaluate_preset_scene(child, {}, upstream, reference_node_id="shared")
                 reconverged = self.nodes.ScenePromptMerge().merge(shared, shared)[0]
                 self.assertEqual([descriptor["source_node_id"] for descriptor in reconverged["rows"][0]["row"]["loras"]], ["shared/4"])
@@ -972,33 +965,23 @@ class ScenePresetTests(unittest.TestCase):
                 *connected, {"id": 2, "type": "ScenePrompter"},
             ]})
 
-    def test_node_expansion_keeps_existing_scene_nodes_and_links(self):
+    def test_reference_plan_keeps_upstream_prompts_sources_and_queue_boundary(self):
         nodes = basic_nodes()
-        nodes["4"] = {
-            "class_type": "ScenePrompterQueue",
-            "inputs": {"scene_prompt1": ["2", 0]},
-        }
+        nodes["4"] = {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["2", 0]}}
         nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
         self.save("expanded", nodes)
-        result = self.module.expand_preset_reference(
-            "expanded",
-            ["outer", 0],
-            "",
-            source_node_id="reference_20",
-        )
-        self.assertIn("result", result)
-        self.assertIn("expand", result)
-        queue = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompterQueue")
-        self.assertEqual(queue["inputs"]["scene_prompt1"][1], 0)
-        prompt = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompter")
-        self.assertEqual(prompt["inputs"]["scene_prompt"], ["outer", 0])
-        marker = result["expand"]["__scene_preset_source"]
-        self.assertEqual(marker["class_type"], "ScenePromptCounter")
-        self.assertEqual(marker["inputs"]["source_node_id"], "reference_20")
-        self.assertEqual(result["result"], (["__scene_preset_source", 0],))
-
-        source_result = self.module.expand_preset_reference("expanded")
-        self.assertTrue(any(value["class_type"] == "ScenePresetInput" for value in source_result["expand"].values()))
+        outer = basic_nodes("outer")["2"]
+        outer["inputs"].pop("scene_prompt")
+        upstream = self.module._scene_node_value({"outside": outer}, "outside", {}, set())
+        plan = self.module.expand_preset_reference("expanded", upstream, source_node_id="reference_20", source_node_name="Ref")
+        self.assertEqual(plan["rows"][0]["row"]["positive_parts"], ["outer", "first"])
+        self.assertTrue(plan["contains_queue_boundary"])
+        self.assertIn("outside", plan["rows"][0]["row"]["source_node_ids"])
+        self.assertIn("reference_20/2", plan["rows"][0]["row"]["source_node_ids"])
+        self.assertEqual(plan["rows"][0]["row"]["source_node_names"]["reference_20"], "Ref")
+        self.assertNotIn("expand", plan)
+        source = self.module.expand_preset_reference("expanded")
+        self.assertEqual(source["rows"][0]["row"]["positive_parts"], ["first"])
 
     def test_queue_matrix_merge_order_is_preserved_by_scene_nodes(self):
         matrix = self.module.SceneMatrix().build(
@@ -1083,10 +1066,7 @@ class ScenePresetTests(unittest.TestCase):
         }
         self.save("standalone", nodes)
         expanded = self.module.expand_preset_reference("standalone")
-        self.assertTrue(any(
-            node["class_type"] == "ScenePresetInput"
-            for node in expanded["expand"].values()
-        ))
+        self.assertEqual(expanded["rows"][0]["row"]["latent"], {"width": 832, "height": 1216, "batch_size": 2})
 
         result = self.module.snapshot_presets_for_run("standalone-run", graph({
             "10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "standalone"}},
@@ -1130,13 +1110,11 @@ class ScenePresetTests(unittest.TestCase):
             "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}},
         }), "11")
         self.save("fixed", basic_nodes("second"))
-        result = self.module.expand_preset_reference("fixed", ["outer", 0], "run-fixed")
-        prompt = next(value for value in result["expand"].values() if value["class_type"] == "ScenePrompter")
-        self.assertEqual(prompt["inputs"]["positive_base"], "first")
+        result = self.module.expand_preset_reference("fixed", run_handle="run-fixed")
+        self.assertEqual(result["rows"][0]["row"]["positive_parts"], ["first"])
         self.module.release_scene_preset_snapshot("run-fixed")
-        fresh = self.module.expand_preset_reference("fixed", ["outer", 0], "")
-        prompt = next(value for value in fresh["expand"].values() if value["class_type"] == "ScenePrompter")
-        self.assertEqual(prompt["inputs"]["positive_base"], "second")
+        fresh = self.module.expand_preset_reference("fixed")
+        self.assertEqual(fresh["rows"][0]["row"]["positive_parts"], ["second"])
 
     def test_expand_conversion_options_transform_preset_prompt_without_mutating_the_snapshot(self):
         preset_nodes = basic_nodes("preset_hair, (preset_weight:1.4)")
@@ -1148,12 +1126,7 @@ class ScenePresetTests(unittest.TestCase):
         })
         run_handle = "model-mode-run"
         self.module.snapshot_presets_for_run(run_handle, api_graph, "21")
-        expanded_reference = self.module.expand_preset_reference(
-            "model-mode", run_handle=run_handle, source_node_id="20"
-        )["expand"]
-        plan = self.module._scene_node_value(
-            expanded_reference, "__scene_preset_source", {}, set(), run_handle=run_handle
-        )
+        plan = self.module.expand_preset_reference("model-mode", run_handle=run_handle, source_node_id="20")
 
         expected = {
             (False, False): ("preset_hair, (preset_weight:1.4)", "preset_hands, (bad_weight:1.2)"),
@@ -1181,8 +1154,7 @@ class ScenePresetTests(unittest.TestCase):
         child["2"]["inputs"]["negative_base"] = "child_neg"
         self.save("reverse-child", child)
 
-        expanded = self.module.expand_preset_reference("reverse-child", source_node_id="20")["expand"]
-        plan = self.module._scene_node_value(expanded, "__scene_preset_source", {}, set())
+        plan = self.module.expand_preset_reference("reverse-child", source_node_id="20")
         reversed_plan = self.nodes.ScenePromptReverse().reverse(plan, "直前のノード")[0]
         row = reversed_plan["rows"][0]["row"]
         self.assertEqual(row["positive_parts"], ["child_neg"])
@@ -1568,10 +1540,10 @@ class ScenePresetTests(unittest.TestCase):
         snapshot = self.module.snapshot_presets_for_run("queue-run", api_graph)
 
         self.assertEqual({item["preset_id"] for item in snapshot["presets"]}, {"first", "second"})
-        first = self.module.expand_preset_reference("first", ["outer", 0], "queue-run")
-        second = self.module.expand_preset_reference("second", ["outer", 0], "queue-run")
-        self.assertTrue(first["expand"])
-        self.assertTrue(second["expand"])
+        first = self.module.expand_preset_reference("first", run_handle="queue-run")
+        second = self.module.expand_preset_reference("second", run_handle="queue-run")
+        self.assertEqual(first["rows"][0]["row"]["positive_parts"], ["first branch"])
+        self.assertEqual(second["rows"][0]["row"]["positive_parts"], ["second branch"])
 
     def test_nested_preset_failure_keeps_outer_reference_node_id(self):
         outer_nodes = basic_nodes()
@@ -1959,9 +1931,9 @@ class ScenePresetTests(unittest.TestCase):
         nodes["10"] = {"class_type": "ScenePrompterQueue", "inputs": {"scene_prompt1": ["9", 0], "scene_prompt2": ["4", 0]}}
         nodes["3"]["inputs"]["scene_prompt"] = ["10", 0]
         self.save("integrated", nodes)
-        expanded = self.module.expand_preset_reference("integrated", ["outer", 0])
-        expanded_classes = {node["class_type"] for node in expanded["expand"].values()}
-        self.assertTrue({"SceneMatrix", "ScenePrompterMerge", "ScenePromptCounter", "ScenePath", "SceneEmptyLatent", "ScenePrompterQueue"}.issubset(expanded_classes))
+        expanded = self.module.expand_preset_reference("integrated")
+        self.assertEqual(expanded["stats"]["total_images"], 6)
+        self.assertEqual(expanded["rows"][0]["row"]["latent"], {"width": 832, "height": 1216, "batch_size": 1})
         api_graph = graph({
             "20": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "integrated"}},
             "21": {"class_type": "PrimitiveInt", "inputs": {"value": 3}},
@@ -2021,8 +1993,7 @@ class ScenePresetTests(unittest.TestCase):
         runs = sys.modules[f"{self.module.__package__}.runs"]
         run_handle = runs.create_run_context("default")
         self.module.snapshot_presets_for_run(run_handle, outer_graph, "21")
-        expanded = self.module.expand_preset_reference("lineage", run_handle=run_handle, source_node_id="20")["expand"]
-        plan = self.module._scene_node_value(expanded, "__scene_preset_source", {}, set(), run_handle=run_handle)
+        plan = self.module.expand_preset_reference("lineage", run_handle=run_handle, source_node_id="20")
         info = self.nodes.ScenePromptExpand().expand(
             current_index=2,
             timestamp_dir=False,
