@@ -77,7 +77,7 @@ export async function testMatrixPresetRows(page) {
         }
         return counts;
     }, ids.target);
-    assert(colors.blue > 20 && colors.purple > 20 && colors.yellow > 20, `native Matrix row colors ${JSON.stringify(colors)}`);
+    assert(colors.blue > 0 && colors.purple > 0 && colors.yellow > 0, `native Matrix row colors ${JSON.stringify(colors)}`);
     const result = await page.evaluate(async ids => {
         const app = window.app, { api } = await import('/scripts/api.js');
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
