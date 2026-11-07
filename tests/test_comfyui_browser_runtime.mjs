@@ -174,7 +174,7 @@ async def civitai_lookup(request):
         if fixture.get("mode") == "missing":
             return civitai._NOT_FOUND
         if path == "/api/v1/models/12":
-            return {"id": 12, "description": "<h3>Outfits</h3><pre><code>jacket, blue shirt</code></pre>",
+            return {"id": 12, "description": "<h3>Outfits</h3><pre><code>jacket,\\n  blue shirt</code></pre>",
                     "modelVersions": [{"id": 99, "description": "wrong version"}, {"id": 23, "description": "<p>Selected outfit notes</p>"}]}
         return {"id": 23, "modelId": 12, "name": "Fixture v1", "model": {"name": "Native metadata"},
                 "trainedWords": ["native_metadata_trigger"], "private_upstream_field": "omitted"}
@@ -2840,12 +2840,19 @@ window.__sceneSeedRuntimeTest = {
     const nativeDetail = page.getByRole("dialog", { name: "LoRA 詳細確認", exact: true });
     await nativeDetail.getByText("Native metadata / Fixture v1", { exact: true }).waitFor();
     await nativeDetail.getByText("Selected outfit notes", { exact: true }).waitFor();
-    assert.equal(await nativeDetail.locator("pre code").textContent(), "jacket, blue shirt");
+    assert.equal(await nativeDetail.locator("pre code").textContent(), "jacket,\n  blue shirt");
     assert.equal(await nativeDetail.getByText("wrong version", { exact: true }).count(), 0);
-    await page.screenshot({ path: resolve(screenshotDirectory, "native-lora-description.png") });
-    await page.setViewportSize({ width: 360, height: 740 });
-    assert.equal(await nativeDetail.evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth), true);
-    await page.screenshot({ path: resolve(screenshotDirectory, "native-lora-description-narrow.png") });
+    for (const width of [1280, 360]) {
+        await page.setViewportSize({ width, height: 740 });
+        assert.equal(await nativeDetail.evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth), true);
+        const layout = await nativeDetail.locator(".pc-lora-code-row").evaluate(row => {
+            const pre = row.querySelector("pre").getBoundingClientRect(), button = row.querySelector("button").getBoundingClientRect();
+            return { right: button.left >= pre.right + 11, centered: Math.abs((pre.top + pre.bottom - button.top - button.bottom) / 2) < 1,
+                naturalHeight: button.height < pre.height };
+        });
+        assert.deepEqual(layout, { right: true, centered: true, naturalHeight: true }, `native multiline code injection layout at ${width}px`);
+        await page.screenshot({ path: resolve(screenshotDirectory, width === 360 ? "native-lora-description-narrow.png" : "native-lora-description.png") });
+    }
     await page.setViewportSize({ width: 1280, height: 720 });
     assert.equal(await nativeDetail.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"), "https://civitai.red/models/12?modelVersionId=23");
     assert.deepEqual(await page.evaluate(id => window.app.graph.getNodeById(id).serialize().widgets_values, metadataNodes.lora), metadataNodes.before);
@@ -2854,6 +2861,13 @@ window.__sceneSeedRuntimeTest = {
         const node = window.app.graph.getNodeById(id);
         return [node.widgets.find(widget => widget.name === "lora_name").value, node.widgets.find(widget => widget.name === "positive").value, node.widgets.find(widget => widget.name === "negative").value];
     }, metadataNodes.lora), ["runtime-hat.safetensors", "manual trigger, native_metadata_trigger", "manual negative"]);
+    await nativeDetail.locator(".pc-lora-code-row").getByRole("button", { name: "注入" }).click();
+    await nativeDetail.locator(".pc-lora-code-row").getByRole("button", { name: "注入" }).click();
+    assert.deepEqual(await page.evaluate(id => {
+        const node = window.app.graph.getNodeById(id);
+        return [node.widgets.find(widget => widget.name === "positive").value, node.widgets.find(widget => widget.name === "negative").value];
+    }, metadataNodes.lora), ["manual trigger, native_metadata_trigger, jacket, blue shirt", "manual negative"],
+    "native code block injection adds missing words once and preserves negative");
     for (const positive of ['manual trigger, native_metadata_trigger', 'manual trigger, (NATIVE_METADATA_TRIGGER:1.4)', 'manual trigger, ((native_metadata_trigger))']) {
         const before = await page.evaluate(({id,positive})=>{
             const node=window.app.graph.getNodeById(id),widget=node.widgets.find(w=>w.name==='positive');
@@ -3535,6 +3549,7 @@ window.__sceneSeedRuntimeTest = {
     assert.deepEqual(nativeWeightedLine.positive_parts, ["first", "((TAG:4):0.5)", "(equal:1.)", "(science:1_2e-1)"]);
     assert.deepEqual(nativeWeightedLine.negative_parts, ["(blocked:.1)"]);
     await page.locator(".pc-popup").last().getByRole("button", { name: "閉じる", exact: true }).click();
+    await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "found" }), headers: { "Content-Type": "application/json" } });
     await verifySceneModalHistory(page);
     await verifyCandidateEditHistory(page);
     await verifyCandidateReloadSelections(page);

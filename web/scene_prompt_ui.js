@@ -5776,6 +5776,22 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
     const canInject = () => sceneLoraPathIdentity(item.path) === selectedAtOpen
         && sceneLoraPathIdentity(findWidget(node, "lora_name")?.value) === selectedAtOpen
         && (!resultIdentity || sceneLoraFileIdentities.get(sceneLoraPathIdentity(item.path)) === resultIdentity);
+    const makeInjectButton = (text, title) => {
+        const inject = document.createElement("button");
+        inject.className = "pc-button";
+        inject.type = "button";
+        inject.textContent = "注入";
+        inject.disabled = !canInject();
+        inject.title = inject.disabled ? "このLoRAを選択してから注入してください。" : title;
+        inject.onclick = () => {
+            if (!canInject()) {
+                closeSceneLoraDetails(node);
+                return;
+            }
+            injectSceneLoraWord(node, text);
+        };
+        return inject;
+    };
     try {
         await waitForModalPaint();
         if (node.sceneLoraDetailsCleanup !== cleanup) return;
@@ -5800,6 +5816,7 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
         if (Number.isSafeInteger(Number(result.modelId)) && Number(result.modelId) > 0
             && Number.isSafeInteger(Number(result.versionId)) && Number(result.versionId) > 0) {
             const link = document.createElement("a");
+            link.className = "pc-lora-civitai-link";
             link.href = `https://civitai.red/models/${result.modelId}?modelVersionId=${result.versionId}`;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
@@ -5811,7 +5828,7 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
             content.append(message);
         }
         const label = document.createElement("strong");
-        label.textContent = "Trigger Words";
+        label.textContent = "TRIGGER WORDS";
         content.append(label);
         const words = [...result.trainedWords, ...result.localWords];
         const unique = [...new Map(words.map((word) => String(word || "").trim()).filter(Boolean)
@@ -5826,19 +5843,7 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
             row.className = "pc-lora-word";
             const text = document.createElement("span");
             text.textContent = word;
-            const inject = document.createElement("button");
-            inject.className = "pc-button";
-            inject.type = "button";
-            inject.textContent = "注入";
-            inject.disabled = !canInject();
-            inject.title = inject.disabled ? "このLoRAを選択してから注入してください。" : "選択中のLoRAのTrigger Wordを注入";
-            inject.onclick = () => {
-                if (!canInject()) {
-                    closeSceneLoraDetails(node);
-                    return;
-                }
-                injectSceneLoraWord(node, word);
-            };
+            const inject = makeInjectButton(word, "選択中のLoRAのTrigger Wordを注入");
             row.append(text, inject);
             content.append(row);
         }
@@ -5858,9 +5863,17 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
                 if (!response.ok) throw new Error(data.error || "Civitaiの説明を取得できませんでした。");
                 if (!ownsDescription()) return;
                 descriptions.replaceChildren();
-                for (const [heading, html] of [["Civitaiの説明", data.description], ["バージョンの説明", data.version_description]]) {
+                for (const [heading, html] of [["CIVITAI DESCRIPTION", data.description], ["VERSION DESCRIPTION", data.version_description]]) {
                     const body = renderCivitaiDescription(html);
                     if (!body.textContent.trim()) continue;
+                    for (const pre of body.querySelectorAll("pre")) {
+                        const text = pre.textContent;
+                        if (!text.trim()) continue;
+                        const row = document.createElement("div");
+                        row.className = "pc-lora-code-row";
+                        pre.replaceWith(row);
+                        row.append(pre, makeInjectButton(text, "選択中のLoRAの説明のコードを注入"));
+                    }
                     const label = document.createElement("strong");
                     label.textContent = heading;
                     descriptions.append(label, body);

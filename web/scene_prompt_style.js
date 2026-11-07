@@ -569,6 +569,9 @@ export function injectStyle() {
             margin-top: 14px;
         }
         .pc-lora-word span { overflow-wrap: anywhere; }
+        .pc-lora-civitai-link { justify-self: start; }
+        .pc-lora-code-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+        .pc-lora-code-row > pre { margin: 0; min-width: 0; }
         .pc-lora-content > *, .pc-lora-descriptions > * { min-width: 0; }
         .pc-lora-descriptions { display: grid; gap: 8px; margin-top: 8px; }
         .pc-civitai-description { min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: pre-wrap; }

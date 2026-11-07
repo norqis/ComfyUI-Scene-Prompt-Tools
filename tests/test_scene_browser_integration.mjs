@@ -1392,7 +1392,10 @@ try {
     assert.equal(safeDescription.code, "one\n  two");
     assert.deepEqual(safeDescription.links, [{ href: "https://civitai.red/models/1", rel: "noopener noreferrer", target: "_blank" }]);
     let descriptionLookups = 0;
-    const descriptionFixture = { description: '<h3>Outfits</h3><p>Choose an outfit.</p><pre><code>jacket, blue shirt\n  boots</code></pre><ul><li>Uniform</li></ul>', version_description: '<p>Selected version notes</p>' };
+    const descriptionFixture = {
+        description: '<h3>Outfits</h3><p>Choose an outfit with <code>inline_tag</code>.</p><pre><code>jacket, blue shirt\n  boots</code></pre><pre>(belle zzz:1.3), Civitai Tag, coat</pre><pre>  \n </pre><ul><li>Uniform</li></ul>',
+        version_description: '<p>Selected version notes</p><pre><code>Local Tag, Fresh Tag</code></pre><pre>pants</pre>',
+    };
     await page.route("**/scene_prompt/civitai/descriptions?*", route => {
         descriptionLookups += 1;
         assert.equal(new URL(route.request().url()).searchParams.get("model_id"), "10");
@@ -1433,11 +1436,14 @@ try {
     const previewDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
     await previewDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
     await previewDialog.getByText("Selected version notes", { exact: true }).waitFor();
-    assert.equal(await previewDialog.locator("pre code").textContent(), "jacket, blue shirt\n  boots");
+    assert.equal(await previewDialog.locator("pre code").first().textContent(), "jacket, blue shirt\n  boots");
     assert.equal(await previewDialog.locator("li").textContent(), "Uniform");
     assert.deepEqual(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values), beforePreview,
         "preview does not change the selected file or prompts");
     assert.equal(await previewDialog.locator(".pc-lora-word button:enabled").count(), 0);
+    assert.equal(await previewDialog.locator(".pc-lora-code-row button:disabled").count(), 4,
+        "all model/version code blocks are disabled for an unselected preview");
+    assert.equal(await previewDialog.locator(".pc-lora-code-row button:enabled").count(), 0);
     assert.match(await previewDialog.locator(".pc-lora-word button").first().getAttribute("title"), /選択/u);
     assert.equal(await loraPicker.evaluate((dialog) => dialog.parentElement.inert), true);
     const previewClose = previewDialog.getByRole("button", { name: "閉じる" });
@@ -1530,8 +1536,34 @@ try {
     await loraDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
     await loraDialog.getByText("Selected version notes", { exact: true }).waitFor();
     assert(descriptionLookups >= 5, "cached metadata still loads descriptions when details are opened");
-    await page.setViewportSize({ width: 360, height: 740 });
-    assert.equal(await loraDialog.evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth), true, "code remains inside the narrow modal");
+    assert.deepEqual(await loraDialog.locator(".pc-lora-content > strong, .pc-lora-descriptions > strong").allTextContents(),
+        ["Civitai Style / Version One", "TRIGGER WORDS", "CIVITAI DESCRIPTION", "VERSION DESCRIPTION"]);
+    assert.equal(await loraDialog.locator("h3").textContent(), "Outfits", "author headings keep their original case");
+    assert.equal(await loraDialog.locator("pre").count(), 5);
+    assert.equal(await loraDialog.locator(".pc-lora-code-row").count(), 4, "blank PRE and inline CODE do not gain controls");
+    assert.equal(await loraDialog.locator("p button, pre button, code button").count(), 0);
+    for (const width of [1280, 360]) {
+        await page.setViewportSize({ width, height: 740 });
+        assert.equal(await loraDialog.evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth), true, "code remains inside the modal");
+        for (const row of await loraDialog.locator(".pc-lora-code-row").all()) {
+            const layout = await row.evaluate(row => {
+                const pre = row.querySelector("pre").getBoundingClientRect(), button = row.querySelector("button").getBoundingClientRect();
+                return { right: button.left >= pre.right + 11, centered: Math.abs((pre.top + pre.bottom - button.top - button.bottom) / 2) < 1,
+                    buttonHeight: button.height, buttonWidth: button.width };
+            });
+            assert.equal(layout.right, true, `injection stays to the right at ${width}px`);
+            assert.equal(layout.centered, true, `injection is vertically centered at ${width}px`);
+            assert(layout.buttonHeight < 40 && layout.buttonWidth < 90, "button keeps its natural size");
+        }
+        const linkLayout = await loraDialog.locator(".pc-lora-civitai-link").evaluate(link => {
+            const rect = link.getBoundingClientRect(), parent = link.parentElement.getBoundingClientRect();
+            const range = document.createRange(); range.selectNodeContents(link);
+            return { textSized: Math.abs(range.getBoundingClientRect().width - rect.width) < 1,
+                parentLarger: parent.width > rect.width + 40,
+                outsideIsLink: !!document.elementFromPoint(rect.right + 10, rect.top + rect.height / 2)?.closest("a") };
+        });
+        assert.deepEqual(linkLayout, { textSized: true, parentLarger: true, outsideIsLink: false }, `link hit area follows its text at ${width}px`);
+    }
     if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR) await page.screenshot({ path: resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, "lora-description.png") });
     await page.setViewportSize({ width: 1280, height: 720 });
     assert.equal(await page.evaluate(() => localStorage.getItem("scene_prompt_lora_names_v1").includes("Selected version notes")), false);
@@ -1561,7 +1593,24 @@ try {
     assert.equal(afterInjection[4], "(belle zzz:1.2), {blue, red|green}, Belle ZZZ extra, Local Tag, Fresh Tag, Belle",
         "multi-word injection adds only missing tokens, including selected weighted candidates");
     assert.equal(afterInjection[5], "bad", "injection leaves negative unchanged");
+    const injectCode = async index => loraDialog.locator(".pc-lora-code-row").nth(index).getByRole("button", { name: "注入" }).click();
+    const beforeCodeCandidates = await page.evaluate(() => window.__sceneLoraTestNode.widgets.find(widget => widget.name === "positive_json").value);
+    await injectCode(0);
+    await injectCode(0);
+    await injectCode(1);
+    await injectCode(2);
+    await injectCode(3);
+    const afterCodeInjection = await page.evaluate(() => Object.fromEntries(window.__sceneLoraTestNode.widgets
+        .filter(widget => ["positive", "negative", "positive_json"].includes(widget.name)).map(widget => [widget.name, widget.value])));
+    assert.deepEqual(afterCodeInjection, {
+        positive: `${afterInjection[4]}, jacket, blue shirt, boots, coat, pants`, negative: "bad", positive_json: beforeCodeCandidates,
+    }, "model/version code injection shares repeat, weighted and selected-positive dedupe without altering negative/candidates");
+    await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find(widget => widget.name === "lora_name").value = "folder/other.safetensors"; });
+    await injectCode(0);
+    assert.equal(await loraDialog.count(), 0, "a code button rechecks selection when clicked");
+    assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.widgets.find(widget => widget.name === "positive").value), afterCodeInjection.positive);
     await page.evaluate(() => {
+        window.__sceneLoraTestNode.widgets.find(widget => widget.name === "lora_name").value = "style.safetensors";
         window.__sceneLoraTestNode.widgets.find(widget => widget.name === "positive_json").value = window.__sceneLoraBeforeSelectedTrigger;
         delete window.__sceneLoraBeforeSelectedTrigger;
     });
