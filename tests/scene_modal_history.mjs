@@ -156,6 +156,7 @@ export async function verifySceneModalHistory(page) {
         { type: "ScenePresetReference", role: "scene_preset_select", field: "preset_id", before: "", after: "native-history" },
         { type: "SceneApplyLora", role: "lora_select", field: "lora_name", before: "runtime-hat.safetensors", after: "runtime-local.safetensors" },
         { type: "SceneApplyLora", role: "lora_details", field: "positive", before: "manual", after: "manual, native_metadata_trigger" },
+        { type: "SceneApplyLora", role: "lora_details", code: true, field: "positive", before: "manual, (JACKET:1.3)", after: "manual, (JACKET:1.3), blue shirt" },
         { type: "ScenePromptRandomRoute", role: "random_settings", field: "weights_json",
             before: "[10000,0,0,0,0,0,0,0,0,0]", after: "[5000,5000,0,0,0,0,0,0,0,0]" },
     ];
@@ -200,7 +201,9 @@ export async function verifySceneModalHistory(page) {
                 await page.locator(".pc-lora-picker .pc-lora-row").filter({ hasText: changed ? scenario.after : scenario.before }).locator(".pc-lora-select").click();
             } else if (scenario.role === "lora_details") {
                 const dialog = page.getByRole("dialog", { name: "LoRA 詳細確認", exact: true });
-                await dialog.locator(".pc-lora-word").filter({ hasText: "native_metadata_trigger" }).getByRole("button", { name: "注入" }).click();
+                const row = scenario.code ? dialog.locator(".pc-lora-code-row")
+                    : dialog.locator(".pc-lora-word").filter({ hasText: "native_metadata_trigger" });
+                await row.getByRole("button", { name: "注入" }).click();
                 await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
             } else {
                 const dialog = page.locator(".pc-random-dialog");
@@ -245,5 +248,5 @@ export async function verifySceneModalHistory(page) {
         assert.equal(reloaded.value, scenario.after);
         assert.equal(reloaded.stored, scenario.after);
     }
-    console.log("real ComfyUI Preset/local-LoRA selection, Trigger Word injection and Random probability DOM edits preserve Undo/Redo, no-op history and reload");
+    console.log("real ComfyUI Preset/local-LoRA selection, Trigger Word/code injection and Random probability DOM edits preserve Undo/Redo, no-op history and reload");
 }
