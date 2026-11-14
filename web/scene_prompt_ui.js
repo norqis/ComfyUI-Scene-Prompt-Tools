@@ -7006,10 +7006,13 @@ function installSceneModeWatcher(node) {
     if (!node || node.sceneModeWatcherInstalled) {
         return;
     }
-    const descriptor = Object.getOwnPropertyDescriptor(node, "mode");
+    let descriptor = Object.getOwnPropertyDescriptor(node, "mode");
     if (descriptor && descriptor.configurable === false) {
         node.sceneLastMode = sceneNodeMode(node);
         return;
+    }
+    for (let prototype = Object.getPrototypeOf(node); !descriptor && prototype; prototype = Object.getPrototypeOf(prototype)) {
+        descriptor = Object.getOwnPropertyDescriptor(prototype, "mode");
     }
 
     let value = node.mode;
@@ -7019,12 +7022,13 @@ function installSceneModeWatcher(node) {
         configurable: true,
         enumerable: true,
         get() {
-            return value;
+            return descriptor?.get ? descriptor.get.call(this) : value;
         },
         set(nextValue) {
-            const previous = Number(value ?? 0);
-            value = nextValue;
-            const next = Number(nextValue ?? 0);
+            const previous = Number(this.mode ?? 0);
+            if (descriptor?.set) descriptor.set.call(this, nextValue);
+            else value = nextValue;
+            const next = Number(this.mode ?? 0);
             if (Number.isFinite(previous) && Number.isFinite(next) && previous !== next) {
                 handleSceneNodeModeChange(this);
             }
@@ -13481,6 +13485,7 @@ function attachSceneUtilityNode(node, nodeName) {
     injectStyle();
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
+    const firstLoraControls = SCENE_APPLY_LORA_NODE_NAMES.has(nodeName) && !findSceneWidget(node, "lora_select");
     if (SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeName)) {
         removeLegacyToTextModelInput(node);
     }
@@ -13517,7 +13522,7 @@ function attachSceneUtilityNode(node, nodeName) {
     scheduleHideInternalDomWidgets();
     if (SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)) {
         installSceneResizeHandler(node, "fit_width");
-        refreshScenePromptNode(node, { fitHeight: true });
+        refreshScenePromptNode(node, { fitHeight: firstLoraControls });
         return;
     }
     if (isSceneExpandNodeName(nodeName)) {

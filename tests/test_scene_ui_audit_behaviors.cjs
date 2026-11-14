@@ -16,6 +16,84 @@ function functionSource(name) {
     throw new Error(`Unclosed function: ${name}`);
 }
 
+const modeContext = {
+    Number, Object,
+    refreshed: [], invalidated: [], downstream: [],
+    clearSceneComputedCaches(node) { modeContext.invalidated.push(node); },
+    scheduleSceneNodeRefresh(node) { modeContext.refreshed.push(node); },
+    refreshDownstreamSceneNodes(node) { modeContext.downstream.push(node); },
+};
+vm.createContext(modeContext);
+for (const name of ["sceneNodeMode", "handleSceneNodeModeChange", "installSceneModeWatcher", "installSceneConnectionWatcher"]) {
+    vm.runInContext(functionSource(name), modeContext);
+}
+
+const nativeModePrototype = {
+    get mode() { return this.tracked.mode; },
+    set mode(value) {
+        this.tracked.mode = Number(value);
+        this.nativeWrites++;
+        this.onModeChange?.();
+    },
+    serialize() { return { mode: this.tracked.mode }; },
+};
+const intermediateModePrototype = Object.create(nativeModePrototype);
+function modeNode(kind) {
+    const node = kind === "inherited" ? Object.create(intermediateModePrototype) : {};
+    node.tracked = { mode: 0 };
+    node.nativeWrites = 0;
+    node.nativeCallbacks = 0;
+    node.onModeChange = function () { this.nativeCallbacks++; return "original result"; };
+    if (kind === "plain") {
+        node.mode = 0;
+        node.serialize = function () { return { mode: this.mode }; };
+    } else if (kind === "own-accessor") {
+        Object.defineProperty(node, "mode", {
+            ...Object.getOwnPropertyDescriptor(nativeModePrototype, "mode"), configurable: true,
+        });
+        node.serialize = nativeModePrototype.serialize;
+    }
+    return node;
+}
+for (const kind of ["plain", "own-accessor", "inherited"]) {
+    const node = modeNode(kind);
+    modeContext.installSceneConnectionWatcher(node);
+    const installedDescriptor = Object.getOwnPropertyDescriptor(node, "mode");
+    modeContext.installSceneConnectionWatcher(node);
+    assert.equal(Object.getOwnPropertyDescriptor(node, "mode").set, installedDescriptor.set, "repeated attachment does not wrap mode twice");
+    for (const mode of [0, 2, 2, 4, 4, 0, 2, 4, 0]) {
+        const before = node.mode;
+        const refreshes = modeContext.refreshed.length;
+        const writes = node.nativeWrites;
+        node.mode = mode;
+        assert.equal(node.mode, mode);
+        assert.equal(node.serialize().mode, mode, `${kind} serialization preserves active/muted/bypass mode`);
+        assert.equal(node.sceneLastMode, mode);
+        assert.equal(modeContext.refreshed.length, refreshes + Number(before !== mode), "a setter and native callback together refresh each change once");
+        assert.equal(node.onModeChange(), "original result", "the original native callback still runs");
+        assert.equal(modeContext.refreshed.length, refreshes + Number(before !== mode), "a repeated native callback does not duplicate the refresh");
+        if (kind !== "plain") assert.equal(node.nativeWrites, writes + 1, "every mode assignment reaches native tracked state");
+    }
+    assert.equal(modeContext.invalidated.length, modeContext.refreshed.length);
+    assert.equal(modeContext.downstream.length, modeContext.refreshed.length);
+    for (const mode of [0, 2, 4]) {
+        node.mode = mode;
+        const saved = JSON.parse(JSON.stringify(node.serialize()));
+        const reloaded = modeNode(kind);
+        modeContext.installSceneConnectionWatcher(reloaded);
+        reloaded.mode = saved.mode;
+        assert.equal(reloaded.mode, mode);
+        assert.equal(reloaded.serialize().mode, mode, "reload updates the same mode used by native serialization");
+    }
+}
+const fixedModeNode = {};
+Object.defineProperty(fixedModeNode, "mode", { value: 4, configurable: false });
+modeContext.installSceneModeWatcher(fixedModeNode);
+assert.equal(fixedModeNode.mode, 4);
+assert.equal(fixedModeNode.sceneLastMode, 4);
+assert.equal(Object.getOwnPropertyDescriptor(fixedModeNode, "mode").configurable, false);
+console.log("Scene mode watcher preserves legacy values and native accessor serialization/reload without duplicate refreshes.");
+
 const previewContext = {
     Math, Number, Set, Map, Array, String,
     MATRIX_SECTION_VISIBLE_ROWS: 160,
@@ -286,6 +364,41 @@ assert.deepEqual(
     [0, 1, 2, 3],
     "Scene Apply Model updates existing link slots after reordering inputs",
 );
+
+const loraLayoutContext = {
+    ...applyModelContext,
+    SCENE_APPLY_MODEL_NODE_NAMES: new Set(), SCENE_APPLY_LORA_NODE_NAMES: new Set(["SceneApplyLora"]),
+    findSceneWidget: (node, role) => node.widgets.find(widget => widget.sceneRole === role),
+    ensureSceneLoraControls(node) {
+        if (!loraLayoutContext.findSceneWidget(node, "lora_select")) node.widgets.push({ sceneRole: "lora_select" });
+    },
+    installScenePromptWidgetSyncHandlers() {}, clearSceneFitHeightTimer() {},
+    sceneShouldDrawDetails: () => true,
+    visibleWidgetTotalHeight: () => 375, sceneAutoFitHeight: height => height,
+    setNodeSize(node, width, height) { node.size = [width, height]; },
+    triggerSceneWidgetDraws() {},
+};
+// The real attach/refresh path must preserve the height restored by configure/Undo.
+vm.createContext(loraLayoutContext);
+for (const name of ["attachSceneUtilityNode", "refreshScenePromptNode", "installSceneResizeHandler"]) {
+    vm.runInContext(functionSource(name), loraLayoutContext);
+}
+const loraFits = [], refreshLoraLayout = loraLayoutContext.refreshScenePromptNode;
+loraLayoutContext.refreshScenePromptNode = (node, options) => {
+    loraFits.push(options.fitHeight);
+    return refreshLoraLayout(node, options);
+};
+const loraLayoutNode = { widgets: [], size: [420, 180], setDirtyCanvas() {} };
+loraLayoutContext.attachSceneUtilityNode(loraLayoutNode, "SceneApplyLora");
+assert.deepEqual(loraLayoutNode.size, [420, 379], "initial LoRA controls are fitted once");
+for (const restoredHeight of [386, 520, 386]) {
+    loraLayoutNode.size = [420, restoredHeight];
+    loraLayoutContext.attachSceneUtilityNode(loraLayoutNode, "SceneApplyLora");
+    assert.deepEqual(loraLayoutNode.size, [420, restoredHeight], "reattachment preserves configured/Undo and user-sized heights");
+    assert.equal(loraLayoutNode.sceneResizeMode, "fit_width");
+}
+assert.deepEqual(loraFits, [true, false, false, false]);
+assert.equal(loraLayoutNode.widgets.filter(widget => widget.sceneRole === "lora_select").length, 1);
 
 const layoutContext = vm.createContext({ Map, Set, Math, Number, String, JSON,
     DEFAULT_SELECTED_JSON: "{}", savedPromptsLayoutRevision: 0, sceneWorkflowLoadDepth: 0, activePopupContext: null,

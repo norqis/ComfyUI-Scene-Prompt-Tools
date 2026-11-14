@@ -1621,6 +1621,8 @@ window.__sceneSeedRuntimeTest = {
         const apiGraph = await app.graphToPrompt();
         if (apiGraph.output[String(reverse.id)]) throw new Error("ComfyUI should bypass Reverse in API graph");
         const workflow = app.graph.serialize();
+        if (workflow.nodes.find(node => String(node.id) === String(reverse.id))?.mode !== 4)
+            throw new Error('Serialized bypassed Reverse must retain mode 4');
         const response = await fetch("/scene_presets/save", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ preset_id: "runtime-bypass", name: "Runtime Bypass", output_node_id: String(output.id), api_graph: apiGraph, workflow }),
@@ -1630,9 +1632,12 @@ window.__sceneSeedRuntimeTest = {
         const loadedResponse = await fetch("/scene_presets/load?preset_id=runtime-bypass");
         const loaded = await loadedResponse.json();
         if (!loadedResponse.ok) throw new Error(loaded.error);
+        if (loaded.workflow.nodes.find(node => String(node.id) === String(reverse.id))?.mode !== 4)
+            throw new Error('Saved Preset must retain bypassed Reverse mode 4 before native reload');
         await app.loadGraphData(loaded.workflow, true, true);
         const restored = app.graph.getNodeById(reverse.id);
         const restoredApi = await app.graphToPrompt();
+        const restoredMode = restored?.mode;
         const restoredLinks = Object.values(app.graph.links).map((link) => [link.origin_id, link.target_id]);
         app.graph.clear();
         const nestedInput = create("ScenePresetInput");
@@ -1646,6 +1651,8 @@ window.__sceneSeedRuntimeTest = {
         const referenceApi = await app.graphToPrompt();
         if (referenceApi.output[String(reference.id)]) throw new Error("ComfyUI should bypass Preset Reference in API graph");
         const referenceWorkflow = app.graph.serialize();
+        if (referenceWorkflow.nodes.find(node => String(node.id) === String(reference.id))?.mode !== 4)
+            throw new Error('Serialized bypassed Preset Reference must retain mode 4');
         const referenceResponse = await fetch("/scene_presets/save", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ preset_id: "runtime-bypass-reference", name: "Runtime Bypass Reference", output_node_id: String(nestedOutput.id), api_graph: referenceApi, workflow: referenceWorkflow }),
@@ -1655,6 +1662,8 @@ window.__sceneSeedRuntimeTest = {
         const referenceLoadedResponse = await fetch("/scene_presets/load?preset_id=runtime-bypass-reference");
         const referenceLoaded = await referenceLoadedResponse.json();
         if (!referenceLoadedResponse.ok) throw new Error(referenceLoaded.error);
+        if (referenceLoaded.workflow.nodes.find(node => String(node.id) === String(reference.id))?.mode !== 4)
+            throw new Error('Saved nested Preset must retain Reference mode 4 before native reload');
         await app.loadGraphData(referenceLoaded.workflow, true, true);
         const restoredReference = app.graph.getNodeById(reference.id);
         const restoredReferenceApi = await app.graphToPrompt();
@@ -1662,7 +1671,7 @@ window.__sceneSeedRuntimeTest = {
         restoredReference.mode = 0;
         const unbypassedReferenceApi = await app.graphToPrompt();
         return {
-            bypassMode: restored?.mode,
+            bypassMode: restoredMode,
             links: restoredLinks,
             expectedLinks: [[input.id, prompt.id], [prompt.id, reverse.id], [reverse.id, output.id]],
             apiContainsReverse: Boolean(restoredApi.output[String(reverse.id)]),
@@ -1983,9 +1992,13 @@ window.__sceneSeedRuntimeTest = {
         const second=add('ScenePrompterQueue');field(second,'alternate_block_size').value=4;
         link(source,second,'scene_prompt1');link(second,receiver,'scene_prompt2');
         await bypass(upstream);const anotherActive=await snapshot();await bypass(second);const allBypassed=await snapshot();
-        const workflow=app.graph.serialize();await app.loadGraphData(workflow,true,true);await new Promise(done=>setTimeout(done,300));
+        const workflow=app.graph.serialize();
+        const savedModes=[upstream.id,second.id].map(id=>workflow.nodes.find(node=>String(node.id)===String(id))?.mode);
+        await app.loadGraphData(workflow,true,true);await new Promise(done=>setTimeout(done,300));
         const restored=app.graph.getNodeById(receiver.id);
         return {active,bypassed,resumed,anotherActive,allBypassed,
+            savedModes,reloadedModes:[upstream.id,second.id].map(id=>app.graph.getNodeById(id).mode),
+            reloadedTotal:app.graph.getNodeById(expand.id).widgets.find(widget=>widget.sceneRole==='expand_total_count')?.sceneTotalCount,
             reloaded:settings.map(name=>({value:field(restored,name).value,disabled:field(restored,name).disabled}))};
     });
     for(const state of Object.values(queueModeRuntime).filter(item=>Array.isArray(item?.values)))assert.deepEqual(state.values,['alternate',3,'fixed']);
@@ -1997,6 +2010,8 @@ window.__sceneSeedRuntimeTest = {
     assert(queueModeRuntime.allBypassed.disabled.every(value=>!value)); assert.equal(queueModeRuntime.allBypassed.total,6);
     assert.deepEqual(queueModeRuntime.reloaded.map(item=>item.value),['alternate',3,'fixed']);
     assert(queueModeRuntime.reloaded.every(item=>!item.disabled));
+    assert.deepEqual(queueModeRuntime.savedModes,[4,4]); assert.deepEqual(queueModeRuntime.reloadedModes,[4,4]);
+    assert.equal(queueModeRuntime.reloadedTotal,6);
     console.log('real ComfyUI bypass action updates downstream Queue controls/counts and preserves saved settings');
     nativeRunChecks = true;
     const countPolicyRuntime = await page.evaluate(async () => {
@@ -2019,6 +2034,7 @@ window.__sceneSeedRuntimeTest = {
             preview: window.__sceneSeedRuntimeTest.countPreview(app.graph.getNodeById(ids.count)),
             displayed: app.graph.getNodeById(ids.expand).widgets.find(widget => widget.sceneRole === 'expand_total_count')?.sceneTotalCount,
             enabled: field(current(), 'enable_downstream_count').value,
+            mode: current().mode, serializedMode: current().serialize().mode ?? 0,
             locked: app.graph.getNodeById(ids.queue).sceneQueueControlLock,
         }; };
         await app.loadGraphData(app.graph.serialize(), true, true);
@@ -2028,9 +2044,24 @@ window.__sceneSeedRuntimeTest = {
         field(current(), 'enable_downstream_count').callback?.(true); tracker.afterChange();
         const enabled = await snapshot(); await tracker.undo(); const undone = await snapshot();
         await tracker.redo(); const redone = await snapshot();
+        tracker.beforeChange();
         field(current(), 'enable_downstream_count').value = false; field(current(), 'enable_downstream_count').callback?.(false);
+        tracker.afterChange();
+        const policyBeforeBypass = await snapshot();
+        tracker.captureCanvasState();
+        if (tracker.activeState.nodes.find(node => String(node.id) === String(ids.ca))?.widgets_values_named?.enable_downstream_count !== false)
+            throw new Error('Count policy must be committed to native history before the separate bypass action');
         app.canvas.deselectAllNodes(); app.canvas.selectNode(current());
-        await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass'); const bypassed = await snapshot();
+        tracker.beforeChange();
+        await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass');
+        tracker.afterChange();
+        const bypassed = await snapshot();
+        if (tracker.activeState.nodes.find(node => String(node.id) === String(ids.ca))?.mode !== 4)
+            throw new Error('Native bypass must be committed to history before Undo');
+        await tracker.undo(); const bypassUndone = await snapshot();
+        await tracker.redo(); const bypassRedone = await snapshot();
+        await app.loadGraphData(app.graph.serialize(), true, true); const bypassReloaded = await snapshot();
+        app.canvas.deselectAllNodes(); app.canvas.selectNode(current());
         await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass'); const resumed = await snapshot();
         const serialized = app.graph.serialize(); await app.loadGraphData(serialized, true, true); const reloaded = await snapshot();
         const fresh = add('ScenePromptCounter');
@@ -2049,16 +2080,21 @@ window.__sceneSeedRuntimeTest = {
         const merge = add('ScenePrompterMerge'), extra = add('ScenePrompter');
         link(app.graph.getNodeById(ids.queue), merge, 'scene_prompt1'); link(extra, merge, 'scene_prompt2');
         link(merge, app.graph.getNodeById(ids.count), 'scene_prompt'); const merged = await snapshot();
-        return {initial,enabled,undone,redone,bypassed,resumed,reloaded,legacy,named,merged,freshFlag,names,legacySources,
+        return {initial,enabled,undone,redone,policyBeforeBypass,bypassed,bypassUndone,bypassRedone,bypassReloaded,resumed,reloaded,legacy,named,merged,freshFlag,names,legacySources,
             apiFlag:prompt.output[String(ids.ca)].inputs.enable_downstream_count,total:prepared.total_batches};
     });
     nativeRunChecks = false;
-    for (const key of ['initial','undone','resumed','reloaded','named','merged']) {
+    for (const key of ['initial','undone','policyBeforeBypass','bypassUndone','resumed','reloaded','named','merged']) {
         assert.equal(countPolicyRuntime[key].total, 33, JSON.stringify(countPolicyRuntime));
         assert.equal(countPolicyRuntime[key].displayed, 33);
+        assert.equal(countPolicyRuntime[key].mode, 0); assert.equal(countPolicyRuntime[key].serializedMode, 0);
     }
     for (const key of ['enabled','redone','legacy']) assert.equal(countPolicyRuntime[key].total, 60);
-    assert.equal(countPolicyRuntime.bypassed.total, 40);
+    for (const key of ['bypassed','bypassRedone','bypassReloaded']) {
+        assert.equal(countPolicyRuntime[key].total, 40); assert.equal(countPolicyRuntime[key].displayed, 40);
+        assert.equal(countPolicyRuntime[key].mode, 4); assert.equal(countPolicyRuntime[key].serializedMode, 4);
+        assert.equal(countPolicyRuntime[key].enabled, false);
+    }
     assert.deepEqual(countPolicyRuntime.initial.preview, [...Array(10).fill('C'), ...Array(3).fill('A'), ...Array(20).fill('B')]);
     assert.equal(countPolicyRuntime.initial.locked, '');
     assert.equal(countPolicyRuntime.freshFlag, true); assert.deepEqual(countPolicyRuntime.names.slice(0,2), ['count','enable_downstream_count']);
