@@ -61,7 +61,7 @@ const server = http.createServer(async (request, response) => {
         window.open=()=>window.current=openCivitaiSearch({node:window.node,api:window.api,activeGraph:()=>window.graph,onAcquired:()=>{window.catalogRefresh=(window.catalogRefresh||0)+1;}});
         window.local=()=>window.localParent=openModal('LoRA 詳細確認');
         window.detail=()=>openCivitaiDetail({api:window.api,modelID:1,versionID:11});
-        window.noID=()=>openCivitaiImage({api:window.api,preview:{url:image,meta:{prompt:'fallback positive',negativePrompt:'fallback negative',resources:[{name:'untrusted',url:'javascript:window.injected=true'},{model:{id:4,name:'safe resource'}}]}},index:9,host:'civitai.red'});
+        window.noID=()=>openCivitaiImage({api:window.api,preview:{url:image,meta:{prompt:'fallback positive',negativePrompt:'fallback negative',resources:[{name:'untrusted',url:'javascript:window.injected=true'},{model:{id:4,name:'safe resource'},modelVersionId:12,id:13},{modelId:5,id:14},{modelId:6,modelVersionId:'15',id:16},{modelId:7,modelVersionId:0},{modelId:8,modelVersionId:-1},{modelId:9,modelVersionId:2.5},{modelId:10,modelVersionId:null,id:20},{modelId:11,modelVersionId:9007199254740992}]}},index:9,host:'civitai.red'});
         document.querySelector('#launch').onclick=window.open;window.ready=true;
     </script></body>`);
 });
@@ -312,13 +312,24 @@ try {
     await search.locator('.pc-civitai-results').evaluate(node=>node.scrollTop=node.scrollHeight); await cards.last().locator('img').waitFor();
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/gallery?')&&new URL(call.path,'http://fixture').searchParams.get('version_id')==='40').length),bottomBefore+1);
     await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    // Relevancy remains a distinct saved UI value while the backend omits the upstream sort parameter.
+    await page.evaluate(()=>{window.node=window.makeNode();window.open();}); await cards.first().waitFor();
+    assert.equal(await search.getByRole('combobox',{name:'並び順',exact:true}).inputValue(),'Most Downloaded');
+    await search.getByRole('combobox',{name:'並び順',exact:true}).selectOption('Relevancy');
+    await page.waitForFunction(()=>new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('sort')==='Relevancy');
+    await page.waitForFunction(()=>!document.querySelector('.pc-civitai-results').inert);
+    const searchesBeforeRelevancyReopen = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
+    await page.keyboard.press('Escape'); await page.evaluate(()=>window.open()); await cards.first().waitFor();
+    assert.equal(await search.getByRole('combobox',{name:'並び順',exact:true}).inputValue(),'Relevancy');
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),searchesBeforeRelevancyReopen);
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
     // Unknown image IDs use the existing public metadata without inventing a lookup or unsafe link.
     const imagesBefore = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/image?')).length);
     await page.evaluate(()=>{window.local();window.noID();});
     const noID = page.getByRole('dialog',{name:'Civitai Image #10',exact:true});
     await noID.getByText('fallback positive',{exact:true}).waitFor();
     await noID.getByText('fallback negative',{exact:true}).waitFor();
-    assert.deepEqual(await noID.locator('a').evaluateAll(links=>links.map(link=>link.href)),['https://civitai.red/models/4']);
+    assert.deepEqual(await noID.locator('a').evaluateAll(links=>links.map(link=>link.href)),['https://civitai.red/models/4?modelVersionId=12','https://civitai.red/models/5?modelVersionId=14','https://civitai.red/models/6','https://civitai.red/models/7','https://civitai.red/models/8','https://civitai.red/models/9','https://civitai.red/models/10?modelVersionId=20','https://civitai.red/models/11']);
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/image?')).length),imagesBefore);
     await noID.locator('..').click({position:{x:2,y:2}});
     assert.equal(await noID.count(),0); assert.equal(await page.locator('[role="dialog"][aria-label="LoRA 詳細確認"]').count(),1, JSON.stringify(await page.locator('[role="dialog"]').evaluateAll(nodes=>nodes.map(node=>({title:node.getAttribute('aria-label'),inert:node.parentElement.inert})))));

@@ -1,4 +1,4 @@
-"""Per-user Civitai API keys, validated explicitly and used only for downloads."""
+"""Per-user Civitai API keys, validated explicitly and used for authenticated red search and downloads."""
 import asyncio
 import json
 import os

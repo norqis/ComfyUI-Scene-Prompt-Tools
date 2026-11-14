@@ -56,11 +56,13 @@ Scene Apply LoRA の **LoRAを選択** を開き、**Civitai Search** を押し�
 | Base Model | All / `Illustrious` / `Anima` / `NoobAI` / `Pony` |
 | Model Type | Civitai公開APIのモデル種別（LoRA、Checkpoint、CLIPなど） |
 | Category | Civitaiのモデルタグ（Action、Style、Conceptなど、任意入力可） |
-| 並び順 | Most Downloaded / Most Liked / Most Collected / Highest Rated |
+| 並び順 | Most Downloaded / Most Liked / Most Collected / Highest Rated / Relevancy |
 
-カードをクリック、または Enter/Space で詳細を開き、画像、説明、Trigger Words、公開日、モデルとバージョンそれぞれの統計を確認します。**戻る** は元の検索結果と表示位置へ戻ります。**取得して選択** はファイルを検証して LoRA フォルダーの `llm` サブフォルダーへ保存し、ノードのモデル種別とトリガーを更新します。
+Relevancy は検索語に関連する順です。公開APIの並び順指定を省略して取得します。初期値は引き続き Most Downloaded です。
 
-検索はモデル系統ごとに行います。Pony V7 は Pony の対象には含まれません。検索・画像・説明は公開APIを匿名で参照します。取得に認証が必要な場合は、検索画面右上または取得エラー画面の **認証** からCivitai APIキーを登録してください。APIキーは [Civitaiのアカウント画面](https://civitai.com/user/account) で発行できます。認証成功後は **再取得** を押して取得します。認証だけで自動取得は始まりません。個々のモデルの利用条件は Civitai の説明で確認してください。LLM API Key はこの検索・取得には使いません。
+カードをクリック、または Enter/Space で詳細を開き、画像、説明、Trigger Words、公開日、モデルとバージョンそれぞれの統計を確認します。**戻る** は元の検索結果と表示位置へ戻ります。**取得** は保存先選択画面を開きます。保存先画面の **取得** はファイルの検証・保存とローカル一覧更新のみ、**取得して選択** はその後ノードのモデル種別とトリガーも更新します。
+
+検索はモデル系統ごとに行います。Pony V7 は Pony の対象には含まれません。`civitai.red` の検索は登録したAPIキーで認証し、`civitai.com` の検索・画像・説明は匿名で参照します。取得に認証が必要な場合は、検索画面右上または取得エラー画面の **認証** からCivitai APIキーを登録してください。APIキーは [Civitaiのアカウント画面](https://civitai.com/user/account) で発行できます。認証成功後は **再取得** を押して取得します。認証だけで自動取得は始まりません。個々のモデルの利用条件は Civitai の説明で確認してください。LLM API Key はこの検索・取得には使いません。
 
 APIキーはComfyUIユーザーごとの `scene_prompt_tools/civitai_auth.json` に暗号化せず保存します。キーは画像やワークフローに入りません。**認証解除** はこの保存ファイルを削除する操作で、Civitai側のキー失効はアカウント画面で行います。
 

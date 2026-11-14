@@ -15,7 +15,7 @@ import folder_paths
 from .llm_service import ServiceError, candidate_identity, MODES
 from .lora_metadata import file_identity, file_signature, file_operation
 
-SORTS = ("Most Downloaded", "Most Liked", "Most Collected", "Highest Rated")
+SORTS = ("Most Downloaded", "Most Liked", "Most Collected", "Highest Rated", "Relevancy")
 _NOT_FOUND = object()
 _DOWNLOAD_LOCK = None
 _HASH_CACHE = {}
@@ -511,7 +511,9 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", 
         raise ValueError("Unsupported Civitai sort.")
     if model_mode and model_mode not in MODES:
         raise ValueError("Unsupported model_mode.")
-    params = {"query": query, "types": model_type, "limit": 30, "period": "AllTime", "sort": sort, "nsfw": "false"}
+    params = {"query": query, "types": model_type, "limit": 30, "period": "AllTime", "nsfw": "false"}
+    if sort != "Relevancy":
+        params["sort"] = sort
     if model_mode:
         params["baseModels"] = [model_mode]
     if category:

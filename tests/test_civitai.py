@@ -262,7 +262,10 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             params, authorization = self.model_requests[-1]
             self.assertEqual(params["limit"], "30")
             self.assertEqual(params["period"], "AllTime")
-            self.assertEqual(params["sort"], sort)
+            if sort == "Relevancy":
+                self.assertNotIn("sort", params)
+            else:
+                self.assertEqual(params["sort"], sort)
             self.assertEqual(authorization, "Bearer fixture-search-key")
             self.assertEqual(self.base_model_parameters[-1], ["Illustrious"])
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])

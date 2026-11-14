@@ -2,7 +2,7 @@ import { requestJSON, identity, value, applyCandidate, captureTarget } from "./s
 import { SCENE_MODEL_MODES } from "./scene_prompt_state.js";
 
 let settingsModalID = 0;
-const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated"];
+const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated", "Relevancy"];
 const modals = [];
 const searchViews = new WeakMap();
 let searchViewGeneration = 0;
@@ -196,10 +196,10 @@ function imageInformation(preview, host) {
     const omitted = new Set(["meta", "prompt", "positive", "negativePrompt", "negative_prompt", "negative", "tags", "tag", "resources", "civitaiResources"]);
     const resources = meta.resources || meta.civitaiResources || [];
     return { resources: Array.isArray(resources) ? resources.filter(resource => resource && typeof resource === "object").map(resource => {
-        const model = resource.model || {}, modelID = model.id || resource.modelId;
+        const model = resource.model || {}, modelID = model.id || resource.modelId, versionID = resource.modelVersionId ?? resource.id;
         return { name: model.name || resource.name, version_name: model.name ? resource.name : "", type: model.type || resource.type,
             strength: resource.strength ?? resource.weight,
-            ...(Number.isSafeInteger(modelID) && modelID > 0 ? { url: `https://${host}/models/${modelID}` } : {}) };
+            ...(Number.isSafeInteger(modelID) && modelID > 0 ? { url: `https://${host}/models/${modelID}${Number.isSafeInteger(versionID) && versionID > 0 ? `?modelVersionId=${versionID}` : ""}` } : {}) };
     }) : [], prompt: meta.prompt ?? meta.positive,
         negative_prompt: meta.negativePrompt ?? meta.negative_prompt ?? meta.negative, tags: meta.tags ?? meta.tag,
         other: Object.fromEntries(Object.entries(meta).filter(([key]) => !omitted.has(key))) };

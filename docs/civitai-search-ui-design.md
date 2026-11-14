@@ -2,7 +2,7 @@
 
 Search uses three desktop columns, two at intermediate widths and one on narrow screens, without horizontal scrolling. Cards preserve preview aspect ratios. Their footer shows a two-line model title, the actual updated date when provided, and model-level Downloads, Bookmarks and Likes. Missing or invalid counts display a dash; version statistics never substitute for model statistics.
 
-Filters are Host, Base Model, Model Type, Category and Sort, below the query. Model types come from the public enums API in its original order. Category uses public model tags rather than an invented complete taxonomy. All omits the baseModels parameter. The four supported sorts are passed to the API unchanged; Updated and Published are not aliases for Newest.
+Filters are Host, Base Model, Model Type, Category and Sort, below the query. Model types come from the public enums API in its original order. Category uses public model tags rather than an invented complete taxonomy. All omits the baseModels parameter. The four existing sorts are passed to the API unchanged. Relevancy remains a distinct UI/snapshot value and omits the upstream sort parameter, selecting the public endpoint’s relevance ranking; literal Relevancy is not sent. Most Downloaded remains the default. Updated and Published are not aliases for Newest.
 
 Search and Detail share one modal. Back preserves the existing results DOM and scroll. Closing releases DOM, requests and observers. A WeakMap keyed by the actual node retains plain filter/result/scroll data for reopening within the page session, never DOM, nodes, graphs, requests, promises or full image metadata. A newer modal generation owns cache updates. This transient cache never enters workflow/node properties.
 
