@@ -104,7 +104,7 @@ jobs:
       - name: Fetch ComfyUI source
         run: |
           git clone https://github.com/Comfy-Org/ComfyUI.git "$RUNNER_TEMP/comfyui-source"
-          git -C "$RUNNER_TEMP/comfyui-source" checkout --detach 12d5279438bfefc058a269eae805ceab6047777f
+          git -C "$RUNNER_TEMP/comfyui-source" checkout --detach 71096d1af6c9d1c34fc42094ec4ec59768104786
       - name: Install ComfyUI runtime
         run: python -m pip install -r "$RUNNER_TEMP/comfyui-source/requirements.txt"
       - name: Load and execute with real ComfyUI modules
