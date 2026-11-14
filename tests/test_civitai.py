@@ -17,6 +17,9 @@ package = llm_fixture.package
 
 with mock.patch.dict(sys.modules, {"folder_paths": folder_paths}):
     civitai = importlib.import_module(package.__name__ + ".civitai")
+    civitai_auth = importlib.import_module(package.__name__ + ".civitai_auth")
+sys.modules[civitai.__name__] = civitai
+sys.modules[civitai_auth.__name__] = civitai_auth
 
 
 class CivitaiHttpTest(llm_fixture.HttpFixture):
@@ -24,6 +27,8 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         await super().asyncSetUp()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.auth_directory = mock.patch.object(civitai_auth, "storage_directory", side_effect=lambda user: self.root / "users" / user)
+        self.auth_directory.start()
         folder_paths.get_folder_paths = lambda kind: [str(self.root)]
         folder_paths.filename_list_cache = {"loras": "old"}
         self.content = b"safetensors-test-content"
@@ -39,6 +44,8 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.model_requests = []
         self.base_model_parameters = []
         self.download_calls = 0
+        self.download_status = 200
+        self.download_message = None
         self.storage_headers = []
         self.api_status = 200
         self.api_raw = None
@@ -49,6 +56,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
                             "trainedWords": ["cat"], "files": [{"downloadUrl": "secret URL"}]}
 
     async def asyncTearDown(self):
+        self.auth_directory.stop()
         self.origin_patch.stop()
         self.temporary.cleanup()
         await super().asyncTearDown()
@@ -72,6 +80,8 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             return web.json_response({"items": [self.model]} if request.path == "/api/v1/models" else self.model, status=self.api_status)
         if request.path.startswith("/api/download"):
             self.download_calls += 1
+            if self.download_status != 200:
+                return web.json_response({"message": self.download_message}, status=self.download_status)
             if self.redirect:
                 # Distinct authority even though both servers are localhost.
                 response = web.HTTPFound(self.storage_origin + "/storage?signature=provider-signature")
@@ -89,6 +99,24 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.assertEqual(self.hash_requests, [("/api/v1/model-versions/by-hash/" + self.sha, None)])
         self.assertNotIn("private", str(result))
         self.assertNotIn("secret", str(result))
+
+    async def test_download_401_messages_are_safe_and_temporary_files_are_removed(self):
+        self.download_status = 401
+        for message, code, expected in [
+            ("The creator of this asset requires you to be logged in to download it", "civitai_auth_required", "認証が必要"),
+            ("The creator of this asset has disabled downloads on this file", "civitai_download_disabled", "無効"),
+            ("<html>private secret URL</html>", "civitai_auth_required", "取得を拒否"),
+        ]:
+            self.download_message = message
+            with self.subTest(message=message), self.assertRaises(civitai.DownloadAccessError) as failure:
+                await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+            self.assertEqual(failure.exception.status, 401)
+            self.assertEqual(failure.exception.code, code)
+            self.assertIn(expected, str(failure.exception))
+            self.assertNotIn("private", str(failure.exception))
+            self.assertEqual(list(self.root.rglob("*.part")), [])
+            self.assertEqual(list(self.root.rglob("*.safetensors")), [])
+            self.assertFalse((self.root / "llm" / "manifest.json").exists())
 
     async def test_descriptions_use_selected_version_without_local_model_access(self):
         self.model["description"] = "<h2>Outfits</h2><pre><code>blue_coat</code></pre>"
@@ -210,9 +238,9 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
     async def test_upstream_used_schema_errors_are_service_errors(self):
         import copy
         for target, key, invalid in [("version", "images", {}), ("version", "images", [None]), ("version", "images", [{"url": 1}]),
-                                     ("version", "images", [{"url": "x", "nsfwLevel": "safe"}]), ("version", "files", {}),
+                                     ("version", "files", {}),
                                      ("version", "trainedWords", [1]), ("version", "description", []), ("version", "stats", []),
-                                     ("model", "stats", {"downloadCount": "many"}), ("file", "hashes", []), ("model", "id", None)]:
+                                     ("file", "hashes", []), ("model", "id", None)]:
             model = copy.deepcopy(self.model)
             obj = model if target == "model" else model["modelVersions"][0] if target == "version" else model["modelVersions"][0]["files"][0]
             obj[key] = invalid

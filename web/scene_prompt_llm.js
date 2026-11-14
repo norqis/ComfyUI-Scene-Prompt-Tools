@@ -105,8 +105,8 @@ function captureRoute(graph, root, anchor) {
         });
     };
 }
-export async function requestJSON(api, path, body) {
-    const response = await api.fetchApi(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+export async function requestJSON(api, path, body, options = {}) {
+    const response = await api.fetchApi(path, body === undefined ? options : { ...options, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const context = `API ${path.split("?")[0]} · HTTP ${response.status ?? (response.ok ? 200 : "不明")}`;
     let data;
     try {
@@ -118,7 +118,10 @@ export async function requestJSON(api, path, body) {
         const restart = response.status === 404 ? " ComfyUIを更新した場合は再起動してAPIを反映してください。" : "";
         throw new Error(`${context}: JSON応答を取得できませんでした。${restart}`);
     }
-    if (!response.ok) throw new Error(`${context}: ${data?.error || data?.message || "取得に失敗しました。"}`);
+    if (!response.ok) {
+        const error = new Error(`${context}: ${data?.error || data?.message || "取得に失敗しました。"}`);
+        error.status = response.status; error.code = data?.code; throw error;
+    }
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error(`${context}: 無効なAPI応答です。`);
     return data;
 }
@@ -131,7 +134,7 @@ function triggerIdentity(token) {
     while (word.startsWith("(") && word.endsWith(")")) word = word.slice(1, -1).replace(/:\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/u, "").trim();
     return word.toLocaleLowerCase();
 }
-export function applyCandidate(node, candidate, { query = "", sort = "Most Downloaded", host = "civitai.red", model_mode = value(node, "model_mode"), origin } = {}) {
+export function applyCandidate(node, candidate, { query = "", sort = "Most Downloaded", host = "civitai.red", model_mode = value(node, "model_mode"), model_type, category, origin } = {}) {
     const previous = node.properties?.scene_civitai || {};
     const managed = new Set(previous.managed_triggers || []);
     const manual = String(value(node, "positive")).split(",").map((token) => token.trim()).filter((token) => token && !managed.has(token));
@@ -143,7 +146,8 @@ export function applyCandidate(node, candidate, { query = "", sort = "Most Downl
     node.properties ||= {};
     node.properties.scene_civitai = { query, sort, host, model_mode, model_id: candidate.model_id, version_id: candidate.version_id,
         file_id: candidate.file_id, lora_name: candidate.lora_name, name: candidate.name, version_name: candidate.version_name,
-        managed_triggers: triggers, origin: origin === undefined ? previous.origin ?? null : origin };
+        managed_triggers: triggers, origin: origin === undefined ? previous.origin ?? null : origin,
+        ...(model_type ? { model_type } : {}), ...(category ? { category } : {}) };
 }
 export function insertLoras(graph, origin, candidates, createNode) {
     const slot = (origin.outputs || []).findIndex((output) => output.type === "SCENE_PROMPT");

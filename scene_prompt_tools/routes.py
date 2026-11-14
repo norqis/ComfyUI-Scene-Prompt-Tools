@@ -707,22 +707,32 @@ def define_routes():
             return web.json_response({"error": "Unable to access Scene Prompt LLM settings."}, status=500)
 
     async def civitai_operation(request, operation):
-        from .civitai import ServiceError, search, download, by_hash, descriptions
+        from .civitai import ServiceError, search, download, by_hash, descriptions, gallery, details, image_details, options, tags
         try:
             if operation == "search":
-                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"))
+                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"), model_type=request.query.get("model_type", "LORA"), category=request.query.get("category", ""))
             elif operation == "by_hash":
                 result = await by_hash(request.query.get("sha256", ""))
             elif operation == "descriptions":
                 result = await descriptions(int(request.query.get("model_id", "0")), int(request.query.get("version_id", "0")))
+            elif operation == "gallery":
+                result = await gallery(int(request.query.get("version_id", "0")), host=request.query.get("host", "civitai.red"), cursor=request.query.get("cursor"))
+            elif operation == "details":
+                result = await details(int(request.query.get("model_id", "0")), int(request.query.get("version_id", "0")), host=request.query.get("host", "civitai.red"))
+            elif operation == "image":
+                result = await image_details(int(request.query.get("image_id", "0")), host=request.query.get("host", "civitai.red"))
+            elif operation == "options":
+                result = await options(host=request.query.get("host", "civitai.red"))
+            elif operation == "tags":
+                result = await tags(request.query.get("query", ""), host=request.query.get("host", "civitai.red"))
             else:
                 payload = await request.json()
                 if not isinstance(payload, dict):
                     raise ValueError("Request body must be a JSON object.")
-                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"))
+                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"), user_id=_request_user_id(request))
             return web.json_response(result)
         except ServiceError as exc:
-            return web.json_response({"error": str(exc)}, status=exc.status)
+            return web.json_response({"error": str(exc), **({"code": exc.code} if hasattr(exc, "code") else {})}, status=exc.status)
         except (ValueError, TypeError, KeyError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except OSError:
@@ -763,6 +773,60 @@ def define_routes():
     @PromptServer.instance.routes.get("/scene_prompt/civitai/descriptions")
     async def scene_civitai_descriptions(request):
         return await civitai_operation(request, "descriptions")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/gallery")
+    async def scene_civitai_gallery(request):
+        return await civitai_operation(request, "gallery")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/details")
+    async def scene_civitai_details(request):
+        return await civitai_operation(request, "details")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/image")
+    async def scene_civitai_image(request):
+        return await civitai_operation(request, "image")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/options")
+    async def scene_civitai_options(request):
+        return await civitai_operation(request, "options")
+
+    async def civitai_auth_operation(request, operation):
+        from . import civitai_auth
+        from .llm_service import ServiceError
+        try:
+            user_id = _request_user_id(request)
+            if operation == "get":
+                result = await asyncio.to_thread(civitai_auth.public_status, user_id)
+            elif operation == "clear":
+                result = await asyncio.to_thread(civitai_auth.clear, user_id)
+            else:
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Request body must be a JSON object.")
+                result = await civitai_auth.authenticate(user_id, payload.get("api_key", ""), payload.get("host", "civitai.red"))
+            return web.json_response(result, headers={"Cache-Control": "no-store"})
+        except ServiceError as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status, headers={"Cache-Control": "no-store"})
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400, headers={"Cache-Control": "no-store"})
+        except OSError:
+            return web.json_response({"error": "Civitai認証設定にアクセスできません。"}, status=500, headers={"Cache-Control": "no-store"})
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/auth")
+    async def scene_civitai_auth_get(request):
+        return await civitai_auth_operation(request, "get")
+
+    @PromptServer.instance.routes.post("/scene_prompt/civitai/auth")
+    async def scene_civitai_auth_post(request):
+        return await civitai_auth_operation(request, "post")
+
+    @PromptServer.instance.routes.post("/scene_prompt/civitai/auth/clear")
+    async def scene_civitai_auth_clear(request):
+        return await civitai_auth_operation(request, "clear")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/tags")
+    async def scene_civitai_tags(request):
+        return await civitai_operation(request, "tags")
 
     @PromptServer.instance.routes.get("/scene_prompt/loras/list")
     async def scene_prompt_lora_list(request):
