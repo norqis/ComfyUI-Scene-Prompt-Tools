@@ -13485,6 +13485,7 @@ function attachSceneUtilityNode(node, nodeName) {
     injectStyle();
     applySceneWidgetLabels(node);
     installSceneConnectionWatcher(node);
+    const firstLoraControls = SCENE_APPLY_LORA_NODE_NAMES.has(nodeName) && !findSceneWidget(node, "lora_select");
     if (SCENE_PROMPT_TO_TEXT_NODE_NAMES.has(nodeName)) {
         removeLegacyToTextModelInput(node);
     }
@@ -13521,7 +13522,7 @@ function attachSceneUtilityNode(node, nodeName) {
     scheduleHideInternalDomWidgets();
     if (SCENE_APPLY_LORA_NODE_NAMES.has(nodeName)) {
         installSceneResizeHandler(node, "fit_width");
-        refreshScenePromptNode(node, { fitHeight: true });
+        refreshScenePromptNode(node, { fitHeight: firstLoraControls });
         return;
     }
     if (isSceneExpandNodeName(nodeName)) {

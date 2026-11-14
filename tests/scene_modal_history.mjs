@@ -155,6 +155,7 @@ export async function verifySceneModalHistory(page) {
     const cases = [
         { type: "ScenePresetReference", role: "scene_preset_select", field: "preset_id", before: "", after: "native-history" },
         { type: "SceneApplyLora", role: "lora_select", field: "lora_name", before: "runtime-hat.safetensors", after: "runtime-local.safetensors" },
+        { type: "SceneApplyLora", role: "lora_select", field: "lora_name", before: "runtime-hat.safetensors", after: "runtime-local.safetensors", customHeight: 640 },
         { type: "SceneApplyLora", role: "lora_details", field: "positive", before: "manual", after: "manual, native_metadata_trigger" },
         { type: "SceneApplyLora", role: "lora_details", code: true, field: "positive", before: "manual, (JACKET:1.3)", after: "manual, (JACKET:1.3), blue shirt" },
         { type: "ScenePromptRandomRoute", role: "random_settings", field: "weights_json",
@@ -168,6 +169,10 @@ export async function verifySceneModalHistory(page) {
             if (scenario.role === "lora_details") node.widgets.find(widget => widget.name === "lora_name").value = "runtime-hat.safetensors";
             node.pos = [380, 80]; app.canvas.ds.scale = 1; app.canvas.ds.offset = [0, 0];
             if (scenario.type === "ScenePresetReference") await window.__sceneSeedRuntimeTest.refreshPresetReference(node);
+            if (scenario.customHeight != null) {
+                await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+                node.size[1] = scenario.customHeight;
+            }
             await app.loadGraphData(JSON.parse(JSON.stringify(app.graph.serialize())), true, true);
             await new Promise(done => setTimeout(done, 150));
             app.canvas.draw(true, true);
@@ -179,6 +184,7 @@ export async function verifySceneModalHistory(page) {
             const widget = node?.widgets?.find(widget => widget.name === field);
             const serialized = node?.serialize();
             return { exists: !!node, value: widget?.value, stored: serialized?.widgets_values_named?.[field] ?? serialized?.widgets_values[node.widgets.indexOf(widget)],
+                ...(node?.type === 'SceneApplyLora' ? { height: node.size[1] } : {}),
                 undo: tracker.undoQueue.length, redo: tracker.redoQueue.length };
         }, { id, field: scenario.field });
         const open = async () => {
@@ -221,6 +227,7 @@ export async function verifySceneModalHistory(page) {
             }, direction);
         };
         const before = await snapshot();
+        if (scenario.customHeight != null) assert.equal(before.height, scenario.customHeight, 'native LoRA reload preserves a custom node height');
         await choose(true);
         const selected = await snapshot();
         assert.equal(selected.value, scenario.after, scenario.type);
@@ -247,6 +254,8 @@ export async function verifySceneModalHistory(page) {
         const reloaded = await snapshot();
         assert.equal(reloaded.value, scenario.after);
         assert.equal(reloaded.stored, scenario.after);
+        if (scenario.customHeight != null) for (const state of [selected, undone, redone, reloaded])
+            assert.equal(state.height, scenario.customHeight, 'LoRA edits, Undo/Redo and reload preserve the custom height');
     }
     console.log("real ComfyUI Preset/local-LoRA selection, Trigger Word/code injection and Random probability DOM edits preserve Undo/Redo, no-op history and reload");
 }

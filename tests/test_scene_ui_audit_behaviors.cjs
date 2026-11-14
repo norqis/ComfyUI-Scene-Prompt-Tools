@@ -365,6 +365,41 @@ assert.deepEqual(
     "Scene Apply Model updates existing link slots after reordering inputs",
 );
 
+const loraLayoutContext = {
+    ...applyModelContext,
+    SCENE_APPLY_MODEL_NODE_NAMES: new Set(), SCENE_APPLY_LORA_NODE_NAMES: new Set(["SceneApplyLora"]),
+    findSceneWidget: (node, role) => node.widgets.find(widget => widget.sceneRole === role),
+    ensureSceneLoraControls(node) {
+        if (!loraLayoutContext.findSceneWidget(node, "lora_select")) node.widgets.push({ sceneRole: "lora_select" });
+    },
+    installScenePromptWidgetSyncHandlers() {}, clearSceneFitHeightTimer() {},
+    sceneShouldDrawDetails: () => true,
+    visibleWidgetTotalHeight: () => 375, sceneAutoFitHeight: height => height,
+    setNodeSize(node, width, height) { node.size = [width, height]; },
+    triggerSceneWidgetDraws() {},
+};
+// The real attach/refresh path must preserve the height restored by configure/Undo.
+vm.createContext(loraLayoutContext);
+for (const name of ["attachSceneUtilityNode", "refreshScenePromptNode", "installSceneResizeHandler"]) {
+    vm.runInContext(functionSource(name), loraLayoutContext);
+}
+const loraFits = [], refreshLoraLayout = loraLayoutContext.refreshScenePromptNode;
+loraLayoutContext.refreshScenePromptNode = (node, options) => {
+    loraFits.push(options.fitHeight);
+    return refreshLoraLayout(node, options);
+};
+const loraLayoutNode = { widgets: [], size: [420, 180], setDirtyCanvas() {} };
+loraLayoutContext.attachSceneUtilityNode(loraLayoutNode, "SceneApplyLora");
+assert.deepEqual(loraLayoutNode.size, [420, 379], "initial LoRA controls are fitted once");
+for (const restoredHeight of [386, 520, 386]) {
+    loraLayoutNode.size = [420, restoredHeight];
+    loraLayoutContext.attachSceneUtilityNode(loraLayoutNode, "SceneApplyLora");
+    assert.deepEqual(loraLayoutNode.size, [420, restoredHeight], "reattachment preserves configured/Undo and user-sized heights");
+    assert.equal(loraLayoutNode.sceneResizeMode, "fit_width");
+}
+assert.deepEqual(loraFits, [true, false, false, false]);
+assert.equal(loraLayoutNode.widgets.filter(widget => widget.sceneRole === "lora_select").length, 1);
+
 const layoutContext = vm.createContext({ Map, Set, Math, Number, String, JSON,
     DEFAULT_SELECTED_JSON: "{}", savedPromptsLayoutRevision: 0, sceneWorkflowLoadDepth: 0, activePopupContext: null,
     sceneTitleSyncNodes: new Set(), sceneLoadedRefreshNodes: new Set(), sceneDownstreamRefreshSources: new Set(),
