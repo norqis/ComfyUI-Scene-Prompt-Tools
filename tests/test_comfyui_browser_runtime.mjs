@@ -335,6 +335,8 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
         if (path.endsWith("/by-hash") || path.endsWith("/descriptions")) return route.continue();
+        if (path.endsWith("/auth")) return route.fulfill({ json: { configured: true, username: "native-fixture" } });
+        if (path.endsWith("/directories")) return route.fulfill({ json: { directories: ["", "llm", "local", "local/test"] } });
         if (path.endsWith("/options")) return route.fulfill({ json: { model_types: ["Checkpoint", "LORA", "CLIP"] } });
         if (path.endsWith("/tags")) return route.fulfill({ json: { items: ["Style", "Action", "Concept"] } });
         if (path.endsWith("/gallery")) return route.fulfill({ json: { items: [], next_cursor: null } });
@@ -2839,13 +2841,13 @@ window.__sceneSeedRuntimeTest = {
     await queryOnlyPicker.getByRole('button',{name:'Civitai Search',exact:true}).click();
     const nativeSearch=page.locator('.pc-civitai-search-dialog');
     await nativeSearch.locator('.pc-civitai-card').first().waitFor();
-    assert.equal(await nativeSearch.locator('.pc-civitai-status').textContent(), '', 'query-only search state is not a selected LoRA');
+    assert.equal(await nativeSearch.locator('.pc-civitai-status').first().textContent(), '', 'query-only search state is not a selected LoRA');
     assert.doesNotMatch(await nativeSearch.textContent(), /undefined/);
     await page.setViewportSize({width:1600,height:950});
     assert.equal(await nativeSearch.locator('.pc-civitai-card').count(),12);
     const nativeCardRows=await nativeSearch.locator('.pc-civitai-card').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().top));
     assert(nativeCardRows.slice(0,3).every(top=>top===nativeCardRows[0])); assert(nativeCardRows[3]>nativeCardRows[0]);
-    await page.screenshot({path:resolve(screenshotDirectory,'native-ten-columns.png')});
+    await page.screenshot({path:resolve(screenshotDirectory,'native-search-cards.png')});
     const nativeSearchRequests=llmRequests.length;
     await nativeSearch.locator('.pc-civitai-card').first().focus(); await page.keyboard.press('Enter');
     assert.equal(await nativeSearch.locator('.pc-civitai-gallery img').count(),2);
@@ -2856,6 +2858,19 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(await nativeSearch.locator('.pc-civitai-gallery img').count(),1);
     await nativeSearch.getByRole('button',{name:'戻る',exact:true}).click();
     assert.equal(llmRequests.length,nativeSearchRequests,'native Back makes no request');
+    const nativeBeforeAcquire = await page.evaluate(id=>{const node=window.app.graph.getNodeById(id);return JSON.stringify({values:node.serialize().widgets_values,properties:node.properties});},queryOnlyLora);
+    await nativeSearch.locator('.pc-civitai-card').first().click();
+    await nativeSearch.getByRole('button',{name:'取得',exact:true}).click();
+    const nativeDestination = page.getByRole('dialog',{name:'LoRAを取得',exact:true});
+    await nativeDestination.getByText('空欄はLoRAフォルダ直下。新しい保存先も入力できます。',{exact:true}).waitFor();
+    await nativeDestination.getByRole('button',{name:'保存先を選択',exact:true}).click();
+    await nativeDestination.getByRole('option',{name:'local/test',exact:true}).click();
+    await nativeDestination.getByRole('button',{name:'取得',exact:true}).click();
+    await nativeDestination.waitFor({state:'detached'});
+    assert.equal(await page.evaluate(id=>{const node=window.app.graph.getNodeById(id);return JSON.stringify({values:node.serialize().widgets_values,properties:node.properties});},queryOnlyLora),nativeBeforeAcquire,'native download-only preserves node values and properties');
+    assert.equal(llmRequests.at(-1).body.directory,'local/test');
+    await nativeSearch.getByRole('button',{name:'戻る',exact:true}).click();
+
     await page.setViewportSize({width:360,height:740});
     assert.equal(await nativeSearch.evaluate(dialog=>dialog.scrollWidth<=dialog.clientWidth),true);
     assert.equal(await nativeSearch.locator('.pc-civitai-results').evaluate(list=>list.scrollWidth<=list.clientWidth),true);
@@ -2884,7 +2899,7 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(await page.evaluate(id=>window.app.graph.getNodeById(id).properties.scene_civitai.lora_name,queryOnlyLora),'runtime-hat.safetensors','manual selection retains provenance history');
     await page.keyboard.press('Escape');
     nativeCivitaiGallery = false;
-    assert.equal(llmRequests.length-servicesBeforeSettings,1,'reopening the same node restores its public search results without another search');
+    assert.equal(llmRequests.length-servicesBeforeSettings,2,'download-only adds one request; reopening the same node restores its public search results without another search');
     assert.equal(llmRequests.filter(request=>request.path.endsWith('/generate')).length,generationsBeforeSettings,'settings never request inference');
     assert(settingsRequests.includes('/scene_prompt/llm/settings'));
     assert(!settingsRequests.includes('/scene_prompt/civitai/settings'));
@@ -2896,7 +2911,7 @@ window.__sceneSeedRuntimeTest = {
     assert([404,405].includes(retiredSettingsStatuses[1]),'removed POST route may fall through to ComfyUI static GET handling');
     assert.deepEqual(await page.evaluate(async()=>await(await fetch('/scene_test/model_executions')).json()),[]);
     assert.deepEqual(pageErrors,[]);
-    console.log('real ComfyUI four-field LLM settings, anonymous Civitai search and absent Civitai settings passed');
+    console.log('real ComfyUI four-field LLM settings, authenticated red browsing, destination download-only and absent legacy Civitai settings passed');
 
     const metadataBefore = { prompts: seedRequests.length, runs: runRequests.length, services: llmRequests.length };
     assert.equal((await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "found" }), headers: { "Content-Type": "application/json" } })).status, 200);

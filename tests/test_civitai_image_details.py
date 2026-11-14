@@ -2,10 +2,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from test_civitai import civitai
+from test_civitai import civitai, civitai_auth
 
 
 class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.auth = mock.patch.object(civitai_auth, "token_snapshot", return_value="fixture-search-key")
+        self.auth.start()
+        self.addCleanup(self.auth.stop)
+
     def preview(self, **fields):
         return {"id": 7, "url": "https://image.civitai.com/example/7.jpeg", "nsfw": False, "nsfwLevel": 1, **fields}
 

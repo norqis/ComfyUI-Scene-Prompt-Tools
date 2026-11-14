@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -44,13 +44,15 @@ def api_origin(host="civitai.red"):
     return "https://" + validate_host(host)
 
 
-async def api_get(path, params=None, *, missing_ok=False, host="civitai.red"):
+async def api_get(path, params=None, *, missing_ok=False, host="civitai.red", token=""):
     url = api_origin(validate_host(host)) + path
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), cookie_jar=aiohttp.DummyCookieJar()) as session:
-            async with session.get(url, params=params, allow_redirects=False) as response:
+            async with session.get(url, params=params, allow_redirects=False, headers={"Authorization": "Bearer " + token} if token and host == "civitai.red" and path == "/api/v1/models" else {}) as response:
                 if missing_ok and response.status == 404:
                     return _NOT_FOUND
+                if response.status == 401 and host == "civitai.red" and path == "/api/v1/models":
+                    raise DownloadAccessError("civitai.redの認証を確認してください。")
                 if response.status != 200:
                     raise ServiceError(f"Civitai API returned HTTP {response.status}.")
                 try:
@@ -372,29 +374,34 @@ def reconcile_lora_hashes(identities):
 
 
 def _manifest(root):
-    path = root / "llm" / "manifest.json"
+    path = _relative_target(root, "llm") / "manifest.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
-def _existing(candidate, root, manifest=None):
-    path = root / "llm" / _filename(candidate)
-    if path.is_file() and _sha256(path) == candidate["sha256"]:
+def _existing(candidate, root, manifest=None, folder=None):
+    path = _relative_target(root, "llm") / _filename(candidate)
+    if (folder is None or path.parent == folder) and path.is_file() and _sha256(path) == candidate["sha256"]:
         return path.relative_to(root).as_posix()
     if manifest is None:
         manifest = _manifest(root)
     if manifest:
         for entry in manifest.values():
             name = entry.get("lora_name", "")
-            if entry.get("sha256") != candidate["sha256"] or not name.startswith("llm/"):
+            if entry.get("sha256") != candidate["sha256"] or not isinstance(name, str):
                 continue
-            path = (root / name).resolve()
-            if root in path.parents and path.is_file() and _sha256(path) == candidate["sha256"]:
-                return name
+            try:
+                path = _relative_target(root, name)
+            except ValueError:
+                continue
+            if (folder is None or path.parent == folder) and path.is_file() and _sha256(path) == candidate["sha256"]:
+                return path.relative_to(root).as_posix()
     return ""
 
 
 def _record(root, candidate, name):
-    path = root / "llm" / "manifest.json"
+    parent = _relative_target(root, "llm")
+    parent.mkdir(parents=True, exist_ok=True)
+    path = _relative_target(root, "llm") / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     manifest["-".join(map(str, candidate_identity(candidate)))] = {"sha256": candidate["sha256"], "lora_name": name}
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".manifest-")
@@ -405,6 +412,42 @@ def _record(root, candidate, name):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def _relative_target(root, relative):
+    if not isinstance(relative, str) or PureWindowsPath(relative).drive or relative.startswith(("/", "\\")) or ".." in relative.replace("\\", "/").split("/"):
+        raise ValueError("保存先はLoRAフォルダー内の相対パスで指定してください。")
+    target = (root / relative.replace("\\", "/")).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("保存先はLoRAフォルダー内に指定してください。")
+    return target
+
+
+def directories():
+    root = lora_root()
+    paths, visited = [""], {root}
+    stack = [(root, False)]
+    while stack:
+        parent, include = stack.pop()
+        resolved = parent.resolve()
+        if include:
+            if root not in resolved.parents or resolved in visited:
+                continue
+            visited.add(resolved)
+            paths.append(parent.relative_to(root).as_posix())
+        with os.scandir(parent) as entries:
+            children = sorted((Path(entry.path) for entry in entries if entry.is_dir()), key=lambda path: (path.name.casefold(), path.name))
+        stack.extend((child, True) for child in reversed(children))
+    return {"directories": paths}
+
+
+def _matching_file(candidate, path):
+    return path.is_file() and _sha256(path) == candidate["sha256"]
+
+
+def _create_target_download(root, folder):
+    checked = _relative_target(root, folder.relative_to(root).as_posix())
+    return _create_download(checked)
 
 
 async def _file_io(function, *args, cancel_cleanup=None, **kwargs):
@@ -462,7 +505,7 @@ async def tags(query="", host="civitai.red"):
     return {"items": [item["name"] for item in data["items"] if isinstance(item, dict) and isinstance(item.get("name"), str)]}
 
 
-async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", model_type="LORA", category=""):
+async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", model_type="LORA", category="", user_id="default"):
     host = validate_host(host)
     if sort not in SORTS:
         raise ValueError("Unsupported Civitai sort.")
@@ -473,7 +516,13 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", 
         params["baseModels"] = [model_mode]
     if category:
         params["tag"] = category
-    data = await api_get("/api/v1/models", params, host=host)
+    token = ""
+    if host == "civitai.red":
+        from .civitai_auth import token_snapshot
+        token = await asyncio.to_thread(token_snapshot, user_id)
+        if not token:
+            raise DownloadAccessError("civitai.redで検索するには認証が必要です。")
+    data = await api_get("/api/v1/models", params, host=host, token=token)
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ServiceError("Civitai returned an invalid search response.")
     items = []
@@ -527,11 +576,13 @@ def _download_headers(url, token):
     return {}
 
 
-async def download(identity, model_mode, host="civitai.red", user_id="default"):
+async def download(identity, model_mode, host="civitai.red", user_id="default", directory="llm"):
     from .civitai_auth import token_snapshot
     global _DOWNLOAD_LOCK
     host = validate_host(host)
     ids = candidate_identity(identity)
+    root = lora_root()
+    folder = await _file_io(_relative_target, root, directory)
     if _DOWNLOAD_LOCK is None:
         _DOWNLOAD_LOCK = asyncio.Lock()
     async with _DOWNLOAD_LOCK:
@@ -539,8 +590,10 @@ async def download(identity, model_mode, host="civitai.red", user_id="default"):
         candidate = next((item for item in normalize(model, model_mode, host) if candidate_identity(item) == ids), None)
         if candidate is None:
             raise ValueError("Selected LoRA is unavailable or incompatible with this model mode.")
-        root = lora_root()
-        name = await _file_io(_existing, candidate, root)
+        destination = folder / _filename(candidate)
+        name = destination.relative_to(root).as_posix() if await _file_io(_matching_file, candidate, destination) else ""
+        if not name:
+            name = await _file_io(_existing, candidate, root, await _file_io(_manifest, root), folder)
         if not name:
             token = await asyncio.to_thread(token_snapshot, user_id)
             version = next(item for item in model["modelVersions"] if item["id"] == ids[1])
@@ -552,9 +605,8 @@ async def download(identity, model_mode, host="civitai.red", user_id="default"):
             if origin not in (selected_origin, "https://civitai.red", "https://civitai.com") or not parsed.path.startswith("/api/download/") or parsed.fragment:
                 raise ValueError("Civitai did not provide a trusted API download URL.")
             url = selected_origin + parsed.path + ("?" + parsed.query if parsed.query else "")
-            folder = root / "llm"
             await _file_io(folder.mkdir, parents=True, exist_ok=True)
-            stream, temporary = await _file_io(_create_download, folder, cancel_cleanup=_discard_download)
+            stream, temporary = await _file_io(_create_target_download, root, folder, cancel_cleanup=_discard_download)
             digest = hashlib.sha256()
             def write_chunk(chunk):
                 stream.write(chunk)
@@ -591,7 +643,6 @@ async def download(identity, model_mode, host="civitai.red", user_id="default"):
                 await _file_io(stream.close)
                 if digest.hexdigest() != candidate["sha256"]:
                     raise ServiceError("Downloaded LoRA SHA256 does not match the published file.")
-                destination = folder / _filename(candidate)
                 await _file_io(os.replace, temporary, destination)
                 name = destination.relative_to(root).as_posix()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:

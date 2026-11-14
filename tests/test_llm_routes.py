@@ -39,6 +39,10 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                             response = await registered[("GET", "/scene_prompt/civitai/" + endpoint)](request)
                             self.assertEqual(response["payload"], {"fixture": endpoint})
                             operation.assert_awaited_once_with(*args, **kwargs)
+                    with mock.patch.object(civitai, "directories", return_value={"directories": ["", "a/b"]}) as directories:
+                        response = await registered[("GET", "/scene_prompt/civitai/directories")](request)
+                        self.assertEqual(response["payload"], {"directories": ["", "a/b"]})
+                        directories.assert_called_once_with()
                     with mock.patch.object(civitai_auth, "public_status", return_value={"configured": True, "username": "fixture-user"}) as get:
                         response = await registered[("GET", "/scene_prompt/civitai/auth")](request)
                         get.assert_called_once_with("alice")
@@ -315,14 +319,14 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         request.query = {"query": "hat", "model_mode": "Anima", "sort": "Highest Rated"}
                         with mock.patch.object(civitai, "search", return_value={"items": []}) as search:
                             self.assertEqual((await registered[("GET", "/scene_prompt/civitai/search")](request))["payload"], {"items": []})
-                            search.assert_awaited_once_with("hat", "Anima", "Highest Rated", host="civitai.red", model_type="LORA", category="")
+                            search.assert_awaited_once_with("hat", "Anima", "Highest Rated", host="civitai.red", model_type="LORA", category="", user_id=request.user_id)
                             request.query["host"] = "civitai.com"
                             await registered[("GET", "/scene_prompt/civitai/search")](request)
                             self.assertEqual(search.await_args.kwargs["host"], "civitai.com")
                         request.payload = {"model_id": 1, "version_id": 2, "file_id": 3, "model_mode": "Anima"}
                         with mock.patch.object(civitai, "download", return_value={"lora_name": "llm/public.safetensors"}) as download:
                             self.assertEqual((await registered[("POST", "/scene_prompt/civitai/download")](request))["status"], 200)
-                            download.assert_awaited_once_with(request.payload, "Anima", host="civitai.red", user_id=request.user_id)
+                            download.assert_awaited_once_with(request.payload, "Anima", host="civitai.red", user_id=request.user_id, directory="llm")
                             request.payload["host"] = "civitai.com"
                             await registered[("POST", "/scene_prompt/civitai/download")](request)
                             self.assertEqual(download.await_args.kwargs["host"], "civitai.com")

@@ -13,7 +13,7 @@ const server = http.createServer(async (request, response) => {
         import {openCivitaiSearch,openCivitaiDetail,openCivitaiImage,openModal} from '/web/scene_prompt_civitai.js';
         import {injectStyle} from '/web/scene_prompt_style.js'; injectStyle();
         const image='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800"><rect width="600" height="800" fill="#36556c"/><circle cx="300" cy="350" r="180" fill="#abcde0"/></svg>');
-        window.calls=[];window.downloads=0;window.authenticated=false;window.activeGallery=0;window.maxGallery=0;window.galleryDelay=true;window.galleryReleases=[];
+        window.calls=[];window.downloads=0;window.authenticated=true;window.activeGallery=0;window.maxGallery=0;window.galleryDelay=true;window.galleryReleases=[];
         window.graph={getNodeById:()=>window.node,beforeChange(){window.transactions=(window.transactions||0)+1;},afterChange(){}};
         window.makeNode=()=>({id:1,graph:window.graph,properties:{},widgets:Object.entries({model_mode:'Illustrious',lora_name:'',positive:'manual'}).map(([name,value])=>({name,value}))});
         window.node=window.makeNode();
@@ -22,9 +22,12 @@ const server = http.createServer(async (request, response) => {
         window.api={async fetchApi(path,options={}){
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
             const url=new URL(path,'http://fixture'), body=options.body?JSON.parse(options.body):{}, reply=(data,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(data)});
+            if(url.pathname.endsWith('/directories'))return reply({directories:['','a','a/b','c','c/local','c/local/bin','c/local/lib','llm']});
             if(url.pathname.endsWith('/options'))return reply({model_types:['Checkpoint','TextualInversion','Hypernetwork','AestheticGradient','LORA','LoCon','DoRA','Controlnet','Upscaler','MotionModule','VAE','TextEncoder','UNet','CLIPVision','Poses','Wildcards','Workflows','ComfyWorkflows','Detection','VisionLanguage','CLIP','LLM','Other']});
             if(url.pathname.endsWith('/tags')){if(window.deferTags){window.deferTags=false;await new Promise(done=>window.releaseTags=done);}return reply({items:['Style','Action',url.searchParams.get('query')]});}
             if(url.pathname.endsWith('/search')){
+                if(window.failSearchAuth){window.failSearchAuth=false;return reply({error:'Red authentication required',code:'civitai_auth_required'},401);}
+                if(window.failSearch){window.failSearch=false;return reply({error:'search offline'},503);}
                 if(window.deferSearch){window.deferSearch=false;await new Promise(done=>window.releaseSearch=done);}
                 return reply({items:Array.from({length:30},(_,index)=>({...candidate(index+1,url.searchParams.get('query')||''),installable:url.searchParams.get('model_type')==='LORA'}))});
             }
@@ -42,18 +45,20 @@ const server = http.createServer(async (request, response) => {
             if(url.pathname.endsWith('/details'))return reply({...candidate(1,''),gallery:[preview(101)],image_url:image});
             if(url.pathname.endsWith('/auth/clear')){window.authenticated=false;return reply({configured:false,username:''});}
             if(url.pathname.endsWith('/auth')){
+                if(!options.body&&window.deferAuthStatus){window.deferAuthStatus=false;const data={configured:window.authenticated,username:''};await new Promise(done=>window.releaseAuthStatus=done);return reply(data);}
                 if(options.body){if(window.deferAuth){window.deferAuth=false;await new Promise(done=>window.releaseAuth=done);}window.authenticated=true;}
                 return reply({configured:window.authenticated,username:window.authenticated?'fixture-user':''});
             }
             if(url.pathname.endsWith('/download')){
                 window.downloads++;
+                if(window.deferDownload){window.deferDownload=false;await new Promise(done=>window.releaseDownload=done);}
                 if(window.disabledDownload)return reply({error:'Creator disabled',code:'civitai_download_disabled'},401);
                 if(!window.authenticated)return reply({error:'Authentication required',code:'civitai_auth_required'},401);
-                return reply({candidate:candidate(body.model_id,''),lora_name:'llm/fixture.safetensors'});
+                return reply({candidate:candidate(body.model_id,''),lora_name:(body.directory?body.directory+'/':'')+'fixture.safetensors'});
             }
             throw new Error('Unexpected API '+path);
         }};
-        window.open=()=>window.current=openCivitaiSearch({node:window.node,api:window.api,activeGraph:()=>window.graph});
+        window.open=()=>window.current=openCivitaiSearch({node:window.node,api:window.api,activeGraph:()=>window.graph,onAcquired:()=>{window.catalogRefresh=(window.catalogRefresh||0)+1;}});
         window.local=()=>window.localParent=openModal('LoRA 詳細確認');
         window.detail=()=>openCivitaiDetail({api:window.api,modelID:1,versionID:11});
         window.noID=()=>openCivitaiImage({api:window.api,preview:{url:image,meta:{prompt:'fallback positive',negativePrompt:'fallback negative',resources:[{name:'untrusted',url:'javascript:window.injected=true'},{model:{id:4,name:'safe resource'}}]}},index:9,host:'civitai.red'});
@@ -90,6 +95,10 @@ try {
     await cards.first().click();
     assert.equal(await search.getAttribute('aria-label'), 'Civitai Detail');
     const detail = search.locator('.pc-civitai-detail');
+    const acquireAndSelect = async () => {
+        if (!await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await detail.getByRole('button',{name:'取得',exact:true}).click();
+        await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).click();
+    };
     await detail.getByRole('button',{name:'Next',exact:true}).click();
     await detail.getByRole('button',{name:'Civitai Image #3',exact:true}).click();
     const image = page.getByRole('dialog',{name:'Civitai Image #3',exact:true});
@@ -107,7 +116,10 @@ try {
     assert.equal(await detail.locator('.pc-civitai-pages span').textContent(), '3–4 / 4');
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/gallery?')).length),galleryBefore+1);
     await page.screenshot({ path: resolve(screenshots, 'detail-desktop.png') });
-    await detail.getByRole('button',{name:/取得.*選択/}).click();
+    await page.evaluate(()=>window.authenticated=false);
+    await detail.getByRole('button',{name:'取得',exact:true}).click();
+    await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('combobox',{name:'保存先',exact:true}).fill('auth/snapshot');
+    await acquireAndSelect();
     const failure = page.getByRole('dialog',{name:'取得に失敗しました'}); await failure.waitFor();
     assert.equal(await failure.getByRole('button',{name:'再試行',exact:true}).count(),0,'auth-required error waits for authentication before retry');
     await failure.getByRole('button',{name:'認証',exact:true}).click();
@@ -119,7 +131,8 @@ try {
     await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
     assert.equal(await page.evaluate(()=>window.downloads), downloads);
     await failure.getByRole('button',{name:'再取得',exact:true}).click();
-    await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='lora_name').value==='llm/fixture.safetensors');
+    await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='lora_name').value==='auth/snapshot/fixture.safetensors');
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.directory),'auth/snapshot');
     assert.doesNotMatch(await page.evaluate(()=>JSON.stringify(window.node.properties)), /fixture-secret|gallery|description|image_url/);
     await detail.getByRole('button',{name:'戻る',exact:true}).click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Search');
     await search.locator('.pc-civitai-results').evaluate(node=>node.scrollTop=650);
@@ -145,14 +158,14 @@ try {
     await search.getByRole('combobox',{name:'Base Model',exact:true}).selectOption('');
     await page.waitForFunction(()=>new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('model_mode')==='');
     await cards.first().click();
-    await detail.getByRole('button',{name:/取得.*選択/}).click();
+    await acquireAndSelect();
     await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value==='Illustrious');
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.model_mode),'Illustrious');
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     assert.equal(await search.getByRole('combobox',{name:'Base Model',exact:true}).inputValue(),'');
     await search.getByRole('combobox',{name:'Model Type',exact:true}).selectOption('Checkpoint');
     await page.waitForFunction(()=>new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('model_type')==='Checkpoint');
-    await cards.first().click(); assert.equal(await detail.getByRole('button',{name:/取得.*選択/}).count(),0);
+    await cards.first().click(); assert.equal(await detail.getByRole('button',{name:'取得',exact:true}).count(),0);
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     const searchesBeforeTag = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
     await search.getByRole('combobox',{name:'Category',exact:true}).fill('Style');
@@ -168,10 +181,10 @@ try {
     await search.getByRole('combobox',{name:'Model Type',exact:true}).selectOption('LORA');
     await cards.first().click();
     await page.evaluate(()=>{window.authenticated=false;window.disabledDownload=true;});
-    await detail.getByRole('button',{name:/取得.*選択/}).click(); await failure.waitFor();
+    await acquireAndSelect(); await failure.waitFor();
     assert.equal(await failure.getByRole('button',{name:'認証',exact:true}).count(),0);
     await page.keyboard.press('Escape'); await page.evaluate(()=>window.disabledDownload=false);
-    await detail.getByRole('button',{name:/取得.*選択/}).click(); await failure.waitFor();
+    await acquireAndSelect(); await failure.waitFor();
     await failure.getByRole('button',{name:'認証',exact:true}).click();
     await auth.getByLabel('Civitai APIキー',{exact:true}).fill('pending-secret');
     await page.evaluate(()=>{window.deferAuth=true;window.releaseAuth=null;window.beforeStaleTransactions=window.transactions;});
@@ -211,6 +224,83 @@ try {
     assert.match(await cards.first().locator('strong').textContent(), /new owner/);
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),searchesAfterLate);
     await page.keyboard.press('Escape');
+    // Destination picker supports typed/new folders, tree keys, root and download-only without undo.
+    await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup?.();window.node=window.makeNode();window.authenticated=true;window.open();});
+    await cards.first().click(); await detail.getByRole('button',{name:'取得',exact:true}).click();
+    const destination = page.getByRole('dialog',{name:'LoRAを取得',exact:true}), directory = destination.getByRole('combobox',{name:'保存先',exact:true});
+    await destination.getByText('空欄はLoRAフォルダ直下。新しい保存先も入力できます。',{exact:true}).waitFor();
+    assert.equal(await directory.inputValue(),'llm');
+    await destination.getByRole('button',{name:'保存先を選択',exact:true}).click();
+    await page.screenshot({path:resolve(screenshots,'download-destination-tree.png')});
+    assert.deepEqual(await destination.getByRole('option').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label'))),['ルート','a','a/b','c','c/local','c/local/bin','c/local/lib','llm']);
+    await directory.press('ArrowDown'); await directory.press('Escape'); assert.equal(await destination.count(),1); assert.equal(await directory.getAttribute('aria-expanded'),'false');
+    await destination.getByRole('button',{name:'保存先を選択',exact:true}).click();
+    await destination.getByRole('option',{name:'a/b',exact:true}).click(); assert.equal(await directory.inputValue(),'a/b');
+    await directory.press('ArrowDown'); await directory.press('Enter'); assert.equal(await directory.getAttribute('aria-expanded'),'false');
+    await page.setViewportSize({width:360,height:740});
+    assert.equal(await destination.evaluate(node=>node.scrollWidth<=node.clientWidth),true);
+    await page.screenshot({path:resolve(screenshots,'download-destination-narrow.png')});
+    await page.setViewportSize({width:1600,height:1000});
+    await directory.fill('new/A/B');
+    const valuesBeforeOnly = await page.evaluate(()=>JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions}));
+    await destination.getByRole('button',{name:'取得',exact:true}).click(); await destination.waitFor({state:'detached'});
+    assert.equal(await page.evaluate(()=>JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions})),valuesBeforeOnly);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.directory),'new/A/B');
+    assert((await page.evaluate(()=>window.catalogRefresh))>0);
+    await detail.getByRole('button',{name:'取得',exact:true}).click(); assert.equal(await directory.inputValue(),'new/A/B');
+    await directory.fill(''); await destination.getByRole('button',{name:'取得して選択',exact:true}).click(); await destination.waitFor({state:'detached'});
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='lora_name').value),'fixture.safetensors');
+    // Same-object newer search invalidates an older pending acquisition before any mutation/catalog refresh.
+    await detail.getByRole('button',{name:'取得',exact:true}).click();
+    await page.evaluate(()=>{window.deferDownload=true;window.releaseDownload=null;window.oldValues=JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions,catalogRefresh:window.catalogRefresh});window.oldWindow=window.current;});
+    await destination.getByRole('button',{name:'取得して選択',exact:true}).click(); await page.waitForFunction(()=>window.releaseDownload);
+    await page.evaluate(()=>{window.open();window.releaseDownload();}); await page.waitForTimeout(30);
+    assert.equal(await page.evaluate(()=>JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions,catalogRefresh:window.catalogRefresh})),await page.evaluate(()=>window.oldValues));
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    // Red has an inline authentication gate; authentication never starts a search automatically.
+    const gateBefore = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
+    await page.evaluate(()=>{window.node=window.makeNode();window.authenticated=false;window.open();});
+    await search.getByText('civitai.redで検索するには認証が必要です。右上の「認証」からAPIキーを登録してください。',{exact:true}).waitFor();
+    assert.equal(await search.getByRole('button',{name:'検索',exact:true}).isDisabled(),true);
+    assert.equal(await page.getByRole('dialog',{name:'Civitai 認証',exact:true}).count(),0);
+    await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByLabel('Civitai APIキー',{exact:true}).fill('gate-key'); await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),gateBefore);
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await cards.first().click();
+    await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
+    assert.equal(await search.getAttribute('aria-label'),'Civitai Detail'); assert.equal(await detail.isVisible(),true);
+    await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByRole('button',{name:'認証解除',exact:true}).click(); await auth.getByText('未認証',{exact:true}).waitFor(); await page.keyboard.press('Escape');
+    assert.equal(await cards.first().isVisible(),false); assert.equal(await search.getAttribute('aria-label'),'Civitai Search');
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    const queriesBeforeCacheGate = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
+    await page.evaluate(()=>window.open());
+    await search.getByText('civitai.redで検索するには認証が必要です。右上の「認証」からAPIキーを登録してください。',{exact:true}).waitFor();
+    assert.equal(await cards.count(),0,'cached red results stay unrendered while unauthenticated');
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),queriesBeforeCacheGate);
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    // Slow pre-auth status cannot undo a new successful authentication.
+    await page.evaluate(()=>{window.node=window.makeNode();window.deferAuthStatus=true;window.releaseAuthStatus=null;window.open();}); await page.waitForFunction(()=>window.releaseAuthStatus);
+    await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByLabel('Civitai APIキー',{exact:true}).fill('latest-key'); await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
+    await page.evaluate(()=>window.releaseAuthStatus()); await page.waitForTimeout(20); assert.equal(await search.getByRole('button',{name:'検索',exact:true}).isDisabled(),false);
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    // A late red status response cannot block anonymous com after a host change.
+    await page.evaluate(()=>{window.node=window.makeNode();window.authenticated=false;window.deferAuthStatus=true;window.releaseAuthStatus=null;window.open();}); await page.waitForFunction(()=>window.releaseAuthStatus);
+    await search.getByRole('combobox',{name:'接続先',exact:true}).selectOption('civitai.com'); await cards.first().waitFor();
+    await page.evaluate(()=>window.releaseAuthStatus()); await page.waitForTimeout(20); assert.equal(await search.getByRole('button',{name:'検索',exact:true}).isDisabled(),false);
+    await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup();window.authenticated=true;});
+    // Search 401 uses authentication plus a manual re-search and the original snapshot.
+    await page.evaluate(()=>{window.node=window.makeNode();window.failSearchAuth=true;window.open();});
+    const searchFailure = page.getByRole('dialog',{name:'検索に失敗しました',exact:true}); await searchFailure.waitFor();
+    await searchFailure.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
+    await searchFailure.getByText('認証しました。再検索してください。',{exact:true}).waitFor();
+    await searchFailure.getByRole('button',{name:'再検索',exact:true}).click(); await cards.first().waitFor();
+    // Failed replacement search resumes lazy gallery loading on the retained offscreen grid.
+    assert.equal(await cards.last().locator('img').count(),0);
+    await search.getByRole('searchbox',{name:'検索語'}).fill('failed new query'); await page.evaluate(()=>window.failSearch=true);
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await failure.waitFor(); await page.keyboard.press('Escape');
+    const bottomBefore = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/gallery?')&&new URL(call.path,'http://fixture').searchParams.get('version_id')==='40').length);
+    await search.locator('.pc-civitai-results').evaluate(node=>node.scrollTop=node.scrollHeight); await cards.last().locator('img').waitFor();
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/gallery?')&&new URL(call.path,'http://fixture').searchParams.get('version_id')==='40').length),bottomBefore+1);
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
     // Unknown image IDs use the existing public metadata without inventing a lookup or unsafe link.
     const imagesBefore = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/image?')).length);
     await page.evaluate(()=>{window.local();window.noID();});

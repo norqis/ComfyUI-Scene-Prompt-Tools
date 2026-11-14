@@ -5163,7 +5163,14 @@ function attachSceneLLM(node) {
 
 function openSceneCivitaiSearch(node) {
     injectStyle();
-    return openCivitaiSearch({ node, api, activeGraph: () => app.graph, beginChange: beginSceneGraphChange, endChange: endSceneGraphChange,
+    return openCivitaiSearch({ node, api,
+        onAcquired: async (target) => {
+            if (sceneLoraCatalogRequest) await sceneLoraCatalogRequest;
+            const catalog = await loadSceneLoraCatalog();
+            if (target.graph?.getNodeById(target.id) !== target) return;
+            const widget = findWidget(target, "lora_name");
+            if (widget?.options) widget.options.values = catalog.map(item => item.path);
+        }, activeGraph: () => app.graph, beginChange: beginSceneGraphChange, endChange: endSceneGraphChange,
         refresh: (target) => { syncSceneLoraSelectLabel(target); clearSceneComputedCaches(target); refreshDownstreamSceneNodes(target); } });
 }
 

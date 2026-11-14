@@ -103,7 +103,7 @@ export function showAPIError(error, query, retry) {
     button.onclick = () => { modal.dismiss(); void retry(); }; modal.dialog.append(button);
     return modal;
 }
-export function openCivitaiAuth({ api, host = "civitai.red", onAuthenticated }) {
+export function openCivitaiAuth({ api, host = "civitai.red", onAuthenticated, onStatusChanged }) {
     const controller = new AbortController();
     let serial = 0, busy = false;
     const modal = openModal("Civitai 認証", () => { serial++; controller.abort(); key.value = ""; });
@@ -128,7 +128,7 @@ export function openCivitaiAuth({ api, host = "civitai.red", onAuthenticated }) 
             const data = await requestJSON(api, removing ? "/scene_prompt/civitai/auth/clear" : "/scene_prompt/civitai/auth",
                 removing ? {} : { api_key: key.value, host }, { signal: controller.signal, cache: "no-store" });
             if (!current(requestedSerial)) return;
-            key.value = ""; show(data);
+            key.value = ""; show(data); onStatusChanged?.(data);
             if (!removing) { onAuthenticated?.(data); modal.dismiss(); }
         } catch (error) { if (current(requestedSerial)) status.textContent = error.message; }
         finally { busy = false; authenticate.disabled = false; clear.disabled = false; }
@@ -137,8 +137,8 @@ export function openCivitaiAuth({ api, host = "civitai.red", onAuthenticated }) 
     clear.onclick = () => void submit(true);
     key.focus(); return modal;
 }
-function showCivitaiDownloadError(error, { api, host, query, retry, isCurrent }) {
-    const modal = openModal("取得に失敗しました"), status = element("p", error.message, "pc-civitai-error"), again = element("button", "再試行", "pc-button");
+function showCivitaiDownloadError(error, { api, host, query, retry, isCurrent, retryLabel = "再取得", title = "取得に失敗しました" }) {
+    const modal = openModal(title), status = element("p", error.message, "pc-civitai-error"), again = element("button", "再試行", "pc-button");
     modal.dialog.append(element("p", `検索・説明: ${query || "—"}`), status, again);
     again.onclick = () => { modal.dismiss(); if (isCurrent()) void retry(); };
     if (error.status === 401 && error.code !== "civitai_download_disabled") {
@@ -148,7 +148,7 @@ function showCivitaiDownloadError(error, { api, host, query, retry, isCurrent })
             if (!isCurrent()) return;
             openCivitaiAuth({ api, host, onAuthenticated: () => {
                 if (!isCurrent() || !modal.overlay.isConnected) return;
-                status.textContent = "認証しました。再取得してください。"; again.textContent = "再取得"; again.hidden = false;
+                status.textContent = `認証しました。${retryLabel}してください。`; again.textContent = retryLabel; again.hidden = false;
             } });
         };
         modal.dialog.append(auth);
@@ -251,6 +251,67 @@ export function openCivitaiImage({ api, preview, index, host }) {
     }
     return modal;
 }
+function openCivitaiDownload({ api, item, isCurrent, acquire }) {
+    const controller = new AbortController();
+    const modal = openModal("LoRAを取得", () => controller.abort());
+    const label = element("label", "保存先"), combo = element("div", undefined, "pc-civitai-directory"), input = element("input"),
+        toggle = element("button", "▼", "pc-button"), list = element("div", undefined, "pc-civitai-directory-list"), status = element("p", "保存先を読み込み中…"),
+        actions = element("div", undefined, "pc-civitai-download-actions"), download = element("button", "取得", "pc-button"), select = element("button", "取得して選択", "pc-button");
+    const path = String(item.lora_name || "").replaceAll("\\", "/");
+    input.value = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : item.acquired ? "" : "llm";
+    input.setAttribute("role", "combobox"); input.setAttribute("aria-label", "保存先"); input.setAttribute("aria-expanded", "false"); input.setAttribute("aria-autocomplete", "list");
+    list.id = `pc-civitai-directories-${++settingsModalID}`; list.setAttribute("role", "listbox"); list.hidden = true; input.setAttribute("aria-controls", list.id);
+    toggle.setAttribute("aria-label", "保存先を選択");
+    let directories = [], active = -1, busy = false;
+    const current = () => modal.overlay.isConnected && isCurrent();
+    function popup(show) { list.hidden = !show; input.setAttribute("aria-expanded", String(show)); }
+    function highlight(index) {
+        active = Math.max(0, Math.min(index, directories.length - 1));
+        for (const [i, option] of [...list.children].entries()) option.setAttribute("aria-selected", String(i === active));
+        const option = list.children[active]; if (option) { input.setAttribute("aria-activedescendant", option.id); option.scrollIntoView({ block: "nearest" }); }
+    }
+    function choose(index) { input.value = directories[index]; popup(false); input.focus(); }
+    toggle.onclick = () => { popup(list.hidden); if (!list.hidden) highlight(Math.max(0, directories.indexOf(input.value))); input.focus(); };
+    input.addEventListener("keydown", event => {
+        if (event.key === "Escape" && !list.hidden) { event.preventDefault(); event.stopImmediatePropagation(); popup(false); }
+        else if (["ArrowDown", "ArrowUp"].includes(event.key) && directories.length) { event.preventDefault(); popup(true); highlight(active + (event.key === "ArrowDown" ? 1 : -1)); }
+        else if (event.key === "Enter" && !list.hidden && active >= 0) { event.preventDefault(); choose(active); }
+    });
+    input.addEventListener("input", () => { active = -1; input.removeAttribute("aria-activedescendant"); });
+    async function load() {
+        status.textContent = "保存先を読み込み中…";
+        try {
+            const data = await requestJSON(api, "/scene_prompt/civitai/directories", undefined, { signal: controller.signal });
+            if (!current()) return;
+            directories = data.directories; list.replaceChildren();
+            const lastChild = new Map();
+            for (const path of directories) if (path) lastChild.set(path.split("/").slice(0, -1).join("/"), path);
+            for (const [index, path] of directories.entries()) {
+                const option = element("div", undefined, "pc-civitai-directory-option"); option.setAttribute("role", "option"); option.setAttribute("aria-label", path || "ルート"); option.id = `${list.id}-${index}`;
+                if (!path) option.textContent = "ルート";
+                else {
+                    const parts = path.split("/"), prefix = parts.slice(0, -1).map((_, depth) => {
+                        const parent = parts.slice(0, depth).join("/"), branch = parts.slice(0, depth + 1).join("/");
+                        return lastChild.get(parent) !== branch ? "│  " : "   ";
+                    }).join("");
+                    const parent = parts.slice(0, -1).join("/");
+                    option.textContent = `${prefix}${lastChild.get(parent) === path ? "└─ " : "├─ "}${parts.at(-1)}`;
+                }
+                option.onclick = () => choose(index); list.append(option);
+            }
+            status.textContent = "空欄はLoRAフォルダ直下。新しい保存先も入力できます。";
+        } catch (error) { if (current()) { status.replaceChildren(element("span", error.message)); const retry = element("button", "再試行", "pc-button"); retry.onclick = () => void load(); status.append(retry); } }
+    }
+    async function run(apply, directory = input.value) {
+        if (busy || !current()) return;
+        popup(false); busy = true; download.disabled = select.disabled = input.disabled = toggle.disabled = true; status.textContent = "取得中…";
+        try { if (await acquire({ apply, directory, isCurrent: current })) { status.textContent = "取得しました。"; modal.dismiss(); } }
+        catch (error) { if (current()) showCivitaiDownloadError(error, { api, host: item.downloadHost, query: item.name, retry: () => run(apply, directory), isCurrent: current }); }
+        finally { busy = false; download.disabled = select.disabled = input.disabled = toggle.disabled = false; }
+    }
+    download.onclick = () => void run(false); select.onclick = () => void run(true);
+    combo.append(input, toggle, list); label.append(combo); actions.append(download, select); modal.dialog.append(label, status, actions); input.focus(); void load(); return modal;
+}
 function renderCivitaiDetail({ modal, container, item, host, scope, api, onBack, onChoose, isCurrent }) {
     const back = element("button", "戻る", "pc-button"); back.onclick = onBack;
     container.replaceChildren(back, element("h2", item.name || "公開情報なし"), element("p", item.version_name || "公開情報なし"));
@@ -302,7 +363,7 @@ function renderCivitaiDetail({ modal, container, item, host, scope, api, onBack,
     const actions = element("div", undefined, "pc-civitai-detail-actions"), source = element("a", "公式サイトを開く");
     source.href = `https://${host}/models/${item.model_id}?modelVersionId=${item.version_id}`; source.target = "_blank"; source.rel = "noopener noreferrer";
     if (onChoose) {
-        const choose = element("button", item.acquired ? "取得済み・選択" : "取得して選択", "pc-button");
+        const choose = element("button", "取得", "pc-button");
         choose.onclick = () => onChoose(choose); actions.append(choose);
     }
     actions.append(source); container.append(actions); back.focus();
@@ -326,11 +387,12 @@ export function openCivitaiDetail({ api, modelID, versionID, host = "civitai.red
     }
     void load(); return modal;
 }
-export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node.graph,
+export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph = () => node.graph,
     beginChange = (graph) => graph.beforeChange?.(), endChange = (graph) => graph.afterChange?.() }) {
     const cached = searchViews.get(node), state = cached?.draft || node.properties?.scene_civitai || {};
     const generation = ++searchViewGeneration;
     searchViews.set(node, { ...cached, generation });
+    let authRevision = 0, authRequest, gate = "checking";
     let revision = 0, detailRevision = 0, currentResult = null, downloadBusy = false, searchRequest, optionsRequest, tagRequest, tagTimer, tagRevision = 0;
     const hostOptions = new Map(Object.entries(cached?.hostOptions || {}));
     let gridPosition = cached?.gridPosition || { left: 0, top: 0, modal: 0 };
@@ -343,14 +405,14 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
     const modal = openModal("Civitai Search", () => {
         revision++; detailRevision++;
         if (!list.hidden) gridPosition = { left: list.scrollLeft, top: list.scrollTop, modal: modal.dialog.scrollTop };
-        saveView(); searchRequest?.abort(); optionsRequest?.abort(); tagRequest?.abort(); clearTimeout(tagTimer); currentResult?.scope.close(); observer.disconnect(); currentResult = null;
+        saveView(); authRevision++; authRequest?.abort(); searchRequest?.abort(); optionsRequest?.abort(); tagRequest?.abort(); clearTimeout(tagTimer); currentResult?.scope.close(); observer.disconnect(); currentResult = null;
         list.replaceChildren(); detail.replaceChildren();
         if (!modals.some(entry => entry.ownerNode === node)) node.sceneCivitaiSearchCleanup = null;
     });
     modal.ownerNode = node;
     node.sceneCivitaiSearchCleanup = () => { for (const entry of modals.filter(entry => entry.ownerNode === node).reverse()) entry.dismiss(); };
     modal.dialog.classList.add("pc-civitai-search-dialog");
-    const authentication = element("button", "認証", "pc-button"); authentication.onclick = () => openCivitaiAuth({ api, host: host.value });
+    const authentication = element("button", "認証", "pc-button"); authentication.onclick = () => openCivitaiAuth({ api, host: host.value, onStatusChanged: data => { if (host.value === "civitai.red" && gateCurrent()) { authRevision++; authRequest?.abort(); setGate(data.configured ? "configured" : "missing"); } } });
     const headActions = element("div", undefined, "pc-lora-head-actions"); headActions.append(authentication, modal.close); modal.head.append(headActions);
     const controls = element("div", undefined, "pc-civitai-controls"), query = element("input"), sort = element("select"), model = element("select"), host = element("select"), modelType = element("select"), category = element("input"), tagList = element("datalist");
     query.type = "search"; query.value = state.query || ""; query.placeholder = "モデルを検索"; query.setAttribute("aria-label", "検索語");
@@ -392,6 +454,30 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
     status.setAttribute("role", "status"); detail.hidden = true;
     controls.append(query, host, model, modelType, category, tagList, tagHelp, sort, search); modal.dialog.append(controls, status, list, detail);
     const snapshot = () => Object.freeze({ query: query.value.trim(), sort: sort.value, host: host.value, model_mode: model.value, model_type: modelType.value, category: category.value.trim() });
+    const authNotice = element("p", undefined, "pc-civitai-status"); controls.after(authNotice);
+    const gateCurrent = () => modal.overlay.isConnected && searchViews.get(node)?.generation === generation;
+    function setGate(next) {
+        const wasBlocked = gate !== "configured";
+        gate = next; const blocked = host.value === "civitai.red" && gate !== "configured";
+        search.disabled = blocked;
+        authNotice.replaceChildren();
+        if (!blocked) { if (detail.hidden) list.hidden = false; if (wasBlocked && currentResult) { currentResult.serial = revision; currentResult.scope = galleryScope(api); render(currentResult); } return; }
+        revision++; detailRevision++; searchRequest?.abort(); currentResult?.scope.close(); observer.disconnect();
+        controls.hidden = false; status.hidden = false; list.hidden = true; detail.hidden = true; detail.replaceChildren(); modal.setTitle("Civitai Search");
+        if (gate === "missing") authNotice.textContent = 'civitai.redで検索するには認証が必要です。右上の「認証」からAPIキーを登録してください。';
+        else if (gate === "checking") authNotice.textContent = "認証状態を確認中…";
+        else { authNotice.append(element("span", "認証状態を確認できませんでした。")); const retry = element("button", "再試行", "pc-button"); retry.onclick = () => void checkGate(); authNotice.append(retry); }
+    }
+    async function checkGate(afterCheck) {
+        const serial = ++authRevision, selectedHost = host.value; authRequest?.abort(); authRequest = new AbortController();
+        if (selectedHost !== "civitai.red") { setGate("configured"); afterCheck?.(); return; }
+        setGate("checking");
+        try {
+            const data = await requestJSON(api, "/scene_prompt/civitai/auth", undefined, { signal: authRequest.signal, cache: "no-store" });
+            if (!gateCurrent() || serial !== authRevision || host.value !== selectedHost) return;
+            setGate(data.configured ? "configured" : "missing"); if (data.configured) afterCheck?.();
+        } catch (error) { if (gateCurrent() && serial === authRevision && host.value === selectedHost) setGate("error"); }
+    }
     const observer = new IntersectionObserver(entries => {
         for (const entry of entries) {
             if (!entry.isIntersecting) continue; observer.unobserve(entry.target);
@@ -417,25 +503,33 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
         const position = { left: list.scrollLeft, top: list.scrollTop, modal: modal.dialog.scrollTop }, serial = ++detailRevision;
         gridPosition = position;
         controls.hidden = true; list.hidden = true; status.hidden = true; detail.hidden = false; modal.setTitle("Civitai Detail");
-        const ownsAction = () => modal.overlay.isConnected && currentResult === view && revision === view.serial && detailRevision === serial;
+        const ownsAction = () => searchViews.get(node)?.generation === generation && modal.overlay.isConnected && currentResult === view && revision === view.serial && detailRevision === serial;
         renderCivitaiDetail({ modal, container: detail, item, host: view.snapshot.host, scope: view.scope, api, onBack: () => back(view, card, position), isCurrent: ownsAction,
-            onChoose: item.installable === false ? null : async choose => {
-                if (downloadBusy) return;
-                const graph = node.graph, lora = value(node, "lora_name"), current = captureTarget({ node, graph, ownerGraph: graph }, activeGraph);
-                downloadBusy = true; choose.disabled = true;
-                try {
-                    const applyMode = item.apply_model_mode || view.snapshot.model_mode;
-                    const downloaded = await requestJSON(api, "/scene_prompt/civitai/download", { model_id: item.model_id, version_id: item.version_id, file_id: item.file_id, model_mode: applyMode, host: view.snapshot.host });
-                    if (!ownsAction() || !current() || value(node, "lora_name") !== lora) return;
-                    if (!downloaded.candidate || !downloaded.lora_name) throw new Error("Civitai取得結果が無効です。");
-                    beginChange(graph); try { applyCandidate(node, { ...downloaded.candidate, lora_name: downloaded.lora_name }, { ...view.snapshot, model_mode: applyMode }); } finally { endChange(graph); }
-                    item.acquired = true; item.lora_name = downloaded.lora_name;
-                    for (const row of list.querySelectorAll(".pc-civitai-card")) row.classList.toggle("pc-lora-selected", row.dataset.identity === identity(item));
-                    choose.textContent = "取得済み・選択"; refresh?.(node);
-                } catch (error) { if (ownsAction()) showCivitaiDownloadError(error, { api, host: view.snapshot.host, query: view.snapshot.query, retry: () => choose.click(), isCurrent: () => ownsAction() && current() && value(node, "lora_name") === lora }); }
-                finally { downloadBusy = false; if (ownsAction()) choose.disabled = false; }
+            onChoose: item.installable === false ? null : () => {
+                openCivitaiDownload({ api, item: { ...item, downloadHost: view.snapshot.host }, isCurrent: ownsAction,
+                    acquire: async ({ apply, directory, isCurrent }) => {
+                        if (downloadBusy) return false;
+                        const graph = node.graph, lora = value(node, "lora_name"), current = captureTarget({ node, graph, ownerGraph: graph }, activeGraph);
+                        downloadBusy = true;
+                        try {
+                            const applyMode = item.apply_model_mode || view.snapshot.model_mode;
+                            const downloaded = await requestJSON(api, "/scene_prompt/civitai/download", { model_id: item.model_id, version_id: item.version_id, file_id: item.file_id, model_mode: applyMode, host: view.snapshot.host, directory });
+                            if (!isCurrent() || !current() || value(node, "lora_name") !== lora) return false;
+                            if (!downloaded.candidate || !downloaded.lora_name) throw new Error("Civitai取得結果が無効です。");
+                            item.acquired = true; item.lora_name = downloaded.lora_name;
+                            await onAcquired?.(node);
+                            if (!isCurrent() || !current() || value(node, "lora_name") !== lora) return false;
+                            if (apply) {
+                                beginChange(graph); try { applyCandidate(node, { ...downloaded.candidate, lora_name: downloaded.lora_name }, { ...view.snapshot, model_mode: applyMode }); } finally { endChange(graph); }
+                                for (const row of list.querySelectorAll(".pc-civitai-card")) row.classList.toggle("pc-lora-selected", row.dataset.identity === identity(item));
+                                refresh?.(node);
+                            }
+                            return true;
+                        } finally { downloadBusy = false; }
+                    } });
             } });
     }
+    function observeMissingPreviews() { for (const card of list.querySelectorAll(".pc-civitai-card")) if (!currentResult.items[Number(card.dataset.index)].image_url) observer.observe(card); }
     function render(view) {
         list.replaceChildren(); list.inert = false; observer.disconnect();
         const saved = node.properties?.scene_civitai;
@@ -466,7 +560,7 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
         }
     }
     async function load(requested = snapshot()) {
-        if (!modal.overlay.isConnected) return;
+        if (!gateCurrent() || (requested.host === "civitai.red" && gate !== "configured")) return;
         const serial = ++revision; detailRevision++; searchRequest?.abort(); currentResult?.scope.close(); observer.disconnect(); searchRequest = new AbortController();
         detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = false; modal.setTitle("Civitai Search"); status.textContent = "検索中…"; list.inert = true;
         try {
@@ -477,13 +571,16 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
         } catch (error) {
             if (modal.overlay.isConnected && serial === revision) {
                 status.textContent = currentResult ? "検索できませんでした。前の検索結果を表示しています。" : "検索できませんでした。";
-                if (currentResult) { currentResult.serial = serial; currentResult.scope = galleryScope(api); list.inert = false; }
-                showAPIError(error, requested.query, () => { if (modal.overlay.isConnected && serial === revision) void load(requested); });
+                if (currentResult) { currentResult.serial = serial; currentResult.scope = galleryScope(api); list.inert = false; observeMissingPreviews(); }
+                if (error.status === 401 && requested.host === "civitai.red") {
+                    setGate("missing"); const failedRevision = revision;
+                    showCivitaiDownloadError(error, { api, host: requested.host, query: requested.query, title: "検索に失敗しました", retryLabel: "再検索", retry: () => { setGate("configured"); void load(requested); }, isCurrent: () => gateCurrent() && failedRevision === revision });
+                } else showAPIError(error, requested.query, () => { if (modal.overlay.isConnected && serial === revision) void load(requested); });
             }
         }
     }
     search.onclick = () => void load(); for (const select of [sort, model, modelType]) select.onchange = () => void load();
-    host.onchange = () => { tagRevision++; clearTimeout(tagTimer); tagRequest?.abort(); setTags([]); void loadOptions(); void load(); };
+    host.onchange = () => { tagRevision++; clearTimeout(tagTimer); tagRequest?.abort(); setTags([]); void loadOptions(); void checkGate(() => void load()); };
     category.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); void load(); } };
     query.onkeydown = event => { if (event.key === "Enter") void load(); };
     query.focus(); void loadOptions();
@@ -491,9 +588,11 @@ export function openCivitaiSearch({ node, api, refresh, activeGraph = () => node
         const result = structuredClone(cached.lastSuccessfulResult);
         currentResult = { serial: revision, snapshot: Object.freeze(result.snapshot), items: result.items, scope: galleryScope(api) };
         if (JSON.stringify(snapshot()) !== JSON.stringify(result.snapshot)) status.textContent = "前回成功した条件の検索結果";
-        render(currentResult);
-        void waitForModalPaint().then(() => { if (modal.overlay.isConnected) { list.scrollLeft = gridPosition.left; list.scrollTop = gridPosition.top; modal.dialog.scrollTop = gridPosition.modal; } });
-    } else if (!cached) void load();
+    }
+    void checkGate(() => {
+        if (currentResult) { void waitForModalPaint().then(() => { if (gateCurrent()) { list.scrollLeft = gridPosition.left; list.scrollTop = gridPosition.top; modal.dialog.scrollTop = gridPosition.modal; } }); }
+        else if (!cached) void load();
+    });
     return modal;
 }
 export async function openLLMSettings(api) {

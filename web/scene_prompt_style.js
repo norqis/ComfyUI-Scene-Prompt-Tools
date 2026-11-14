@@ -41,6 +41,13 @@ export function injectStyle() {
         .pc-civitai-metadata dt { font-weight: bold; }
         .pc-civitai-metadata dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
         .pc-civitai-search-dialog [hidden] { display: none; }
+        .pc-civitai-directory { position: relative; display: flex; flex: 1; min-width: 0; }
+        .pc-civitai-dialog .pc-civitai-directory input { flex: 1; width: auto; }
+        .pc-civitai-directory-list { position: absolute; top: 100%; left: 0; right: 0; max-height: 45vh; overflow: auto; background: #242932; border: 1px solid #59616d; z-index: 1; }
+        .pc-civitai-directory-list[hidden] { display: none; }
+        .pc-civitai-directory-option { padding: 6px 10px; white-space: pre; cursor: pointer; }
+        .pc-civitai-directory-option:hover, .pc-civitai-directory-option[aria-selected=true] { background: #354f70; }
+        .pc-civitai-download-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 20px; }
         .pc-civitai-error { color: #ffb0a7; }
         .pc-civitai-dialog form { display: flex; flex-direction: column; gap: 10px; }
         .pc-civitai-dialog label { display: flex; justify-content: space-between; align-items: center; gap: 12px; }

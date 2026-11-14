@@ -707,10 +707,10 @@ def define_routes():
             return web.json_response({"error": "Unable to access Scene Prompt LLM settings."}, status=500)
 
     async def civitai_operation(request, operation):
-        from .civitai import ServiceError, search, download, by_hash, descriptions, gallery, details, image_details, options, tags
+        from .civitai import ServiceError, search, download, by_hash, descriptions, gallery, details, image_details, options, tags, directories
         try:
             if operation == "search":
-                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"), model_type=request.query.get("model_type", "LORA"), category=request.query.get("category", ""))
+                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"), model_type=request.query.get("model_type", "LORA"), category=request.query.get("category", ""), user_id=_request_user_id(request))
             elif operation == "by_hash":
                 result = await by_hash(request.query.get("sha256", ""))
             elif operation == "descriptions":
@@ -725,11 +725,13 @@ def define_routes():
                 result = await options(host=request.query.get("host", "civitai.red"))
             elif operation == "tags":
                 result = await tags(request.query.get("query", ""), host=request.query.get("host", "civitai.red"))
+            elif operation == "directories":
+                result = await asyncio.to_thread(directories)
             else:
                 payload = await request.json()
                 if not isinstance(payload, dict):
                     raise ValueError("Request body must be a JSON object.")
-                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"), user_id=_request_user_id(request))
+                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"), user_id=_request_user_id(request), directory=payload.get("directory", "llm"))
             return web.json_response(result)
         except ServiceError as exc:
             return web.json_response({"error": str(exc), **({"code": exc.code} if hasattr(exc, "code") else {})}, status=exc.status)
@@ -827,6 +829,10 @@ def define_routes():
     @PromptServer.instance.routes.get("/scene_prompt/civitai/tags")
     async def scene_civitai_tags(request):
         return await civitai_operation(request, "tags")
+
+    @PromptServer.instance.routes.get("/scene_prompt/civitai/directories")
+    async def scene_civitai_directories(request):
+        return await civitai_operation(request, "directories")
 
     @PromptServer.instance.routes.get("/scene_prompt/loras/list")
     async def scene_prompt_lora_list(request):
