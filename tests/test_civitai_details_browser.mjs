@@ -22,7 +22,7 @@ const server = http.createServer(async (request, response) => {
         window.api={async fetchApi(path,options={}){
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
             const url=new URL(path,'http://fixture'), body=options.body?JSON.parse(options.body):{}, reply=(data,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(data)});
-            if(url.pathname.endsWith('/directories'))return reply({directories:['','a','a/b','c','c/local','c/local/bin','c/local/lib','llm']});
+            if(url.pathname.endsWith('/directories'))return reply({directories:['','a','a/b','c','c/local','c/local/bin','c/local/lib','llm',...Array.from({length:20},(_,i)=>'z'+String(i).padStart(2,'0'))]});
             if(url.pathname.endsWith('/options'))return reply({model_types:['Checkpoint','TextualInversion','Hypernetwork','AestheticGradient','LORA','LoCon','DoRA','Controlnet','Upscaler','MotionModule','VAE','TextEncoder','UNet','CLIPVision','Poses','Wildcards','Workflows','ComfyWorkflows','Detection','VisionLanguage','CLIP','LLM','Other']});
             if(url.pathname.endsWith('/tags')){if(window.deferTags){window.deferTags=false;await new Promise(done=>window.releaseTags=done);}return reply({items:['Style','Action',url.searchParams.get('query')]});}
             if(url.pathname.endsWith('/search')){
@@ -231,15 +231,26 @@ try {
     await destination.getByText('空欄はLoRAフォルダ直下。新しい保存先も入力できます。',{exact:true}).waitFor();
     assert.equal(await directory.inputValue(),'llm');
     await destination.getByRole('button',{name:'保存先を選択',exact:true}).click();
+    const lastDirectory = destination.getByRole('option',{name:'z19',exact:true});
+    await lastDirectory.scrollIntoViewIfNeeded();
+    assert.equal(await lastDirectory.evaluate(node=>{const rect=node.getBoundingClientRect();return node.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2));}),true,'last folder remains clickable inside the modal');
     await page.screenshot({path:resolve(screenshots,'download-destination-tree.png')});
-    assert.deepEqual(await destination.getByRole('option').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label'))),['ルート','a','a/b','c','c/local','c/local/bin','c/local/lib','llm']);
+    assert((await destination.getByRole('listbox').evaluate(node=>node.scrollTop))>0,'long tree scrolls within its own list');
+    await lastDirectory.click(); assert.equal(await directory.inputValue(),'z19');
+    await destination.getByRole('button',{name:'保存先を選択',exact:true}).click();
+    assert.deepEqual(await destination.getByRole('option').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label'))),['ルート','a','a/b','c','c/local','c/local/bin','c/local/lib','llm',...Array.from({length:20},(_,i)=>'z'+String(i).padStart(2,'0'))]);
     await directory.press('ArrowDown'); await directory.press('Escape'); assert.equal(await destination.count(),1); assert.equal(await directory.getAttribute('aria-expanded'),'false');
     await destination.getByRole('button',{name:'保存先を選択',exact:true}).click();
     await destination.getByRole('option',{name:'a/b',exact:true}).click(); assert.equal(await directory.inputValue(),'a/b');
     await directory.press('ArrowDown'); await directory.press('Enter'); assert.equal(await directory.getAttribute('aria-expanded'),'false');
     await page.setViewportSize({width:360,height:740});
     assert.equal(await destination.evaluate(node=>node.scrollWidth<=node.clientWidth),true);
+    await destination.getByRole('button',{name:'保存先を選択',exact:true}).click();
+    await lastDirectory.scrollIntoViewIfNeeded();
+    assert.equal(await lastDirectory.evaluate(node=>{const rect=node.getBoundingClientRect();return node.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2));}),true,'last folder is clickable on narrow screens');
+    for (const button of await destination.locator('.pc-civitai-download-actions button').all()) assert.equal(await button.evaluate(node=>{const rect=node.getBoundingClientRect();return rect.top>=0&&rect.bottom<=innerHeight&&node.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2));}),true,'footer actions stay visible and clickable with dropdown open');
     await page.screenshot({path:resolve(screenshots,'download-destination-narrow.png')});
+    await lastDirectory.click();
     await page.setViewportSize({width:1600,height:1000});
     await directory.fill('new/A/B');
     const valuesBeforeOnly = await page.evaluate(()=>JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions}));

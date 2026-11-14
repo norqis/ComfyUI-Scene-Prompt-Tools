@@ -254,7 +254,7 @@ export function openCivitaiImage({ api, preview, index, host }) {
 function openCivitaiDownload({ api, item, isCurrent, acquire }) {
     const controller = new AbortController();
     const modal = openModal("LoRAを取得", () => controller.abort());
-    const label = element("label", "保存先"), combo = element("div", undefined, "pc-civitai-directory"), input = element("input"),
+    const label = element("label", "保存先", "pc-civitai-directory-label"), combo = element("div", undefined, "pc-civitai-directory"), input = element("input"),
         toggle = element("button", "▼", "pc-button"), list = element("div", undefined, "pc-civitai-directory-list"), status = element("p", "保存先を読み込み中…"),
         actions = element("div", undefined, "pc-civitai-download-actions"), download = element("button", "取得", "pc-button"), select = element("button", "取得して選択", "pc-button");
     const path = String(item.lora_name || "").replaceAll("\\", "/");
