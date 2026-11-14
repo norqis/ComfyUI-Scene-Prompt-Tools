@@ -2052,7 +2052,12 @@ window.__sceneSeedRuntimeTest = {
         if (tracker.activeState.nodes.find(node => String(node.id) === String(ids.ca))?.widgets_values_named?.enable_downstream_count !== false)
             throw new Error('Count policy must be committed to native history before the separate bypass action');
         app.canvas.deselectAllNodes(); app.canvas.selectNode(current());
-        await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass'); const bypassed = await snapshot();
+        tracker.beforeChange();
+        await app.extensionManager.command.execute('Comfy.Canvas.ToggleSelectedNodes.Bypass');
+        tracker.afterChange();
+        const bypassed = await snapshot();
+        if (tracker.activeState.nodes.find(node => String(node.id) === String(ids.ca))?.mode !== 4)
+            throw new Error('Native bypass must be committed to history before Undo');
         await tracker.undo(); const bypassUndone = await snapshot();
         await tracker.redo(); const bypassRedone = await snapshot();
         await app.loadGraphData(app.graph.serialize(), true, true); const bypassReloaded = await snapshot();
