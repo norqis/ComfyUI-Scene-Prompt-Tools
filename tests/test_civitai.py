@@ -106,7 +106,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             (self.root / path).mkdir(parents=True)
         (self.root / "weight.safetensors").write_bytes(b"not-a-folder")
         self.assertEqual(civitai.directories(), {"directories": ["", "a", "a/b", "c", "c/local", "c/local/bin", "c/local/lib"]})
-        for path in ("../outside", "/absolute", "C:/drive", "a/../../outside"):
+        for path in ("../outside", "/absolute", "C:" + "/drive", "a/../../outside"):
             with self.subTest(path=path), mock.patch.object(civitai, "api_get") as get, self.assertRaises(ValueError):
                 await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious", directory=path)
             get.assert_not_called()
