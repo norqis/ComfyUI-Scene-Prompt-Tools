@@ -9484,7 +9484,8 @@ function updateSceneExpandButton(node, options = {}) {
         return;
     }
 
-    const previousName = button.name;
+    const pause = findSceneWidget(node, "expand_pause");
+    const previousState = [button.name, button.disabled, pause?.name, pause?.disabled];
     const run = sceneBatchRunForNode(node);
     const status = sceneBatchRunStatus(run);
     button.disabled = !!node.sceneBatchStarting;
@@ -9496,8 +9497,7 @@ function updateSceneExpandButton(node, options = {}) {
         } else if (run.preparing) {
             button.name = "生成準備中";
         } else {
-            const current = Math.min(run.nextIndex + 1, run.total);
-            button.name = `停止 ${current}/${run.total}`;
+            button.name = "停止";
         }
     } else if (status === "pending") {
         const position = Math.max(1, sceneBatchPendingRuns.indexOf(run) + 1);
@@ -9509,9 +9509,75 @@ function updateSceneExpandButton(node, options = {}) {
     } else {
         button.name = "連続生成";
     }
-    if (button.name !== previousName) {
+    if (pause) {
+        const canPause = status === "active" && !node.sceneBatchStarting
+            && !run.preparing && !run.finalizing && !run.cancelled && !run.releaseBlocked;
+        const draining = run?.waiting || run?.queueing || run?.pauseReleasePromise
+            || (run?.pauseRequested && run.nextIndex >= run.total);
+        pause.name = canPause && run.pauseRequested ? (draining ? "停止中..." : "再開") : "一時停止";
+        pause.disabled = !canPause || !!(run.pauseRequested && draining);
+    }
+    if ([button.name, button.disabled, pause?.name, pause?.disabled].some((value, index) => value !== previousState[index])) {
         markSceneNodeChanged(node, options);
     }
+}
+
+async function toggleSceneBatchPause(node) {
+    const run = sceneBatchRunForNode(node);
+    if (!run || sceneBatchRun !== run || !sceneNodeHasCurrentOwner(node)
+        || node.sceneBatchStarting || run.preparing || run.finalizing || run.cancelled || run.releaseBlocked) {
+        return;
+    }
+    if (run.pauseRequested && (run.waiting || run.queueing || run.pauseReleasePromise)) {
+        return;
+    }
+    if (run.pauseRequested && !run.pauseGPUReleased) {
+        await settleSceneBatchPause(run);
+        if (sceneBatchRun !== run || !run.pauseGPUReleased) return;
+    }
+    run.pauseRequested = !run.pauseRequested;
+    run.pauseGPUReleased = false;
+    if (run.nextTimer) {
+        clearTimeout(run.nextTimer);
+        run.nextTimer = null;
+    }
+    refreshSceneBatchRunNode(run, { graphChange: false, background: false });
+    if (run.pauseRequested) {
+        scheduleActiveSceneBatchReconcile(run);
+        settleSceneBatchPause(run);
+    } else {
+        if (run.activeReconcileTimer) {
+            clearTimeout(run.activeReconcileTimer);
+            run.activeReconcileTimer = null;
+        }
+        scheduleNextSceneBatchItem(run);
+    }
+}
+
+function settleSceneBatchPause(run, finishing = false) {
+    if (run.pauseGPUReleased || (!finishing && (sceneBatchRun !== run || !run.pauseRequested
+        || run.waiting || run.queueing || run.finalizing || run.nextIndex >= run.total))) {
+        return Promise.resolve();
+    }
+    if (run.pauseReleasePromise) return run.pauseReleasePromise;
+    run.pauseReleasePromise = sceneGPUController.freeComfy().then(() => {
+        run.pauseGPUReleased = true;
+    }).catch((error) => {
+        if (sceneBatchRun === run) {
+            showSceneBatchError("GPUメモリを解放できませんでした。「再開」で再試行します。", error);
+        } else {
+            console.warn("[Scene Prompt] 一時停止時のGPUメモリ解放に失敗しました。", error);
+        }
+    }).finally(() => {
+        run.pauseReleasePromise = null;
+        if (sceneBatchRun === run) {
+            refreshSceneBatchRunNode(run, { graphChange: false, background: false });
+        } else if (!run.finalizing && !run.finalized && sceneBatchFinalizingRuns.delete(run)) {
+            activateNextSceneBatchRun();
+        }
+    });
+    refreshSceneBatchRunNode(run, { graphChange: false, background: false });
+    return run.pauseReleasePromise;
 }
 
 function updateSceneExpandCountWidget(node) {
@@ -10426,6 +10492,7 @@ function acceptSceneBatchPrompt(run, result) {
     refreshSceneBatchRunNode(run, { graphChange: false, background: false });
     if (run.runHandle && !run.runClaimed) {
         run.runClaimed = true;
+        run.claimedPromptId ||= promptId;
         run.runClaimPromise = claimSceneRunHandle(run.runHandle, promptId).catch((error) => {
             run.runClaimed = false;
             markSceneBatchReleaseBlocked(run, "連続生成の実行状態を開始できませんでした。もう一度実行してください。");
@@ -10772,7 +10839,7 @@ function rememberPendingSceneBatchRelease(promptId, runId) {
 }
 
 function scheduleActiveSceneBatchReconcile(run) {
-    if (!run?.currentPromptId || run.activeReconcileTimer) {
+    if ((!run?.currentPromptId && !(run?.pauseRequested && run.claimedPromptId)) || run.activeReconcileTimer) {
         return;
     }
     run.activeReconcileTimer = setTimeout(() => {
@@ -10782,15 +10849,25 @@ function scheduleActiveSceneBatchReconcile(run) {
 }
 
 async function reconcileActiveSceneBatchRun(run) {
-    if (sceneBatchRun !== run || !run?.waiting || run.reconciling) {
+    if (sceneBatchRun !== run || (!run?.waiting && !run?.pauseRequested) || run.reconciling) {
         return;
     }
     const promptId = String(run.currentPromptId || "");
-    if (!promptId) {
+    if (run.waiting && !promptId) {
         return;
     }
     run.reconciling = true;
     try {
+        if (run.pauseRequested) {
+            try {
+                await run.runClaimPromise;
+                if (sceneBatchRun !== run || !run.pauseRequested) return;
+                await claimSceneRunHandle(run.runHandle, run.claimedPromptId);
+            } catch (error) {
+                console.warn("[Scene Prompt] 一時停止中の実行状態の更新に失敗しました。", error);
+            }
+            if (!run.waiting) return;
+        }
         const historyResponse = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
         const history = await readApiJson(historyResponse, "連続生成の状態を確認できませんでした");
         if (!historyResponse.ok) {
@@ -10818,7 +10895,7 @@ async function reconcileActiveSceneBatchRun(run) {
         console.warn("[Scene Prompt] 連続生成の再照合に失敗しました。", error);
     } finally {
         run.reconciling = false;
-        if (sceneBatchRun === run && run.waiting) {
+        if (sceneBatchRun === run && (run.waiting || run.pauseRequested)) {
             scheduleActiveSceneBatchReconcile(run);
         }
     }
@@ -10941,6 +11018,8 @@ function stopSceneBatchRun(options = {}) {
     if (run?.preparing) {
         cancelSceneBatchRunPreparation(run);
     }
+    if (run?.pauseRequested && !run.waiting && !run.queueing) settleSceneBatchPause(run, true);
+    if (run?.pauseReleasePromise) sceneBatchFinalizingRuns.add(run);
     sceneBatchRun = null;
     if (finalizing) {
         if (previousNode) {
@@ -11201,6 +11280,9 @@ function createSceneBatchRun(node, total) {
         gpuReleaseRequested: false,
         waiting: false,
         queueing: false,
+        pauseRequested: false,
+        pauseReleasePromise: null,
+        pauseGPUReleased: false,
         currentPromptId: "",
         pendingPromptIds: new Set(),
         currentSeed: sceneBatchSeedBase(),
@@ -11290,7 +11372,7 @@ function prepareSceneBatchRunSnapshot(run, node) {
 
 async function queueNextSceneBatchItem() {
     const run = sceneBatchRun;
-    if (!run || run.queueing || run.waiting) {
+    if (!run || run.queueing || run.waiting || run.pauseRequested) {
         return;
     }
     if (run.releaseBlocked) {
@@ -11303,7 +11385,7 @@ async function queueNextSceneBatchItem() {
         if (run.snapshotPromise && !run.snapshotReady && !run.cachedPrompt) {
             await run.snapshotPromise;
         }
-        if (sceneBatchRun !== run || run.cancelled) {
+        if (sceneBatchRun !== run || run.cancelled || run.pauseRequested) {
             return;
         }
         if (run.snapshotError) {
@@ -11348,6 +11430,8 @@ async function queueNextSceneBatchItem() {
         }
     } finally {
         run.queueing = false;
+        if (sceneBatchRun === run) refreshSceneBatchRunNode(run, { graphChange: false, background: false });
+        if (sceneBatchRun === run && run.pauseRequested) settleSceneBatchPause(run);
         if (run.completedWhileQueueing && sceneBatchRun === run) {
             run.completedWhileQueueing = false;
             scheduleNextSceneBatchItem(run);
@@ -11474,8 +11558,15 @@ async function completeFinalSceneBatchRun(run, options = {}) {
         sceneBatchRun = null;
     }
     sceneBatchFinalizingRuns.add(run);
+    refreshSceneBatchRunNode(run, { graphChange: false, background: false });
     clearDetachedSceneBatchRun(run);
     clearPendingSceneBatchReleasesForRun(run.runId);
+    if (run.pauseRequested) {
+        await settleSceneBatchPause(run, true);
+        if (!run.pauseGPUReleased) {
+            showSceneBatchError("GPUメモリを解放できなかったため、後続の連続生成は開始しません。");
+        }
+    }
     await releaseSceneBatchPlan(run.runId);
     sceneBatchRunsById.delete(run.runId);
     sceneBatchFinalizingRuns.delete(run);
@@ -11484,7 +11575,7 @@ async function completeFinalSceneBatchRun(run, options = {}) {
         resetSceneExpandRunControls(node, { mark: false });
         updateSceneExpandButton(node);
     }
-    if (options.activateNext !== false) {
+    if (options.activateNext !== false && (!run.pauseRequested || run.pauseGPUReleased)) {
         activateNextSceneBatchRun();
     }
 }
@@ -11575,7 +11666,21 @@ function continueSceneBatchRun(detail = null) {
 
 function scheduleNextSceneBatchItem(run) {
     if (run.nextIndex >= run.total) {
+        if (run.pauseRequested && run.queueing) {
+            run.completedWhileQueueing = true;
+            return;
+        }
+        if (run.pauseRequested) {
+            run.finalizePromise = completeFinalSceneBatchRun(run);
+            return;
+        }
         stopSceneBatchRun({ forceRelease: true });
+        return;
+    }
+    if (run.pauseRequested) {
+        refreshSceneBatchRunNode(run, { graphChange: false, background: false });
+        scheduleActiveSceneBatchReconcile(run);
+        settleSceneBatchPause(run);
         return;
     }
     if (run.queueing) {
@@ -12241,6 +12346,9 @@ function ensureSceneExpandControls(node) {
         node.widgets.splice(node.widgets.indexOf(run), 0, info);
     }
     addSceneExpandCountWidget(node);
+    const pause = addSceneButton(node, "expand_pause", "一時停止", () => toggleSceneBatchPause(node));
+    node.widgets.splice(node.widgets.indexOf(pause), 1);
+    node.widgets.splice(node.widgets.indexOf(run) + 1, 0, pause);
     updateSceneExpandButton(node);
     updateSceneExpandCountWidget(node);
 }

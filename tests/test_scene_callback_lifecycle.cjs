@@ -76,7 +76,8 @@ function lifecycleContext(response) {
             return release.promise;
         },
         releaseSceneBatchGPU: async () => {},
-        sceneGPUController: { onCleanupError: (error) => { throw error; } },
+        sceneGPUController: { onCleanupError: (error) => { throw error; }, async freeComfy() { context.gpuFrees++; } },
+        gpuFrees: 0,
         activateNextSceneBatchRun() { context.activated += 1; },
         scheduleNextSceneBatchItem() { context.scheduled += 1; },
         showSceneBatchError(message) { context.errors.push(message); },
@@ -89,6 +90,7 @@ function lifecycleContext(response) {
         "clearDetachedSceneBatchRun",
         "sceneExpandHasLastCallback",
         "completeFinalSceneBatchRun",
+        "settleSceneBatchPause",
         "finalizeSceneBatchRun",
         "continueSceneBatchRun",
         "stopSceneBatchRun",
@@ -125,6 +127,7 @@ async function testFinalCallbackWaitsBeforeReleaseAndFifo() {
     const response = deferred();
     const { context, release } = lifecycleContext(response.promise);
     const run = finalRun();
+    run.pauseRequested = true;
     context.sceneBatchRun = run;
     context.sceneBatchRunsById.set(run.runId, run);
 
@@ -138,10 +141,12 @@ async function testFinalCallbackWaitsBeforeReleaseAndFifo() {
     assert.equal(context.releaseCalls.length, 0, "the context stays live while final Callback is pending");
     assert.equal(context.sceneBatchFinalizingRuns.has(run), true, "the finalizing run blocks FIFO as soon as final Callback communication starts");
     assert.equal(context.activated, 0, "the next FIFO run waits for final Callback");
+    assert.equal(context.gpuFrees, 0, "paused last item keeps models until its final Callback finishes");
 
     response.resolve({ ok: true, payload: { warnings: ["temporary transport error"] } });
     await new Promise((resolve) => setTimeout(resolve, 5));
     assert.deepEqual(context.releaseCalls, ["run-one"], "final Callback completion releases its context");
+    assert.equal(context.gpuFrees, 1, "paused final Callback completion frees models once before cleanup");
     assert.equal(context.sceneBatchFinalizingRuns.has(run), true, "FIFO remains blocked until context release completes");
     assert.equal(context.activated, 0, "release completion still gates the next FIFO run");
     release.resolve(true);

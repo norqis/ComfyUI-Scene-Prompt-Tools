@@ -3188,16 +3188,21 @@ try {
         window.__originalResourceGraphToPrompt = window.app.graphToPrompt;
         window.app.graphToPrompt = async () => ({ output: { [node.id]: { class_type: "ScenePrompterExpand", inputs: {} } } });
         return {
-            order: node.widgets.filter((widget) => ["expand_resources", "expand_run_all"].includes(widget.sceneRole)).map((widget) => widget.sceneRole),
-            counts: ["expand_resources", "expand_run_all"].map((role) => node.widgets.filter((widget) => widget.sceneRole === role).length),
+            order: node.widgets.filter((widget) => ["expand_resources", "expand_run_all", "expand_pause", "expand_total_count"].includes(widget.sceneRole)).map((widget) => widget.sceneRole),
+            counts: ["expand_resources", "expand_run_all", "expand_pause"].map((role) => node.widgets.filter((widget) => widget.sceneRole === role).length),
             serialized: node.serialize().widgets_values.slice(0, 11), before,
             infoSerialize: node.widgets.find((widget) => widget.sceneRole === "expand_resources").serialize,
+            pause: (() => {
+                const widget = node.widgets.find((item) => item.sceneRole === "expand_pause");
+                return { serialize: widget.serialize, name: widget.name, disabled: widget.disabled };
+            })(),
         };
     });
-    assert.deepEqual(resourceSetup.order, ["expand_resources", "expand_run_all"], "generation info stays directly above continuous generation");
-    assert.deepEqual(resourceSetup.counts, [1, 1], "hot reload does not duplicate Expand buttons");
+    assert.deepEqual(resourceSetup.order, ["expand_resources", "expand_run_all", "expand_pause", "expand_total_count"], "pause stays directly below stop and above progress, including legacy reload");
+    assert.deepEqual(resourceSetup.counts, [1, 1, 1], "hot reload does not duplicate Expand buttons");
     assert.deepEqual(resourceSetup.serialized, resourceSetup.before, "the new button does not shift legacy saved settings");
     assert.equal(resourceSetup.infoSerialize, false, "generation info is not serialized");
+    assert.deepEqual(resourceSetup.pause, { serialize: false, name: "一時停止", disabled: true }, "idle pause is disabled and does not alter saved settings");
     const beforePaint = await page.evaluate(async () => {
         const original = window.requestAnimationFrame, frames = [];
         const snapshot = window.app.graphToPrompt;

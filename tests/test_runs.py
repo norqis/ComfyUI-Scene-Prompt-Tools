@@ -109,6 +109,20 @@ class RunContextTests(unittest.TestCase):
         with self.assertRaises(RUNS.SceneRunError):
             store.require(stale)
 
+    def test_reclaiming_first_prompt_refreshes_continuous_idle_deadline(self):
+        store = RUNS.RunContextStore(active_idle_ttl_seconds=10)
+        with mock.patch.object(RUNS.time, "monotonic", return_value=0) as clock:
+            handle = store.create("alice", continuous=True)
+            self.assertTrue(store.claim(handle, "alice", "first-prompt"))
+            for tick in (9, 18, 27):
+                clock.return_value = tick
+                self.assertTrue(store.claim(handle, "alice", "first-prompt"))
+                self.assertEqual(store.purge_expired(), [])
+            clock.return_value = 36
+            self.assertEqual(store.purge_expired(), [])
+            clock.return_value = 37
+            self.assertEqual(store.purge_expired(), [(handle, "alice")])
+
     def test_reconcile_preserves_live_running_and_pending_contexts(self):
         store = RUNS.RunContextStore()
         running = store.create("alice")

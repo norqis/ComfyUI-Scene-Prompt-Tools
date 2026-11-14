@@ -320,8 +320,9 @@ context.installSceneBatchPromptCapture();
             assert.equal(context.released.at(-1), current);
         }
     }
-    for (const detached of [false, true]) {
-        const run = { runId: "owned-run", nodeId: 20, runHandle: "owned-snapshot", samplerSeedTargets: [], firstApiPending: true, nextIndex: 0 };
+    for (const state of ["active", "paused", "detached"]) {
+        const detached = state === "detached";
+        const run = { runId: "owned-run", nodeId: 20, runHandle: "owned-snapshot", samplerSeedTargets: [], firstApiPending: true, nextIndex: 0, pauseRequested: state === "paused" };
         run.firstPromptSnapshot = { output: {
             10: { class_type: "ScenePresetReference", inputs: { preset_id: "saved", run_handle: run.runHandle } },
             20: { class_type: "ScenePrompterExpand", inputs: { scene_prompt: ["10", 0], run_id: run.runId, current_index: 0, seed_base: 11, run_handle: run.runHandle } },
@@ -347,6 +348,9 @@ context.installSceneBatchPromptCapture();
         assert.equal(run.firstApiPending, true, "normal Queue does not consume the batch's first submission");
         assert.equal(run.cachedPrompt, undefined);
         assert.equal(JSON.stringify(run.firstPromptSnapshot), ownedBefore);
+        assert.equal(run.nextIndex, 0, "ordinary top-right Queue does not advance the paused batch");
+        assert.equal(run.pauseRequested, state === "paused", "ordinary top-right Queue does not resume the paused batch");
+        run.pauseRequested = false;
         const before = preparations;
         for (let index = 0; index < 3; index++) {
             run.nextIndex = index;
