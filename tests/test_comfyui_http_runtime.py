@@ -842,7 +842,7 @@ NODE_CLASS_MAPPINGS = {
         cls.log = cls.log_path.open("w", encoding="utf-8")
         cls.process = subprocess.Popen(
             [
-                sys.executable,
+                os.environ.get("COMFYUI_PYTHON", sys.executable),
                 "main.py",
                 "--cpu",
                 "--listen",
@@ -966,6 +966,48 @@ NODE_CLASS_MAPPINGS = {
         self._request("/scene_prompt/llm/settings", {"base_url": "http://127.0.0.1/v1",
             "port": provider.port, "model": "gpu-fixture", "api_key": "gpu-private-secret"})
 
+
+    def test_gpu_free_waits_for_active_image_and_confirms_worker_cache_release(self):
+        marker = self.base / "gpu-free-image.log"
+        worker_marker = self.base / "gpu-worker.log"
+        hold = self.base / "gpu-free.hold"
+        hold.touch()
+        result, errors = {}, []
+        def free():
+            try:
+                result.update(self._request("/scene_prompt/gpu/free", {"client_id": "gpu-free-owner"}))
+            except Exception as exc:
+                errors.append(exc)
+        with _DesktopCallbackClient(self.port, "gpu-free-owner"):
+            try:
+                queued = self._request("/prompt", {"prompt": self._gpu_graph(marker, "active", hold)})
+                deadline = time.monotonic() + 10
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(marker.exists())
+                worker_marker.write_text("", encoding="utf-8")
+                thread = Thread(target=free)
+                thread.start()
+                time.sleep(0.1)
+                self.assertFalse(result)
+                self.assertTrue(thread.is_alive(), "GPU free must wait through the active image")
+            finally:
+                hold.unlink(missing_ok=True)
+            self._wait_for_prompt(queued["prompt_id"])
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+            self.assertFalse(errors)
+            self.assertEqual(result, {"freed": True})
+            events = worker_marker.read_text(encoding="utf-8").splitlines()
+            previous = events.index("task-done")
+            for event in ("comfy-reset", "comfy-unload", "comfy-gc", "comfy-empty"):
+                current = events.index(event, previous + 1)
+                self.assertGreater(current, previous)
+                previous = current
+            self._queue_and_wait(self._gpu_graph(marker, "after"))
+            self.assertIn("after-done", marker.read_text(encoding="utf-8"))
+            self.assertEqual(self._request("/scene_prompt/gpu/free", {"client_id": "gpu-free-owner"}), {"freed": True})
+            self.assertEqual(self._request_status("/scene_prompt/gpu/free", {"client_id": "missing"})[0], 403)
 
     def test_gpu_handoff_real_worker_order_external_reload_and_private_history(self):
         with _GpuProvider() as provider, _DesktopCallbackClient(self.port, "gpu-owner"):

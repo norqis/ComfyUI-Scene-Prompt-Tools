@@ -75,6 +75,33 @@ const continuousPrompt = (run, index = 0) => ({ ...prompt(), output: { 7: {
 const settle = () => new Promise((done) => setImmediate(done));
 
 assert(GPU_HANDOFF_SETTINGS.every((setting) => setting.type === "boolean" && setting.defaultValue === false));
+{
+    const calls = [];
+    let finish, fail = false;
+    const completed = new Promise((resolve) => { finish = resolve; });
+    const api = { clientId: "pause-owner", async fetchApi(path, options) {
+        calls.push({ path, ...options, body: JSON.parse(options.body) });
+        await completed;
+        return { ok: !fail, status: 502, json: async () => fail ? { error: "worker release failed" } : { freed: true } };
+    } };
+    const controller = createGPUController({ app: {}, api });
+    let resolved = false;
+    const pending = controller.freeComfy().then((result) => { resolved = true; return result; });
+    await settle();
+    assert.equal(resolved, false, "pause waits for worker-confirmed HTTP completion");
+    assert.deepEqual(calls[0], { path: "/scene_prompt/gpu/free", method: "POST", headers: { "Content-Type": "application/json" },
+        body: { client_id: "pause-owner" }, timeoutMs: null });
+    finish();
+    assert.deepEqual(await pending, { freed: true });
+    controller.releaseOnPageHide({ persisted: false });
+    await settle();
+    assert.equal(calls.length, 1, "one-shot free retains no session or policy for teardown");
+    fail = true;
+    api.clientId = "";
+    await assert.rejects(controller.freeComfy(), /worker release failed/);
+    assert.deepEqual(calls.at(-1).body, { client_id: "" });
+    assert.equal(calls.at(-1).timeoutMs, null);
+}
 for (const llm of [false, true]) for (const image of [false, true]) {
     const { settings, resources, calls } = fixture();
     settings["ScenePrompt.ReleaseComfyBeforeLLM"] = llm;

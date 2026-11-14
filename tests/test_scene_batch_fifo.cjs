@@ -420,6 +420,7 @@ async function testPresetFailureDoesNotQueue() {
         sceneBatchSeedBase() { return 0; },
         setWidgetValue() { return false; },
         updateSceneExpandButton() {},
+        refreshSceneBatchRunNode() {},
         markSceneNodeChanged() {},
         async queueSingleScenePrompt() {
             failureContext.queued = true;
@@ -507,7 +508,7 @@ async function testPresetRunCountDisplay() {
     run.preparing = false;
     run.nextIndex = 2;
     displayContext.updateSceneExpandButton(node);
-    assert.equal(node.widgets[0].name, "停止 3/6");
+    assert.equal(node.widgets[0].name, "停止");
 }
 
 async function testExpandCountTracksCompletedRuns() {

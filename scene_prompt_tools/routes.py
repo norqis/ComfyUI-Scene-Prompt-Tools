@@ -632,6 +632,9 @@ def define_routes():
                         run_handle=str(payload.get("run_handle") or ""))}
                 else:
                     result = {"session_id": await gpu.begin_session(user_id, client_id, settings, state)}
+            elif operation == "free":
+                await gpu.free_comfy(user_id, client_id)
+                result = {"freed": True}
             elif operation == "release":
                 policy_id = str(payload.get("policy_id") or "")
                 result = {"released": gpu.retire_policy(policy_id, user_id, client_id=client_id)}
@@ -652,6 +655,10 @@ def define_routes():
     @PromptServer.instance.routes.post("/scene_prompt/gpu/release")
     async def scene_gpu_release(request):
         return await gpu_operation(request, "release")
+
+    @PromptServer.instance.routes.post("/scene_prompt/gpu/free")
+    async def scene_gpu_free(request):
+        return await gpu_operation(request, "free")
 
     @PromptServer.instance.routes.post("/scene_prompt/llm/begin")
     async def scene_llm_begin(request):

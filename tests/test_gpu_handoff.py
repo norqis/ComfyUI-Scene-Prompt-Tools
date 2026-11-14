@@ -4,6 +4,7 @@ import gc
 import heapq
 import importlib
 import sys
+import tempfile
 import threading
 import types
 import unittest
@@ -45,6 +46,182 @@ async def until(predicate):
 
 
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_free_rejects_missing_foreign_closed_and_reconnected_owner(self):
+        owner = coordinator()
+        for user, client in (("alice", ""), ("alice", "missing"), ("bob", "a")):
+            with self.assertRaises(gpu.HandoffError) as caught:
+                await owner.free_comfy(user, client)
+            self.assertEqual(caught.exception.status, 403)
+        owner.server.sockets["b"].closed = True
+        with self.assertRaises(gpu.HandoffError):
+            await owner.free_comfy("alice", "b")
+        await owner.gate.acquire_async()
+        operation = asyncio.create_task(owner.free_comfy("alice", "a"))
+        await until(lambda: owner.gate.writers == 1)
+        token = gpu._REQUEST_OWNER.set("alice")
+        try:
+            owner.server.sockets["a"] = Socket()
+        finally:
+            gpu._REQUEST_OWNER.reset(token)
+        owner.gate.release(False)
+        with self.assertRaises(gpu.HandoffError) as caught:
+            await operation
+        self.assertEqual(caught.exception.status, 409)
+        self.assertFalse(owner.controls)
+        self.assertFalse(owner.sessions)
+        self.assertFalse(owner.gate.exclusive)
+
+    async def test_free_waits_for_image_task_done_and_shared_requests(self):
+        owner = coordinator()
+        await asyncio.to_thread(owner.start_image, (0, "active", {}, {}, []), 1)
+        with mock.patch.object(owner, "release_comfy", new=mock.AsyncMock()) as release:
+            async with owner.llm_request("alice"):
+                operation = asyncio.create_task(owner.free_comfy("alice", "a"))
+                await until(lambda: owner.gate.writers == 1)
+                release.assert_not_awaited()
+                owner.finish_image(1)
+                await asyncio.sleep(0)
+                self.assertFalse(operation.done(), "a shared LLM request still owns the GPU gate")
+                release.assert_not_awaited()
+            await operation
+        release.assert_awaited_once_with()
+        self.assertFalse(owner.image_leases)
+        self.assertFalse(owner.sessions)
+        self.assertFalse(owner.policies)
+        self.assertFalse(owner.gate.exclusive)
+
+    async def test_free_confirms_real_worker_completion_and_keeps_gate_until_then(self):
+        owner = coordinator()
+        events = []
+        started, finish = threading.Event(), threading.Event()
+        owner.server.prompt_queue = types.SimpleNamespace(set_flag=lambda *_args: events.append("wake"))
+        class Executor:
+            def reset(self):
+                events.append("reset")
+        executor = Executor()
+        owner.executors.add(executor)
+        management = types.ModuleType("comfy.model_management")
+        def unload():
+            events.append("unload")
+            started.set()
+            if not finish.wait(5):
+                raise AssertionError("The test did not finish its worker control")
+        management.unload_all_models = unload
+        management.soft_empty_cache = lambda: events.append("empty")
+        comfy = types.ModuleType("comfy")
+        comfy.model_management = management
+        with mock.patch.dict(sys.modules, {"comfy": comfy, "comfy.model_management": management}), mock.patch.object(gpu.gc, "collect", side_effect=lambda: events.append("gc")):
+            operation = asyncio.create_task(owner.free_comfy("alice", "a"))
+            await until(lambda: bool(owner.controls))
+            worker = asyncio.create_task(asyncio.to_thread(owner.service_controls))
+            await until(started.is_set)
+            next_image = asyncio.create_task(owner.gate.acquire_async())
+            await asyncio.sleep(0)
+            self.assertFalse(operation.done())
+            self.assertFalse(next_image.done())
+            self.assertTrue(owner.gate.exclusive)
+            finish.set()
+            await worker
+            await operation
+            await next_image
+            owner.gate.release(False)
+        self.assertEqual(events, ["wake", "reset", "unload", "gc", "empty"])
+        self.assertFalse(owner.controls)
+        self.assertFalse(owner.sessions)
+        self.assertFalse(owner.policies)
+        self.assertFalse(owner.gate.exclusive)
+
+    async def test_free_worker_failure_releases_gate_and_control(self):
+        owner = coordinator()
+        owner.server.prompt_queue = types.SimpleNamespace(set_flag=lambda *_args: None)
+        management = types.ModuleType("comfy.model_management")
+        management.unload_all_models = mock.Mock(side_effect=RuntimeError("private failure"))
+        management.soft_empty_cache = mock.Mock()
+        comfy = types.ModuleType("comfy")
+        comfy.model_management = management
+        with mock.patch.dict(sys.modules, {"comfy": comfy, "comfy.model_management": management}):
+            operation = asyncio.create_task(owner.free_comfy("alice", "a"))
+            await until(lambda: bool(owner.controls))
+            owner.service_controls()
+            with self.assertRaises(gpu.HandoffError) as caught:
+                await operation
+        self.assertEqual(caught.exception.status, 502)
+        self.assertNotIn("private failure", str(caught.exception))
+        self.assertFalse(owner.controls)
+        self.assertFalse(owner.sessions)
+        self.assertFalse(owner.gate.exclusive)
+
+    async def test_free_cancellation_while_waiting_or_queued_does_not_leak_gate_or_control(self):
+        for active_image in (True, False):
+            owner = coordinator()
+            owner.server.prompt_queue = types.SimpleNamespace(set_flag=lambda *_args: None)
+            if active_image:
+                await owner.gate.acquire_async()
+            operation = asyncio.create_task(owner.free_comfy("alice", "a"))
+            await until(lambda: owner.gate.writers == 1 if active_image else bool(owner.controls))
+            operation.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await operation
+            if active_image:
+                self.assertEqual(owner.gate.shared, 1)
+                owner.gate.release(False)
+            self.assertFalse(owner.gate.exclusive)
+            self.assertFalse(owner.gate.waiters)
+            self.assertFalse(owner.gate.writer_queue)
+            self.assertFalse(owner.controls)
+            self.assertFalse(owner.sessions)
+
+    async def test_free_cancellation_after_worker_start_waits_for_real_completion(self):
+        owner = coordinator()
+        owner.server.prompt_queue = types.SimpleNamespace(set_flag=lambda *_args: None)
+        started, finish = threading.Event(), threading.Event()
+        management = types.ModuleType("comfy.model_management")
+        def unload():
+            started.set()
+            if not finish.wait(5):
+                raise AssertionError("The test did not finish its worker control")
+        management.unload_all_models = unload
+        management.soft_empty_cache = lambda: None
+        comfy = types.ModuleType("comfy")
+        comfy.model_management = management
+        with mock.patch.dict(sys.modules, {"comfy": comfy, "comfy.model_management": management}):
+            operation = asyncio.create_task(owner.free_comfy("alice", "a"))
+            await until(lambda: bool(owner.controls))
+            worker = asyncio.create_task(asyncio.to_thread(owner.service_controls))
+            await until(started.is_set)
+            operation.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(operation.done())
+            self.assertTrue(owner.gate.exclusive)
+            finish.set()
+            await worker
+            with self.assertRaises(asyncio.CancelledError):
+                await operation
+        self.assertFalse(owner.gate.exclusive)
+        self.assertFalse(owner.controls)
+        self.assertFalse(owner.sessions)
+
+    async def test_free_route_is_owner_bound_and_never_reads_llm_settings(self):
+        from test_routes import load_routes
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(sys.modules):
+            routes = load_routes(Path(temporary))
+            owner = routes.PromptServer.instance._scene_gpu_handoff
+            handoff = sys.modules[routes.__package__ + ".gpu_handoff"]
+            owner.socket_owners["a"] = ("alice", Socket())
+            settings = importlib.import_module(routes.__package__ + ".llm_settings")
+            handler = routes._test_routes[("POST", "/scene_prompt/gpu/free")]
+            def request(user="alice", client="a"):
+                return types.SimpleNamespace(user_id=user, json=mock.AsyncMock(return_value={"client_id": client, "user_id": "alice"}))
+            with mock.patch.object(settings, "request_settings", side_effect=AssertionError("free must not read LLM settings")), mock.patch.object(owner, "release_comfy", new=mock.AsyncMock()) as release:
+                response = await handler(request())
+                self.assertEqual(response, {"payload": {"freed": True}, "status": 200})
+                release.assert_awaited_once_with()
+                self.assertEqual((await handler(request("bob")))["status"], 403)
+                self.assertEqual((await handler(request(client="missing")))["status"], 403)
+                release.side_effect = handoff.HandoffError("worker failed", 502)
+                self.assertEqual((await handler(request()))["status"], 502)
+                self.assertFalse(owner.gate.exclusive)
+
     async def test_off_requests_are_shared_without_resource_control(self):
         owner = coordinator()
         async with owner.llm_request("alice"):

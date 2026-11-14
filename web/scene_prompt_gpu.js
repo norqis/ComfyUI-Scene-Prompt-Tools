@@ -33,11 +33,14 @@ export function createGPUController({ app, api, onCleanupError = (error) => cons
         const response = await api.fetchApi(`/scene_prompt/${path}`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body), ...(keepalive ? { keepalive: true } : {}),
-            ...(path === "llm/begin" ? { timeoutMs: null } : {}),
+            ...(["llm/begin", "gpu/free"].includes(path) ? { timeoutMs: null } : {}),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || data.message || `HTTP ${response.status}`);
         return data;
+    }
+    async function freeComfy() {
+        return await post("gpu/free", { client_id: api.clientId || "" });
     }
     async function endLLM(sessionId, options) {
         if (!sessionId) return;
@@ -133,5 +136,5 @@ export function createGPUController({ app, api, onCleanupError = (error) => cons
         for (const sessionId of sessions) endLLM(sessionId, { keepalive: true }).catch(onCleanupError);
         for (const policyId of policies) releaseImage(policyId, { keepalive: true }).catch(onCleanupError);
     }
-    return { snapshot, beginLLM, endLLM, prepareImage, releaseImage, applyImagePolicy, acceptImage, queueClient, releaseOnPageHide, onCleanupError };
+    return { snapshot, freeComfy, beginLLM, endLLM, prepareImage, releaseImage, applyImagePolicy, acceptImage, queueClient, releaseOnPageHide, onCleanupError };
 }

@@ -297,6 +297,16 @@ class Coordinator:
                 self.gate.release(True)
             raise
 
+    async def free_comfy(self, user_id, client_id):
+        socket = self.owner_socket(user_id, client_id)
+        await self.gate.acquire_async(exclusive=True)
+        try:
+            if self.owner_socket(user_id, client_id) is not socket:
+                raise HandoffError("The ComfyUI client connection changed while waiting.", 409)
+            await self.release_comfy()
+        finally:
+            self.gate.release(True)
+
     async def release_comfy(self):
         future = asyncio.get_running_loop().create_future()
         with self.lock:

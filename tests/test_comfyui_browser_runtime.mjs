@@ -111,6 +111,7 @@ try {
 import importlib
 from aiohttp import web
 import json
+import threading
 import urllib.request
 from server import PromptServer
 executions = []
@@ -189,8 +190,44 @@ class TestSceneTextImage:
     CATEGORY = "test"
     def render(self, positive, negative):
         return {"ui": {"text": [positive, negative]}, "result": nodes.EmptyImage().generate(16, 16, 1, 0)}
+pause_image_gates = []
+@PromptServer.instance.routes.get("/scene_test/pause_images")
+async def pause_images(request):
+    return web.json_response({"started": len(pause_image_gates)})
+@PromptServer.instance.routes.post("/scene_test/pause_images/release")
+async def release_pause_image(request):
+    index = (await request.json())["index"]
+    pause_image_gates[index].set()
+    return web.json_response({"released": index})
+class TestScenePauseImage(TestSceneTextImage):
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"positive": ("STRING",), "negative": ("STRING",), "seed": ("INT",)}}
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+    def render(self, positive, negative, seed):
+        gate = threading.Event()
+        pause_image_gates.append(gate)
+        if not gate.wait(30):
+            raise RuntimeError("Native pause image was not released by its test")
+        return super().render(positive, negative)
 cache_probe_counts = {}
 import execution
+import comfy.model_management as model_management
+pause_release_events = []
+def record_pause_release(name, original):
+    def recorded(*args, **kwargs):
+        result = original(*args, **kwargs)
+        pause_release_events.append({"operation": name, "thread": threading.get_ident()})
+        return result
+    return recorded
+execution.PromptExecutor.reset = record_pause_release("reset", execution.PromptExecutor.reset)
+model_management.unload_all_models = record_pause_release("unload", model_management.unload_all_models)
+model_management.soft_empty_cache = record_pause_release("cache", model_management.soft_empty_cache)
+@PromptServer.instance.routes.get("/scene_test/pause_release")
+async def get_pause_release(request):
+    return web.json_response({"events": list(pause_release_events), "main_thread": threading.main_thread().ident})
 execution_probe_nodes = []
 execution_probe_enabled = False
 original_node_execute = execution.execute
@@ -233,7 +270,7 @@ class SceneCacheProbe:
         row = plan.item_for_normalized_plan(scene_prompt, 0, 7)["row"]
         details = {key: row.get(key) for key in ("model_links", "loras", "source_node_ids", "source_node_names")}
         return {"ui": {"text": [json.dumps(scene_prompt["stats"]), positive, str(seed), json.dumps(details)]}, "result": ()}
-NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "SceneCacheProbe": SceneCacheProbe}
+NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePauseImage": TestScenePauseImage, "SceneCacheProbe": SceneCacheProbe}
 `);
     child = spawn(python, [
         "main.py",
@@ -326,6 +363,7 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "SceneCacheProb
         await route.fulfill({ response, body: `${sourceUI}
 window.__sceneSeedRuntimeTest = {
     titleNodes() { return [...sceneTitleSyncNodes]; },
+    batchRun() { return sceneBatchRun; },
     llmWidgets(node) {
         const names = ["model_mode", "description", "positive", "negative", "generation_state_json"];
         return { firstRole: node.widgets[0]?.sceneRole, settingsCount: node.widgets.filter(widget => widget.sceneRole === "llm_settings").length,
@@ -422,6 +460,9 @@ window.__sceneSeedRuntimeTest = {
     });
     assert.deepEqual(removedInitialization, { retained: 0, liveRetained: true, pending: false });
     console.log('real ComfyUI configure/remove cancels deferred initialization without retaining deleted nodes; configure-before-add remains active');
+    nativeRunChecks = true;
+    try { await (await import('./scene_pause_runtime.mjs')).verifySceneBatchPause(page, url); }
+    finally { nativeRunChecks = false; }
     const allowPreviewQueue = route => route.continue();
     await page.route('**/prompt', allowPreviewQueue);
     nativeRunChecks = true;
