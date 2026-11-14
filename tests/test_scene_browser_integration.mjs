@@ -1434,7 +1434,7 @@ try {
     const otherDetails = pickerRows.last().locator(".pc-lora-source");
     await otherDetails.click();
     const previewDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
-    await previewDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    await previewDialog.getByRole("button", { name: "Civitai で確認" }).waitFor();
     await previewDialog.getByText("Selected version notes", { exact: true }).waitFor();
     assert.equal(await previewDialog.locator("pre code").first().textContent(), "jacket, blue shirt\n  boots");
     assert.equal(await previewDialog.locator("li").textContent(), "Uniform");
@@ -1449,7 +1449,7 @@ try {
     const previewClose = previewDialog.getByRole("button", { name: "閉じる" });
     await previewClose.focus();
     await page.keyboard.press("Shift+Tab");
-    assert.equal(await previewDialog.getByRole("link", { name: "Civitaiで見る" }).evaluate((link) => document.activeElement === link), true);
+    assert.equal(await previewDialog.getByRole("button", { name: "Civitai で確認" }).evaluate((link) => document.activeElement === link), true);
     await page.keyboard.press("Tab");
     assert.equal(await previewClose.evaluate((button) => document.activeElement === button), true);
     await page.keyboard.press("Escape");
@@ -1459,7 +1459,7 @@ try {
     assert.equal(await otherDetails.evaluate((button) => document.activeElement === button), true);
     for (let i = 0; i < 2; i += 1) {
         await otherDetails.click();
-        await previewDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+        await previewDialog.getByRole("button", { name: "Civitai で確認" }).waitFor();
         await previewDialog.locator("..").click({ position: { x: 2, y: 2 } });
         assert.equal(await previewDialog.count(), 0);
         assert.equal(await otherDetails.evaluate((button) => document.activeElement === button), true);
@@ -1533,7 +1533,7 @@ try {
         "the execution value stays the relative file path");
     await page.evaluate(() => { window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback(); });
     const loraDialog = page.getByRole("dialog", { name: "LoRA 詳細確認" });
-    await loraDialog.getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    await loraDialog.getByRole("button", { name: "Civitai で確認" }).waitFor();
     await loraDialog.getByText("Selected version notes", { exact: true }).waitFor();
     assert(descriptionLookups >= 5, "cached metadata still loads descriptions when details are opened");
     assert.deepEqual(await loraDialog.locator(".pc-lora-content > strong, .pc-lora-descriptions > strong").allTextContents(),
@@ -1558,7 +1558,7 @@ try {
         const linkLayout = await loraDialog.locator(".pc-lora-civitai-link").evaluate(link => {
             const rect = link.getBoundingClientRect(), parent = link.parentElement.getBoundingClientRect();
             const range = document.createRange(); range.selectNodeContents(link);
-            return { textSized: Math.abs(range.getBoundingClientRect().width - rect.width) < 1,
+            return { textSized: rect.width > range.getBoundingClientRect().width && rect.width < range.getBoundingClientRect().width + 32,
                 parentLarger: parent.width > rect.width + 40,
                 outsideIsLink: !!document.elementFromPoint(rect.right + 10, rect.top + rect.height / 2)?.closest("a") };
         });
@@ -1567,8 +1567,7 @@ try {
     if (process.env.SCENE_BROWSER_SCREENSHOTS_DIR) await page.screenshot({ path: resolve(process.env.SCENE_BROWSER_SCREENSHOTS_DIR, "lora-description.png") });
     await page.setViewportSize({ width: 1280, height: 720 });
     assert.equal(await page.evaluate(() => localStorage.getItem("scene_prompt_lora_names_v1").includes("Selected version notes")), false);
-    assert.equal(await loraDialog.getByRole("link", { name: "Civitaiで見る" }).getAttribute("href"),
-        "https://civitai.red/models/10?modelVersionId=20");
+    assert.equal(await loraDialog.getByRole("button", { name: "Civitai で確認" }).count(), 1);
     assert.equal(await loraDialog.locator(".pc-lora-word").count(), 5, "local and Civitai words are deduplicated");
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), loraInfoCalls,
         "details reuse the selected LoRA cache");
@@ -1704,7 +1703,7 @@ try {
     const missingDetails = page.getByRole("dialog", { name: "LoRA 詳細確認" });
     await missingDetails.locator(".pc-lora-word").filter({ hasText: "Local Tag" }).getByRole("button", { name: "注入" }).waitFor();
     assert.equal(await missingDetails.locator(".pc-lora-word button:disabled").count(), 0, "a normal missing Civitai record retains local trigger injection");
-    assert.equal(await missingDetails.getByRole("link", { name: "Civitaiで見る" }).count(), 0);
+    assert.equal(await missingDetails.getByRole("button", { name: "Civitai で確認" }).count(), 0);
     assert.deepEqual(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values), beforeMissingDetails,
         "opening a missing-record detail leaves selection and input intact");
     await page.keyboard.press("Escape");
@@ -1732,7 +1731,7 @@ try {
     assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?") && call.url.includes("other.safetensors")).length), infoBeforeConcurrentDetails + 1,
         "selection and details share the in-flight metadata and hash lookup");
     await page.evaluate(() => window.__releaseSceneLoraInfo());
-    await page.getByRole("dialog", { name: "LoRA 詳細確認" }).getByRole("link", { name: "Civitaiで見る" }).waitFor();
+    await page.getByRole("dialog", { name: "LoRA 詳細確認" }).getByRole("button", { name: "Civitai で確認" }).waitFor();
     assert.equal(civitaiLookupCount, lookupsBeforeConcurrentDetails + 1, "selection and details share one Civitai request");
     assert.deepEqual(await page.evaluate(() => window.__sceneLoraTestNode.serialize().widgets_values), delayedPreviewBefore, "delayed preview leaves node widgets intact");
     await page.keyboard.press("Escape");

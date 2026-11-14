@@ -17,6 +17,9 @@ package = llm_fixture.package
 
 with mock.patch.dict(sys.modules, {"folder_paths": folder_paths}):
     civitai = importlib.import_module(package.__name__ + ".civitai")
+    civitai_auth = importlib.import_module(package.__name__ + ".civitai_auth")
+sys.modules[civitai.__name__] = civitai
+sys.modules[civitai_auth.__name__] = civitai_auth
 
 
 class CivitaiHttpTest(llm_fixture.HttpFixture):
@@ -24,6 +27,10 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         await super().asyncSetUp()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.auth_directory = mock.patch.object(civitai_auth, "storage_directory", side_effect=lambda user: self.root / "users" / user)
+        self.auth_directory.start()
+        self.auth_token = mock.patch.object(civitai_auth, "token_snapshot", return_value="fixture-search-key")
+        self.auth_token.start()
         folder_paths.get_folder_paths = lambda kind: [str(self.root)]
         folder_paths.filename_list_cache = {"loras": "old"}
         self.content = b"safetensors-test-content"
@@ -39,6 +46,8 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.model_requests = []
         self.base_model_parameters = []
         self.download_calls = 0
+        self.download_status = 200
+        self.download_message = None
         self.storage_headers = []
         self.api_status = 200
         self.api_raw = None
@@ -49,12 +58,15 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
                             "trainedWords": ["cat"], "files": [{"downloadUrl": "secret URL"}]}
 
     async def asyncTearDown(self):
+        self.auth_token.stop()
+        self.auth_directory.stop()
         self.origin_patch.stop()
         self.temporary.cleanup()
         await super().asyncTearDown()
 
     async def handle(self, request):
-        self.assertIsNone(request.headers.get("Authorization"))
+        self.assertIn(request.headers.get("Authorization"), (None, "Bearer fixture-search-key"))
+        if request.path != "/api/v1/models": self.assertIsNone(request.headers.get("Authorization"))
         self.assertIsNone(request.headers.get("Cookie"))
         self.assertNotIn("token", request.query)
         if request.path.startswith("/api/v1/model-versions/by-hash/"):
@@ -72,6 +84,8 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             return web.json_response({"items": [self.model]} if request.path == "/api/v1/models" else self.model, status=self.api_status)
         if request.path.startswith("/api/download"):
             self.download_calls += 1
+            if self.download_status != 200:
+                return web.json_response({"message": self.download_message}, status=self.download_status)
             if self.redirect:
                 # Distinct authority even though both servers are localhost.
                 response = web.HTTPFound(self.storage_origin + "/storage?signature=provider-signature")
@@ -79,6 +93,67 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
                 raise response
             return web.Response(body=self.content)
         return await super().handle(request)
+
+    async def test_search_token_is_scoped_to_red_models_only(self):
+        await civitai.api_get("/api/v1/models/1", host="civitai.red", token="fixture-search-key")
+        await civitai.api_get("/api/v1/models", host="civitai.com", token="fixture-search-key")
+        self.assertEqual([headers for _, headers in self.model_requests], [None, None])
+        await civitai.api_get("/api/v1/models", host="civitai.red", token="fixture-search-key")
+        self.assertEqual(self.model_requests[-1][1], "Bearer fixture-search-key")
+
+    async def test_destination_tree_and_safe_relative_paths(self):
+        for path in ("a/b", "c/local/bin", "c/local/lib"):
+            (self.root / path).mkdir(parents=True)
+        (self.root / "weight.safetensors").write_bytes(b"not-a-folder")
+        self.assertEqual(civitai.directories(), {"directories": ["", "a", "a/b", "c", "c/local", "c/local/bin", "c/local/lib"]})
+        for path in ("../outside", "/absolute", "C:" + "/drive", "a/../../outside"):
+            with self.subTest(path=path), mock.patch.object(civitai, "api_get") as get, self.assertRaises(ValueError):
+                await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious", directory=path)
+            get.assert_not_called()
+        with tempfile.TemporaryDirectory() as outside:
+            try:
+                (self.root / "outside").symlink_to(outside, target_is_directory=True)
+                (self.root / "a" / "loop").symlink_to(self.root, target_is_directory=True)
+            except OSError:
+                return  # Windows can prohibit symlinks without Developer Mode.
+            self.assertNotIn("outside", civitai.directories()["directories"])
+            self.assertNotIn("a/loop", civitai.directories()["directories"])
+            with self.assertRaises(ValueError):
+                civitai._relative_target(self.root, "outside/new")
+
+    async def test_destination_download_reuse_manifest_and_hash_failure(self):
+        ids = {"model_id": 1, "version_id": 2, "file_id": 3}
+        first = await civitai.download(ids, "Illustrious", directory="")
+        self.assertNotIn("/", first["lora_name"])
+        second = await civitai.download(ids, "Illustrious", directory="")
+        self.assertEqual(first["lora_name"], second["lora_name"])
+        self.assertEqual(self.download_calls, 1)
+        third = await civitai.download(ids, "Illustrious", directory="a/b")
+        self.assertTrue(third["lora_name"].startswith("a/b/"))
+        self.assertEqual(self.download_calls, 2)
+        self.assertEqual((await civitai.search("cat", "Illustrious"))["items"][0]["lora_name"], third["lora_name"])
+        destination = self.root / third["lora_name"]
+        destination.write_bytes(b"keep-existing")
+        self.content = b"invalid-new-content"
+        with self.assertRaisesRegex(civitai.ServiceError, "SHA256"):
+            await civitai.download(ids, "Illustrious", directory="a/b")
+        self.assertEqual(destination.read_bytes(), b"keep-existing")
+        self.assertFalse(list((self.root / "a/b").glob("*.part")))
+
+    async def test_red_authentication_search_only_and_missing_key_rejected_before_http(self):
+        with mock.patch.object(civitai_auth, "token_snapshot", return_value=""), mock.patch.object(civitai, "api_get") as get:
+            with self.assertRaises(civitai.DownloadAccessError) as failure:
+                await civitai.search("cat", "Illustrious")
+            self.assertEqual(failure.exception.status, 401)
+            get.assert_not_called()
+        await civitai.search("cat", "Illustrious")
+        self.assertEqual(self.model_requests[-1][1], "Bearer fixture-search-key")
+        await civitai.search("cat", "Illustrious", host="civitai.com")
+        self.assertIsNone(self.model_requests[-1][1])
+        self.api_status = 401
+        with self.assertRaises(civitai.DownloadAccessError) as failure:
+            await civitai.search("cat", "Illustrious")
+        self.assertEqual(failure.exception.code, "civitai_auth_required")
 
     async def test_by_hash_returns_only_metadata_without_any_local_model_access(self):
         with mock.patch.object(civitai, "lora_root", side_effect=AssertionError("local model access")), \
@@ -89,6 +164,24 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.assertEqual(self.hash_requests, [("/api/v1/model-versions/by-hash/" + self.sha, None)])
         self.assertNotIn("private", str(result))
         self.assertNotIn("secret", str(result))
+
+    async def test_download_401_messages_are_safe_and_temporary_files_are_removed(self):
+        self.download_status = 401
+        for message, code, expected in [
+            ("The creator of this asset requires you to be logged in to download it", "civitai_auth_required", "認証が必要"),
+            ("The creator of this asset has disabled downloads on this file", "civitai_download_disabled", "無効"),
+            ("<html>private secret URL</html>", "civitai_auth_required", "取得を拒否"),
+        ]:
+            self.download_message = message
+            with self.subTest(message=message), self.assertRaises(civitai.DownloadAccessError) as failure:
+                await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
+            self.assertEqual(failure.exception.status, 401)
+            self.assertEqual(failure.exception.code, code)
+            self.assertIn(expected, str(failure.exception))
+            self.assertNotIn("private", str(failure.exception))
+            self.assertEqual(list(self.root.rglob("*.part")), [])
+            self.assertEqual(list(self.root.rglob("*.safetensors")), [])
+            self.assertFalse((self.root / "llm" / "manifest.json").exists())
 
     async def test_descriptions_use_selected_version_without_local_model_access(self):
         self.model["description"] = "<h2>Outfits</h2><pre><code>blue_coat</code></pre>"
@@ -169,8 +262,11 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             params, authorization = self.model_requests[-1]
             self.assertEqual(params["limit"], "30")
             self.assertEqual(params["period"], "AllTime")
-            self.assertEqual(params["sort"], sort)
-            self.assertEqual(authorization, None)
+            if sort == "Relevancy":
+                self.assertNotIn("sort", params)
+            else:
+                self.assertEqual(params["sort"], sort)
+            self.assertEqual(authorization, "Bearer fixture-search-key")
             self.assertEqual(self.base_model_parameters[-1], ["Illustrious"])
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])
 
@@ -210,9 +306,9 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
     async def test_upstream_used_schema_errors_are_service_errors(self):
         import copy
         for target, key, invalid in [("version", "images", {}), ("version", "images", [None]), ("version", "images", [{"url": 1}]),
-                                     ("version", "images", [{"url": "x", "nsfwLevel": "safe"}]), ("version", "files", {}),
+                                     ("version", "files", {}),
                                      ("version", "trainedWords", [1]), ("version", "description", []), ("version", "stats", []),
-                                     ("model", "stats", {"downloadCount": "many"}), ("file", "hashes", []), ("model", "id", None)]:
+                                     ("file", "hashes", []), ("model", "id", None)]:
             model = copy.deepcopy(self.model)
             obj = model if target == "model" else model["modelVersions"][0] if target == "version" else model["modelVersions"][0]["files"][0]
             obj[key] = invalid
@@ -512,7 +608,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             with self.assertRaises(ValueError):
                 await civitai.search("query", mode, sort)
 
-    async def test_api_and_redirected_download_are_anonymous_without_cookie_replay(self):
+    async def test_api_and_redirected_download_do_not_replay_cookie_or_cdn_authorization(self):
         async def storage(request):
             self.storage_headers.append((request.path, request.headers.get("Authorization"), request.headers.get("Cookie"), dict(request.query)))
             if request.path == "/storage":

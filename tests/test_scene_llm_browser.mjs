@@ -28,6 +28,11 @@ const server = http.createServer(async (request, response) => {
         if(window.rawResponse&&path.includes('search?'))return {ok:window.rawResponse.status===200,status:window.rawResponse.status,text:async()=>{window.bodyReads++;return window.rawResponse.text;}};
         if(window.fail&&path.includes('search?'))return {ok:false,status:503,text:async()=>JSON.stringify({error:'Network unavailable'})};
         if(path.includes('search?'))data={items:Array.from({length:window.resultCount},(_,index)=>candidate(index+1)).map(item=>({...item,base_model:params.get('model_mode')||'Illustrious',description:'<img src=x onerror=window.injected=true> Model description',version_description:'Version notes',published_at:'2026-08-02',model_stats:{downloadCount:90},version_stats:{downloadCount:12},gallery:Array.from({length:item.model_id===2?0:item.model_id===3?1:5},(_,index)=>({url:item.image_url+'#'+index,width:600,height:800})),name:item.name+' '+searchHost+(window.queryLabels?' '+searchQuery:'')}))};
+        else if(path.endsWith('/auth'))data={configured:true,username:'fixture'};
+        else if(path.endsWith('/directories'))data={directories:['','a','a/b','llm']};
+        else if(path.includes('/options?'))data={model_types:['Checkpoint','LORA','CLIP']};
+        else if(path.includes('/gallery?'))data={items:[],next_cursor:null};
+        else if(path.includes('/tags?'))data={items:['Style','Concept']};
         else if(path.endsWith('/download')){if(window.failDownload){window.failDownload=false;return {ok:false,status:502,text:async()=>JSON.stringify({error:'Download unavailable'})};}if(window.deferDownload){window.deferDownload=false;await new Promise(done=>window.finishDownload=done);}data={candidate:candidate(submitted.model_id),lora_name:'llm/'+submitted.model_id+'.safetensors'};}
         else if(path.endsWith('/test'))data={ok:true,models:[{id:'model-a'},{id:'model-b'}]};
         else if(path==='/scene_prompt/llm/settings'){if(submitted){if(submitted.api_key)window.savedSettings.api_key_set=true;for(const field of ['base_url','model'])window.savedSettings[field]=submitted[field];window.savedSettings.port=submitted.port===''?null:Number(submitted.port);}data={...window.savedSettings,template_version:'scene-llm-v1'};}
@@ -45,7 +50,7 @@ try {
     await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(() => window.ready);
     assert.equal(await page.evaluate(() => window.calls.length), 0, "loading modules never calls inference/search");
     await page.getByRole("button", { name: "Launch" }).click();
-    const modal = page.getByRole("dialog", { name: "Civitai Search" });
+    const modal = page.locator(".pc-civitai-search-dialog");
     await modal.locator(".pc-civitai-card").first().waitFor();
     assert.deepEqual(await modal.locator(".pc-civitai-card strong").allTextContents(), Array.from({length:12},(_,index)=>`LoRA ${index+1} civitai.red`), "selected item stays in server order");
     assert.equal(await modal.locator(".pc-lora-selected strong").textContent(), "LoRA 2 civitai.red");
@@ -57,12 +62,16 @@ try {
     const cards = modal.locator('.pc-civitai-card');
     assert.equal(await cards.count(), 12);
     const boxes = await cards.evaluateAll(nodes => nodes.map(node => { const box=node.getBoundingClientRect(); return {x:box.x,y:box.y}; }));
-    assert(boxes.slice(0,10).every(box => box.y === boxes[0].y)); assert(boxes[10].y > boxes[0].y);
+    assert(boxes.slice(0,3).every(box => box.y === boxes[0].y)); assert(boxes[3].y > boxes[0].y);
     assert.equal(await cards.locator('button,a').count(), 0, 'cards contain no nested actions');
     await page.screenshot({ path: resolve(reviewDirectory, "civitai-ten-columns.png") });
     await page.evaluate(() => { window.originalCard=document.querySelector('.pc-civitai-card'); window.originalGrid=document.querySelector('.pc-civitai-results'); window.searchCount=window.calls.length; });
     await cards.first().focus(); await page.keyboard.press('Enter');
     const detail = modal.locator('.pc-civitai-detail');
+    const acquireAndSelect = async () => {
+        if (!await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await detail.getByRole('button',{name:'取得',exact:true}).click();
+        await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).click();
+    };
     assert.equal(await detail.locator('.pc-civitai-gallery img').count(), 2);
     assert.equal(await detail.getByRole('button',{name:'Previous',exact:true}).isDisabled(),true);
     await detail.getByRole('button',{name:'Next',exact:true}).click();
@@ -71,12 +80,13 @@ try {
     assert.equal(await detail.locator('.pc-civitai-gallery img').count(),1);
     assert.equal(await detail.getByRole('button',{name:'Next',exact:true}).isDisabled(),true);
     await detail.getByRole('button',{name:'Previous',exact:true}).click();
-    assert.match(await detail.textContent(), /Model description.*Version notes.*2026-08-02.*Model Stats.*90.*Version Stats.*12/s);
+    assert.match(await detail.textContent(), /Model description.*Version notes.*2026-08-02.*MODEL STATS.*90.*VERSION STATS.*12/s);
     assert.equal(await detail.locator('.pc-civitai-metadata img').count(),0); assert.equal(await page.evaluate(()=>window.injected),undefined);
     await page.screenshot({ path: resolve(reviewDirectory, "civitai-details.png") });
-    await detail.getByRole('button',{name:'取得して選択',exact:true}).click();
+    await acquireAndSelect();
     await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='positive').value==='manual, tag1');
     assert.doesNotMatch(await page.evaluate(()=>JSON.stringify(window.node.properties)),/gallery|description|image_url|stats/);
+    if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     assert.equal(await page.evaluate(()=>document.querySelector('.pc-civitai-card')===window.originalCard && document.querySelector('.pc-civitai-results')===window.originalGrid),true);
     assert.equal(await cards.first().evaluate(node=>node===document.activeElement),true);
@@ -85,15 +95,17 @@ try {
         await cards.nth(index).focus(); await page.keyboard.press('Space');
         assert.equal(await detail.locator('.pc-civitai-gallery img').count(),count);
         assert.equal(await detail.getByRole('button',{name:'Next',exact:true}).isDisabled(),true);
-        await detail.getByRole('button',{name:'戻る',exact:true}).click();
+        if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
+    await detail.getByRole('button',{name:'戻る',exact:true}).click();
     }
     await page.setViewportSize({ width: 360, height: 740 });
     assert.equal(await modal.evaluate(node=>node.scrollWidth<=node.clientWidth),true);
-    assert.equal(await modal.locator('.pc-civitai-results').evaluate(node=>node.scrollWidth>node.clientWidth),true);
+    assert.equal(await modal.locator('.pc-civitai-results').evaluate(node=>node.scrollWidth<=node.clientWidth),true);
     await modal.locator('.pc-civitai-results').evaluate(node=>{node.scrollLeft=420;node.scrollTop=80;});
     const scrolled=await modal.locator('.pc-civitai-results').evaluate(node=>[node.scrollLeft,node.scrollTop]);
     const callsBeforeBack=await page.evaluate(()=>window.calls.length);
     await cards.nth(4).evaluate(node=>node.click());
+    if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     assert.deepEqual(await modal.locator('.pc-civitai-results').evaluate(node=>[node.scrollLeft,node.scrollTop]),scrolled);
     assert.equal(await page.evaluate(()=>window.calls.length),callsBeforeBack,'Back never requests search or details');
@@ -106,36 +118,39 @@ try {
     await page.waitForFunction(()=>document.querySelector('.pc-civitai-card')?.textContent.includes('Anima'));
     assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value),'Illustrious','searching never edits node');
     await cards.first().click();
-    assert.match(await detail.getByRole('link',{name:'Civitaiで開く'}).getAttribute('href'),/^https:\/\/civitai.com\//);
+    assert.match(await detail.getByRole('link',{name:'公式サイトを開く'}).getAttribute('href'),/^https:\/\/civitai.com\//);
     await page.evaluate(()=>{window.deferDownload=true;window.finishDownload=null;});
-    await detail.getByRole('button',{name:/取得.*選択/}).click();
+    await acquireAndSelect();
     await page.waitForFunction(()=>window.finishDownload);
+    if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     await page.evaluate(()=>window.finishDownload()); await page.waitForTimeout(30);
     assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value),'Illustrious','Back invalidates in-flight selection');
-    await cards.first().click(); await detail.getByRole('button',{name:/取得.*選択/}).click();
+    await cards.first().click(); await acquireAndSelect();
     await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value==='Anima');
     assert.deepEqual(await page.evaluate(()=>[window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.host,window.node.properties.scene_civitai.host]),['civitai.com','civitai.com']);
     await page.evaluate(()=>window.failDownload=true);
-    await detail.getByRole('button',{name:/取得.*選択/}).click();
+    await acquireAndSelect();
     const downloadFailure=page.getByRole('dialog',{name:'取得に失敗しました'}); await downloadFailure.waitFor();
     assert.match(await downloadFailure.textContent(),/API \/scene_prompt\/civitai\/download.*HTTP 502.*Download unavailable/s);
     await downloadFailure.getByRole('button',{name:'再試行'}).click();
     await page.waitForFunction(()=>!document.querySelector('.pc-civitai-detail-actions button').disabled);
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.model_mode),'Anima');
 
+    if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     await modal.getByRole('combobox',{name:'並び順'}).selectOption('Highest Rated');
     assert.deepEqual(await modal.getByRole('combobox',{name:'Base Model',exact:true}).locator('option').evaluateAll(items=>items.map(item=>item.value)),
-        ['Illustrious','Anima','NoobAI','Pony']);
+        ['','Illustrious','Anima','NoobAI','Pony']);
     for (const mode of ['NoobAI','Pony']) {
         await modal.getByRole('combobox',{name:'Base Model',exact:true}).selectOption(mode);
         await page.waitForFunction(mode=>document.querySelector('.pc-civitai-card')?.textContent.includes(mode),mode);
         await cards.first().click();
-        await detail.getByRole('button',{name:/取得.*選択/}).click();
+        await acquireAndSelect();
         await page.waitForFunction(mode=>window.node.widgets.find(widget=>widget.name==='model_mode').value===mode,mode);
         assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.model_mode),mode);
-        await detail.getByRole('button',{name:'戻る',exact:true}).click();
+        if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
+    await detail.getByRole('button',{name:'戻る',exact:true}).click();
     }
     await page.waitForFunction(()=>window.calls.some(call=>call.path.includes('sort=Highest+Rated')));
     await modal.getByRole('searchbox',{name:'検索語'}).fill('different');
@@ -145,7 +160,8 @@ try {
     assert.equal(await modal.locator('.pc-civitai-card').count(),12,'failed search preserves previous DOM');
     await page.keyboard.press('Escape');
     await cards.first().click(); assert.equal(await detail.isVisible(),true,'previous cards remain usable after a failed search');
-    assert.match(await detail.getByRole('link',{name:'Civitaiで開く'}).getAttribute('href'),/^https:\/\/civitai.com\//);
+    assert.match(await detail.getByRole('link',{name:'公式サイトを開く'}).getAttribute('href'),/^https:\/\/civitai.com\//);
+    if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     await page.evaluate(()=>window.fail=false); await modal.getByRole('button',{name:'検索',exact:true}).click();
     await page.waitForFunction(()=>!document.querySelector('.pc-civitai-results').inert);
@@ -164,14 +180,14 @@ try {
         await page.evaluate(()=>{window.staleNode=window.node;window.beforeTransactions=window.transactions;window.search();});
         await modal.locator('.pc-civitai-card').first().waitFor(); await modal.locator('.pc-civitai-card').first().click();
         await page.evaluate(()=>{window.deferDownload=true;window.finishDownload=null;});
-        await detail.getByRole('button',{name:/取得.*選択/}).click(); await page.waitForFunction(()=>window.finishDownload);
-        assert.equal(await detail.getByRole('button',{name:/取得.*選択/}).isDisabled(),true);
-        if(action==='close') await page.keyboard.press('Escape');
+        await acquireAndSelect(); await page.waitForFunction(()=>window.finishDownload);
+        assert.equal(await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).isDisabled(),true);
+        if(action==='close') await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
         else await page.evaluate(()=>window.node=null);
         await page.evaluate(()=>window.finishDownload()); await page.waitForTimeout(30);
         assert.equal(await page.evaluate(()=>window.transactions),await page.evaluate(()=>window.beforeTransactions),'dismissed/deleted action never applies');
         await page.evaluate(()=>window.node=window.staleNode);
-        if(action==='delete') await page.keyboard.press('Escape');
+        if(action==='delete') await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
     }
     const savedSelection = await page.evaluate(() => window.node.properties.scene_civitai);
     for (const modelID of [savedSelection.model_id, 999]) {
@@ -182,7 +198,7 @@ try {
         }, modelID);
         await cards.first().waitFor();
         assert.equal(await modal.locator('.pc-civitai-card.pc-lora-selected').count(), 0, 'a manual local selection invalidates the saved Civitai highlight');
-        assert.equal(await modal.locator('.pc-civitai-status').textContent(), '', 'stale Civitai identity is not shown as the current selection outside results');
+        assert.equal(await modal.locator('.pc-civitai-status').first().textContent(), '', 'stale Civitai identity is not shown as the current selection outside results');
         assert.deepEqual(await page.evaluate(() => window.node.properties.scene_civitai), { ...savedSelection, model_id: modelID }, 'display validation preserves search and selection history');
         await page.keyboard.press('Escape');
     }
@@ -306,6 +322,7 @@ try {
     await page.evaluate(async()=>{window.finishSettingsGet();const modal=await window.pendingSettings;window.closedSettings=modal;});
     assert.equal(await page.evaluate(()=>window.closedSettings.dialog.querySelectorAll('input').length),0,'close during GET does not attach orphan controls');
     await page.evaluate(() => {window.deferSearch=true;window.finishSearch=null;window.search();});
+    await modal.getByRole('button',{name:'検索',exact:true}).click();
     await page.waitForFunction(() => window.finishSearch);
     await page.evaluate(() => window.settings());
     await settings.getByRole("button", { name: "保存", exact: true }).waitFor();
@@ -324,13 +341,15 @@ try {
     assert.equal(await page.getByRole('dialog').count(), 0, "late search remains owned by its dismissed modal");
     const beforeReopen = await page.evaluate(() => window.calls.filter(call=>call.path.includes('search?')).length);
     await page.evaluate(() => window.search()); await modal.locator('.pc-civitai-card').first().waitFor();
-    assert.equal(await page.evaluate(() => window.calls.filter(call=>call.path.includes('search?')).length), beforeReopen+1, "old in-flight response cannot restore dismissed search state");
+    assert.equal(await page.evaluate(() => window.calls.filter(call=>call.path.includes('search?')).length), beforeReopen, "reopen restores the previous successful result without searching");
     assert.match(await modal.locator('.pc-civitai-card strong').first().textContent(), /civitai.com/);
     await page.keyboard.press("Escape");
     await page.evaluate(() => {
         window.queryLabels=true; window.deferSearch=true; window.finishSearch=null;
         window.node.properties.scene_civitai.query='older-query'; window.pendingModal=window.search();
     });
+    await modal.getByRole("searchbox", { name: "検索語" }).fill("older-query");
+    await modal.getByRole("button", { name: "検索", exact: true }).click();
     await page.waitForFunction(() => window.finishSearch);
     await modal.getByRole("searchbox", { name: "検索語" }).fill("newer-query");
     await modal.getByRole("button", { name: "検索", exact: true }).click();
@@ -344,6 +363,8 @@ try {
     await page.evaluate(() => {
         window.deferSearch=true; window.finishSearch=null; window.node.properties.scene_civitai.query='closed-query'; window.closedModal=window.search();
     });
+    await modal.getByRole("searchbox", { name: "検索語" }).fill("closed-query");
+    await modal.getByRole("button", { name: "検索", exact: true }).click();
     await page.waitForFunction(() => window.finishSearch);
     await page.evaluate(() => { window.closedModal.dismiss(); window.finishSearch(); });
     await page.waitForTimeout(30);
@@ -351,15 +372,17 @@ try {
         "late search cannot repopulate a dismissed modal");
     const closedSearches = await page.evaluate(() => window.calls.filter(call=>call.path.includes('query=closed-query')).length);
     await page.evaluate(() => window.search()); await modal.locator('.pc-civitai-card').first().waitFor();
-    assert.equal(await page.evaluate(() => window.calls.filter(call=>call.path.includes('query=closed-query')).length), closedSearches+1,
-        "a new modal fetches its own current result rather than closed result history");
+    assert.equal(await page.evaluate(() => window.calls.filter(call=>call.path.includes('query=closed-query')).length), closedSearches,
+        "a new modal restores the last successful result and ignores the late closed search");
     await page.keyboard.press('Escape');
     await page.evaluate(async () => {
         window.ownedModals=[];
         for(let index=0;index<24;index++) {
             window.node.properties.scene_civitai.query='current-modal-'+index;
             const current=window.search(); window.ownedModals.push(current);
-            while(!current.dialog.querySelector('.pc-civitai-card')) await new Promise(done=>setTimeout(done,0));
+            current.dialog.querySelector('input[type=search]').value='current-modal-'+index;
+            current.dialog.querySelector('.pc-civitai-controls button').click();
+            while(!current.dialog.querySelector('.pc-civitai-card strong')?.textContent.endsWith('current-modal-'+index)) await new Promise(done=>setTimeout(done,0));
         }
     });
     assert.equal(await page.evaluate(() => window.ownedModals.filter(current=>current.dialog.querySelectorAll('.pc-civitai-card').length===2).length), 24,

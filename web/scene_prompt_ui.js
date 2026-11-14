@@ -3,7 +3,7 @@ import { api } from "../../scripts/api.js";
 import { ChangeTracker } from "../../scripts/changeTracker.js";
 import { createLLMController, LLM_TYPE, value as sceneLLMValue } from "./scene_prompt_llm.js";
 import { createGPUController, GPU_HANDOFF_SETTINGS } from "./scene_prompt_gpu.js";
-import { openCivitaiSearch, openLLMSettings, showAPIError, lookupCivitaiByHash, renderCivitaiDescription, waitForModalPaint } from "./scene_prompt_civitai.js";
+import { openCivitaiSearch, openCivitaiDetail, openModal, openLLMSettings, showAPIError, lookupCivitaiByHash, renderCivitaiDescription, waitForModalPaint } from "./scene_prompt_civitai.js";
 import { collectPresetLLMTargets, preparePresetReference, presetOccurrenceChild, presetReferenceRevision, presetReferenceHasLLM, presetEditorDefinition, hydratePresetReference, createPresetOperation } from "./scene_llm_presets.js";
 import { isSceneSwitch, sceneSwitchNames, sceneSwitchSettings, sceneMakeSwitchValues, sceneLiveSwitchSource, sceneLiveSwitchValue, sceneLiveSwitchSelection, sceneLiveReferenceSwitchValues, createScenePresetSwitchContext, resolveSceneSwitchSettings } from "./scene_prompt_switches.js";
 import {
@@ -5163,7 +5163,14 @@ function attachSceneLLM(node) {
 
 function openSceneCivitaiSearch(node) {
     injectStyle();
-    return openCivitaiSearch({ node, api, activeGraph: () => app.graph, beginChange: beginSceneGraphChange, endChange: endSceneGraphChange,
+    return openCivitaiSearch({ node, api,
+        onAcquired: async (target) => {
+            if (sceneLoraCatalogRequest) await sceneLoraCatalogRequest;
+            const catalog = await loadSceneLoraCatalog();
+            if (target.graph?.getNodeById(target.id) !== target) return;
+            const widget = findWidget(target, "lora_name");
+            if (widget?.options) widget.options.values = catalog.map(item => item.path);
+        }, activeGraph: () => app.graph, beginChange: beginSceneGraphChange, endChange: endSceneGraphChange,
         refresh: (target) => { syncSceneLoraSelectLabel(target); clearSceneComputedCaches(target); refreshDownstreamSceneNodes(target); } });
 }
 
@@ -5717,58 +5724,21 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
     closeSceneLoraDetails(node);
     const descriptionRequest = new AbortController();
     injectStyle();
-    const overlay = document.createElement("div");
-    overlay.className = "pc-lora-overlay";
-    const dialog = document.createElement("div");
-    dialog.className = "pc-lora-dialog";
-    dialog.setAttribute("role", "dialog");
-    dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", "LoRA 詳細確認");
-    const title = document.createElement("strong");
-    title.textContent = "LoRA 詳細確認";
-    const close = document.createElement("button");
-    close.className = "pc-button";
-    close.type = "button";
-    close.textContent = "閉じる";
-    const head = document.createElement("div");
-    head.className = "pc-lora-head";
-    head.append(title, close);
+    const pickerOverlay = node.sceneLoraPickerOverlay;
+    if (pickerOverlay) pickerOverlay.inert = true;
+    const cleanup = () => modal.dismiss();
+    const modal = openModal("LoRA 詳細確認", () => {
+        descriptionRequest.abort();
+        if (node.sceneLoraDetailsCleanup === cleanup) node.sceneLoraDetailsCleanup = null;
+        if (pickerOverlay) pickerOverlay.inert = false;
+    }, returnFocus);
+    const { overlay, dialog } = modal;
     const content = document.createElement("div");
     content.className = "pc-lora-content";
     content.textContent = "情報を取得しています…";
     content.setAttribute("role", "status");
-    dialog.append(head, content);
-    overlay.append(dialog);
-    document.body.append(overlay);
-    const pickerOverlay = node.sceneLoraPickerOverlay;
-    if (pickerOverlay) pickerOverlay.inert = true;
-    const onKey = (event) => {
-        if (event.key === "Escape") {
-            event.preventDefault();
-            closeSceneLoraDetails(node);
-        } else if (event.key === "Tab") {
-            const focusable = [...dialog.querySelectorAll("button:not(:disabled), a[href]")];
-            const first = focusable[0];
-            const last = focusable.at(-1);
-            if (event.shiftKey && document.activeElement === first) {
-                event.preventDefault(); last.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-                event.preventDefault(); first.focus();
-            }
-        }
-    };
-    const cleanup = () => {
-        descriptionRequest.abort();
-        document.removeEventListener("keydown", onKey);
-        overlay.remove();
-        if (pickerOverlay) pickerOverlay.inert = false;
-        if (returnFocus?.isConnected) returnFocus.focus();
-    };
+    dialog.append(content);
     node.sceneLoraDetailsCleanup = cleanup;
-    close.onclick = () => closeSceneLoraDetails(node);
-    overlay.onclick = (event) => { if (event.target === overlay) closeSceneLoraDetails(node); };
-    document.addEventListener("keydown", onKey);
-    close.focus();
     const selectedName = String(findWidget(node, "lora_name")?.value || "").trim();
     const selectedAtOpen = sceneLoraPathIdentity(selectedName);
     const item = previewItem || sceneLoraCatalogItem(selectedName);
@@ -5815,12 +5785,11 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
         }
         if (Number.isSafeInteger(Number(result.modelId)) && Number(result.modelId) > 0
             && Number.isSafeInteger(Number(result.versionId)) && Number(result.versionId) > 0) {
-            const link = document.createElement("a");
-            link.className = "pc-lora-civitai-link";
-            link.href = `https://civitai.red/models/${result.modelId}?modelVersionId=${result.versionId}`;
-            link.target = "_blank";
-            link.rel = "noopener noreferrer";
-            link.textContent = "Civitaiで見る";
+            const link = document.createElement("button");
+            link.type = "button";
+            link.className = "pc-button pc-lora-civitai-link";
+            link.textContent = "Civitai で確認";
+            link.onclick = () => openCivitaiDetail({ api, modelID: Number(result.modelId), versionID: Number(result.versionId) });
             content.append(link);
         } else {
             const message = document.createElement("div");
@@ -13564,6 +13533,7 @@ function installSceneNodeRemovalCleanup(node, nodeName) {
         clearSceneComputedCaches(this);
         invalidatePopupRequests(this);
         closeSceneLoraDetails(this);
+        this.sceneCivitaiSearchCleanup?.();
         closeSceneExpandResources(this);
         if (typeof closeSceneLoraPicker === "function") closeSceneLoraPicker(this);
         if (this.sceneRandomSettingsCleanup) this.sceneRandomSettingsCleanup();

@@ -45,7 +45,7 @@ def load_routes(data_dir):
         return register
     aiohttp = types.ModuleType("aiohttp")
     aiohttp.web = types.SimpleNamespace(
-        json_response=lambda payload, status=200: {"payload": payload, "status": status},
+        json_response=lambda payload, status=200, headers=None: {"payload": payload, "status": status, **({"headers": headers} if headers else {})},
     )
     server = types.ModuleType("server")
     server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(
