@@ -229,9 +229,12 @@ class RealComfyUISmokeTests(unittest.TestCase):
         original = folder_paths.get_filename_list
         graph = {"2": {"class_type": "SceneApplyLora", "inputs": {"lora_name": "folder/style.safetensors", "strength_model": 1.0, "strength_clip": 1.0}},
                  "3": {"class_type": "NativeLoraValidationSink", "inputs": {"scene_prompt": ["2", 0]}}}
-        with mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, mapping), mock.patch.object(folder_paths, "get_filename_list", side_effect=lambda kind: ["folder\\style.safetensors"] if kind == "loras" else original(kind)):
+        native_name = os.path.normpath("folder/style.safetensors")
+        with mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, mapping), mock.patch.object(folder_paths, "get_filename_list", side_effect=lambda kind: [native_name] if kind == "loras" else original(kind)):
             def validate():
                 return asyncio.run(execution.validate_prompt("lora-name-validation", graph, None))
+            self.assertTrue(validate()[0])
+            graph["2"]["inputs"]["lora_name"] = "folder\\style.safetensors"
             self.assertTrue(validate()[0])
             graph["2"]["inputs"]["lora_name"] = "missing.safetensors"
             self.assertFalse(validate()[0])

@@ -348,7 +348,7 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         request.payload = {"model_id": 1, "version_id": 2, "file_id": 3, "model_mode": "Anima"}
                         with mock.patch.object(civitai, "download", return_value={"lora_name": "llm/public.safetensors"}) as download:
                             self.assertEqual((await registered[("POST", "/scene_prompt/civitai/download")](request))["status"], 200)
-                            download.assert_awaited_once_with(request.payload, "Anima", host="civitai.red", user_id=request.user_id, directory="llm", progress=None)
+                            download.assert_awaited_once_with(request.payload, "Anima", host="civitai.red", user_id=request.user_id, directory="llm", progress=None, existing_action="reuse", existing_name="")
                             request.payload["host"] = "civitai.com"
                             await registered[("POST", "/scene_prompt/civitai/download")](request)
                             self.assertEqual(download.await_args.kwargs["host"], "civitai.com")

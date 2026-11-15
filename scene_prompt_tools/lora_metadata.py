@@ -83,7 +83,7 @@ def read_lora_info(name):
     """Resolve an actual ComfyUI LoRA selection, then read its header and hash."""
     name = canonical_lora_name(name)
     while True:
-        if not name or name not in {canonical_lora_name(item) for item in folder_paths.get_filename_list("loras")}:
+        if not name or name not in folder_paths.get_filename_list("loras"):
             raise ValueError("Select an available LoRA.")
         path = folder_paths.get_full_path("loras", name)
         if not path:
@@ -118,7 +118,7 @@ def read_lora_info(name):
                           "size": signature[0], "mtime_ns": signature[1]}
             # A catalog refresh or file replacement during hashing cannot publish
             # an obsolete result, including the cached-result presentation path.
-            if name not in {canonical_lora_name(item) for item in folder_paths.get_filename_list("loras")}:
+            if name not in folder_paths.get_filename_list("loras"):
                 with _CACHE_LOCK:
                     _CACHE.pop(key, None)
                 raise ValueError("Select an available LoRA.")

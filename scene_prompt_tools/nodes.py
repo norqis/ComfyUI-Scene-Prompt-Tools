@@ -2678,7 +2678,7 @@ class SceneApplyLora:
 
     @classmethod
     def VALIDATE_INPUTS(cls, lora_name):
-        return True if lora_name is None or canonical_lora_name(lora_name) in {canonical_lora_name(name) for name in folder_paths.get_filename_list("loras")} else "Select an available LoRA."
+        return True if lora_name is None or canonical_lora_name(lora_name) in folder_paths.get_filename_list("loras") else "Select an available LoRA."
 
     @classmethod
     def INPUT_TYPES(cls):

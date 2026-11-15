@@ -5710,7 +5710,7 @@ async function openSceneLoraPicker(node) {
             updateSource(source, display.status);
             source.onclick = () => {
                 if (cachedSceneLora(item)?.status === "found") { openSceneLoraDetails(node, item, source); return; }
-                updateSource(source, "unknown"); pending.push(row.sceneLoraJob); void work();
+                updateSource(source, "unknown"); badge.textContent = "確認中…"; badge.removeAttribute("title"); pending.push(row.sceneLoraJob); void work();
             };
             const metadata = document.createElement("div"); metadata.className = "pc-lora-metadata";
             const badge = document.createElement("span"); badge.className = "pc-lora-base-model"; badge.textContent = display.baseModel;
