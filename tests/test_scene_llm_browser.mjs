@@ -38,6 +38,7 @@ const server = http.createServer(async (request, response) => {
         else if(path==='/scene_prompt/llm/settings'){if(submitted){if(submitted.api_key)window.savedSettings.api_key_set=true;for(const field of ['base_url','model'])window.savedSettings[field]=submitted[field];window.savedSettings.port=submitted.port===''?null:Number(submitted.port);}data={...window.savedSettings,template_version:'scene-llm-v1'};}
         else throw new Error('Unexpected service route: '+path);
         return {ok:true,status:200,text:async()=>{window.bodyReads++;return JSON.stringify(data);}};}};
+        const events=new EventTarget(); window.api.clientId="fixture-client"; window.api.addEventListener=events.addEventListener.bind(events); window.api.removeEventListener=events.removeEventListener.bind(events); window.progress=data=>events.dispatchEvent(new CustomEvent("scene_prompt_civitai_download_progress",{detail:data}));
         window.search=()=>openCivitaiSearch({node:window.node,api:window.api});window.settings=()=>openLLMSettings(window.api);
         document.querySelector('#launch').onclick=window.search;window.ready=true;
         </script></body>`);
@@ -122,10 +123,14 @@ try {
     await page.evaluate(()=>{window.deferDownload=true;window.finishDownload=null;});
     await acquireAndSelect();
     await page.waitForFunction(()=>window.finishDownload);
-    if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
+    const busyDownload=page.getByRole('dialog',{name:'LoRAを取得',exact:true});
+    await page.keyboard.press('Escape');
+    assert.equal(await busyDownload.getAttribute('aria-busy'),'true','transfer blocks closing and parent navigation');
+    assert.equal(await detail.evaluate(node=>node.closest('.pc-lora-overlay').inert),true);
+    await page.evaluate(()=>window.finishDownload());
+    await busyDownload.waitFor({state:'detached'});
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value),'Anima','completed selection uses the captured model');
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
-    await page.evaluate(()=>window.finishDownload()); await page.waitForTimeout(30);
-    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value),'Illustrious','Back invalidates in-flight selection');
     await cards.first().click(); await acquireAndSelect();
     await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value==='Anima');
     assert.deepEqual(await page.evaluate(()=>[window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.host,window.node.properties.scene_civitai.host]),['civitai.com','civitai.com']);
@@ -182,12 +187,12 @@ try {
         await page.evaluate(()=>{window.deferDownload=true;window.finishDownload=null;});
         await acquireAndSelect(); await page.waitForFunction(()=>window.finishDownload);
         assert.equal(await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).isDisabled(),true);
-        if(action==='close') await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+        if(action==='close') await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup?.());
         else await page.evaluate(()=>window.node=null);
         await page.evaluate(()=>window.finishDownload()); await page.waitForTimeout(30);
-        assert.equal(await page.evaluate(()=>window.transactions),await page.evaluate(()=>window.beforeTransactions),'dismissed/deleted action never applies');
+        assert.equal(await page.evaluate(()=>window.transactions),await page.evaluate(()=>window.beforeTransactions)+(action==='close'?1:0),'busy close is blocked; deleted owners never receive selection');
         await page.evaluate(()=>window.node=window.staleNode);
-        if(action==='delete') await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+        await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup?.());
     }
     const savedSelection = await page.evaluate(() => window.node.properties.scene_civitai);
     for (const modelID of [savedSelection.model_id, 999]) {

@@ -5457,7 +5457,7 @@ function saveSceneLoraCache(item, local, version, status) {
     const title = String(version?.model?.name || "").trim();
     const entry = {
         key, path: sceneLoraPathIdentity(item.path || item.name), title, status, versionName: String(version?.name || "").trim(),
-        modelId: version?.modelId, versionId: version?.id,
+        modelId: version?.modelId, versionId: version?.id, baseModel: typeof version?.baseModel === "string" ? version.baseModel : "",
         trainedWords: Array.isArray(version?.trainedWords) ? version.trainedWords : [],
         localWords: Array.isArray(local?.trigger_phrases) ? local.trigger_phrases : [],
     };
@@ -5476,7 +5476,7 @@ function sceneLoraCatalogItem(path) {
 
 function sceneLoraDisplay(item) {
     const cached = cachedSceneLora(item);
-    return { title: cached?.title || item.path.split(/[\\/]/u).at(-1) || item.path, status: cached?.status || "unknown" };
+    return { title: cached?.title || item.path.split(/[\\/]/u).at(-1) || item.path, status: cached?.status || "unknown", baseModel: cached?.baseModel || "モデル不明" };
 }
 
 function currentSceneLoraResult(item, result) {
@@ -5486,10 +5486,17 @@ function currentSceneLoraResult(item, result) {
 
 async function resolveSceneLora(item) {
     const cached = cachedSceneLora(item);
-    if (cached) return cached;
+    if (cached && (cached.status !== "found" || Object.hasOwn(cached, "baseModel"))) return cached;
     const key = sceneLoraCacheKey(item);
     if (sceneLoraResolutions.has(key)) return sceneLoraResolutions.get(key);
-    const resolution = resolveSceneLoraUncached(item);
+    const resolution = cached ? (async () => {
+        const response = await api.fetchApi(`/scene_prompt/civitai/descriptions?${new URLSearchParams({ model_id: cached.modelId, version_id: cached.versionId })}`);
+        const data = await readApiJson(response, "LoRA情報を取得できませんでした");
+        if (!response.ok) throw new Error(data.error || "LoRA情報を取得できませんでした。");
+        if (!currentSceneLoraResult(item, cached)) throw new Error("LoRAファイルが更新されました。再表示してください。");
+        const result = { ...cached, baseModel: typeof data.base_model === "string" ? data.base_model : "" };
+        sceneLoraSessionCache.set(result.path, result); persistSceneLoraTitles(); return result;
+    })() : resolveSceneLoraUncached(item);
     const path = sceneLoraPathIdentity(item.path), requestedIdentity = sceneLoraFileIdentities.get(path);
     sceneLoraResolutions.set(key, resolution);
     try { return await resolution; }
@@ -5538,7 +5545,7 @@ function closeSceneLoraPicker(node) {
 async function openSceneLoraPicker(node) {
     const selected = sceneLoraPathIdentity(findWidget(node, "lora_name")?.value);
     if (selected && sceneLoraPathIdentity(node.properties?.scene_civitai?.lora_name) === selected)
-        return openSceneCivitaiSearch(node);
+        return openSceneLoraDetails(node);
     closeSceneLoraDetails(node);
     closeSceneLoraPicker(node);
     injectStyle();
@@ -5600,7 +5607,7 @@ async function openSceneLoraPicker(node) {
         if (busy) return;
         busy = true;
         while (pending.length && node.sceneLoraPickerCleanup === cleanup) {
-            const { item, row, title, source, revision } = pending.shift();
+            const { item, row, title, source, badge, revision } = pending.shift();
             if (revision !== generation || !row.isConnected) continue;
             try {
                 const result = await resolveSceneLora(item);
@@ -5608,7 +5615,7 @@ async function openSceneLoraPicker(node) {
                     if (result.key !== sceneLoraCacheKey(item) || !currentSceneLoraResult(item, result)) source.textContent = "再表示";
                     else {
                         title.textContent = result.title || item.path.split(/[\\/]/u).at(-1) || item.path;
-                        updateSource(source, result.status);
+                        updateSource(source, result.status); badge.textContent = result.baseModel || "モデル不明";
                     }
                 }
             } catch (_error) {
@@ -5681,9 +5688,12 @@ async function openSceneLoraPicker(node) {
                 if (cachedSceneLora(item)?.status === "found") { openSceneLoraDetails(node, item, source); return; }
                 updateSource(source, "unknown"); pending.push(row.sceneLoraJob); void work();
             };
-            row.append(select, source);
-            if (!cachedSceneLora(item)) {
-                row.sceneLoraJob = { item, row, title, source, revision };
+            const metadata = document.createElement("div"); metadata.className = "pc-lora-metadata";
+            const badge = document.createElement("span"); badge.className = "pc-lora-base-model"; badge.textContent = display.baseModel;
+            metadata.append(source, badge); row.append(select, metadata);
+            const cached = cachedSceneLora(item);
+            if (!cached || cached.status === "found" && !Object.hasOwn(cached, "baseModel")) {
+                row.sceneLoraJob = { item, row, title, source, badge, revision };
                 observer.observe(row);
             }
             row.onclick = async (event) => {
