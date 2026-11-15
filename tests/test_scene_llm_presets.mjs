@@ -676,6 +676,29 @@ finishTitleVersion();
 await assert.rejects(changedLookup, /再表示/);
 assert(!titles.sceneLoraSessionCache.has(changedFile.path), "late version reply cannot publish an obsolete same-path revision");
 
+// Old persisted titles receive one visible lazy metadata fill, never another local/hash lookup.
+for (const baseModel of ['Illustrious', '']) {
+    let disk=JSON.stringify([{path:'old.safetensors',key:'old.safetensors\u00001\u00001',title:'Old title',status:'found',modelId:4,versionId:5}]), calls=0, finish;
+    const context=vm.createContext({Map,Set,Array,String,JSON,Object,URLSearchParams,
+        localStorage:{getItem:()=>disk,setItem:(_key,value)=>disk=value},
+        api:{async fetchApi(path){calls++;assert.equal(path,'/scene_prompt/civitai/descriptions?model_id=4&version_id=5');await new Promise(done=>finish=done);return {ok:true,json:async()=>({base_model:baseModel})};}},
+        readApiJson:response=>response.json(),lookupCivitaiByHash:()=>assert.fail('old title never rehashes')});
+    const load=()=>vm.runInContext(`${uiSource.slice(titleStart,titleEnd)};globalThis.testTitles={resolveSceneLora,reconcileSceneLoraTitles,cachedSceneLora};`,context);
+    load(); const item={path:'old.safetensors',size:1,mtime_ns:1}; context.testTitles.reconcileSceneLoraTitles([item]);
+    const first=context.testTitles.resolveSceneLora(item), second=context.testTitles.resolveSceneLora(item); finish();
+    assert.strictEqual(await first,await second); assert.equal(calls,1); assert.equal((await first).baseModel,baseModel);
+    await context.testTitles.resolveSceneLora(item); assert.equal(calls,1,'empty value is also a completed fill');
+    const fresh=vm.createContext({...context,localStorage:{getItem:()=>disk,setItem:(_key,value)=>disk=value}});
+    vm.runInContext(`${uiSource.slice(titleStart,titleEnd)};globalThis.cached=cachedSceneLora({path:'old.safetensors',size:1,mtime_ns:1});`,fresh);
+    assert.equal(fresh.cached.baseModel,baseModel,'reloaded stored cache retains filled base model');
+    delete (await first).baseModel;
+    const late=context.testTitles.resolveSceneLora(item);
+    context.testTitles.reconcileSceneLoraTitles([]); finish();
+    await assert.rejects(late,/再表示/);
+    assert.equal(context.testTitles.cachedSceneLora(item),null,'late descriptions cannot repopulate a removed file');
+    assert.equal(JSON.parse(disk).length,0,'persisted cache also stays clear');
+}
+
 const largeOutput = {};
 for (let index = 1; index <= 1500; index++) largeOutput[index] = { class_type: "ScenePromptCounter", inputs: { count: index } };
 largeOutput[1501] = { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["1500", 0] } };

@@ -18,7 +18,7 @@ const server = http.createServer(async (request, response) => {
         window.makeNode=()=>({id:1,graph:window.graph,properties:{},widgets:Object.entries({model_mode:'Illustrious',lora_name:'',positive:'manual'}).map(([name,value])=>({name,value}))});
         window.node=window.makeNode();
         const preview=id=>({id,url:image+'#'+id,width:600,height:800});
-        const candidate=(id,query)=>({model_id:id,version_id:id===2?11:id+10,file_id:id+20,name:'Model '+id+' '+query+' long title for responsive layout',version_name:'v1',base_model:id===3?'Illustrious XL with a very long model family name':'Illustrious',model_type:'LORA',installable:true,apply_model_mode:'Illustrious',triggers:['trigger'],gallery:[],image_url:'',model_stats:id===2?{downloadCount:null,collectedCount:'invalid',thumbsUpCount:null}:{downloadCount:5200,collectedCount:1200,thumbsUpCount:0},updated_at:id===2?null:'2026-11-15T12:00:00Z'});
+        const candidate=(id,query)=>({model_id:id,version_id:id===2?11:id+10,file_id:id+20,name:'Model '+id+' '+query+' long title for responsive layout',version_name:'v1',creator_name:id===2?'':id===3?'Author with a very long Unicode 名前 which must truncate':'作者 <script>literal<'+'/script>',base_model:id===3?'Illustrious XL with a very long model family name':'Illustrious',model_type:'LORA',installable:true,apply_model_mode:'Illustrious',triggers:['trigger'],gallery:[],image_url:'',model_stats:id===2?{downloadCount:null,collectedCount:'invalid',thumbsUpCount:null}:{downloadCount:5200,collectedCount:1200,thumbsUpCount:0},updated_at:id===2?null:'2026-11-15T12:00:00Z'});
         window.api={async fetchApi(path,options={}){
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
             const url=new URL(path,'http://fixture'), body=options.body?JSON.parse(options.body):{}, reply=(data,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(data)});
@@ -52,12 +52,14 @@ const server = http.createServer(async (request, response) => {
             if(url.pathname.endsWith('/download')){
                 window.downloads++;
                 if(window.deferDownload){window.deferDownload=false;await new Promise(done=>window.releaseDownload=done);}
+                if(window.downloadError)return reply({error:'download offline'},503);
                 if(window.disabledDownload)return reply({error:'Creator disabled',code:'civitai_download_disabled'},401);
                 if(!window.authenticated)return reply({error:'Authentication required',code:'civitai_auth_required'},401);
                 return reply({candidate:candidate(body.model_id,''),lora_name:(body.directory?body.directory+'/':'')+'fixture.safetensors'});
             }
             throw new Error('Unexpected API '+path);
         }};
+        const events=new EventTarget(); window.api.clientId="fixture-client"; window.progressListeners=new Set(); window.api.addEventListener=(name,listener)=>{window.progressListeners.add(listener);events.addEventListener(name,listener);}; window.api.removeEventListener=(name,listener)=>{window.progressListeners.delete(listener);events.removeEventListener(name,listener);}; window.progress=data=>events.dispatchEvent(new CustomEvent("scene_prompt_civitai_download_progress",{detail:data}));
         window.open=()=>window.current=openCivitaiSearch({node:window.node,api:window.api,activeGraph:()=>window.graph,onAcquired:()=>{window.catalogRefresh=(window.catalogRefresh||0)+1;}});
         window.local=()=>window.localParent=openModal('LoRA 詳細確認');
         window.detail=()=>openCivitaiDetail({api:window.api,modelID:1,versionID:11});
@@ -93,10 +95,10 @@ try {
     async function checkCardGeometry(expectedColumns) {
         const geometry = await cards.first().evaluate(card=>{
             const box = node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width};};
-            const title=card.querySelector('.pc-civitai-card-title'), version=card.querySelector('.pc-civitai-card-version'), base=card.querySelector('.pc-civitai-card-base'), stats=card.querySelector('.pc-civitai-card-stats');
-            return {card:box(card),image:box(card.querySelector('img')),title:box(title),version:box(version),base:box(base),stats:box(stats),metrics:[...stats.children].map(box),font:parseFloat(getComputedStyle(card).fontSize),titleFont:parseFloat(getComputedStyle(title).fontSize),overflow:card.scrollWidth>card.clientWidth};
+            const title=card.querySelector('.pc-civitai-card-title'), version=card.querySelector('.pc-civitai-card-version'), base=card.querySelector('.pc-civitai-card-base'), author=card.querySelector('.pc-civitai-card-author'), stats=card.querySelector('.pc-civitai-card-stats');
+            return {card:box(card),image:box(card.querySelector('img')),title:box(title),version:box(version),base:box(base),author:box(author),baseText:base.textContent,titleText:title.textContent,authorText:author.textContent,stats:box(stats),metrics:[...stats.children].map(box),font:parseFloat(getComputedStyle(card).fontSize),titleFont:parseFloat(getComputedStyle(title).fontSize),overflow:card.scrollWidth>card.clientWidth};
         });
-        assert(geometry.title.top>=geometry.image.bottom);assert(geometry.version.top>=geometry.title.bottom);assert(geometry.base.left<geometry.stats.left);assert(geometry.base.width>=32&&geometry.base.right<=geometry.stats.left,JSON.stringify(geometry));assert(geometry.stats.right<=geometry.card.right);assert(geometry.metrics.every(metric=>metric.top===geometry.metrics[0].top));assert(geometry.font>=14);assert(geometry.titleFont>=16);assert.equal(geometry.overflow,false);
+        assert(geometry.title.top>=geometry.image.bottom);assert(geometry.version.top>=geometry.title.bottom);assert.equal(geometry.base.left,geometry.image.left);assert.equal(geometry.base.top,geometry.image.top);assert.equal(geometry.baseText,'Illustrious');assert.match(geometry.titleText,/Model 1/);assert.equal(geometry.authorText,'作者 <script>literal</script>');assert(geometry.author.left<geometry.stats.left);assert(geometry.author.width>=32&&geometry.author.right<=geometry.stats.left,JSON.stringify(geometry));assert(geometry.stats.right<=geometry.card.right);assert(geometry.metrics.every(metric=>metric.top===geometry.metrics[0].top));assert(geometry.font>=14);assert(geometry.titleFont>=16);assert.equal(geometry.overflow,false);
         const rows=await cards.evaluateAll(nodes=>nodes.slice(0,7).map(node=>node.getBoundingClientRect().top));assert(rows.slice(0,expectedColumns).every(y=>y===rows[0]));assert(rows[expectedColumns]>rows[0]);
         const toolbar=await search.locator('.pc-civitai-controls > *').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().top));assert(toolbar.every(y=>y===toolbar[0]),'toolbar stays on one row');
     }
@@ -106,11 +108,15 @@ try {
     assert((await cards.first().boundingBox()).width<270,'six-column cards are about half the old three-column width');
     assert.equal(await cards.nth(2).locator('.pc-civitai-card-base').getAttribute('title'),'Illustrious XL with a very long model family name');
     assert.equal(await cards.nth(2).locator('.pc-civitai-card-base').evaluate(node=>getComputedStyle(node).textOverflow),'ellipsis');
+    assert.equal(await cards.nth(2).locator('.pc-civitai-card-author').evaluate(node=>getComputedStyle(node).textOverflow),'ellipsis');
+    assert.equal(await cards.nth(1).locator('.pc-civitai-card-author').textContent(),'—');
+    assert.match(await cards.nth(2).locator('.pc-civitai-card-author').getAttribute('title'),/Unicode 名前/);
     assert.deepEqual(await search.getByRole('combobox',{name:'並び順',exact:true}).locator('option').evaluateAll(nodes=>nodes.map(node=>node.value)),['Relevancy','Highest Rated','Most Downloaded','Most Liked','Most Collected','Newest']);
     await page.screenshot({ path: resolve(screenshots, 'search-desktop.png') });
     const galleryBefore = await page.evaluate(() => window.calls.filter(call => call.path.includes('/gallery?')).length);
     await cards.first().click();
     assert.equal(await search.getAttribute('aria-label'), 'Civitai Detail');
+    assert.match(await search.locator('.pc-civitai-metadata').textContent(), /AUTHOR.*作者 <script>literal<\/script>.*UPDATED.*2026-11-15T12:00:00Z/s);
     const detail = search.locator('.pc-civitai-detail');
     const acquireAndSelect = async () => {
         if (!await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await detail.getByRole('button',{name:'取得',exact:true}).click();
@@ -137,6 +143,47 @@ try {
     assert.equal(await detail.locator('.pc-civitai-pages span').textContent(), '3–4 / 4');
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/gallery?')).length),galleryBefore+1);
     await page.screenshot({ path: resolve(screenshots, 'detail-desktop.png') });
+    for (const outcome of ['success','error','auth','stale','stale-error']) {
+        await detail.getByRole('button',{name:'取得',exact:true}).click();
+        const destination = page.getByRole('dialog',{name:'LoRAを取得',exact:true});
+        await page.evaluate(outcome=>{window.deferDownload=true;window.releaseDownload=null;window.downloadError=outcome==='error'||outcome==='stale-error';window.authenticated=outcome!=='auth';window.busyDownloads=window.downloads;window.busyNode=window.node;window.busyState=JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions});},outcome);
+        await destination.getByRole('button',{name:'取得',exact:true}).click(); await page.waitForFunction(()=>window.releaseDownload);
+        await page.evaluate(()=>{const body=window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body;window.progress({download_id:'wrong-id',received:99,total:100});});
+        assert.equal(await destination.locator('progress').isVisible(),true);
+        assert.equal(await destination.locator('progress').getAttribute('value'),null,'wrong id cannot set the initial indeterminate progress');
+        await page.evaluate(()=>{const body=window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body;window.progress({download_id:body.download_id,received:5,total:10});});
+        assert.equal(await destination.locator('progress').getAttribute('value'),'5');
+        assert.match(await destination.locator('.pc-civitai-download-progress').textContent(),/50%/);
+        if(outcome==='success') { await page.waitForTimeout(350); await page.screenshot({path:resolve(screenshots,'download-progress.png')}); }
+        await page.evaluate(()=>{const body=window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body;window.progress({download_id:body.download_id,received:10,total:10});});
+        assert.match(await destination.locator('.pc-civitai-download-progress').textContent(),/100%.*確認・保存中/);
+        await page.evaluate(()=>{const body=window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body;window.progress({download_id:body.download_id,received:11,total:null});});
+        assert.equal(await destination.locator('progress').getAttribute('value'),null);
+        assert.match(await destination.locator('.pc-civitai-download-progress').textContent(),/11 bytes/);
+        assert.equal(await destination.getAttribute('aria-busy'),'true'); assert.equal(await destination.evaluate(dialog=>dialog.inert),true);
+        assert.equal(await destination.getByRole('button',{name:'閉じる',exact:true}).isDisabled(),true);
+        assert.equal(await destination.locator('input,button').evaluateAll(nodes=>nodes.every(node=>node.disabled)),true);
+        await destination.getByRole('button',{name:'閉じる',exact:true}).evaluate(button=>button.click());
+        await destination.evaluate(dialog=>dialog.parentElement.click()); await page.keyboard.press('Escape');
+        await page.evaluate(()=>window.current.dismiss());
+        assert.equal(await destination.count(),1); assert.equal(await search.count(),1);
+        await destination.getByRole('button',{name:'取得して選択',exact:true}).evaluate(button=>button.click());
+        assert.equal(await page.evaluate(()=>window.downloads),await page.evaluate(()=>window.busyDownloads+1));
+        await page.evaluate(outcome=>{if(outcome.startsWith('stale'))window.node=window.makeNode();window.releaseDownload();},outcome);
+        if(outcome==='error'||outcome==='auth') {
+            const error = page.getByRole('dialog',{name:'取得に失敗しました',exact:true}); await error.waitFor();
+            assert.equal(await destination.getAttribute('aria-busy'),'false'); assert.equal(await destination.evaluate(dialog=>dialog.inert),false);
+            assert.equal(await error.getByRole('button',{name:'認証',exact:true}).count(),outcome==='auth'?1:0);
+            await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+        } else {
+            await destination.waitFor({state:'detached'});
+            assert.equal(await page.getByRole('dialog',{name:'取得に失敗しました',exact:true}).count(),0);
+        }
+        assert.equal(await page.evaluate(()=>JSON.stringify({widgets:window.busyNode.widgets,properties:window.busyNode.properties,transactions:window.transactions})),await page.evaluate(()=>window.busyState));
+        assert.equal(await page.evaluate(()=>window.progressListeners.size),0,'listener released on every result');
+        await page.evaluate(()=>{window.node=window.busyNode;window.authenticated=true;window.downloadError=false;});
+        if (!await search.count()) { await page.evaluate(()=>window.open()); await cards.first().waitFor(); await cards.first().click(); }
+    }
     await page.evaluate(()=>window.authenticated=false);
     await detail.getByRole('button',{name:'取得',exact:true}).click();
     await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('combobox',{name:'保存先',exact:true}).fill('auth/snapshot');
@@ -286,7 +333,10 @@ try {
     await detail.getByRole('button',{name:'取得',exact:true}).click();
     await page.evaluate(()=>{window.deferDownload=true;window.releaseDownload=null;window.oldValues=JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions,catalogRefresh:window.catalogRefresh});window.oldWindow=window.current;});
     await destination.getByRole('button',{name:'取得して選択',exact:true}).click(); await page.waitForFunction(()=>window.releaseDownload);
-    await page.evaluate(()=>{window.open();window.releaseDownload();}); await page.waitForTimeout(30);
+    await page.evaluate(()=>{window.newWindow=window.open();window.newFocus=document.activeElement;window.releaseDownload();}); await page.waitForTimeout(30);
+    assert.equal(await page.evaluate(()=>window.newWindow.overlay.isConnected && document.activeElement===window.newFocus),true,"stale owner cleanup preserves the independent new Search and its focus");
+    assert.equal(await search.count(),1);
+    assert.equal(await page.evaluate(()=>window.oldWindow.overlay.isConnected),false);
     assert.equal(await page.evaluate(()=>JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions,catalogRefresh:window.catalogRefresh})),await page.evaluate(()=>window.oldValues));
     await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
     // Red has an inline authentication gate; authentication never starts a search automatically.

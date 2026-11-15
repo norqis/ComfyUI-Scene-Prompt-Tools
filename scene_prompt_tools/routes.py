@@ -718,7 +718,7 @@ def define_routes():
             elif operation == "gallery":
                 result = await gallery(int(request.query.get("version_id", "0")), host=request.query.get("host", "civitai.red"), cursor=request.query.get("cursor"))
             elif operation == "details":
-                result = await details(int(request.query.get("model_id", "0")), int(request.query.get("version_id", "0")), host=request.query.get("host", "civitai.red"))
+                result = await details(int(request.query.get("model_id", "0")), int(request.query.get("version_id", "0")), host=request.query.get("host", "civitai.red"), user_id=_request_user_id(request))
             elif operation == "image":
                 result = await image_details(int(request.query.get("image_id", "0")), host=request.query.get("host", "civitai.red"))
             elif operation == "options":
@@ -731,7 +731,12 @@ def define_routes():
                 payload = await request.json()
                 if not isinstance(payload, dict):
                     raise ValueError("Request body must be a JSON object.")
-                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"), user_id=_request_user_id(request), directory=payload.get("directory", "llm"))
+                client_id, download_id = payload.get("client_id"), payload.get("download_id")
+                progress = None
+                if isinstance(client_id, str) and client_id and isinstance(download_id, str) and download_id:
+                    def progress(received, total):
+                        PromptServer.instance.send_sync("scene_prompt_civitai_download_progress", {"download_id": download_id, "received": received, "total": total}, sid=client_id)
+                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"), user_id=_request_user_id(request), directory=payload.get("directory", "llm"), progress=progress)
             return web.json_response(result)
         except ServiceError as exc:
             return web.json_response({"error": str(exc), **({"code": exc.code} if hasattr(exc, "code") else {})}, status=exc.status)

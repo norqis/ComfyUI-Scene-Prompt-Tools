@@ -17,11 +17,13 @@ export function injectStyle() {
         .pc-civitai-card img { width: 100%; max-height: 60vh; aspect-ratio: 4 / 3; object-fit: contain; }
         .pc-civitai-no-preview { width: 100%; aspect-ratio: 4 / 3; }
         .pc-civitai-card-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 10px; }
+        .pc-civitai-card-preview { position: relative; min-width: 0; }
         .pc-civitai-card-title { font-size: 16px; min-width: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .pc-civitai-card-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .pc-civitai-card-summary { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
         .pc-civitai-card-updated { color: #bbc4d2; font-size: 14px; text-align: right; }
         .pc-civitai-card-stats { display: flex; justify-content: flex-end; flex-wrap: nowrap; gap: 6px; flex-shrink: 0; }
-        .pc-civitai-card-base { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pc-civitai-card-base { position: absolute; left: 0; top: 0; max-width: 100%; box-sizing: border-box; padding: 4px 6px; background: #000b; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .pc-civitai-card-stats span { white-space: nowrap; color: #bbc4d2; }
         .pc-civitai-no-preview { display: grid; place-items: center; color: #aeb7c5; background: #292d35; }
         .pc-civitai-status:empty { display: none; }
@@ -653,6 +655,10 @@ export function injectStyle() {
         .pc-lora-path { grid-column: 1 / -1; color: #b8c7d9; overflow-wrap: anywhere; }
         .pc-lora-title { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
         .pc-lora-source { border: 1px solid #667e9b; font: inherit; cursor: pointer; align-self: center; padding: 2px 6px; border-radius: 3px; background: #455366; color: #dceaff; white-space: nowrap; }
+        .pc-lora-metadata { display: flex; flex-direction: column; align-items: stretch; gap: 4px; max-width: 150px; }
+        .pc-lora-base-model { border: 1px solid #667e9b; border-radius: 3px; padding: 2px 6px; background: #343941; color: #c5cbd5; font: inherit; text-align: center; overflow-wrap: anywhere; }
+        .pc-civitai-download-progress { margin-top: 4px; }
+        .pc-civitai-dialog > progress { width: 100%; }
         .pc-lora-source.pc-lora-local { cursor: default; background: #343941; color: #c5cbd5; }
         .pc-lora-head-actions { display: flex; gap: 8px; margin-left: auto; flex-shrink: 0; }
         .pc-lora-head > strong { min-width: 0; overflow-wrap: anywhere; }

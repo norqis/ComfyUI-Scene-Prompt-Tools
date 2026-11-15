@@ -8,7 +8,7 @@ from test_civitai import civitai, civitai_auth
 class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.auth = mock.patch.object(civitai_auth, "token_snapshot", return_value="fixture-search-key")
-        self.auth.start()
+        self.token_mock = self.auth.start()
         self.addCleanup(self.auth.stop)
         self.site = mock.patch.object(civitai, "_site_search", return_value={"hits": [{"id": 1}], "facetDistribution": {"category.name": {"Style": 5, "Action": 3}}})
         self.site_mock = self.site.start()
@@ -47,6 +47,27 @@ class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["name"], "Model")
         self.assertEqual(result["model_type"], "Checkpoint")
         self.assertEqual(result["gallery"][0]["id"], 7)
+
+    async def test_details_optional_index_date_uses_current_user_and_exact_model(self):
+        model = {"id": 1, "name": "Name", "type": "LORA", "creator": {"username": "Author"},
+                 "createdAt": "2020-01-01T00:00:00Z", "modelVersions": [{"id": 2}]}
+        self.site_mock.return_value = {"hits": [{"id": 99, "lastVersionAt": "2026-01-01T00:00:00Z"}, {"id": 1, "lastVersionAt": "2025-02-03T00:00:00Z"}]}
+        with mock.patch.object(civitai, "api_get", return_value=model) as get:
+            result = await civitai.details(1, 2, "civitai.red", user_id="alice")
+        self.assertEqual(result["updated_at"], "2025-02-03T00:00:00Z")
+        self.assertEqual(result["creator_name"], "Author")
+        self.token_mock.assert_called_with("alice")
+        get.assert_awaited_once_with("/api/v1/models/1", host="civitai.red")
+        self.site_mock.assert_awaited_once_with({"indexUid": "models_v9", "q": "", "filter": "id = 1", "limit": 1, "attributesToRetrieve": ["id", "lastVersionAt"]}, "civitai.red", "fixture-search-key")
+        for optional in ({}, {"hits": []}, {"hits": [{"id": True, "lastVersionAt": "2025-02-03T00:00:00Z"}]}, civitai.DownloadAccessError("auth")):
+            with self.subTest(optional=optional), mock.patch.object(civitai, "api_get", return_value=model), mock.patch.object(civitai, "_site_search", side_effect=optional if isinstance(optional, Exception) else None, return_value=optional):
+                self.assertIsNone((await civitai.details(1, 2))["updated_at"])
+        with mock.patch.object(civitai, "api_get", return_value=model), mock.patch.object(civitai_auth, "token_snapshot", return_value="") as token, mock.patch.object(civitai, "_site_search") as site:
+            self.assertIsNone((await civitai.details(1, 2, user_id="bob"))["updated_at"])
+            token.assert_called_once_with("bob"); site.assert_not_called()
+        model["modelVersions"][0]["updatedAt"] = "2026-01-01T00:00:00Z"
+        with mock.patch.object(civitai, "api_get", return_value=model), mock.patch.object(civitai, "_site_search") as site:
+            self.assertEqual((await civitai.details(1, 2))["updated_at"], "2026-01-01T00:00:00Z"); site.assert_not_called()
 
     async def test_image_gate_precedes_generation_data(self):
         for image in (self.preview(id=8), self.preview(nsfw=True), self.preview(type="video"), self.preview(nsfwLevel="Soft")):

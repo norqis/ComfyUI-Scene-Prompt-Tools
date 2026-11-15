@@ -73,7 +73,7 @@ def _hash_version(version):
             or any(not isinstance(word, str) for word in version.get("trainedWords", []))):
         raise ServiceError("Civitai returned an invalid version response.")
     return {"found": True, "version": {"id": version["id"], "modelId": version["modelId"],
-        "name": version["name"], "model": {"name": version["model"]["name"]}, "trainedWords": version.get("trainedWords", [])}}
+        "name": version["name"], "baseModel": _field(version, "baseModel", str, ""), "model": {"name": version["model"]["name"]}, "trainedWords": version.get("trainedWords", [])}}
 
 
 async def by_hash(sha256):
@@ -115,7 +115,7 @@ async def descriptions(model_id, version_id):
                             and type(entry.get("id")) is int and entry["id"] == version_id), None)
             if version is None:
                 raise ServiceError("Selected Civitai version was not found.")
-            return {"description": _field(model, "description", str, ""),
+            return {"base_model": _field(version, "baseModel", str, ""), "description": _field(model, "description", str, ""),
                     "version_description": _field(version, "description", str, "")}
         except ServiceError:
             if host == HOSTS[-1]:
@@ -157,9 +157,10 @@ def _positive_ids(*values):
         raise ValueError("Civitai identifiers must be positive integers.")
 
 
-def _presentation(model, version, host):
+def _presentation(model, version, host, hit=None):
     gallery = [preview for image in _field(version, "images", list, []) if (preview := normalize_preview(image))]
     return {"model_id": model["id"], "version_id": version["id"], "model_type": _field(model, "type", str, ""),
+            "creator_name": _creator_name(model), "updated_at": _updated_at(model, version, hit),
             "name": _field(model, "name", str, ""), "version_name": _field(version, "name", str, ""),
             "base_model": _field(version, "baseModel", str, ""), "triggers": _field(version, "trainedWords", list, []),
             "description": _field(model, "description", str, ""), "version_description": _field(version, "description", str, ""),
@@ -169,9 +170,14 @@ def _presentation(model, version, host):
             "model_url": f"https://{host}/models/{model['id']}?modelVersionId={version['id']}"}
 
 
-def _updated_at(model, version):
+def _creator_name(model):
+    creator = model.get("creator")
+    return creator.get("username", "") if isinstance(creator, dict) and isinstance(creator.get("username"), str) else ""
+
+
+def _updated_at(model, version, hit=None):
     from datetime import datetime
-    for value in (version.get("updatedAt"), model.get("updatedAt")):
+    for value in (version.get("updatedAt"), model.get("updatedAt"), model.get("lastVersionAt"), (hit or {}).get("lastVersionAt")):
         if not isinstance(value, str) or not re.match(r"^\d{4}-\d{2}-\d{2}T", value):
             continue
         try:
@@ -182,7 +188,7 @@ def _updated_at(model, version):
     return None
 
 
-async def details(model_id, version_id, host="civitai.red"):
+async def details(model_id, version_id, host="civitai.red", user_id="default"):
     _positive_ids(model_id, version_id)
     host = validate_host(host)
     model = await api_get(f"/api/v1/models/{model_id}", host=host)
@@ -192,7 +198,19 @@ async def details(model_id, version_id, host="civitai.red"):
                     if isinstance(entry, dict) and type(entry.get("id")) is int and entry["id"] == version_id), None)
     if version is None:
         raise ServiceError("Selected Civitai version was not found.")
-    return _presentation(model, version, host)
+    hit = None
+    if not _updated_at(model, version):
+        from .civitai_auth import token_snapshot
+        token = await asyncio.to_thread(token_snapshot, user_id)
+        if token or host != "civitai.red":
+            try:
+                result = await _site_search({"indexUid": "models_v9", "q": "", "filter": f"id = {model_id}",
+                    "limit": 1, "attributesToRetrieve": ["id", "lastVersionAt"]}, host, token)
+                hits = result.get("hits")
+                hit = next((entry for entry in hits if isinstance(entry, dict) and type(entry.get("id")) is int and entry["id"] == model_id), None) if isinstance(hits, list) else None
+            except ServiceError:
+                pass  # Optional index metadata must not hide the public model details.
+    return _presentation(model, version, host, hit)
 
 
 async def gallery(version_id, host="civitai.red", cursor=None):
@@ -276,7 +294,7 @@ async def image_details(image_id, host="civitai.red"):
     preview.pop("meta", None)
     return {"image": preview, **_image_information(image, generation, host), "partial": partial}
 
-def normalize(model, mode, host="civitai.red"):
+def normalize(model, mode, host="civitai.red", hit=None):
     host = validate_host(host)
     if not isinstance(model, dict) or not isinstance(model.get("modelVersions", []), list):
         raise ServiceError("Civitai returned an invalid model response.")
@@ -301,7 +319,8 @@ def normalize(model, mode, host="civitai.red"):
             file_name = _field(file, "name", str, "")
             if _field(file, "type", str, "") != "Model" or not file_name.lower().endswith(".safetensors") or not re.fullmatch(r"[0-9a-f]{64}", sha256) or not _field(file, "downloadUrl", str, ""):
                 continue
-            candidate = {"model_id": model.get("id"), "version_id": version.get("id"), "file_id": file.get("id"),
+            candidate = {"creator_name": _creator_name(model), "updated_at": _updated_at(model, version, hit),
+                "model_id": model.get("id"), "version_id": version.get("id"), "file_id": file.get("id"),
                 "name": _field(model, "name", str, ""), "version_name": _field(version, "name", str, ""), "base_model": _field(version, "baseModel", str, ""),
                 "file_name": file_name, "size_kb": _field(file, "sizeKB", (int, float), 0), "sha256": sha256,
                 "triggers": triggers, "image_url": gallery[0]["url"] if gallery else "", "gallery": gallery,
@@ -324,8 +343,20 @@ def lora_root():
     return Path(paths[0]).resolve()
 
 
-def _filename(candidate):
-    return "civitai-{}-{}-{}.safetensors".format(*candidate_identity(candidate))
+def _filename(candidate, disposition=None):
+    from email.message import Message
+    from email.utils import collapse_rfc2231_value
+    message = Message()
+    if disposition:
+        message["Content-Disposition"] = disposition
+    values = [value for key, value in (message.get_params(header="content-disposition", unquote=True) or [])[1:] if key == "filename"]
+    extended = next((value for value in values if isinstance(value, tuple)), None)
+    name = collapse_rfc2231_value(extended, errors="strict") if extended is not None else values[0] if values else candidate["file_name"]
+    if (not isinstance(name, str) or not name or not name.lower().endswith(".safetensors")
+            or re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or name.endswith((".", " "))
+            or PureWindowsPath(name).is_reserved()):
+        raise ValueError("Civitai returned an invalid LoRA filename.")
+    return name
 
 
 def _sha256(path):
@@ -384,8 +415,11 @@ def _manifest(root):
 
 
 def _existing(candidate, root, manifest=None, folder=None):
-    path = _relative_target(root, "llm") / _filename(candidate)
-    if (folder is None or path.parent == folder) and path.is_file() and _sha256(path) == candidate["sha256"]:
+    try:
+        path = _relative_target(root, ((folder or _relative_target(root, "llm")) / _filename(candidate)).relative_to(root).as_posix())
+    except ValueError:
+        path = None
+    if path is not None and path.is_file() and _sha256(path) == candidate["sha256"]:
         return path.relative_to(root).as_posix()
     if manifest is None:
         manifest = _manifest(root)
@@ -448,6 +482,14 @@ def directories():
 
 def _matching_file(candidate, path):
     return path.is_file() and _sha256(path) == candidate["sha256"]
+
+
+def _download_collision(candidate, root, path):
+    if not path.exists():
+        return ""
+    if _matching_file(candidate, path):
+        return path.relative_to(root).as_posix()
+    raise ValueError("同名の別ファイルが保存先に存在します。保存先を変更してください。")
 
 
 def _create_target_download(root, folder):
@@ -557,7 +599,7 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", 
     if category:
         filters.append("category.name = " + json.dumps(category))
     request = {"indexUid": "models_v9", "q": query, "filter": " AND ".join(filters), "limit": 30,
-               "attributesToRetrieve": ["id", "metrics", "createdAt"]}
+               "attributesToRetrieve": ["id", "metrics", "createdAt", "lastVersionAt"]}
     sort_fields = {"Highest Rated": "metrics.thumbsUpCount", "Most Downloaded": "metrics.downloadCount",
                    "Most Liked": "metrics.favoriteCount", "Most Collected": "metrics.collectedCount", "Newest": "createdAt"}
     if sort != "Relevancy":
@@ -598,7 +640,7 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", 
                              and _field(entry, "availability", str, "Public") == "Public"), None)
         if model_type == "LORA" and not model_mode and first_public:
             apply_mode = next((mode for mode in MODES if compatible(_field(first_public, "baseModel", str, ""), mode)), "")
-        candidates = normalize(model, apply_mode, host) if model_type == "LORA" and apply_mode else []
+        candidates = normalize(model, apply_mode, host, hit) if model_type == "LORA" and apply_mode else []
         if not model_mode:
             candidates = [candidate for candidate in candidates if candidate["version_id"] == first_public["id"]]
         if candidates:
@@ -606,14 +648,14 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", 
             version = next(item for item in model["modelVersions"] if item["id"] == first_version)
             primary_ids = {file.get("id") for file in version.get("files", []) if _field(file, "primary", bool, False)}
             candidate = next((candidate for candidate in candidates if candidate["version_id"] == first_version and candidate["file_id"] in primary_ids), candidates[0])
-            items.append({**candidate, "model_type": "LORA", "installable": True, "apply_model_mode": apply_mode, "updated_at": _updated_at(model, version)})
+            items.append({**candidate, "model_type": "LORA", "installable": True, "apply_model_mode": apply_mode})
         else:
             version = next((entry for entry in _field(model, "modelVersions", list, []) if isinstance(entry, dict)
                             and _field(entry, "availability", str, "Public") == "Public"
                             and (not model_mode or compatible(_field(entry, "baseModel", str, ""), model_mode))), None)
             if version is not None:
                 _positive_ids(model.get("id"), version.get("id"))
-                items.append({**_presentation(model, version, host), "installable": False, "updated_at": _updated_at(model, version)})
+                items.append({**_presentation(model, version, host, hit), "installable": False})
     acquired_items = [item for item in items if item["installable"]]
     if acquired_items:
         root = lora_root()
@@ -638,7 +680,7 @@ def _download_headers(url, token):
     return {}
 
 
-async def download(identity, model_mode, host="civitai.red", user_id="default", directory="llm"):
+async def download(identity, model_mode, host="civitai.red", user_id="default", directory="llm", progress=None):
     from .civitai_auth import token_snapshot
     global _DOWNLOAD_LOCK
     host = validate_host(host)
@@ -652,10 +694,7 @@ async def download(identity, model_mode, host="civitai.red", user_id="default", 
         candidate = next((item for item in normalize(model, model_mode, host) if candidate_identity(item) == ids), None)
         if candidate is None:
             raise ValueError("Selected LoRA is unavailable or incompatible with this model mode.")
-        destination = folder / _filename(candidate)
-        name = destination.relative_to(root).as_posix() if await _file_io(_matching_file, candidate, destination) else ""
-        if not name:
-            name = await _file_io(_existing, candidate, root, await _file_io(_manifest, root), folder)
+        name = await _file_io(_existing, candidate, root, await _file_io(_manifest, root), folder)
         if not name:
             token = await asyncio.to_thread(token_snapshot, user_id)
             version = next(item for item in model["modelVersions"] if item["id"] == ids[1])
@@ -700,13 +739,32 @@ async def download(identity, model_mode, host="civitai.red", user_id="default", 
                                     raise DownloadAccessError("作成者がこのモデルのダウンロードを無効にしています。公式サイトで公開状況を確認してください。", code="civitai_download_disabled")
                                 raise DownloadAccessError("Civitaiがこのモデルの取得を拒否しました（HTTP 401）。認証状態や公式サイトの公開状況を確認してください。")
                             raise ServiceError(f"Civitai download returned HTTP {response.status}.")
-                        async for chunk in response.content.iter_chunked(1024 * 1024):
-                            await _file_io(write_chunk, chunk)
+                        length = response.headers.get("Content-Length", "")
+                        total = int(length) if re.fullmatch(r"[0-9]+", length) and response.headers.get("Content-Encoding", "").lower() in ("", "identity") else None
+                        received = 0
+                        def report():
+                            if progress:
+                                try:
+                                    progress(received, total)
+                                except Exception:
+                                    pass  # Progress delivery must not change the file acquisition result.
+                        report()
+                        filename = _filename(candidate, response.headers.get("Content-Disposition"))
+                        destination = await _file_io(_relative_target, root, (folder / filename).relative_to(root).as_posix())
+                        name = await _file_io(_download_collision, candidate, root, destination)
+                        if not name:
+                            async for chunk in response.content.iter_chunked(1024 * 1024):
+                                await _file_io(write_chunk, chunk)
+                                received += len(chunk)
+                                report()
                 await _file_io(stream.close)
-                if digest.hexdigest() != candidate["sha256"]:
-                    raise ServiceError("Downloaded LoRA SHA256 does not match the published file.")
-                await _file_io(os.replace, temporary, destination)
-                name = destination.relative_to(root).as_posix()
+                if not name:
+                    if digest.hexdigest() != candidate["sha256"]:
+                        raise ServiceError("Downloaded LoRA SHA256 does not match the published file.")
+                    name = await _file_io(_download_collision, candidate, root, destination)
+                    if not name:
+                        await _file_io(os.replace, temporary, destination)
+                        name = destination.relative_to(root).as_posix()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 raise ServiceError("Civitai download failed or timed out.") from exc
             finally:

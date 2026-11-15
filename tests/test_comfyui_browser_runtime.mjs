@@ -157,6 +157,11 @@ async def preset_metadata(request):
         workflow = data["graph"]["workflow"]
     text = presets._scene_node_value(prompt, data["text_id"], {}, set())
     return web.json_response({"output": prompt, "workflow": workflow, "text": text})
+@PromptServer.instance.routes.post("/scene_test/civitai_progress")
+async def civitai_progress(request):
+    data = await request.json()
+    PromptServer.instance.send_sync("scene_prompt_civitai_download_progress", {"download_id": data["download_id"], "received": 5, "total": 10}, sid=data["client_id"])
+    return web.json_response({"ok": True})
 lookup_calls = []
 @PromptServer.instance.routes.post("/scene_test/civitai_lookup")
 async def civitai_lookup(request):
@@ -179,7 +184,7 @@ async def civitai_lookup(request):
         if path == "/api/v1/models/12":
             return {"id": 12, "description": "<h3>Outfits</h3><pre><code>jacket,\\n  blue shirt</code></pre>",
                     "modelVersions": [{"id": 99, "description": "wrong version"}, {"id": 23, "description": "<p>Selected outfit notes</p>"}]}
-        return {"id": 23, "modelId": 12, "name": "Fixture v1", "model": {"name": "Native metadata"},
+        return {"id": 23, "modelId": 12, "name": "Fixture v1", "baseModel": "Illustrious", "model": {"name": "Native metadata"},
                 "trainedWords": ["native_metadata_trigger"], "private_upstream_field": "omitted"}
     civitai.api_get = api_get
     return web.json_response({"calls": lookup_calls})
@@ -332,7 +337,7 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
         if (path.endsWith("/select_loras")) return route.fulfill({ json: { selected: [{ model_id: 100, version_id: 200, file_id: 300 }] } });
         throw new Error(`Unexpected LLM runtime request ${path}`);
     });
-    let nativeCivitaiGallery = false;
+    let nativeCivitaiGallery = false, nativeProgressDownload;
     await page.route("**/scene_prompt/civitai/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
@@ -350,10 +355,13 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
             const preview = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="300" height="400"%3E%3Crect width="300" height="400" fill="%23366387"/%3E%3Ccircle cx="150" cy="160" r="80" fill="%23b3d9c4"/%3E%3C/svg%3E';
             const items = nativeCivitaiGallery ? Array.from({length:12}, (_, index) => ({ ...runtimeCandidate, model_id:100+index, name:'Native LoRA '+(index+1), image_url:preview,
                 gallery:[{url:preview,width:300,height:400},{url:preview,width:300,height:400},{url:preview,width:300,height:400}], description:'<p>Native model description</p>',
-                version_description:'Native version notes', published_at:'2026-08-02', model_stats:{downloadCount:90}, version_stats:{downloadCount:12} })) : [runtimeCandidate];
+                creator_name:'Native Author', updated_at:'2026-11-15T12:00:00Z', version_description:'Native version notes', published_at:'2026-08-02', model_stats:{downloadCount:90}, version_stats:{downloadCount:12} })) : [runtimeCandidate];
             return route.fulfill({ json: { items, query: "hat", sort: "Most Downloaded" } });
         }
-        if (path.endsWith("/download")) return route.fulfill({ json: { candidate: runtimeCandidate, lora_name: runtimeCandidate.lora_name } });
+        if (path.endsWith("/download")) {
+            if (nativeProgressDownload) { nativeProgressDownload.started(route.request().postDataJSON()); await nativeProgressDownload.pending; }
+            return route.fulfill({ json: { candidate: runtimeCandidate, lora_name: runtimeCandidate.lora_name } });
+        }
         throw new Error(`Unexpected Civitai runtime request ${path}`);
     });
     await page.route("**/prompt", async (route) => {
@@ -445,6 +453,33 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    // Use the real ComfyUI WebSocket and API listener while the JSON acquisition is pending.
+    let startProgress, finishProgress;
+    const progressStarted = new Promise(done=>startProgress=done);
+    nativeProgressDownload={started:startProgress,pending:new Promise(done=>finishProgress=done)};
+    await page.evaluate(async()=>{
+        const node=window.LiteGraph.createNode('SceneApplyLora');window.app.graph.add(node);
+        await node.widgets.find(widget=>widget.sceneRole==='lora_select').callback();
+    });
+    await page.getByRole('button',{name:'Civitai Search',exact:true}).click();
+    const progressSearch=page.getByRole('dialog',{name:'Civitai Search',exact:true});
+    await progressSearch.locator('.pc-civitai-card').first().click();
+    await page.getByRole('dialog',{name:'Civitai Detail',exact:true}).getByRole('button',{name:'取得',exact:true}).click();
+    const progressDialog=page.getByRole('dialog',{name:'LoRAを取得',exact:true});
+    await progressDialog.getByRole('button',{name:'取得',exact:true}).click();
+    const progressRequest=await progressStarted;
+    assert(progressRequest.client_id && progressRequest.download_id,'native socket and acquisition identities are sent');
+    assert.equal((await fetch(`${url}/scene_test/civitai_progress`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(progressRequest)})).status,200);
+    await progressDialog.getByText('50% · 5 bytes / 10 bytes',{exact:true}).waitFor();
+    assert.equal(await progressDialog.locator('progress').getAttribute('value'),'5');
+    assert.equal(await progressDialog.locator('progress').getAttribute('max'),'10');
+    await page.waitForTimeout(350);
+    const progressScreenshots=resolve(tmpdir(),'scene-civitai-details-review');await mkdir(progressScreenshots,{recursive:true});
+    await page.screenshot({path:resolve(progressScreenshots,'native-download-progress.png')});
+    finishProgress();await progressDialog.waitFor({state:'detached'});nativeProgressDownload=null;
+    await page.keyboard.press('Escape');await page.evaluate(()=>window.app.graph.clear());llmRequests.length=0;
+    console.log('real ComfyUI targeted WebSocket download progress reaches the indeterminate/50% DOM bar before JSON completion');
+    if (process.env.SCENE_NATIVE_PROGRESS_ONLY !== '1') {
     await verifySceneWidgetVisibility(page);
     await verifySceneWeightHistory(page);
     await (await import('./scene_public_widget_inputs.mjs')).verifyPublicWidgetInputs(page);
@@ -2888,15 +2923,21 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(await nativeSearch.getByRole('button',{name:'Civitai設定',exact:true}).count(),0);
     assert.equal(await page.getByRole('dialog',{name:'Civitai設定',exact:true}).count(),0);
     assert.equal(await page.evaluate(async()=> 'openCivitaiSettings' in await import('/extensions/scene-prompt-tools-browser-smoke/scene_prompt_civitai.js')),false);
+    await nativeSearch.locator('.pc-civitai-card').first().click();
+    await nativeSearch.getByRole('button',{name:'取得',exact:true}).click();
+    await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).click();
+    await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).waitFor({state:'detached'});
     await page.keyboard.press('Escape');
-    await page.evaluate(async id=>{
-        const node=window.app.graph.getNodeById(id);
-        node.properties.scene_civitai={query:'hat',lora_name:'runtime-hat.safetensors',model_id:1,version_id:2,file_id:3};
-        node.widgets.find(widget=>widget.name==='lora_name').value='runtime-hat.safetensors';
-        await node.widgets.find(widget=>widget.sceneRole==='lora_select').callback();
-    },queryOnlyLora);
-    await page.getByRole('dialog',{name:'Civitai Search',exact:true}).waitFor();
-    await page.keyboard.press('Escape');
+    for (const reload of [false, true]) {
+        await page.evaluate(async ({id,reload})=>{
+            const app=window.app;
+            if(reload)await app.loadGraphData(JSON.parse(JSON.stringify(app.graph.serialize())),true,true);
+            await app.graph.getNodeById(id).widgets.find(widget=>widget.sceneRole==='lora_select').callback();
+        },{id:queryOnlyLora,reload});
+        await page.getByRole('dialog',{name:'LoRA 詳細確認',exact:true}).waitFor();
+        assert.equal(await page.getByRole('dialog',{name:'Civitai Search',exact:true}).count(),0,'acquired selection reopens local LoRA details, including saved/reloaded provenance');
+        await page.keyboard.press('Escape');
+    }
     await page.evaluate(async id=>{
         const node=window.app.graph.getNodeById(id);
         node.widgets.find(widget=>widget.name==='lora_name').value='runtime-local.safetensors';
@@ -2904,10 +2945,10 @@ window.__sceneSeedRuntimeTest = {
     },queryOnlyLora);
     await queryOnlyPicker.waitFor();
     assert.equal(await page.getByRole('dialog',{name:'Civitai Search',exact:true}).count(),0,'manual local B after Civitai A opens local picker');
-    assert.equal(await page.evaluate(id=>window.app.graph.getNodeById(id).properties.scene_civitai.lora_name,queryOnlyLora),'runtime-hat.safetensors','manual selection retains provenance history');
+    assert.equal(await page.evaluate(id=>window.app.graph.getNodeById(id).properties.scene_civitai.lora_name,queryOnlyLora),runtimeCandidate.lora_name,'manual selection retains provenance history');
     await page.keyboard.press('Escape');
     nativeCivitaiGallery = false;
-    assert.equal(llmRequests.length-servicesBeforeSettings,2,'download-only adds one request; reopening the same node restores its public search results without another search');
+    assert.equal(llmRequests.length-servicesBeforeSettings,3,'download-only and download-select each add one request; reopening local details never repeats Civitai search');
     assert.equal(llmRequests.filter(request=>request.path.endsWith('/generate')).length,generationsBeforeSettings,'settings never request inference');
     assert(settingsRequests.includes('/scene_prompt/llm/settings'));
     assert(!settingsRequests.includes('/scene_prompt/civitai/settings'));
@@ -3026,6 +3067,8 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-local.safetensors'}).locator('.pc-lora-title').textContent(),'runtime-local.safetensors');
     assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-unknown.safetensors'}).locator('.pc-lora-title').textContent(),'runtime-unknown.safetensors');
     assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-hat.safetensors'}).locator('.pc-lora-title').textContent(),'Native metadata');
+    assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-hat.safetensors'}).locator('.pc-lora-base-model').textContent(),'Illustrious');
+    assert.equal(await nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-local.safetensors'}).locator('.pc-lora-base-model').textContent(),'モデル不明');
     assert.deepEqual(await nativePicker.locator('.pc-lora-head-actions button').allTextContents(),['Civitai Search','閉じる']);
     for (const query of ['nativemetadata', 'NATIVE METADATA', 'NaTiVe\u3000MeTa DaTa']) {
         await nativePicker.getByRole('searchbox').fill(query);
@@ -3056,7 +3099,7 @@ window.__sceneSeedRuntimeTest = {
     await page.setViewportSize({width:1280,height:720});
     await fetch(`${url}/scene_test/civitai_lookup`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode:"found"}) });
     const directResult = await (await fetch(`${url}/scene_prompt/civitai/by-hash?sha256=${"a".repeat(64)}`)).json();
-    assert.deepEqual(directResult, { found: true, version: { id: 23, modelId: 12, name: "Fixture v1", model: { name: "Native metadata" }, trainedWords: ["native_metadata_trigger"] } });
+    assert.deepEqual(directResult, { found: true, version: { id: 23, modelId: 12, name: "Fixture v1", baseModel: "Illustrious", model: { name: "Native metadata" }, trainedWords: ["native_metadata_trigger"] } });
     await fetch(`${url}/scene_test/civitai_lookup`, { method: "POST", body: JSON.stringify({ mode: "missing" }), headers: { "Content-Type": "application/json" } });
     assert.deepEqual(await (await fetch(`${url}/scene_prompt/civitai/by-hash?sha256=${"a".repeat(64)}`)).json(), { found: false, version: null });
     assert(metadataRequests.length >= lookupsBeforeResources + 2);
@@ -3697,6 +3740,7 @@ window.__sceneSeedRuntimeTest = {
     await page.waitForTimeout(100);
     assert.deepEqual(pageErrors, []);
     console.log("real ComfyUI local metadata HTTP, model/LoRA dialogs, retry, red links and weighted Matrix input preservation passed");
+}
 } catch (error) {
     console.error(output.join("").slice(-6000));
     throw error;

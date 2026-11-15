@@ -1403,7 +1403,7 @@ try {
     });
     await page.route("**/scene_prompt/civitai/by-hash?*", (route) => { civitaiLookupCount += 1; return route.fulfill({
         status: 200, contentType: "application/json",
-        body: JSON.stringify({ found: true, version: { id: 20, modelId: 10, name: "Version One", model: { name: "Civitai Style" }, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle", "Local Tag, Fresh Tag"] } }),
+        body: JSON.stringify({ found: true, version: { id: 20, modelId: 10, name: "Version One", baseModel: "Illustrious", model: { name: "Civitai Style" }, trainedWords: ["Belle ZZZ", "Civitai Tag", "Belle", "Local Tag, Fresh Tag"] } }),
     }); });
     await page.evaluate(() => {
         window.__sceneLoraTestNode.properties ||= {};
@@ -1414,16 +1414,19 @@ try {
     assert.equal(await page.getByRole("dialog", { name: "Civitai Search", exact: true }).count(), 0, "query-only Civitai history keeps local picker entry");
     await loraPicker.locator(".pc-lora-select").filter({ hasText: "style.safetensors" }).waitFor();
     await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-title").getByText("Civitai Style").waitFor();
+    assert.equal(await loraPicker.locator('.pc-lora-row').first().locator('.pc-lora-base-model').textContent(),'Illustrious');
     assert.equal(await loraPicker.locator(".pc-lora-select").first().locator(":scope > :first-child").getAttribute("class"), "pc-lora-title",
         "the Civitai title leads each picker row and the path is subordinate");
     assert.equal(await loraPicker.locator(".pc-lora-row").first().locator(".pc-lora-source").textContent(), "Civitai",
         "the picker title is the resolved Civitai model name");
+    await page.screenshot({path:resolve(process.env.TEMP || "/tmp","scene-civitai-details-review","local-picker-base-model.png")});
     const pickerRows = loraPicker.locator(".pc-lora-row");
     assert.deepEqual(await pickerRows.locator(".pc-lora-path").allTextContents(), ["style.safetensors", "folder/other.safetensors"]);
     assert.equal(await pickerRows.first().locator(".pc-lora-select").getAttribute("aria-pressed"), "true");
     await pickerRows.first().getByText("選択中", { exact: true }).waitFor();
     assert.equal(await pickerRows.locator("button button").count(), 0, "selection and detail buttons are siblings");
-    assert.equal(await pickerRows.first().locator(":scope > button").count(), 2);
+    assert.equal(await pickerRows.first().locator("button").count(), 2);
+    assert.equal(await pickerRows.first().locator(".pc-lora-metadata > .pc-lora-base-model").count(),1);
     const selectedColor = await pickerRows.first().evaluate((row) => getComputedStyle(row).backgroundColor);
     await pickerRows.first().hover();
     assert.equal(await pickerRows.first().evaluate((row) => getComputedStyle(row).backgroundColor), selectedColor);
