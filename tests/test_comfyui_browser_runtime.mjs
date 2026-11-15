@@ -188,6 +188,17 @@ async def civitai_lookup(request):
                 "trainedWords": ["native_metadata_trigger"], "private_upstream_field": "omitted"}
     civitai.api_get = api_get
     return web.json_response({"calls": lookup_calls})
+@PromptServer.instance.routes.post("/scene_test/nested_lora")
+async def nested_lora(request):
+    import folder_paths
+    import os
+    from pathlib import Path
+    original = Path(folder_paths.get_full_path("loras", "runtime-hat.safetensors"))
+    path = original.parent / "nested" / "衣装.safetensors"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(original.read_bytes())
+    folder_paths.filename_list_cache.pop("loras", None)
+    return web.json_response({"lora_name": os.path.normpath("nested/衣装.safetensors")})
 class TestSceneTextImage:
     @classmethod
     def INPUT_TYPES(cls):
@@ -317,8 +328,8 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
             nativeResourceRequests.push({ path, body: request.postDataJSON() });
         }
     });
-    const runtimeCandidate = { model_id: 100, version_id: 200, file_id: 300, name: "Runtime Hat", version_name: "v1", base_model: "Illustrious",
-        file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["runtime_hat"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "runtime-hat.safetensors" };
+    const runtimeCandidate = { model_id: 12, version_id: 23, file_id: 300, name: "Native metadata", version_name: "Fixture v1", base_model: "Illustrious",
+        file_name: "runtime-hat.safetensors", size_kb: 1000, sha256: "a".repeat(64), triggers: ["native_metadata_trigger"], stats: { thumbsUpCount: 10 }, acquired: true, lora_name: "runtime-hat.safetensors" };
     await page.route("**/scene_prompt/llm/**", async (route) => {
         if (nativeGPUChecks) return route.continue();
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
@@ -334,10 +345,10 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
             if (deferredGeneration) { const gate = deferredGeneration; gate.started(); await gate.pending; }
             return route.fulfill({ json: { positive: "1girl, hat", negative: "blurry", lora_queries: ["hat"], template_version: "scene-llm-v1" } });
         }
-        if (path.endsWith("/select_loras")) return route.fulfill({ json: { selected: [{ model_id: 100, version_id: 200, file_id: 300 }] } });
+        if (path.endsWith("/select_loras")) return route.fulfill({ json: { selected: [{ model_id: runtimeCandidate.model_id, version_id: runtimeCandidate.version_id, file_id: runtimeCandidate.file_id }] } });
         throw new Error(`Unexpected LLM runtime request ${path}`);
     });
-    let nativeCivitaiGallery = false, nativeProgressDownload;
+    let nativeCivitaiGallery = false, nativeProgressDownload, nativeDownloadName;
     await page.route("**/scene_prompt/civitai/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
@@ -360,7 +371,7 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
         }
         if (path.endsWith("/download")) {
             if (nativeProgressDownload) { nativeProgressDownload.started(route.request().postDataJSON()); await nativeProgressDownload.pending; }
-            return route.fulfill({ json: { candidate: runtimeCandidate, lora_name: runtimeCandidate.lora_name } });
+            return route.fulfill({ json: { candidate: runtimeCandidate, lora_name: nativeDownloadName || runtimeCandidate.lora_name } });
         }
         throw new Error(`Unexpected Civitai runtime request ${path}`);
     });
@@ -2350,7 +2361,7 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(llmRuntime.beforeReload.llm.positive, "1girl, hat");
     assert.equal(llmRuntime.beforeReload.llm.negative, "blurry");
     assert.equal(llmRuntime.beforeReload.lora.lora_name, runtimeCandidate.lora_name);
-    assert.equal(llmRuntime.beforeReload.lora.positive, "runtime_hat");
+    assert.equal(llmRuntime.beforeReload.lora.positive, "native_metadata_trigger");
     assert.deepEqual(llmRuntime.undone, { positive: "", loras: 0, queueOrigin: llmRuntime.beforeReload.ids.llm });
     assert.deepEqual(llmRuntime.redone, { positive: "1girl, hat", loras: 1, queueOrigin: llmRuntime.beforeReload.ids.lora });
     assert.deepEqual(llmRuntime.beforeReload.queueInput, [String(llmRuntime.beforeReload.ids.lora), 0]);
@@ -2681,7 +2692,7 @@ window.__sceneSeedRuntimeTest = {
     presetLLMRuntime.editor.widgets.forEach((snapshot, index) => assertLLMWidgetContract(snapshot, presetLLMRuntime.editor.prompts[index]));
     presetLLMRuntime.loadedWidgets.forEach((snapshot, index) => assertLLMWidgetContract(snapshot, presetLLMRuntime.loadedPrompts[index]));
     for (const lora of [...presetLLMRuntime.editor.loras, ...presetLLMRuntime.loadedLoras]) {
-        assert.equal(lora.lora_name, runtimeCandidate.lora_name); assert.equal(lora.positive, "runtime_hat"); assert.equal(lora.model_mode, "Illustrious");
+        assert.equal(lora.lora_name, runtimeCandidate.lora_name); assert.equal(lora.positive, "native_metadata_trigger"); assert.equal(lora.model_mode, "Illustrious");
     }
     for (const prompt of [...presetLLMRuntime.editor.prompts, ...presetLLMRuntime.loadedPrompts]) {
         assert.equal(prompt.positive, "1girl, hat"); assert.equal(prompt.negative, "blurry"); assert.equal(prompt.model_mode, "Illustrious");
@@ -2935,8 +2946,9 @@ window.__sceneSeedRuntimeTest = {
             if(reload)await app.loadGraphData(JSON.parse(JSON.stringify(app.graph.serialize())),true,true);
             await app.graph.getNodeById(id).widgets.find(widget=>widget.sceneRole==='lora_select').callback();
         },{id:queryOnlyLora,reload});
-        await page.getByRole('dialog',{name:'LoRA 詳細確認',exact:true}).waitFor();
-        assert.equal(await page.getByRole('dialog',{name:'Civitai Search',exact:true}).count(),0,'acquired selection reopens local LoRA details, including saved/reloaded provenance');
+        await queryOnlyPicker.waitFor();
+        assert.equal(await page.getByRole('dialog',{name:'LoRA 詳細確認',exact:true}).count(),0,'acquired selection reopens the picker, including saved/reloaded provenance');
+        assert.equal(await page.getByRole('dialog',{name:'Civitai Search',exact:true}).count(),0);
         await page.keyboard.press('Escape');
     }
     await page.evaluate(async id=>{
@@ -2949,7 +2961,7 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(await page.evaluate(id=>window.app.graph.getNodeById(id).properties.scene_civitai.lora_name,queryOnlyLora),runtimeCandidate.lora_name,'manual selection retains provenance history');
     await page.keyboard.press('Escape');
     nativeCivitaiGallery = false;
-    assert.equal(llmRequests.length-servicesBeforeSettings,3,'download-only and download-select each add one request; reopening local details never repeats Civitai search');
+    assert.equal(llmRequests.length-servicesBeforeSettings,3,'download-only and download-select each add one request; reopening the picker never repeats Civitai search');
     assert.equal(llmRequests.filter(request=>request.path.endsWith('/generate')).length,generationsBeforeSettings,'settings never request inference');
     assert(settingsRequests.includes('/scene_prompt/llm/settings'));
     assert(!settingsRequests.includes('/scene_prompt/civitai/settings'));
@@ -3755,8 +3767,43 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(await page.evaluate(id => window.app.graph.getNodeById(id).widgets.find(widget => widget.name === 'preset_id').value, heightReferenceId), 'height-59');
     await page.unroute('**/scene_presets/list');
     await page.waitForTimeout(100);
+    // A nested Unicode acquisition must survive real native validation and CPU execution after reload.
+    const nestedFixture = await nativeBodyRequest('/scene_test/nested_lora', {});
+    nativeDownloadName = nestedFixture.lora_name.replaceAll('\\','/');
+    const nestedNode = await page.evaluate(async()=>{
+        const {app}=await import('/scripts/app.js');app.graph.clear();
+        const lora=window.LiteGraph.createNode('SceneApplyLora');app.graph.add(lora);
+        lora.widgets.find(widget=>widget.name==='lora_name').value='';
+        await lora.widgets.find(widget=>widget.sceneRole==='lora_select').callback();return lora.id;
+    });
+    await page.getByRole('dialog',{name:'LoRAを選択',exact:true}).getByRole('button',{name:'Civitai Search',exact:true}).click();
+    const nestedSearch=page.locator('.pc-civitai-search-dialog');await nestedSearch.locator('.pc-civitai-card').first().click();
+    await nestedSearch.getByRole('button',{name:'取得',exact:true}).click();
+    await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).click();
+    await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).waitFor({state:'detached'});await page.keyboard.press('Escape');
+    for(const reload of [false,true]) {
+        await page.evaluate(async({id,reload})=>{const app=window.app;if(reload)await app.loadGraphData(JSON.parse(JSON.stringify(app.graph.serialize())),true,true);await app.graph.getNodeById(id).widgets.find(widget=>widget.sceneRole==='lora_select').callback();},{id:nestedNode,reload});
+        const picker=page.getByRole('dialog',{name:'LoRAを選択',exact:true});
+        const selected=picker.locator('.pc-lora-selected');await selected.getByText('Illustrious',{exact:true}).waitFor();
+        assert.equal(await selected.locator('.pc-lora-title').textContent(),'Native metadata','verified acquisition metadata persists across picker reopen and workflow reload');
+        assert.equal(await selected.locator('.pc-lora-path').textContent(),nestedFixture.lora_name);
+        await page.keyboard.press('Escape');
+    }
+    const nestedPrompt=await page.evaluate(async id=>{
+        const app=window.app,lora=app.graph.getNodeById(id),text=window.LiteGraph.createNode('ScenePromptToText'),sink=window.LiteGraph.createNode('SceneCacheProbe');
+        app.graph.add(text);app.graph.add(sink);lora.connect(0,text,0);lora.connect(0,sink,0);text.connect(0,sink,1);
+        return {api:await app.graphToPrompt(),sink:sink.id};
+    },nestedNode);
+    const nestedQueued=await nativeBodyRequest('/prompt',{prompt:nestedPrompt.api.output});
+    let nestedHistory;const nestedDeadline=Date.now()+30000;
+    while(Date.now()<nestedDeadline){nestedHistory=(await nativeBodyRequest('/history/'+nestedQueued.prompt_id))[nestedQueued.prompt_id];if(nestedHistory?.status?.completed)break;await new Promise(done=>setTimeout(done,100));}
+    assert.equal(nestedHistory?.status?.status_str,'success',JSON.stringify(nestedHistory));
+    const nestedResources=JSON.parse(nestedHistory.outputs[String(nestedPrompt.sink)].text[3]);
+    assert.equal(nestedResources.loras[0].name,nestedFixture.lora_name);
+    assert.deepEqual(await nativeBodyRequest('/scene_test/model_executions'),[],'nested acquisition CPU plans never load weights');
+    nativeDownloadName=null;
     assert.deepEqual(pageErrors, []);
-    console.log("real ComfyUI local metadata HTTP, model/LoRA dialogs, retry, red links and weighted Matrix input preservation passed");
+    console.log("real ComfyUI local metadata HTTP, nested Unicode acquire/reload/validate/CPU execution, retry and Matrix inputs passed");
 }
 } catch (error) {
     console.error(output.join("").slice(-6000));

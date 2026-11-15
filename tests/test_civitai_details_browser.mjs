@@ -29,7 +29,7 @@ const server = http.createServer(async (request, response) => {
                 if(window.failSearchAuth){window.failSearchAuth=false;return reply({error:'Red authentication required',code:'civitai_auth_required'},401);}
                 if(window.failSearch){window.failSearch=false;return reply({error:'search offline'},503);}
                 if(window.deferSearch){window.deferSearch=false;await new Promise(done=>window.releaseSearch=done);}
-                return reply({items:Array.from({length:30},(_,index)=>({...candidate(index+1,url.searchParams.get('query')||''),installable:url.searchParams.get('model_type')==='LORA'}))});
+                return reply({items:Array.from({length:30},(_,index)=>({...candidate(index+1,url.searchParams.get('query')||''),installable:url.searchParams.get('model_type')==='LORA',...(window.acquiredItems?{acquired:true,lora_name:'folder/'+(index+1)+'.safetensors'}:{})}))});
             }
             if(url.pathname.endsWith('/gallery')){
                 if(window.failGalleryAuth)return reply({error:'Gallery authentication required',code:'civitai_auth_required'},401);
@@ -58,6 +58,8 @@ const server = http.createServer(async (request, response) => {
                 if(window.downloadError)return reply({error:'download offline'},503);
                 if(window.disabledDownload)return reply({error:'Creator disabled',code:'civitai_download_disabled'},401);
                 if(!window.authenticated)return reply({error:'Authentication required',code:'civitai_auth_required'},401);
+                if(window.fileExists&&body.existing_action==='ask')return reply({error:'既に存在します。再取得しますか？',code:'civitai_file_exists',existing_name:(body.directory?body.directory+'/':'')+'fixture.safetensors'},409);
+                if(window.fileExists&&body.existing_action==='select'&&window.existingDifferent)return reply({candidate:null,lora_name:body.existing_name});
                 return reply({candidate:candidate(body.model_id,''),lora_name:(body.directory?body.directory+'/':'')+'fixture.safetensors'});
             }
             throw new Error('Unexpected API '+path);
@@ -166,6 +168,7 @@ try {
         assert.equal(await destination.getAttribute('aria-busy'),'true'); assert.equal(await destination.evaluate(dialog=>dialog.inert),true);
         assert.equal(await destination.getByRole('button',{name:'閉じる',exact:true}).isDisabled(),true);
         assert.equal(await destination.locator('input,button').evaluateAll(nodes=>nodes.every(node=>node.disabled)),true);
+        assert.equal(await destination.locator('.pc-civitai-download-actions button').first().evaluate(node=>getComputedStyle(node).color),'rgb(133, 137, 147)','busy actions are visibly gray');
         await destination.getByRole('button',{name:'閉じる',exact:true}).evaluate(button=>button.click());
         await destination.evaluate(dialog=>dialog.parentElement.click()); await page.keyboard.press('Escape');
         await page.evaluate(()=>window.current.dismiss());
@@ -529,6 +532,56 @@ try {
     await cards.first().click();failedMetadata=await authenticateRequest();
     await page.evaluate(()=>window.failGalleryAuth=false);await failedMetadata.getByRole('button',{name:'再試行',exact:true}).click();
     await detail.getByRole('button',{name:'Civitai Image #1',exact:true}).waitFor();await page.keyboard.press('Escape');
+
+    // Actual selected local paths, rather than provenance alone, determine the green card.
+    await page.evaluate(()=>{window.node=window.makeNode();window.acquiredItems=true;window.node.widgets.find(widget=>widget.name==='lora_name').value='folder\\1.safetensors';window.open();});
+    await cards.first().waitFor();
+    assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
+    await cards.first().click();await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
+    await page.keyboard.press('Escape');await page.evaluate(()=>window.open());await cards.first().waitFor();
+    assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
+    await cards.first().click();await detail.getByRole('button',{name:'取得',exact:true}).click();
+    await page.evaluate(()=>{window.fileExists=true;window.existingDifferent=true;window.collisionBefore=JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions});});
+    await destination.getByRole('button',{name:'取得',exact:true}).click();
+    const exists=page.getByRole('dialog',{name:'既に存在します。再取得しますか？',exact:true});await exists.waitFor();
+    assert.deepEqual(await exists.locator('.pc-civitai-download-actions button').allTextContents(),['キャンセル','選択のみ','再取得']);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.existing_action),'ask');
+    await exists.getByRole('button',{name:'キャンセル',exact:true}).click();
+    assert.equal(await destination.getAttribute('aria-busy'),'false');assert.doesNotMatch(await destination.textContent(),/取得中…/);
+    assert.equal(await destination.locator('progress').isVisible(),false);
+    assert.equal(await page.evaluate(()=>JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions})),await page.evaluate(()=>window.collisionBefore));
+    await destination.getByRole('button',{name:'取得',exact:true}).click();await exists.waitFor();await exists.getByRole('button',{name:'選択のみ',exact:true}).click();await destination.waitFor({state:'detached'});
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.existing_action),'select');
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='positive').value),'manual');
+    assert.deepEqual(await page.evaluate(()=>window.node.properties),{},'different local bytes do not acquire the Civitai identity or triggers');
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='lora_name').value),'folder/fixture.safetensors');
+    assert.equal(await page.evaluate(()=>window.progressListeners.size),0);
+    // Replace keeps the user's initial action and directory, and unlocks after completion.
+    await detail.getByRole('button',{name:'取得',exact:true}).click();await directory.fill('a/b');await destination.getByRole('button',{name:'取得して選択',exact:true}).click();await exists.waitFor();
+    await exists.getByRole('button',{name:'再取得',exact:true}).click();await destination.waitFor({state:'detached'});
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.existing_action),'replace');
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.directory),'a/b');
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='positive').value),'manual, trigger');
+    await detail.getByRole('button',{name:'戻る',exact:true}).click();assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
+    await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup();window.acquiredItems=false;window.fileExists=false;});
+
+    // A delayed collision belongs to its download modal, not a newer independent root.
+    await page.evaluate(()=>{window.node=window.makeNode();window.fileExists=true;window.oldCollisionNode=window.node;window.oldCollisionRoot=window.open();});
+    await cards.first().click();await detail.getByRole('button',{name:'取得',exact:true}).click();
+    await page.evaluate(()=>{window.deferDownload=true;window.releaseDownload=null;});
+    await destination.getByRole('button',{name:'取得',exact:true}).click();await page.waitForFunction(()=>window.releaseDownload);
+    await page.evaluate(()=>{
+        const old=window.oldCollisionNode;window.node=window.makeNode();window.node.id=2;
+        window.graph.getNodeById=id=>id===old.id?old:window.node;
+        window.independentRoot=window.open();window.releaseDownload();
+    });
+    await exists.waitFor();await page.evaluate(()=>window.oldCollisionRoot.dismiss());
+    assert.equal(await exists.count(),0);assert.equal(await destination.count(),0);
+    assert.equal(await page.locator('.pc-civitai-search-dialog').count(),1,'closing the old collision parent preserves the new independent search');
+    assert.equal(await page.locator('.pc-civitai-search-dialog').evaluate(node=>node.parentElement.inert),false);
+    assert.equal(await page.evaluate(()=>window.progressListeners.size),0);
+    await page.evaluate(()=>{window.independentRoot.dismiss();window.fileExists=false;window.graph.getNodeById=()=>window.node;});
 
     assert.deepEqual(errors, []);
     console.log('Civitai gallery sharing, responsive cards, nested image data, auth/retry and in-session search restoration passed. Screenshots: '+screenshots);

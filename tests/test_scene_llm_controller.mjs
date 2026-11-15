@@ -59,6 +59,8 @@ const candidate = (id) => ({ model_id: id, version_id: id + 10, file_id: id + 20
 }
 {
     const rich = { ...candidate(1), name: "model", description: "full metadata", gallery: [{url:"preview"}], model_stats: {downloadCount:3} };
+    await assert.rejects(()=>requestJSON({fetchApi:async()=>reply({error:'exists',code:'civitai_file_exists',existing_name:'folder/file.safetensors'},false,409)},'/scene_prompt/civitai/download',{}),
+        error=>error.status===409&&error.code==='civitai_file_exists'&&error.existing_name==='folder/file.safetensors');
     assert.deepEqual(Object.keys(compactCandidates([rich])[0]), ["model_id","version_id","file_id","name","version_name","base_model","triggers"]);
     for (const [status, text] of [[200,""],[200,'{"items":'],[502,"<html>failure</html>"],[404,""]]) {
         let reads = 0;

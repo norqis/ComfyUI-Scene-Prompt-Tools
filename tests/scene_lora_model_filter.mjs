@@ -69,6 +69,8 @@ export async function verifyLoraModelFilter(page) {
     await install(); await open();await model.selectOption('Anima');
     const failedRow=picker.locator('.pc-lora-row').filter({hasText:'filter/9.safetensors'});
     await failedRow.getByRole('button',{name:'filter/9.safetensors の詳細確認',exact:true}).getByText('再確認',{exact:true}).waitFor();
+    assert.equal(await failedRow.locator('.pc-lora-base-model').textContent(),'取得失敗');
+    assert.match(await failedRow.locator('.pc-lora-base-model').getAttribute('title'),/metadata offline/);
     assert.deepEqual(await paths(),shown([2,9]));fail=false;await failedRow.locator('.pc-lora-source').click();await failedRow.waitFor({state:'detached'});
     assert.deepEqual(await paths(),shown([2]));
     // A late reply cannot restore a row/file removed by a later catalog generation.

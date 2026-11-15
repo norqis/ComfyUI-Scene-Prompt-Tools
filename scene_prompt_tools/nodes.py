@@ -23,6 +23,7 @@ from comfy_execution.graph_utils import GraphBuilder, is_link
 from comfy_execution.utils import get_executing_context
 from .switches import selected_switch_input
 from .storage import is_windows_reserved_name
+from .lora_metadata import canonical_lora_name
 
 from .prompt import (
     DEFAULT_CATEGORY_ORDER,
@@ -2676,6 +2677,10 @@ class SceneApplyLora:
     FUNCTION = "apply_lora"
 
     @classmethod
+    def VALIDATE_INPUTS(cls, lora_name):
+        return True if lora_name is None or canonical_lora_name(lora_name) in {canonical_lora_name(name) for name in folder_paths.get_filename_list("loras")} else "Select an available LoRA."
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
@@ -2711,6 +2716,7 @@ class SceneApplyLora:
         name = str(lora_name or "").strip()
         if not name:
             raise ValueError("LoRAを選択してください。")
+        name = canonical_lora_name(name)
         positive_parts = _compose_prompt_parts(positive, positive_json, category_order, True, 0)
         negative_parts = _compose_prompt_parts(negative, negative_json, category_order, True, 0)
         descriptor = {

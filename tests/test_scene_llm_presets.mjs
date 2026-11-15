@@ -621,7 +621,7 @@ const titleContext = vm.createContext({ Map, Set, Array, String, JSON, Object,
         return { id: 1, model: { name: "Resolved again" } };
     },
 });
-vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.titles = { sceneLoraDisplay, cachedSceneLora, saveSceneLoraCache, resolveSceneLora, reconcileSceneLoraTitles, sceneLoraSessionCache, sceneLoraFileIdentities, sceneLoraResolutions, sceneLoraCacheKey };`, titleContext);
+vm.runInContext(`${uiSource.slice(titleStart, titleEnd)}; globalThis.titles = { seedSceneAcquiredLora, sceneLoraDisplay, cachedSceneLora, saveSceneLoraCache, resolveSceneLora, reconcileSceneLoraTitles, sceneLoraSessionCache, sceneLoraFileIdentities, sceneLoraResolutions, sceneLoraCacheKey };`, titleContext);
 const legacyTitleContext = vm.createContext({ Map, Array, String, JSON,
     localStorage: { getItem: () => JSON.stringify([{ key: "folder\\legacy.safetensors\u00001\u00001", title: "Legacy cached title", status: "found" }]) },
 });
@@ -631,6 +631,25 @@ const titles = titleContext.titles, titleItem = (index, revision = 1) => ({ path
 const displayItem = {path:'folder/local.safetensors',size:1,mtime_ns:1};
 assert.equal(titles.sceneLoraDisplay(displayItem).title,'local.safetensors');
 assert.equal(titles.sceneLoraDisplay(displayItem).status,'unknown');
+assert.equal(titles.sceneLoraDisplay(displayItem).baseModel,'確認中…');
+
+const acquiredItem={path:'folder\\acquired.safetensors',size:42,mtime_ns:7};
+const verifiedAcquisition={lora_name:'folder/acquired.safetensors',candidate:{name:'Verified title',version_name:'Verified version',base_model:'Anima',model_id:12,version_id:23,triggers:['only once']}};
+titles.reconcileSceneLoraTitles([acquiredItem]);
+titles.seedSceneAcquiredLora([acquiredItem],verifiedAcquisition);
+const requestsBeforeSeedRead=titleInfoCalls;
+const seeded=await titles.resolveSceneLora(acquiredItem);
+assert.equal(seeded.title,'Verified title');assert.equal(seeded.baseModel,'Anima');
+assert.deepEqual([...seeded.trainedWords],['only once']);assert.deepEqual([...seeded.localWords],[]);
+assert.equal(titleInfoCalls,requestsBeforeSeedRead,'verified acquisition supplies metadata without rehashing or API calls');
+assert.equal(JSON.parse(titleDisk).find(entry=>entry.path==='folder/acquired.safetensors').baseModel,'Anima','seed persists for picker reopen/page reload');
+titles.seedSceneAcquiredLora([acquiredItem],{...verifiedAcquisition,candidate:null});
+assert.equal(titles.cachedSceneLora(acquiredItem).baseModel,'Anima','local-only selection cannot overwrite verified metadata');
+titles.reconcileSceneLoraTitles([{...acquiredItem,mtime_ns:8}]);
+titles.seedSceneAcquiredLora([acquiredItem],verifiedAcquisition);
+assert.equal(titles.cachedSceneLora({...acquiredItem,mtime_ns:8}),null,'changed identity does not receive an old acquisition seed');
+titles.reconcileSceneLoraTitles([]);titles.seedSceneAcquiredLora([],verifiedAcquisition);
+assert.equal(titles.sceneLoraSessionCache.size,0,'absent catalog targets are never seeded');
 titles.saveSceneLoraCache(displayItem, {}, null, 'not_found');
 assert.equal(titles.sceneLoraDisplay(displayItem).title,'local.safetensors');
 assert.equal(titles.sceneLoraDisplay(displayItem).status,'not_found');

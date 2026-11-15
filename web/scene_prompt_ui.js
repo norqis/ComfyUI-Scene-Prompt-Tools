@@ -5161,12 +5161,13 @@ function attachSceneLLM(node) {
 function openSceneCivitaiSearch(node) {
     injectStyle();
     return openCivitaiSearch({ node, api,
-        onAcquired: async (target) => {
+        onAcquired: async (target, downloaded, current) => {
             if (sceneLoraCatalogRequest) await sceneLoraCatalogRequest;
             const catalog = await loadSceneLoraCatalog();
-            if (target.graph?.getNodeById(target.id) !== target) return;
+            if (target.graph?.getNodeById(target.id) !== target || !current()) return;
             const widget = findWidget(target, "lora_name");
             if (widget?.options) widget.options.values = catalog.map(item => item.path);
+            seedSceneAcquiredLora(catalog, downloaded);
         }, activeGraph: () => app.graph, beginChange: beginSceneGraphChange, endChange: endSceneGraphChange,
         refresh: (target) => { syncSceneLoraSelectLabel(target); clearSceneComputedCaches(target); refreshDownstreamSceneNodes(target); } });
 }
@@ -5466,6 +5467,19 @@ function saveSceneLoraCache(item, local, version, status) {
     return entry;
 }
 
+function seedSceneAcquiredLora(catalog, downloaded) {
+    const candidate = downloaded?.candidate;
+    if (!candidate) return;
+    const matches = catalog.filter(item => sceneLoraPathIdentity(item.path) === sceneLoraPathIdentity(downloaded.lora_name));
+    if (matches.length !== 1 || matches[0].size == null || matches[0].mtime_ns == null) return;
+    const item = matches[0];
+    if (sceneLoraFileIdentities.get(sceneLoraPathIdentity(item.path))?.key !== sceneLoraCacheKey(item)) return;
+    const identity = observeSceneLoraFile(item);
+    if (sceneLoraFileIdentities.get(sceneLoraPathIdentity(item.path)) !== identity) return;
+    saveSceneLoraCache(item, null, { model: { name: candidate.name }, name: candidate.version_name,
+        baseModel: candidate.base_model, trainedWords: candidate.triggers, modelId: candidate.model_id, id: candidate.version_id }, "found");
+}
+
 function sceneLoraPathIdentity(path) {
     return String(path || "").trim().replaceAll("\\", "/");
 }
@@ -5476,7 +5490,8 @@ function sceneLoraCatalogItem(path) {
 
 function sceneLoraDisplay(item) {
     const cached = cachedSceneLora(item);
-    return { title: cached?.title || item.path.split(/[\\/]/u).at(-1) || item.path, status: cached?.status || "unknown", baseModel: cached?.baseModel || "モデル不明" };
+    return { title: cached?.title || item.path.split(/[\\/]/u).at(-1) || item.path, status: cached?.status || "unknown",
+        baseModel: !cached || cached.status === "found" && !Object.hasOwn(cached, "baseModel") ? "確認中…" : cached.baseModel || "モデル不明" };
 }
 
 function currentSceneLoraResult(item, result) {
@@ -5543,9 +5558,6 @@ function closeSceneLoraPicker(node) {
 }
 
 async function openSceneLoraPicker(node) {
-    const selected = sceneLoraPathIdentity(findWidget(node, "lora_name")?.value);
-    if (selected && sceneLoraPathIdentity(node.properties?.scene_civitai?.lora_name) === selected)
-        return openSceneLoraDetails(node);
     closeSceneLoraDetails(node);
     closeSceneLoraPicker(node);
     injectStyle();
@@ -5622,11 +5634,11 @@ async function openSceneLoraPicker(node) {
                     else {
                         if (!matchesModel(result)) { row.remove(); if (!list.childElementCount) list.textContent = "該当するLoRAはありません。"; continue; }
                         title.textContent = result.title || item.path.split(/[\\/]/u).at(-1) || item.path;
-                        updateSource(source, result.status); badge.textContent = result.baseModel || "モデル不明";
+                        updateSource(source, result.status); badge.textContent = result.baseModel || "モデル不明"; badge.removeAttribute("title");
                     }
                 }
             } catch (_error) {
-                if (revision === generation && row.isConnected) { source.textContent = "再確認"; source.disabled = false; source.title = _error.message; }
+                if (revision === generation && row.isConnected) { source.textContent = "再確認"; source.disabled = false; source.title = _error.message; badge.textContent = "取得失敗"; badge.title = _error.message; }
             }
         }
         busy = false;

@@ -120,7 +120,9 @@ export async function requestJSON(api, path, body, options = {}) {
     }
     if (!response.ok) {
         const error = new Error(`${context}: ${data?.error || data?.message || "取得に失敗しました。"}`);
-        error.status = response.status; error.code = data?.code; throw error;
+        error.status = response.status; error.code = data?.code;
+        if (typeof data?.existing_name === "string") error.existing_name = data.existing_name;
+        throw error;
     }
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error(`${context}: 無効なAPI応答です。`);
     return data;

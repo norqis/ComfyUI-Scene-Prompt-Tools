@@ -200,6 +200,51 @@ class RealComfyUISmokeTests(unittest.TestCase):
         self.assertNotIn("callback_timeout_seconds", expand["optional"])
         self.assertIn("callback_failure_mode", expand["optional"])
 
+    def test_native_lora_preflight_accepts_separator_alias_and_linked_combo(self):
+        import execution
+        import folder_paths
+        import nodes as comfy_nodes
+
+        class Sink:
+            OUTPUT_NODE = True
+            RETURN_TYPES = ()
+            FUNCTION = "finish"
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"scene_prompt": ("SCENE_PROMPT",)}}
+            def finish(self, scene_prompt):
+                raise AssertionError("Validation must not execute models or load LoRA weights")
+
+        class Combo:
+            RETURN_TYPES = ("COMBO",)
+            FUNCTION = "produce"
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {}}
+            def produce(self):
+                raise AssertionError("Preflight must not execute the linked value")
+
+        lora = self.package.NODE_CLASS_MAPPINGS["SceneApplyLora"]
+        mapping = {"SceneApplyLora": lora, "NativeLoraValidationSink": Sink, "NativeLoraCombo": Combo}
+        original = folder_paths.get_filename_list
+        graph = {"2": {"class_type": "SceneApplyLora", "inputs": {"lora_name": "folder/style.safetensors", "strength_model": 1.0, "strength_clip": 1.0}},
+                 "3": {"class_type": "NativeLoraValidationSink", "inputs": {"scene_prompt": ["2", 0]}}}
+        with mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, mapping), mock.patch.object(folder_paths, "get_filename_list", side_effect=lambda kind: ["folder\\style.safetensors"] if kind == "loras" else original(kind)):
+            def validate():
+                return asyncio.run(execution.validate_prompt("lora-name-validation", graph, None))
+            self.assertTrue(validate()[0])
+            graph["2"]["inputs"]["lora_name"] = "missing.safetensors"
+            self.assertFalse(validate()[0])
+            primitive = comfy_nodes.NODE_CLASS_MAPPINGS["PrimitiveString"]
+            self.assertIn("value", primitive.INPUT_TYPES()["required"])
+            graph["1"] = {"class_type": "PrimitiveString", "inputs": {"value": "folder/style.safetensors"}}
+            graph["2"]["inputs"]["lora_name"] = ["1", 0]
+            self.assertFalse(validate()[0], "STRING to COMBO remains an unsupported typed link")
+            graph["1"] = {"class_type": "NativeLoraCombo", "inputs": {}}
+            self.assertTrue(validate()[0], "compatible linked COMBO is not computed during preflight")
+            graph["2"]["inputs"]["strength_model"] = 101
+            self.assertFalse(validate()[0], "custom LoRA name validation does not disable strength bounds")
+
     def test_scene_model_route_uses_real_graph_builder_links(self):
         apply_model = self.package.NODE_CLASS_MAPPINGS["SceneApplyModel"]()
         apply_lora = self.package.NODE_CLASS_MAPPINGS["SceneApplyLora"]()

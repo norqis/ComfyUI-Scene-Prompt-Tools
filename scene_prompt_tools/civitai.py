@@ -13,7 +13,7 @@ import aiohttp
 import folder_paths
 
 from .llm_service import ServiceError, candidate_identity, MODES
-from .lora_metadata import file_identity, file_signature, file_operation
+from .lora_metadata import canonical_lora_name, file_identity, file_signature, file_operation
 
 SORTS = ("Relevancy", "Highest Rated", "Most Downloaded", "Most Liked", "Most Collected", "Newest")
 _NOT_FOUND = object()
@@ -466,7 +466,7 @@ def _record(root, candidate, name):
     parent.mkdir(parents=True, exist_ok=True)
     path = _relative_target(root, "llm") / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    manifest["-".join(map(str, candidate_identity(candidate)))] = {"sha256": candidate["sha256"], "lora_name": name}
+    manifest["-".join(map(str, candidate_identity(candidate)))] = {"sha256": candidate["sha256"], "lora_name": name.replace("\\", "/")}
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".manifest-")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
@@ -678,6 +678,13 @@ class DownloadAccessError(ServiceError):
         self.code = code
 
 
+class DownloadExistsError(ServiceError):
+    def __init__(self, root, path):
+        super().__init__("既に存在します。再取得しますか？", status=409)
+        self.code = "civitai_file_exists"
+        self.existing_name = path.relative_to(root).as_posix()
+
+
 def _download_headers(url, token):
     parsed = urlsplit(url)
     if token and parsed.scheme == "https" and parsed.hostname in HOSTS and parsed.port in (None, 443) and parsed.username is None and parsed.password is None:
@@ -685,12 +692,19 @@ def _download_headers(url, token):
     return {}
 
 
-async def download(identity, model_mode, host="civitai.red", user_id="default", directory="llm", progress=None):
+async def download(identity, model_mode, host="civitai.red", user_id="default", directory="llm", progress=None, existing_action="reuse", existing_name=""):
     global _DOWNLOAD_LOCK
     host = validate_host(host)
     ids = candidate_identity(identity)
     root = lora_root()
     folder = await _file_io(_relative_target, root, directory)
+    if existing_action not in ("reuse", "ask", "select", "replace"):
+        raise ValueError("Unsupported existing file action.")
+    confirmed = None
+    if existing_action in ("select", "replace"):
+        confirmed = await _file_io(_relative_target, root, existing_name)
+        if confirmed.parent != folder or not await _file_io(confirmed.is_file):
+            raise ValueError("指定された保存先に既存LoRAがありません。")
     token = await _token(user_id)
     if _DOWNLOAD_LOCK is None:
         _DOWNLOAD_LOCK = asyncio.Lock()
@@ -699,7 +713,12 @@ async def download(identity, model_mode, host="civitai.red", user_id="default", 
         candidate = next((item for item in normalize(model, model_mode, host) if candidate_identity(item) == ids), None)
         if candidate is None:
             raise ValueError("Selected LoRA is unavailable or incompatible with this model mode.")
-        name = await _file_io(_existing, candidate, root, await _file_io(_manifest, root), folder)
+        if existing_action == "select":
+            name = canonical_lora_name(confirmed.relative_to(root).as_posix())
+            if not await _file_io(_matching_file, candidate, confirmed):
+                return {"lora_name": name, "candidate": None}
+        else:
+            name = await _file_io(_existing, candidate, root, await _file_io(_manifest, root), folder) if existing_action == "reuse" else ""
         if not name:
             version = next(item for item in model["modelVersions"] if item["id"] == ids[1])
             file = next(item for item in version["files"] if item["id"] == ids[2])
@@ -755,7 +774,13 @@ async def download(identity, model_mode, host="civitai.red", user_id="default", 
                         report()
                         filename = _filename(candidate, response.headers.get("Content-Disposition"))
                         destination = await _file_io(_relative_target, root, (folder / filename).relative_to(root).as_posix())
-                        name = await _file_io(_download_collision, candidate, root, destination)
+                        if existing_action == "replace" and destination != confirmed:
+                            if await _file_io(destination.exists):
+                                raise DownloadExistsError(root, destination)
+                            raise ValueError("取得ファイル名が確認した既存ファイルと一致しません。")
+                        if existing_action == "ask" and await _file_io(destination.exists):
+                            raise DownloadExistsError(root, destination)
+                        name = await _file_io(_download_collision, candidate, root, destination) if existing_action == "reuse" else ""
                         if not name:
                             async for chunk in response.content.iter_chunked(1024 * 1024):
                                 await _file_io(write_chunk, chunk)
@@ -765,7 +790,9 @@ async def download(identity, model_mode, host="civitai.red", user_id="default", 
                 if not name:
                     if digest.hexdigest() != candidate["sha256"]:
                         raise ServiceError("Downloaded LoRA SHA256 does not match the published file.")
-                    name = await _file_io(_download_collision, candidate, root, destination)
+                    if existing_action == "ask" and await _file_io(destination.exists):
+                        raise DownloadExistsError(root, destination)
+                    name = await _file_io(_download_collision, candidate, root, destination) if existing_action == "reuse" else ""
                     if not name:
                         await _file_io(os.replace, temporary, destination)
                         name = destination.relative_to(root).as_posix()
@@ -777,5 +804,6 @@ async def download(identity, model_mode, host="civitai.red", user_id="default", 
         cache = getattr(folder_paths, "filename_list_cache", None)
         if isinstance(cache, dict):
             cache.pop("loras", None)
+        name = canonical_lora_name(name)
         candidate.update(acquired=True, lora_name=name)
         return {"lora_name": name, "candidate": candidate}

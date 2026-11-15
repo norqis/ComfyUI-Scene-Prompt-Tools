@@ -24,6 +24,23 @@ class SceneLoraPromptTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_lora_selection_accepts_separator_aliases_and_defers_linked_values(self):
+        import ntpath
+        metadata = importlib.import_module(self.nodes.__package__ + ".lora_metadata")
+        # Simulate Windows native normalization on every CI platform.
+        with patch.object(metadata.os.path, "normpath", ntpath.normpath), patch.object(sys.modules["folder_paths"], "get_filename_list", return_value=["folder\\原名.safetensors"]):
+            cls = self.nodes.SceneApplyLora
+            self.assertIs(cls.VALIDATE_INPUTS("folder/原名.safetensors"), True)
+            self.assertIs(cls.VALIDATE_INPUTS("folder\\原名.safetensors"), True)
+            self.assertIs(cls.VALIDATE_INPUTS(None), True)
+            self.assertIsInstance(cls.VALIDATE_INPUTS("missing.safetensors"), str)
+            self.assertIsInstance(cls.VALIDATE_INPUTS(123), str)
+            self.assertIsInstance(cls.VALIDATE_INPUTS(""), str)
+            plan = cls().apply_lora("folder/原名.safetensors")[0]
+            self.assertIn("folder\\\\原名.safetensors", json.dumps(plan, ensure_ascii=False))
+        import inspect
+        self.assertEqual(list(inspect.signature(cls.VALIDATE_INPUTS).parameters), ["lora_name"], "strength/type validation remains owned by ComfyUI")
+
     def expand(self, plan, mode="Illustrious", seed=7):
         return self.nodes.ScenePromptExpand().expand(scene_prompt=plan, model_mode=mode,
                                                      seed_base=seed, seed_base_literal=True,

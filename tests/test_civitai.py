@@ -215,9 +215,9 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.assertEqual(first["lora_name"], second["lora_name"])
         self.assertEqual(self.download_calls, 1)
         third = await civitai.download(ids, "Illustrious", directory="a/b")
-        self.assertTrue(third["lora_name"].startswith("a/b/"))
+        self.assertTrue(third["lora_name"].replace("\\", "/").startswith("a/b/"))
         self.assertEqual(self.download_calls, 2)
-        self.assertEqual((await civitai.search("cat", "Illustrious"))["items"][0]["lora_name"], third["lora_name"])
+        self.assertEqual((await civitai.search("cat", "Illustrious"))["items"][0]["lora_name"], third["lora_name"].replace("\\", "/"))
         destination = self.root / third["lora_name"]
         destination.write_bytes(b"keep-existing")
         self.content = b"invalid-new-content"
@@ -523,12 +523,12 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         ]):
             self.download_headers = {"Content-Disposition": header} if header else {}
             result = await civitai.download(ids, "Illustrious", directory=str(index))
-            self.assertEqual(result["lora_name"], str(index) + "/" + expected)
+            self.assertEqual(result["lora_name"], civitai.canonical_lora_name(str(index) + "/" + expected))
             self.assertEqual((self.root / result["lora_name"]).read_bytes(), self.content)
         self.download_headers = {}
         self.version["files"][0]["name"] = "API 衣装 LoRA.safetensors"
         unicode_name = await civitai.download(ids, "Illustrious", directory="unicode-api")
-        self.assertEqual(unicode_name["lora_name"], "unicode-api/API 衣装 LoRA.safetensors")
+        self.assertEqual(unicode_name["lora_name"], civitai.canonical_lora_name("unicode-api/API 衣装 LoRA.safetensors"))
         self.version["files"][0]["name"] = "Original LoRA.safetensors"
         for index, invalid in enumerate(["../bad.safetensors", "a/b.safetensors", "a\\b.safetensors", "CON.safetensors", "COM1.safetensors", "bad?.safetensors", "bad.safetensors ", "bad.safetensors.", "bad.txt"]):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "filename"):
@@ -559,6 +559,44 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             raise RuntimeError("websocket closed")
         self.assertTrue((await civitai.download(identity, "Illustrious", directory="offline-progress", progress=offline))["lora_name"])
 
+    async def test_existing_file_ask_select_replace_and_final_header_authority(self):
+        ids = {"model_id": 1, "version_id": 2, "file_id": 3}
+        folder = self.root / "new"; folder.mkdir()
+        original = folder / "Original LoRA.safetensors"; original.write_bytes(b"different")
+        self.download_headers = {"Content-Disposition": 'attachment; filename="Final.safetensors"'}
+        # The provider's final filename wins over a conflicting predicted API filename.
+        result = await civitai.download(ids, "Illustrious", directory="new", existing_action="ask")
+        self.assertEqual(Path(result["lora_name"]).name, "Final.safetensors")
+        final = folder / "Final.safetensors"
+        with self.assertRaises(civitai.DownloadExistsError) as conflict:
+            await civitai.download(ids, "Illustrious", directory="new", existing_action="ask")
+        self.assertEqual(conflict.exception.status, 409)
+        self.assertEqual(conflict.exception.existing_name, "new/Final.safetensors")
+        calls = self.download_calls
+        selected = await civitai.download(ids, "Illustrious", directory="new", existing_action="select", existing_name="new/Final.safetensors")
+        self.assertTrue(selected["candidate"])
+        self.assertEqual(self.download_calls, calls, "select only never requests binary content")
+        before_manifest = (self.root / "llm/manifest.json").read_bytes()
+        different = await civitai.download(ids, "Illustrious", directory="new", existing_action="select", existing_name="new/Original LoRA.safetensors")
+        self.assertIsNone(different["candidate"])
+        self.assertEqual((self.root / "llm/manifest.json").read_bytes(), before_manifest)
+        self.assertEqual(self.download_calls, calls)
+        final.write_bytes(b"keep")
+        self.content = b"invalid"
+        with self.assertRaisesRegex(civitai.ServiceError, "SHA256"):
+            await civitai.download(ids, "Illustrious", directory="new", existing_action="replace", existing_name="new/Final.safetensors")
+        self.assertEqual(final.read_bytes(), b"keep")
+        self.assertFalse(list(folder.glob("*.part")))
+        self.content = b"safetensors-test-content"
+        await civitai.download(ids, "Illustrious", directory="new", existing_action="replace", existing_name="new/Final.safetensors")
+        self.assertEqual(final.read_bytes(), self.content)
+        with self.assertRaises(civitai.DownloadExistsError):
+            await civitai.download(ids, "Illustrious", directory="new", existing_action="replace", existing_name="new/Original LoRA.safetensors")
+        self.assertEqual(original.read_bytes(), b"different")
+        for action, name in (("unknown", ""), ("select", "../outside"), ("select", "new/missing.safetensors"), ("select", "llm/manifest.json")):
+            with self.subTest(action=action, name=name), self.assertRaises(ValueError):
+                await civitai.download(ids, "Illustrious", directory="new", existing_action=action, existing_name=name)
+
     async def test_original_name_collision_preserves_existing_and_legacy_manifest_reuses_name(self):
         ids = {"model_id": 1, "version_id": 2, "file_id": 3}
         folder = self.root / "llm"; folder.mkdir()
@@ -572,7 +610,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         (folder / "manifest.json").write_text(json.dumps({"1-2-3": {"sha256": self.sha, "lora_name": "llm/" + legacy.name}}), encoding="utf-8")
         before = self.download_calls
         result = await civitai.download(ids, "Illustrious")
-        self.assertEqual(result["lora_name"], "llm/" + legacy.name)
+        self.assertEqual(result["lora_name"], civitai.canonical_lora_name("llm/" + legacy.name))
         self.assertEqual(self.download_calls, before)
         self.assertFalse(path.exists())
 
@@ -593,7 +631,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
     async def test_download_safe_path_atomic_hash_dedup_and_incompatible(self):
         identity = {"model_id": 1, "version_id": 2, "file_id": 3}
         result = await civitai.download(identity, "Illustrious")
-        self.assertEqual(result["lora_name"], "llm/Original LoRA.safetensors")
+        self.assertEqual(result["lora_name"], civitai.canonical_lora_name("llm/Original LoRA.safetensors"))
         self.assertEqual((self.root / result["lora_name"]).read_bytes(), self.content)
         self.assertNotIn("loras", folder_paths.filename_list_cache)
         await civitai.download(identity, "Illustrious")

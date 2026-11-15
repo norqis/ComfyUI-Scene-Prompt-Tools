@@ -736,10 +736,10 @@ def define_routes():
                 if isinstance(client_id, str) and client_id and isinstance(download_id, str) and download_id:
                     def progress(received, total):
                         PromptServer.instance.send_sync("scene_prompt_civitai_download_progress", {"download_id": download_id, "received": received, "total": total}, sid=client_id)
-                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"), user_id=_request_user_id(request), directory=payload.get("directory", "llm"), progress=progress)
+                result = await download(payload, payload.get("model_mode"), host=payload.get("host", "civitai.red"), user_id=_request_user_id(request), directory=payload.get("directory", "llm"), progress=progress, existing_action=payload.get("existing_action", "reuse"), existing_name=payload.get("existing_name", ""))
             return web.json_response(result)
         except ServiceError as exc:
-            return web.json_response({"error": str(exc), **({"code": exc.code} if hasattr(exc, "code") else {})}, status=exc.status)
+            return web.json_response({"error": str(exc), **({"code": exc.code} if hasattr(exc, "code") else {}), **({"existing_name": exc.existing_name} if hasattr(exc, "existing_name") else {})}, status=exc.status)
         except (ValueError, TypeError, KeyError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except OSError:

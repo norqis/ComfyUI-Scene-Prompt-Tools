@@ -145,6 +145,10 @@ export function injectStyle() {
         .pc-button:hover {
             background: #373d47;
         }
+        .pc-lora-dialog .pc-button:disabled, .pc-lora-dialog .pc-button:disabled:hover,
+        .pc-civitai-directory input:disabled {
+            background: #303238; border-color: #4a4d53; color: #858993; cursor: default; opacity: .65;
+        }
         .pc-button.pc-danger {
             background: #4a2026;
             border-color: #a34e5a;
