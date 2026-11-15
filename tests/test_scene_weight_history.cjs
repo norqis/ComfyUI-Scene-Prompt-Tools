@@ -84,11 +84,18 @@ async function main() {
         const { app, graph, workflow, before, args } = setup(), identities = graph.nodes.slice(), target = clone(before);
         edit(target, 0, 'positive_json', selection(1.3)); edit(target, 1, 'negative_json', selection(1.4));
         edit(target, 2, 'matrix_json', '{"version":1,"sets":[{"name":"new"}]}'); target.nodes[0].size = [400, 320];
+        const visits = new Map(), shared = new Map([[identities[0], [identities[1], identities[2]]], [identities[1], [identities[2]]]]);
+        context.downstreamNodes = node => { visits.set(node, (visits.get(node) || 0) + 1); return shared.get(node) || []; };
+        context.isRerouteNode = () => false; context.isPromptMatrixNode = () => false;
+        context.isScenePromptSourceNode = () => true; context.isSceneExpandNode = () => false;
+        vm.runInContext(extract('collectDownstreamSceneNodes'), context);
         assert.equal(await app.loadGraphData(...args(target)), true);
         assert.equal(app.fullLoads, 0); assert.deepEqual(graph.nodes, identities);
+        assert.equal(visits.size, 3); assert([...visits.values()].every(count => count === 1), 'all changed nodes share one downstream traversal');
         assert.deepEqual(graph.serialize(), target); assert.equal(workflow.changeTracker.activeState, target);
         assert.equal(await app.loadGraphData(...args(before)), true);
         assert.equal(app.fullLoads, 0); assert.deepEqual(graph.serialize(), before);
+        context.collectDownstreamSceneNodes = () => {};
     }
     {
         const x = setup(), target = clone(x.before); edit(target, 0, 'positive_json', selection(2));

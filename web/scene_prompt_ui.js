@@ -11206,7 +11206,7 @@ function restoreSceneSelectionHistory(args) {
     if (!sceneHistoryEqual(live, tracker.activeState)) return false;
     const plan = sceneSelectionHistoryPlan(graph, live, target);
     if (!plan || plan.some(({ node }) => popupContextReferencesNode(activePopupContext, node))) return false;
-    const targets = new Set();
+    const targets = new Set(), seen = new Set();
     for (const { node, edits, size, matrix } of plan) {
         for (const { widget, value, liveSlot } of edits) {
             widget.value = value;
@@ -11215,7 +11215,7 @@ function restoreSceneSelectionHistory(args) {
         if (matrix) node.properties.scene_matrix_json = edits[0].value;
         node.size[0] = size[0]; node.size[1] = size[1];
         targets.add(node);
-        collectDownstreamSceneNodes(node, targets);
+        collectDownstreamSceneNodes(node, targets, seen);
     }
     for (const node of targets) {
         clearSceneFitHeightTimer(node);
