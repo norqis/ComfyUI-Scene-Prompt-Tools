@@ -1502,23 +1502,26 @@ try {
     await loraPicker.getByRole("searchbox", { name: "パス・取得済みCivitai名で検索" }).fill("style.safetensors");
     await loraPicker.locator(".pc-lora-select").click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("scene_prompt_lora_names_v1") || "[]").some((entry) => entry.title === "Civitai Style"));
-    for (const target of ["top", "bottom", "left", "right", "gap", "Enter", "Space"]) {
+    for (const target of ["top", "bottom", "left", "right", "gap", "badge", "Enter", "Space"]) {
         await page.evaluate(() => window.__sceneLoraTestNode.widgets.find(widget => widget.sceneRole === "lora_select").callback());
         const row = loraPicker.locator(".pc-lora-row").filter({ hasText: "folder/other.safetensors" });
         await row.waitFor();
         if (target === "Enter" || target === "Space") {
             await row.locator(".pc-lora-select").press(target);
+        } else if (target === "badge") {
+            assert.equal(await row.locator(".pc-lora-base-model").evaluate(node => node.tagName === "SPAN" && !node.hasAttribute("tabindex")), true);
+            await row.locator(".pc-lora-base-model").click();
         } else {
             const point = await row.evaluate((row, target) => {
                 const box = row.getBoundingClientRect();
                 const select = row.querySelector(".pc-lora-select").getBoundingClientRect();
-                const source = row.querySelector(".pc-lora-source").getBoundingClientRect();
+                const metadata = row.querySelector(".pc-lora-metadata").getBoundingClientRect();
                 const points = {
                     top: [box.x + box.width / 2, box.y + 3],
                     bottom: [box.x + box.width / 2, box.bottom - 3],
                     left: [box.x + 3, box.y + box.height / 2],
                     right: [box.right - 3, box.y + box.height / 2],
-                    gap: [(select.right + source.left) / 2, box.y + box.height / 2],
+                    gap: [(select.right + metadata.left) / 2, box.y + box.height / 2],
                 };
                 const [x, y] = points[target];
                 return { x, y, isRow: document.elementFromPoint(x, y) === row };
