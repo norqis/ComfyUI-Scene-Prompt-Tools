@@ -205,7 +205,7 @@ export const api = {
     if (url.includes("/scene_prompt/items")) payload = { items: promptItems };
     if (url === "/scene_prompt/loras/list") payload = loraCatalog;
     if (url.startsWith("/scene_prompt/loras/info?")) payload = {
-      name: decodeURIComponent(url.split("name=")[1] || ""), sha256: "A".repeat(64), trigger_phrases: ["Local Tag", "BELLE ZZZ"],
+      name: decodeURIComponent(url.split("name=")[1] || ""), sha256: window.__sceneLoraHashes?.[decodeURIComponent(url.split("name=")[1] || "")] || "A".repeat(64), trigger_phrases: ["Local Tag", "BELLE ZZZ"],
       size: loraCatalog.find((item) => url.includes(encodeURIComponent(item.path)))?.size,
       mtime_ns: window.__sceneLoraInfoVersionOverride ?? loraCatalog.find((item) => url.includes(encodeURIComponent(item.path)))?.mtime_ns,
     };
@@ -1869,6 +1869,7 @@ try {
     await page.getByRole("dialog", { name: "LoRA 詳細確認" }).waitFor({ state: "hidden" });
     assert.equal(await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((entry) => entry.name === "positive").value), positiveBeforeStaleDetails,
         "a stale LoRA cannot expose Trigger Words to inject into the new selection");
+    await (await import("./scene_lora_model_filter.mjs")).verifyLoraModelFilter(page);
     await page.evaluate(() => window.__scenePromptTestNode.widgets.find((widget) => widget.sceneRole === "positive_open").callback());
     await page.evaluate(() => window.__sceneLoraTestNode.widgets.find((widget) => widget.sceneRole === "lora_details").callback());
     await loraDialog.waitFor();

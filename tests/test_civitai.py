@@ -62,6 +62,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.hash_raw = False
         self.hash_requests = []
         self.api_requests = []
+        self.preview_images = None
         self.hash_result = {"id": 2, "modelId": 1, "name": "version", "model": {"name": "cat", "description": "private provider body"},
                             "trainedWords": ["cat"], "files": [{"downloadUrl": "secret URL"}]}
 
@@ -94,7 +95,9 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         if request.path == "/api/v1/enums":
             return web.json_response({"ModelType": ["Checkpoint", "LORA", "CLIP"]})
         if request.path == "/api/v1/images":
-            return web.json_response({"items": [{"id": 7, "modelVersionId": 2, "url": "https://image.civitai.com/hash/7.jpeg", "nsfw": False, "nsfwLevel": 1, "meta": {"prompt": "REST"}}]})
+            self.assertEqual(request.query.get("browsingLevel"),"31")
+            self.assertNotIn("nsfw",request.query)
+            return web.json_response({"items": self.preview_images if self.preview_images is not None else [{"id": 7, "modelVersionId": 2, "url": "https://image.civitai.com/hash/7.jpeg", "nsfw": False, "nsfwLevel": 1, "meta": {"prompt": "REST"}}]})
         if request.path == "/api/generation/data":
             return web.json_response({"params": {"prompt": "generated"}})
         if request.path == "/api/v1/tags":
@@ -368,7 +371,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.assertEqual(item["published_at"], "2026-08-02")
         self.assertEqual(item["model_stats"], {"downloadCount": 90})
         self.assertEqual(item["version_stats"], {"downloadCount": 12})
-        self.assertEqual(item["gallery"], [{"url": "first", "width": 600, "height": 800}, {"url": "second", "width": 900, "height": 600}])
+        self.assertEqual(item["gallery"], [{"url": "first", "width": 600, "height": 800}, {"url": "hidden", "width": None, "height": None}, {"url": "second", "width": 900, "height": 600}, {"url": "hidden2", "width": None, "height": None}])
         self.assertEqual(item["image_url"], "first")
         self.model["stats"]["unusedFutureField"] = "ignored"
         self.assertEqual(civitai.normalize(self.model, "Illustrious")[0]["model_stats"]["unusedFutureField"], "ignored")
@@ -487,6 +490,27 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.hash_status=401
         with self.assertRaises(civitai.DownloadAccessError):await civitai.by_hash(self.sha)
         self.assertEqual(len(self.hash_requests),1,"real HTTP 401 is exposed without host fallback")
+
+    async def test_all_ratings_keep_stills_and_selected_authenticated_host_without_fallback(self):
+        images=[{"id": index+7,"url":f"https://image.civitai.com/fake/{index+7}.jpeg","nsfw":level>1,"nsfwLevel":level,"browsingLevel":level} for index,level in enumerate([1,2,4,8,16])]
+        self.version["images"]=images+[{"id":99,"url":"video","type":"video"}]
+        self.preview_images=self.version["images"]
+        for host in ("civitai.red","civitai.com"):
+            self.api_requests.clear()
+            with mock.patch.object(civitai,"api_origin",side_effect=lambda actual:self.origin if actual==host else self.fail("switched host")):
+                self.assertEqual(len((await civitai.search("cat","Illustrious",host=host))["items"][0]["gallery"]),5)
+                self.assertEqual(len((await civitai.details(1,2,host))["gallery"]),5)
+                self.assertEqual(len((await civitai.gallery(2,host))["items"]),5)
+                for image_id in range(7,12): self.assertEqual((await civitai.image_details(image_id,host))["image"]["id"],image_id)
+            self.assertTrue(all(auth=="Bearer fixture-search-key" for _,auth in self.api_requests))
+        async def denied(path,params=None,**kwargs):
+            self.assertEqual(kwargs["host"],"civitai.red")
+            raise civitai.DownloadAccessError("fixture auth")
+        with mock.patch.object(civitai,"api_get",side_effect=denied) as get:
+            for function,args in ((civitai.details,(1,2)),(civitai.gallery,(2,)),(civitai.image_details,(7,))):
+                get.reset_mock()
+                with self.assertRaises(civitai.DownloadAccessError):await function(*args,host="civitai.red")
+                self.assertEqual(get.await_count,1)
 
     async def test_final_download_filename_headers_unicode_and_invalid_names(self):
         from urllib.parse import quote

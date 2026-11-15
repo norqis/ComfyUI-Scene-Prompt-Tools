@@ -635,11 +635,14 @@ export function injectStyle() {
         .pc-resource-card.pc-resource-unapplied .pc-button, .pc-resource-card.pc-resource-unapplied a { color: #aab1bb; }
         .pc-resource-card .pc-button { justify-self: start; }
         .pc-lora-picker { width: min(660px, calc(100vw - 24px)); display: flex; flex-direction: column; }
-        .pc-lora-search {
-            box-sizing: border-box; width: 100%; margin: 12px 0 8px; padding: 9px 11px;
+        .pc-lora-filters { display: flex; gap: 8px; margin: 12px 0 8px; min-width: 0; }
+        .pc-lora-search, .pc-lora-model-filter {
+            box-sizing: border-box; min-width: 0; padding: 9px 11px;
             border: 1px solid #596271; border-radius: 5px; background: #151a21; color: #f3f5f9;
             font: inherit;
         }
+        .pc-lora-search { flex: 1; }
+        .pc-lora-model-filter { max-width: 45%; }
         .pc-lora-list { min-height: 80px; overflow-y: auto; display: grid; align-content: start; gap: 5px; }
         .pc-lora-row {
             display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; align-items: center;

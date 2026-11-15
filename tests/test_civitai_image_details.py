@@ -18,11 +18,9 @@ class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
         return {"id": 7, "url": "https://image.civitai.com/example/7.jpeg", "nsfw": False, "nsfwLevel": 1, **fields}
 
     def test_preview_gate_and_trusted_filename_identity(self):
-        for level in (0, 1, "None"):
-            self.assertEqual(civitai.normalize_preview(self.preview(nsfwLevel=level))["id"], 7)
-        for fields in ({"nsfw": True}, {"type": "video"}, {"nsfwLevel": 2}, {"nsfwLevel": "Soft"},
-                       {"nsfwLevel": True}, {"browsingLevel": 2}, {"browsingLevel": True}):
-            self.assertIsNone(civitai.normalize_preview(self.preview(**fields)))
+        for level in (0, 1, 2, 4, 8, 16, "None", "Soft", "Mature", "X", "XXX"):
+            self.assertEqual(civitai.normalize_preview(self.preview(nsfw=True, nsfwLevel=level, browsingLevel=31))["id"], 7)
+        self.assertIsNone(civitai.normalize_preview(self.preview(type="video")))
         self.assertEqual(civitai.normalize_preview({"url": "https://image.civitai.com/hash/123.jpeg"})["id"], 123)
         for url in ("https://example.com/123.jpeg", "https://image.civitai.com.evil/123.jpeg", "https://image.civitai.com/hash/preview.jpeg"):
             self.assertNotIn("id", civitai.normalize_preview({"url": url, "meta": {"prompt": "kept"}}))
@@ -34,9 +32,9 @@ class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
                     "metadata": {"nextCursor": "next cursor"}}
         with mock.patch.object(civitai, "api_get", return_value=response) as get:
             result = await civitai.gallery(22, host="civitai.com", cursor="page")
-        self.assertEqual([image["id"] for image in result["items"]], [7, 11])
+        self.assertEqual([image["id"] for image in result["items"]], [7, 10, 11])
         self.assertEqual(result["next_cursor"], "next cursor")
-        get.assert_awaited_once_with("/api/v1/images", {"modelVersionId": 22, "nsfw": "false", "type": "image", "cursor": "page"}, host="civitai.com", token="fixture-search-key")
+        get.assert_awaited_once_with("/api/v1/images", {"modelVersionId": 22, "browsingLevel": "31", "type": "image", "cursor": "page"}, host="civitai.com", token="fixture-search-key")
 
     async def test_presentation_accepts_fileless_models_without_local_inventory_or_hash(self):
         model = {"id": 1, "name": "Model", "type": "Checkpoint", "modelVersions": [{"id": 2, "name": "Version", "images": [self.preview()]}]}
@@ -70,7 +68,7 @@ class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await civitai.details(1, 2))["updated_at"], "2026-01-01T00:00:00Z"); site.assert_not_called()
 
     async def test_image_gate_precedes_generation_data(self):
-        for image in (self.preview(id=8), self.preview(nsfw=True), self.preview(type="video"), self.preview(nsfwLevel="Soft")):
+        for image in (self.preview(id=8), self.preview(type="video")):
             with self.subTest(image=image), mock.patch.object(civitai, "api_get", return_value={"items": [image]}) as get:
                 with self.assertRaises(civitai.ServiceError):
                     await civitai.image_details(7)
