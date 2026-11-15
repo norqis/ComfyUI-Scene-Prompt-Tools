@@ -1984,6 +1984,7 @@ function formatCategoryCount(counts) {
 }
 
 function setItemChecked(node, item, checked, options = {}) {
+    flushSceneWeightDraft();
     const stateWidgetName = popupStateWidgetName(node, options);
     const state = readStateFromWidget(node, stateWidgetName);
     const category = itemCategoryKey(item);
@@ -2130,6 +2131,7 @@ function writeItemPartSelections(node, item, selections, options = {}) {
 }
 
 function setItemPartChecked(node, item, part, checked, options = {}) {
+    flushSceneWeightDraft();
     const stateWidgetName = popupStateWidgetName(node, options);
     const selectedItem = selectedItemFor(readStateFromWidget(node, stateWidgetName), item);
     const selections = partSelectionsForItem(item, selectedItem).map((selection) => {
@@ -2154,6 +2156,7 @@ function setItemPartWeight(node, item, part, value, options = {}) {
 }
 
 function setAllItemParts(node, item, checked, options = {}) {
+    flushSceneWeightDraft();
     const stateWidgetName = popupStateWidgetName(node, options);
     const selectedItem = selectedItemFor(readStateFromWidget(node, stateWidgetName), item);
     const selections = partSelectionsForItem(item, selectedItem).map((selection) => ({
@@ -2232,6 +2235,7 @@ function readPopupSelectionState(node, stateWidgetName, data) {
 }
 
 function closePopup(options = {}) {
+    flushSceneWeightDraft(activePopup);
     if (activePopup) {
         cancelPopupRendering(activePopup);
         const closingContext = activePopupContext;
@@ -2749,11 +2753,45 @@ function appendSearchPathRow(container, node, items, state, path, options = {}) 
     return row;
 }
 
+function flushSceneWeightDraft(container = null) {
+    const input = document.activeElement;
+    if (!container || container.contains(input)) input?.sceneCommitWeight?.();
+}
+
+function bindSceneWeightDraft(input, commit) {
+    let saved = input.value;
+    let dirty = false;
+    input.addEventListener("focus", () => { if (!dirty) saved = input.value; });
+    input.addEventListener("input", () => { dirty = true; });
+    input.sceneCommitWeight = () => {
+        if (!dirty) return;
+        dirty = false;
+        const value = input.value.trim();
+        if (!value || !Number.isFinite(Number(value))) {
+            input.value = saved;
+            return;
+        }
+        const normalized = formatWeight(Number(value));
+        input.value = normalized;
+        if (normalized === saved) return;
+        try {
+            // Mark clean before committing: the callback may replace this DOM.
+            commit(normalized);
+            saved = normalized;
+            input.setCustomValidity("");
+        } catch (error) {
+            input.value = saved;
+            showSceneBatchError("強度を保存できませんでした。", error);
+        }
+    };
+    input.addEventListener("change", input.sceneCommitWeight);
+    input.addEventListener("blur", input.sceneCommitWeight);
+}
+
 function createWeightControl(node, item, selectedItem, onUpdate, options = {}) {
     const stateWidgetName = popupStateWidgetName(node, options);
     const wrap = document.createElement("div");
     wrap.className = `pc-weight-control ${options.className || ""}`.trim();
-
     const input = document.createElement("input");
     input.className = "pc-weight-input";
     input.type = "number";
@@ -2762,41 +2800,14 @@ function createWeightControl(node, item, selectedItem, onUpdate, options = {}) {
     input.disabled = !!options.disabled;
     input.setAttribute("aria-label", "強度");
     input.title = "1 is normal. Non-1 values output as (prompt:1.5).";
-
-    const stop = (event) => {
-        event.stopPropagation();
-    };
-    input.addEventListener("click", stop);
-    input.addEventListener("mousedown", stop);
-    input.addEventListener("pointerdown", stop);
-    input.addEventListener("keydown", stop);
-    const storeWeight = (options = {}) => {
-        try {
-            const updated = setItemWeight(node, item, input.value, { stateWidgetName });
-            input.setCustomValidity("");
-            if (options.normalize) {
-                input.value = formatWeight(itemWeight(updated));
-            }
-            if (options.notify) {
-                onUpdate?.();
-            }
-            if (options.commit) {
-                matrixLineDraftContextFor(node, stateWidgetName)?.commitDrafts?.();
-            }
-        } catch (error) {
-            input.setCustomValidity(error?.message || "強度を保存できませんでした。");
-            input.reportValidity?.();
-            showSceneBatchError("強度を保存できませんでした。", error);
-        }
-    };
-    input.addEventListener("input", () => {
-        if (Number.isFinite(Number.parseFloat(String(input.value).trim()))) {
-            storeWeight();
-        }
+    for (const type of ["click", "mousedown", "pointerdown", "keydown"]) {
+        input.addEventListener(type, (event) => event.stopPropagation());
+    }
+    bindSceneWeightDraft(input, (value) => {
+        setItemWeight(node, item, value, { stateWidgetName });
+        matrixLineDraftContextFor(node, stateWidgetName)?.commitDrafts?.();
+        onUpdate?.();
     });
-    input.addEventListener("change", () => storeWeight({ normalize: true, notify: true, commit: true }));
-    input.addEventListener("blur", () => storeWeight({ normalize: true, commit: true }));
-
     wrap.appendChild(input);
     wrap.sceneWeightInput = input;
     return wrap;
@@ -2811,37 +2822,10 @@ function createPartWeightInput(value, disabled, onChange) {
     input.disabled = !!disabled;
     input.setAttribute("aria-label", "強度");
     input.title = "1が通常。1以外は生成時に(prompt:1.5)として出力します。";
-    input.addEventListener("click", (event) => event.stopPropagation());
-    input.addEventListener("mousedown", (event) => event.stopPropagation());
-    input.addEventListener("pointerdown", (event) => event.stopPropagation());
-    input.addEventListener("keydown", (event) => event.stopPropagation());
-    const applyWeight = (options = {}) => {
-        try {
-            onChange(input.value, options);
-            input.setCustomValidity("");
-            return true;
-        } catch (error) {
-            input.setCustomValidity(error?.message || "強度を保存できませんでした。");
-            input.reportValidity?.();
-            showSceneBatchError("強度を保存できませんでした。", error);
-            return false;
-        }
-    };
-    input.addEventListener("input", () => {
-        if (Number.isFinite(Number.parseFloat(String(input.value).trim()))) {
-            applyWeight({ notify: false });
-        }
-    });
-    input.addEventListener("change", () => {
-        if (applyWeight({ notify: true })) {
-            input.value = formatWeight(input.value);
-        }
-    });
-    input.addEventListener("blur", () => {
-        if (applyWeight({ notify: false })) {
-            input.value = formatWeight(input.value);
-        }
-    });
+    for (const type of ["click", "mousedown", "pointerdown", "keydown"]) {
+        input.addEventListener(type, (event) => event.stopPropagation());
+    }
+    bindSceneWeightDraft(input, (weight) => onChange(weight, { notify: true }));
     return input;
 }
 
@@ -2896,6 +2880,7 @@ async function openItemPartPopup(node, item, backHandler = null, options = {}) {
     popup.appendChild(list);
 
     const renderParts = () => {
+        flushSceneWeightDraft(list);
         const selectedItem = selectedItemFor(readStateFromWidget(node, stateWidgetName), item);
         const selections = partSelectionsForItem(item, selectedItem);
         list.innerHTML = "";
@@ -3752,6 +3737,7 @@ async function openPromptCandidatePopup(node, path, options = {}) {
     rememberPopupScroll(session, popupListScrollKey("candidates", path), list);
 
     const renderList = () => {
+        flushSceneWeightDraft(list);
         cancelPopupListRender(popup);
         const state = readPopupSelectionState(node, stateWidgetName, data);
         if (!state) {
@@ -3843,6 +3829,7 @@ async function openSelectedPopup(node, options = {}) {
     rememberPopupScroll(session, "selected", list);
 
     const renderSelected = () => {
+        flushSceneWeightDraft(list);
         const state = readPopupSelectionState(node, stateWidgetName, data);
         if (!state) {
             return;
@@ -3920,6 +3907,7 @@ async function openSavedPromptDetailPopup(node, savedPrompt, options = {}) {
     rememberPopupScroll(session, `selected:${session.selected.detailId}`, list);
 
     const renderItems = () => {
+        flushSceneWeightDraft(list);
         const selected = selectedKeys(readStateFromWidget(node, stateWidgetName));
         list.innerHTML = "";
         appendBackButton(list, "←戻る", () => openSelectedPopup(node, { stateWidgetName, popupSession: session }));
@@ -3979,6 +3967,7 @@ async function openSearchPopup(node, options = {}) {
     rememberPopupScroll(session, mode, list);
 
     const renderResults = () => {
+        flushSceneWeightDraft(list);
         cancelPopupListRender(popup);
         const state = readPopupSelectionState(node, stateWidgetName, data);
         if (!state) {
@@ -9807,6 +9796,7 @@ function installScenePresetSwitchBindings() {
     if (typeof app.graphToPrompt !== "function" || app.graphToPrompt.scenePresetSwitchBindings) return;
     const original = app.graphToPrompt;
     app.graphToPrompt = async function (...args) {
+        flushSceneWeightDraft();
         commitActiveMatrixLineDraft();
         const bindings = new Map((this.graph?._nodes || [])
             .filter((node) => ["ScenePresetInput", "ScenePromptCounter", "ScenePromptRandomRoute"].includes(nodeClassName(node)))
@@ -11148,12 +11138,112 @@ function scheduleScenePromptQueueSyncInstall() {
     installSceneBatchPromptCapture();
 }
 
+function sceneHistoryEqual(left, right) {
+    if (Object.is(left, right)) return true;
+    if (!left || !right || typeof left !== "object" || typeof right !== "object"
+        || Array.isArray(left) !== Array.isArray(right)) return false;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length
+        && keys.every((key) => Object.hasOwn(right, key) && sceneHistoryEqual(left[key], right[key]));
+}
+
+function sceneSelectionHistoryPlan(graph, before, target) {
+    if (!Array.isArray(before?.nodes) || !Array.isArray(target?.nodes)
+        || before.nodes.length !== target.nodes.length
+        || before.definitions?.subgraphs?.length || target.definitions?.subgraphs?.length
+        || !sceneHistoryEqual(before, { ...target, nodes: before.nodes })) return null;
+    const plan = [];
+    for (let index = 0; index < before.nodes.length; index++) {
+        const previous = before.nodes[index], next = target.nodes[index];
+        if (sceneHistoryEqual(previous, next)) continue;
+        const names = previous.type === "ScenePrompter" ? SCENE_PROMPT_SERIALIZED_WIDGET_NAMES
+            : previous.type === "SceneApplyLora" ? SCENE_LORA_STORED_WIDGET_NAMES
+                : previous.type === "SceneMatrix" ? ["matrix_json", "run_handle"] : null;
+        if (!names || previous.id !== next.id || previous.type !== next.type
+            || previous.widgets_values?.length !== names.length || next.widgets_values?.length !== names.length
+            || !previous.widgets_values_named || !next.widgets_values_named) return null;
+        const node = graph.getNodeById(previous.id);
+        if (!node || node.graph !== graph || nodeClassName(node) !== previous.type) return null;
+        const values = [...next.widgets_values], named = { ...next.widgets_values_named }, edits = [];
+        for (const name of previous.type === "SceneMatrix" ? ["matrix_json"] : ["positive_json", "negative_json"]) {
+            const slot = names.indexOf(name);
+            const oldValue = previous.widgets_values[slot], value = next.widgets_values[slot];
+            if (typeof oldValue !== "string" || typeof value !== "string"
+                || previous.widgets_values_named[name] !== oldValue || next.widgets_values_named[name] !== value) return null;
+            if (oldValue === value) continue;
+            const widget = findWidget(node, name);
+            if (!widget || widget.value !== oldValue || node.inputs?.some((input) => input.name === name && input.link != null)) return null;
+            // Validate the same serialized schema the normal node refresh consumes.
+            if (name === "matrix_json") parseMatrixState(value);
+            else parseSelectionState(value);
+            edits.push({ widget, value, liveSlot: node.widgets.indexOf(widget) });
+            values[slot] = oldValue;
+            named[name] = oldValue;
+        }
+        if (!edits.length || !Array.isArray(next.size) || next.size.length !== 2) return null;
+        let properties = next.properties;
+        if (previous.type === "SceneMatrix") {
+            if (previous.properties?.scene_matrix_json !== previous.widgets_values[0]
+                || next.properties?.scene_matrix_json !== next.widgets_values[0]) return null;
+            properties = { ...next.properties, scene_matrix_json: previous.properties.scene_matrix_json };
+        }
+        if (!sceneHistoryEqual(previous, { ...next, widgets_values: values, widgets_values_named: named,
+            properties, size: previous.size })) return null;
+        plan.push({ node, edits, size: next.size, matrix: previous.type === "SceneMatrix" });
+    }
+    return plan.length ? plan : null;
+}
+
+function restoreSceneSelectionHistory(args) {
+    const [target, clean, restoreView, workflow, options] = args;
+    const current = sceneActiveWorkflow(), tracker = current?.changeTracker, graph = app.rootGraph;
+    if (args.length !== 5 || !current || workflow?.changeTracker !== tracker || !sceneWorkflowsMatch(workflow, current) || !sceneWorkflowsMatch(tracker?.workflow, current)
+        || tracker._restoringState !== true || clean !== false || restoreView !== false
+        || !graph || app.graph !== graph || app.canvas?.graph !== graph || graph.subgraphs?.size
+        || !sceneHistoryEqual(options, { checkForRerouteMigration: false, silentAssetErrors: true })) return false;
+    // Native ChangeTracker snapshots use JSON serialization (undefined fields disappear).
+    const live = JSON.parse(JSON.stringify(graph.serialize()));
+    if (!sceneHistoryEqual(live, tracker.activeState)) return false;
+    const plan = sceneSelectionHistoryPlan(graph, live, target);
+    if (!plan || plan.some(({ node }) => popupContextReferencesNode(activePopupContext, node))) return false;
+    const targets = new Set(), seen = new Set();
+    for (const { node, edits, size, matrix } of plan) {
+        for (const { widget, value, liveSlot } of edits) {
+            widget.value = value;
+            if (Array.isArray(node.widgets_values)) node.widgets_values[liveSlot] = value;
+        }
+        if (matrix) node.properties.scene_matrix_json = edits[0].value;
+        node.size[0] = size[0]; node.size[1] = size[1];
+        targets.add(node);
+        collectDownstreamSceneNodes(node, targets, seen);
+    }
+    for (const node of targets) {
+        clearSceneFitHeightTimer(node);
+        clearTimeout(node.sceneRefreshTimer);
+        node.sceneRefreshTimer = null;
+        node.scenePendingRefreshOptions = null;
+        clearSceneComputedCaches(node);
+    }
+    for (const node of targets) {
+        if (isScenePromptQueueNode(node)) syncSceneQueueControls(node);
+        refreshNode(node, { fitHeight: false });
+    }
+    if (!sceneHistoryEqual(JSON.parse(JSON.stringify(graph.serialize())), target)) return false;
+    tracker.activeState = target;
+    return true;
+}
+
 function installSceneWorkflowLoadGuard() {
     if (app.__ScenePromptWorkflowLoadGuardInstalled || typeof app.loadGraphData !== "function") {
         return;
     }
     const originalLoadGraphData = app.loadGraphData.bind(app);
     app.loadGraphData = async function (...args) {
+        try {
+            if (restoreSceneSelectionHistory(args)) return true;
+        } catch (_error) {
+            // The original loader also repairs any partially applied restore.
+        }
         sceneWorkflowLoadDepth += 1;
         let loaded = false;
         try {
@@ -12174,6 +12264,7 @@ function openSceneMatrixLinesPopup(node) {
     toolbar.appendChild(addPreset);
 
     const renderRows = () => {
+        flushSceneWeightDraft(list);
         list.textContent = "";
         drafts.forEach((draft, index) => {
             const row = document.createElement("div");

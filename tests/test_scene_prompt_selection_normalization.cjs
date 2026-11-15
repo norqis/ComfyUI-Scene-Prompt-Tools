@@ -22,6 +22,7 @@ function functionSource(name) {
 
 const writes = [];
 const context = {
+    flushSceneWeightDraft() {},
     Number,
     Object,
     String,
@@ -236,6 +237,7 @@ for (const parts of [
 
 const partWrites = [];
 const partContext = {
+    flushSceneWeightDraft() {},
     Number,
     Object,
     String,
