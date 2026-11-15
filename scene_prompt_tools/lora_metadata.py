@@ -75,8 +75,13 @@ def _read_metadata(stream):
     return metadata if isinstance(metadata, dict) else {}
 
 
+def canonical_lora_name(name):
+    return os.path.normpath(str(name or "").replace("\\", "/"))
+
+
 def read_lora_info(name):
     """Resolve an actual ComfyUI LoRA selection, then read its header and hash."""
+    name = canonical_lora_name(name)
     while True:
         if not name or name not in folder_paths.get_filename_list("loras"):
             raise ValueError("Select an available LoRA.")

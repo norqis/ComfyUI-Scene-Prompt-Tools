@@ -308,6 +308,15 @@ class FileMetadataMemoryTests(unittest.TestCase):
         self.catalogs["loras"][name] = str(path)
         return path
 
+    def test_lora_info_normalizes_old_separator_aliases(self):
+        import ntpath
+        path = self.write_lora("alias.safetensors")
+        self.catalogs["loras"] = {"folder\\alias.safetensors": str(path)}
+        with mock.patch.object(self.metadata.os.path, "normpath", ntpath.normpath):
+            info = self.metadata.read_lora_info("folder/alias.safetensors")
+            self.assertEqual(info["name"], "folder\\alias.safetensors")
+            self.assertEqual(info["trigger_phrases"], ["trigger"])
+
     def hash_reader(self, kind, path, alias=False):
         name = "alias.safetensors" if alias else path.name
         if kind == "metadata":

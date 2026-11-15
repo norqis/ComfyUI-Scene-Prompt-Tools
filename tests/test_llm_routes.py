@@ -69,6 +69,15 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                             response = await registered[("POST", "/scene_prompt/civitai/download")](request)
                         self.assertEqual(response["status"], 200)
                         self.assertEqual(events, [("scene_prompt_civitai_download_progress", {"download_id": download_id, "received": 3, "total": 10}, client_id)] if client_id and download_id else [])
+                    request.payload = {"model_mode": "Illustrious", "directory": "a", "existing_action": "select", "existing_name": "a/existing.safetensors"}
+                    conflict = civitai.DownloadExistsError(Path("root"), Path("root/a/existing.safetensors"))
+                    with mock.patch.object(civitai, "download", side_effect=conflict) as transfer:
+                        response = await registered[("POST", "/scene_prompt/civitai/download")](request)
+                    self.assertEqual(response["status"], 409)
+                    self.assertEqual(response["payload"]["code"], "civitai_file_exists")
+                    self.assertEqual(response["payload"]["existing_name"], "a/existing.safetensors")
+                    self.assertEqual(transfer.await_args.kwargs["existing_action"], "select")
+                    self.assertEqual(transfer.await_args.kwargs["existing_name"], "a/existing.safetensors")
                     request.payload = []
                     response = await registered[("POST", "/scene_prompt/civitai/auth")](request)
                     self.assertEqual(response["status"], 400)
@@ -339,7 +348,7 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         request.payload = {"model_id": 1, "version_id": 2, "file_id": 3, "model_mode": "Anima"}
                         with mock.patch.object(civitai, "download", return_value={"lora_name": "llm/public.safetensors"}) as download:
                             self.assertEqual((await registered[("POST", "/scene_prompt/civitai/download")](request))["status"], 200)
-                            download.assert_awaited_once_with(request.payload, "Anima", host="civitai.red", user_id=request.user_id, directory="llm", progress=None)
+                            download.assert_awaited_once_with(request.payload, "Anima", host="civitai.red", user_id=request.user_id, directory="llm", progress=None, existing_action="reuse", existing_name="")
                             request.payload["host"] = "civitai.com"
                             await registered[("POST", "/scene_prompt/civitai/download")](request)
                             self.assertEqual(download.await_args.kwargs["host"], "civitai.com")

@@ -330,20 +330,32 @@ function openCivitaiDownload({ api, item, isCurrent, acquire, onStale }) {
             transferred.textContent = received >= total ? "100% · 確認・保存中…" : `${Math.floor(received / total * 100)}% · ${bytes(received)} / ${bytes(total)}`;
         } else { progress.removeAttribute("value"); transferred.textContent = `${bytes(received)} 取得済み`; }
     }
-    async function run(apply, directory = input.value) {
+    async function run(apply, directory = input.value, existingAction = "ask", existingName = "") {
         if (busy || !current()) return;
         popup(false); busy = true; modal.setBusy(true);
         download.disabled = select.disabled = input.disabled = toggle.disabled = true; status.textContent = "取得中…";
         let failure, acquired;
         updateProgress({ received: 0, total: null });
-        try { acquired = await acquire({ apply, directory, isCurrent: current, onProgress: updateProgress }); }
+        try { acquired = await acquire({ apply, directory, existingAction, existingName, isCurrent: current, onProgress: updateProgress }); }
         catch (error) { failure = error; }
         finally {
             busy = false; modal.setBusy(false);
             download.disabled = select.disabled = input.disabled = toggle.disabled = false;
         }
         if (!current() || acquired === false) { modal.dismiss(); onStale?.(); return; }
-        if (failure) showCivitaiRequestError(failure, { api, host: item.downloadHost, query: item.name, retry: () => run(apply, directory), isCurrent: current });
+        if (failure?.code === "civitai_file_exists" && failure.existing_name) {
+            status.textContent = "同名ファイルが存在します。操作を選択してください。"; progress.hidden = transferred.hidden = true;
+            const confirmation = openModal("既に存在します。再取得しますか？", undefined, modal.close, modal);
+            confirmation.dialog.append(element("p", failure.existing_name));
+            const actions = element("div", undefined, "pc-civitai-download-actions");
+            for (const [label, action, shouldApply] of [["キャンセル", null, false], ["選択のみ", "select", true], ["再取得", "replace", apply]]) {
+                const button = element("button", label, "pc-button");
+                button.onclick = () => { confirmation.dismiss(); if (action && current()) void run(shouldApply, directory, action, failure.existing_name); };
+                actions.append(button);
+            }
+            confirmation.dialog.append(actions);
+        }
+        else if (failure) showCivitaiRequestError(failure, { api, host: item.downloadHost, query: item.name, retry: () => run(apply, directory, existingAction, existingName), isCurrent: current });
         else modal.dismiss();
     }
     download.onclick = () => void run(false); select.onclick = () => void run(true);
@@ -557,6 +569,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     function back(view, card, position) {
         detailRevision++; detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = false; modal.setTitle("Civitai Search");
         if (currentResult !== view) return;
+        updateSelection(view);
         list.scrollLeft = position.left; list.scrollTop = position.top; modal.dialog.scrollTop = position.modal; card.focus({ preventScroll: true });
     }
     function showDetails(item, view, card) {
@@ -568,7 +581,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         renderCivitaiDetail({ modal, container: detail, item, host: view.snapshot.host, scope: view.scope, api, onBack: () => back(view, card, position), isCurrent: ownsAction,
             onChoose: item.installable === false ? null : () => {
                 openCivitaiDownload({ api, item: { ...item, downloadHost: view.snapshot.host }, isCurrent: ownsAction, onStale: () => modal.dismiss(),
-                    acquire: async ({ apply, directory, isCurrent, onProgress }) => {
+                    acquire: async ({ apply, directory, existingAction, existingName, isCurrent, onProgress }) => {
                         if (downloadBusy) return false;
                         const graph = node.graph, lora = value(node, "lora_name"), current = captureTarget({ node, graph, ownerGraph: graph }, activeGraph);
                         downloadBusy = true;
@@ -579,16 +592,22 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                             api.addEventListener("scene_prompt_civitai_download_progress", listener);
                             let downloaded;
                             try {
-                                downloaded = await requestJSON(api, "/scene_prompt/civitai/download", { model_id: item.model_id, version_id: item.version_id, file_id: item.file_id, model_mode: applyMode, host: view.snapshot.host, directory, client_id: api.clientId || "", download_id: downloadID });
+                                downloaded = await requestJSON(api, "/scene_prompt/civitai/download", { model_id: item.model_id, version_id: item.version_id, file_id: item.file_id, model_mode: applyMode, host: view.snapshot.host, directory, existing_action: existingAction, existing_name: existingName, client_id: api.clientId || "", download_id: downloadID });
                             } finally { api.removeEventListener("scene_prompt_civitai_download_progress", listener); }
                             if (!isCurrent() || !current() || value(node, "lora_name") !== lora) return false;
-                            if (!downloaded.candidate || !downloaded.lora_name) throw new Error("Civitai取得結果が無効です。");
-                            item.acquired = true; item.lora_name = downloaded.lora_name;
-                            await onAcquired?.(node);
+                            if (!downloaded.lora_name || !downloaded.candidate && existingAction !== "select") throw new Error("Civitai取得結果が無効です。");
+                            if (downloaded.candidate) { item.acquired = true; item.lora_name = downloaded.lora_name; }
+                            await onAcquired?.(node, downloaded, () => isCurrent() && current() && value(node, "lora_name") === lora);
                             if (!isCurrent() || !current() || value(node, "lora_name") !== lora) return false;
+                            const loraWidget = node.widgets.find(widget => widget.name === "lora_name");
+                            const pathIdentity = path => String(path).replaceAll("\\", "/");
+                            const nativeName = (loraWidget?.options?.values || []).find(name => pathIdentity(name) === pathIdentity(downloaded.lora_name)) || downloaded.lora_name;
                             if (apply) {
-                                beginChange(graph); try { applyCandidate(node, { ...downloaded.candidate, lora_name: downloaded.lora_name }, { ...view.snapshot, model_mode: applyMode }); } finally { endChange(graph); }
-                                for (const row of list.querySelectorAll(".pc-civitai-card")) row.classList.toggle("pc-lora-selected", row.dataset.identity === identity(item));
+                                beginChange(graph); try {
+                                    if (downloaded.candidate) applyCandidate(node, { ...downloaded.candidate, lora_name: nativeName }, { ...view.snapshot, model_mode: applyMode });
+                                    else loraWidget.value = nativeName;
+                                } finally { endChange(graph); }
+                                updateSelection(view);
                                 refresh?.(node);
                             }
                             return true;
@@ -600,6 +619,15 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
             } });
     }
     function observeMissingPreviews() { for (const card of list.querySelectorAll(".pc-civitai-card")) if (!currentResult.items[Number(card.dataset.index)].image_url) observer.observe(card); }
+    function updateSelection(view) {
+        const path = name => String(name || "").replaceAll("\\", "/");
+        const selectedPath = path(value(node, "lora_name")), saved = node.properties?.scene_civitai;
+        const selected = selectedPath && path(saved?.lora_name) === selectedPath ? saved : null;
+        for (const card of list.querySelectorAll(".pc-civitai-card")) {
+            const item = view.items[Number(card.dataset.index)];
+            card.classList.toggle("pc-lora-selected", Boolean(selected && identity(item) === identity(selected) || selectedPath && item.acquired && path(item.lora_name) === selectedPath));
+        }
+    }
     function render(view) {
         list.replaceChildren(); list.inert = false; observer.disconnect();
         const saved = node.properties?.scene_civitai;
@@ -608,7 +636,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         const selectedLabel = selected?.name || selected?.lora_name;
         if (selectedLabel && [selected.model_id, selected.version_id, selected.file_id].every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0) && !view.items.some(item => identity(item) === identity(selected))) status.textContent = `現在の選択（検索結果外）: ${selectedLabel}${selected.version_name ? ` · ${selected.version_name}` : ""}`;
         for (const [index, item] of view.items.entries()) {
-            const card = element("article", undefined, `pc-civitai-card${selected && identity(item) === identity(selected) ? " pc-lora-selected" : ""}`);
+            const card = element("article", undefined, "pc-civitai-card");
             card.setAttribute("role", "button"); card.tabIndex = 0; card.dataset.identity = identity(item); card.dataset.index = index; card.setAttribute("aria-label", `${item.name} ${item.version_name || ""} の詳細`);
             const preview = element("div", undefined, "pc-civitai-card-preview");
             if (item.image_url) { const image = element("img"); image.src = item.image_url; image.loading = "lazy"; image.alt = ""; preview.append(image); }
@@ -631,6 +659,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
             card.onclick = () => showDetails(item, view, card); card.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); showDetails(item, view, card); } }; list.append(card);
             if (!item.image_url) observer.observe(card);
         }
+        updateSelection(view);
     }
     let searchIntent = 0;
     async function load(requested) {
