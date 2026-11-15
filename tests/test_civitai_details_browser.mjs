@@ -23,7 +23,7 @@ const server = http.createServer(async (request, response) => {
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
             const url=new URL(path,'http://fixture'), body=options.body?JSON.parse(options.body):{}, reply=(data,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(data)});
             if(url.pathname.endsWith('/directories'))return reply({directories:['','a','a/b','c','c/local','c/local/bin','c/local/lib','llm',...Array.from({length:20},(_,i)=>'z'+String(i).padStart(2,'0'))]});
-            if(url.pathname.endsWith('/options')){if(window.failOptions){window.failOptions=false;return reply({error:'options offline'},503);}const data={model_types:window.modelTypesByHost?.[url.searchParams.get('host')]||['Checkpoint','TextualInversion','Hypernetwork','AestheticGradient','LORA','LoCon','DoRA','Controlnet','Upscaler','MotionModule','VAE','TextEncoder','UNet','CLIPVision','Poses','Wildcards','Workflows','ComfyWorkflows','Detection','VisionLanguage','CLIP','LLM','Other'],categories:window.categoriesByHost?.[url.searchParams.get('host')]||window.categories||['Style','Action','Concept']};if(window.deferOptions){window.deferOptions=false;await new Promise(done=>window.releaseOptions=done);}return reply(data);}
+            if(url.pathname.endsWith('/options')){if(window.failOptions){window.failOptions=false;return reply({error:'options offline'},503);}const data={model_types:window.modelTypesByHost?.[url.searchParams.get('host')]||['Checkpoint','TextualInversion','Hypernetwork','AestheticGradient','LORA','LoCon','DoRA','Controlnet','Upscaler','MotionModule','VAE','TextEncoder','UNet','CLIPVision','Poses','Wildcards','Workflows','ComfyWorkflows','Detection','VisionLanguage','CLIP','LLM','Other'],categories:window.categoriesByHost?.[url.searchParams.get('host')]||window.categories||['Style','Action','Concept']};if(window.deferOptions){window.deferOptions=false;await new Promise(done=>window.releaseOptions=done);}if(window.failOptionsAfterWait){window.failOptionsAfterWait=false;return reply({error:'delayed options offline'},503);}return reply(data);}
             if(url.pathname.endsWith('/tags')){if(window.deferTags){window.deferTags=false;await new Promise(done=>window.releaseTags=done);}return reply({items:['Style','Action',url.searchParams.get('query')]});}
             if(url.pathname.endsWith('/search')){
                 if(window.failSearchAuth){window.failSearchAuth=false;return reply({error:'Red authentication required',code:'civitai_auth_required'},401);}
@@ -386,6 +386,27 @@ try {
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),cachedConditionSearches);
     await search.getByText('前回成功した条件の検索結果',{exact:true}).waitFor();
     await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    // An older search cannot publish while a new host is still waiting for options.
+    for (const optionsFail of [false,true]) {
+    await page.evaluate(()=>{window.node=window.makeNode();window.node.properties.scene_civitai={query:'stable baseline'};window.open();}); await cards.first().waitFor();
+    await search.getByRole('searchbox',{name:'検索語'}).fill('obsolete red response'); await page.evaluate(()=>{window.deferSearch=true;window.releaseSearch=null;});
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForFunction(()=>window.releaseSearch);
+    const beforeOldHostRelease = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
+    await page.evaluate(()=>{window.deferOptions=true;window.releaseOptions=null;}); await search.getByRole('combobox',{name:'接続先',exact:true}).selectOption('civitai.com'); await page.waitForFunction(()=>window.releaseOptions);
+    assert.equal(await search.locator('.pc-civitai-results').evaluate(node=>node.inert),false,'retained successful results remain usable during option preparation');
+    await page.evaluate(()=>window.releaseSearch()); await page.waitForTimeout(20);
+    assert.match(await cards.first().locator('strong').textContent(),/stable baseline/);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),beforeOldHostRelease);
+    await cards.first().click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Detail'); await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await page.evaluate(optionsFail=>{window.failOptionsAfterWait=optionsFail;window.releaseOptions();},optionsFail);
+    if (optionsFail) { await failure.waitFor(); await page.keyboard.press('Escape'); assert.match(await cards.first().locator('strong').textContent(),/stable baseline/); assert.equal(await search.locator('.pc-civitai-results').evaluate(node=>node.inert),false); await cards.first().click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Detail'); await detail.getByRole('button',{name:'戻る',exact:true}).click(); assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),beforeOldHostRelease); }
+    else {
+    await page.waitForFunction(()=>!document.querySelector('.pc-civitai-results').inert);
+    await page.waitForFunction(()=>window.calls.filter(call=>call.path.includes('/search?')).length>0&&new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('host')==='civitai.com');
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),beforeOldHostRelease+1);
+    }
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    }
     // Failed options never start a search; retrying options alone does not submit one either.
     const optionsFailureSearches = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
     await page.evaluate(()=>{window.node=window.makeNode();window.failOptions=true;window.open();}); await failure.waitFor();

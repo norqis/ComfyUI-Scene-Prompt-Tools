@@ -583,26 +583,30 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     let searchIntent = 0;
     async function load(requested) {
         const intent = ++searchIntent, selectedHost = host.value, authSerial = authRevision;
+        searchRequest?.abort(); list.inert = false;
+        if (currentResult) { currentResult.serial = revision; observeMissingPreviews(); }
         if (!await loadOptions() || intent !== searchIntent || !gateCurrent() || selectedHost !== host.value || authSerial !== authRevision) return;
         const categories = hostOptions.get(selectedHost)?.categories || [];
         setCategories(categories, category.value, Boolean(categories.length || selectedHost !== "civitai.red" || gate === "configured"));
         requested ??= snapshot();
         if (!gateCurrent() || (requested.host === "civitai.red" && gate !== "configured")) return;
-        const serial = ++revision; detailRevision++; searchRequest?.abort(); currentResult?.scope.close(); observer.disconnect(); searchRequest = new AbortController();
+        const serial = ++revision; detailRevision++; searchRequest = new AbortController();
+        const ownsSearch = () => gateCurrent() && intent === searchIntent && selectedHost === host.value && authSerial === authRevision && serial === revision;
         detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = false; modal.setTitle("Civitai Search"); status.textContent = "検索中…"; list.inert = true;
         try {
             const result = await requestJSON(api, `/scene_prompt/civitai/search?${new URLSearchParams(requested)}`, undefined, { signal: searchRequest.signal });
-            if (!modal.overlay.isConnected || serial !== revision) return;
+            if (!ownsSearch()) return;
             if (!Array.isArray(result.items)) throw new Error("API /scene_prompt/civitai/search · HTTP 200: 無効な検索応答です。");
+            currentResult?.scope.close(); observer.disconnect();
             currentResult = { serial, snapshot: requested, items: result.items, scope: galleryScope(api) }; status.textContent = ""; render(currentResult); saveView();
         } catch (error) {
-            if (modal.overlay.isConnected && serial === revision) {
+            if (ownsSearch()) {
                 status.textContent = currentResult ? "検索できませんでした。前の検索結果を表示しています。" : "検索できませんでした。";
-                if (currentResult) { currentResult.serial = serial; currentResult.scope = galleryScope(api); list.inert = false; observeMissingPreviews(); }
+                if (currentResult) { currentResult.serial = serial; list.inert = false; observeMissingPreviews(); }
                 if (error.status === 401) {
                     setGate(requested.host === "civitai.red" ? "missing" : "configured"); let failedRevision = revision;
-                    showCivitaiDownloadError(error, { api, host: requested.host, query: requested.query, title: "検索に失敗しました", onStatusChanged: data => { authenticationChanged(data); failedRevision = revision; }, retryLabel: "再検索", retry: () => { setGate("configured"); void load(requested); }, isCurrent: () => gateCurrent() && failedRevision === revision });
-                } else showAPIError(error, requested.query, () => { if (modal.overlay.isConnected && serial === revision) void load(requested); });
+                    showCivitaiDownloadError(error, { api, host: requested.host, query: requested.query, title: "検索に失敗しました", onStatusChanged: data => { authenticationChanged(data); failedRevision = revision; }, retryLabel: "再検索", retry: () => { setGate("configured"); void load(requested); }, isCurrent: () => gateCurrent() && intent === searchIntent && selectedHost === host.value && failedRevision === revision });
+                } else showAPIError(error, requested.query, () => { if (ownsSearch()) void load(requested); });
             }
         }
     }
