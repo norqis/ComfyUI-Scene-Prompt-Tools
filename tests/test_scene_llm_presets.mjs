@@ -592,6 +592,18 @@ let independentLoads = 0;
 (await operationSourceProbe(activeSources[0].metadata.preset_id, activeSources[0], async () => { independentLoads++; return activeSources[0]; })).dispose();
 assert.equal(independentLoads, 1, "disposed action does not retain a full-source history");
 
+const filterStart=uiSource.indexOf('    function matchesModel(result) {',uiSource.indexOf('async function openSceneLoraPicker('));
+const filterEnd=uiSource.indexOf('    const render =',filterStart);
+const filterContext=vm.createContext({model:{value:''}});vm.runInContext(uiSource.slice(filterStart,filterEnd)+';globalThis.matches=matchesModel;',filterContext);
+for(const mode of ['Illustrious','Anima','NoobAI','Pony']) {
+    filterContext.model.value=mode;
+    assert.equal(filterContext.matches(null),true);assert.equal(filterContext.matches({status:'found'}),true,'old found cache without a base model remains unresolved');
+    assert.equal(filterContext.matches({status:'found',baseModel:mode.toUpperCase()}),true);
+    assert.equal(filterContext.matches({status:'found',baseModel:mode+' XL'}),mode==='Illustrious'||mode==='NoobAI');
+    for(const value of [{status:'found',baseModel:''},{status:'not_found'},{status:'found',baseModel:'Pony V7'}])assert.equal(filterContext.matches(value),false);
+}
+filterContext.model.value='';for(const value of [null,{status:'found'},{status:'not_found'},{status:'found',baseModel:''}])assert.equal(filterContext.matches(value),true);
+
 const titleStart = uiSource.indexOf('const SCENE_LORA_CACHE_KEY =');
 const titleEnd = uiSource.indexOf('function closeSceneLoraPicker(', titleStart);
 let titleDisk = "[]", titleInfoCalls = 0, finishTitleInfo, finishTitleVersion, pauseTitleInfo = false, pauseTitleVersion = false, failTitleInfo = false;

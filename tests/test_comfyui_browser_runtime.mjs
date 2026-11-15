@@ -348,7 +348,7 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
         if (path.endsWith("/tags")) return route.fulfill({ json: { items: ["Style", "Action", "Concept"] } });
         if (path.endsWith("/gallery")) return route.fulfill({ json: { items: [], next_cursor: null } });
         if (path.endsWith("/details")) return route.fulfill({ json: { model_id:12, version_id:23, name:"Native metadata", version_name:"Fixture v1", base_model:"Illustrious",
-            gallery:[{id:7,url:'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="30" height="40"/%3E',width:30,height:40}], triggers:["native_metadata_trigger"] } });
+            gallery:[{id:7,nsfw:true,nsfwLevel:16,browsingLevel:16,url:'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="30" height="40"/%3E',width:30,height:40}], triggers:["native_metadata_trigger"] } });
         if (path.endsWith("/image")) return route.fulfill({ json: { resources:[{name:"Native resource",type:"LORA",strength:0.7}],prompt:"native image positive",negative_prompt:"native image negative",tags:null,other:{seed:1} } });
         llmRequests.push({ path, body: route.request().method() === "POST" ? route.request().postDataJSON() : null });
         if (path.endsWith("/search")) {
@@ -3076,6 +3076,20 @@ window.__sceneSeedRuntimeTest = {
         assert.deepEqual(await nativePicker.locator('.pc-lora-path').allTextContents(), ['runtime-hat.safetensors'],
             'native LoRA title search ignores whitespace on both sides and letter case');
     }
+    const nativeFilter = nativePicker.getByRole('combobox',{name:'Base Model',exact:true});
+    assert.deepEqual(await nativeFilter.locator('option').evaluateAll(items=>items.map(item=>item.value)),['','Illustrious','Anima','NoobAI','Pony']);
+    const filterBefore=await page.evaluate(id=>JSON.stringify(window.app.graph.getNodeById(id).serialize()),metadataNodes.lora);
+    await nativePicker.getByRole('searchbox').fill('');
+    for(const family of ['Illustrious','Anima','NoobAI','Pony']) {
+        await nativeFilter.selectOption(family);
+        assert.deepEqual(await nativePicker.locator('.pc-lora-path').allTextContents(),family==='Illustrious'?['runtime-hat.safetensors','runtime-unknown.safetensors']:['runtime-unknown.safetensors']);
+    }
+    await nativePicker.getByRole('searchbox').fill('runtime-hat');
+    await nativePicker.getByText('該当するLoRAはありません。',{exact:true}).waitFor();
+    await nativeFilter.selectOption('Illustrious');
+    assert.deepEqual(await nativePicker.locator('.pc-lora-path').allTextContents(),['runtime-hat.safetensors']);
+    await nativeFilter.selectOption('');await nativePicker.getByRole('searchbox').fill('');
+    assert.equal(await page.evaluate(id=>JSON.stringify(window.app.graph.getNodeById(id).serialize()),metadataNodes.lora),filterBefore,'native filtering never edits the node');
     await nativePicker.getByRole('searchbox').fill('RUNTIME - LOCAL .SAFETENSORS');
     assert.deepEqual(await nativePicker.locator('.pc-lora-path').allTextContents(), ['runtime-local.safetensors']);
     await nativePicker.getByRole('searchbox').fill(' \u3000 ');
@@ -3083,6 +3097,8 @@ window.__sceneSeedRuntimeTest = {
     await page.screenshot({path:resolve(screenshotDirectory,'native-local-fallback.png')});
     await page.setViewportSize({width:360,height:740});
     assert.equal(await nativePicker.getByRole('button',{name:'閉じる',exact:true}).evaluate(button=>button.getBoundingClientRect().right<=innerWidth),true);
+    assert.equal(await nativePicker.locator('.pc-lora-filters').evaluate(bar=>{const [search,model]=bar.children;const a=search.getBoundingClientRect(),b=model.getBoundingClientRect();return Math.abs(a.y-b.y)<1&&a.width>0&&a.right<=b.left&&b.right<=innerWidth&&bar.scrollWidth<=bar.clientWidth;}),true);
+
     await page.screenshot({path:resolve(screenshotDirectory,'native-local-narrow.png')});
     const localRow = nativePicker.locator('.pc-lora-row').filter({hasText:'runtime-local.safetensors'});
     assert.equal(await localRow.evaluate(row => {

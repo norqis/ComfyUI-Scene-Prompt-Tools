@@ -5577,11 +5577,17 @@ async function openSceneLoraPicker(node) {
     search.className = "pc-lora-search";
     search.placeholder = "パス・取得済みCivitai名で検索";
     search.setAttribute("aria-label", "パス・取得済みCivitai名で検索");
+    const filters = document.createElement("div"); filters.className = "pc-lora-filters";
+    const model = document.createElement("select"); model.className = "pc-lora-model-filter"; model.setAttribute("aria-label", "Base Model");
+    for (const mode of ["", ...SCENE_MODEL_MODES]) {
+        const option = document.createElement("option"); option.value = mode; option.textContent = mode || "All"; model.append(option);
+    }
+    filters.append(search, model);
     const list = document.createElement("div");
     list.className = "pc-lora-list";
     list.textContent = "LoRAを読み込んでいます…";
     list.setAttribute("role", "status");
-    dialog.append(head, search, list);
+    dialog.append(head, filters, list);
     overlay.append(dialog);
     document.body.append(overlay);
     const onKey = (event) => { if (!overlay.inert && event.key === "Escape") closeSceneLoraPicker(node); };
@@ -5614,6 +5620,7 @@ async function openSceneLoraPicker(node) {
                 if (revision === generation && row.isConnected) {
                     if (result.key !== sceneLoraCacheKey(item) || !currentSceneLoraResult(item, result)) source.textContent = "再表示";
                     else {
+                        if (!matchesModel(result)) { row.remove(); if (!list.childElementCount) list.textContent = "該当するLoRAはありません。"; continue; }
                         title.textContent = result.title || item.path.split(/[\\/]/u).at(-1) || item.path;
                         updateSource(source, result.status); badge.textContent = result.baseModel || "モデル不明";
                     }
@@ -5633,6 +5640,11 @@ async function openSceneLoraPicker(node) {
         else source.removeAttribute("role");
     }
     const normalizeSearchText = (text) => text.replace(/\s+/gu, "").toLowerCase();
+    function matchesModel(result) {
+        if (!model.value || !result || result.status === "found" && !Object.hasOwn(result, "baseModel")) return true;
+        const base = String(result.baseModel || "").toLowerCase(), mode = model.value.toLowerCase();
+        return result.status === "found" && (base === mode || ["Illustrious", "NoobAI"].includes(model.value) && base === mode + " xl");
+    }
     const render = () => {
         generation += 1;
         pending = [];
@@ -5642,7 +5654,7 @@ async function openSceneLoraPicker(node) {
         const selectedPath = sceneLoraPathIdentity(findWidget(node, "lora_name")?.value);
         const shown = sceneLoraCatalog.filter((item) => {
             const cached = cachedSceneLora(item);
-            return [item.path, cached?.title || "", cached?.versionName || ""]
+            return matchesModel(cached) && [item.path, cached?.title || "", cached?.versionName || ""]
                 .some((text) => normalizeSearchText(text).includes(query));
         }).sort((a, b) => Number(sceneLoraPathIdentity(b.path) === selectedPath) - Number(sceneLoraPathIdentity(a.path) === selectedPath));
         list.replaceChildren();
@@ -5711,7 +5723,7 @@ async function openSceneLoraPicker(node) {
             list.append(row);
         }
     };
-    search.oninput = render;
+    search.oninput = render; model.onchange = render;
     try {
         await waitForModalPaint();
         if (node.sceneLoraPickerCleanup !== cleanup) return;

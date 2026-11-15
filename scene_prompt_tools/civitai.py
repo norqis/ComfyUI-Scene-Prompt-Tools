@@ -148,15 +148,10 @@ async def descriptions(model_id, version_id, user_id="default"):
 
 
 def normalize_preview(image):
-    """Keep public still-image previews, sharing the same gate in every view."""
+    """Keep provider-returned still-image previews consistently in every view."""
     if not isinstance(image, dict):
         raise ServiceError("Civitai returned an invalid image response.")
-    if _field(image, "type", str, "image") != "image" or _field(image, "nsfw", bool, False):
-        return None
-    level = image.get("nsfwLevel", 1)
-    if not (type(level) in (int, float) and level <= 1 or level == "None"):
-        return None
-    if "browsingLevel" in image and (type(image["browsingLevel"]) is not int or image["browsingLevel"] != 1):
+    if _field(image, "type", str, "image") != "image":
         return None
     url = _field(image, "url", str, "")
     if not url:
@@ -241,7 +236,7 @@ async def details(model_id, version_id, host="civitai.red", user_id="default"):
 async def gallery(version_id, host="civitai.red", cursor=None, user_id="default"):
     _positive_ids(version_id)
     host = validate_host(host)
-    params = {"modelVersionId": version_id, "nsfw": "false", "type": "image"}
+    params = {"modelVersionId": version_id, "browsingLevel": "31", "type": "image"}
     if cursor:
         params["cursor"] = cursor
     token = await _token(user_id)
@@ -304,7 +299,7 @@ async def image_details(image_id, host="civitai.red", user_id="default"):
     _positive_ids(image_id)
     host = validate_host(host)
     token = await _token(user_id)
-    data = await api_get("/api/v1/images", {"imageId": image_id, "withMeta": "true", "nsfw": "false", "type": "image"}, host=host, token=token)
+    data = await api_get("/api/v1/images", {"imageId": image_id, "withMeta": "true", "browsingLevel": "31", "type": "image"}, host=host, token=token)
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ServiceError("Civitai returned an invalid image response.")
     image = next((item for item in data["items"] if isinstance(item, dict) and type(item.get("id")) is int and item["id"] == image_id), None)
