@@ -30,7 +30,7 @@ const server = http.createServer(async (request, response) => {
         if(path.includes('search?'))data={items:Array.from({length:window.resultCount},(_,index)=>candidate(index+1)).map(item=>({...item,base_model:params.get('model_mode')||'Illustrious',description:'<img src=x onerror=window.injected=true> Model description',version_description:'Version notes',published_at:'2026-08-02',model_stats:{downloadCount:90},version_stats:{downloadCount:12},gallery:Array.from({length:item.model_id===2?0:item.model_id===3?1:5},(_,index)=>({url:item.image_url+'#'+index,width:600,height:800})),name:item.name+' '+searchHost+(window.queryLabels?' '+searchQuery:'')}))};
         else if(path.endsWith('/auth'))data={configured:true,username:'fixture'};
         else if(path.endsWith('/directories'))data={directories:['','a','a/b','llm']};
-        else if(path.includes('/options?'))data={model_types:['Checkpoint','LORA','CLIP']};
+        else if(path.includes('/options?'))data={model_types:['Checkpoint','LORA','CLIP'],categories:['Style','Action','Concept']};
         else if(path.includes('/gallery?'))data={items:[],next_cursor:null};
         else if(path.includes('/tags?'))data={items:['Style','Concept']};
         else if(path.endsWith('/download')){if(window.failDownload){window.failDownload=false;return {ok:false,status:502,text:async()=>JSON.stringify({error:'Download unavailable'})};}if(window.deferDownload){window.deferDownload=false;await new Promise(done=>window.finishDownload=done);}data={candidate:candidate(submitted.model_id),lora_name:'llm/'+submitted.model_id+'.safetensors'};}
@@ -62,7 +62,7 @@ try {
     const cards = modal.locator('.pc-civitai-card');
     assert.equal(await cards.count(), 12);
     const boxes = await cards.evaluateAll(nodes => nodes.map(node => { const box=node.getBoundingClientRect(); return {x:box.x,y:box.y}; }));
-    assert(boxes.slice(0,3).every(box => box.y === boxes[0].y)); assert(boxes[3].y > boxes[0].y);
+    assert(boxes.slice(0,6).every(box => box.y === boxes[0].y)); assert(boxes[6].y > boxes[0].y);
     assert.equal(await cards.locator('button,a').count(), 0, 'cards contain no nested actions');
     await page.screenshot({ path: resolve(reviewDirectory, "civitai-ten-columns.png") });
     await page.evaluate(() => { window.originalCard=document.querySelector('.pc-civitai-card'); window.originalGrid=document.querySelector('.pc-civitai-results'); window.searchCount=window.calls.length; });
@@ -109,7 +109,7 @@ try {
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
     assert.deepEqual(await modal.locator('.pc-civitai-results').evaluate(node=>[node.scrollLeft,node.scrollTop]),scrolled);
     assert.equal(await page.evaluate(()=>window.calls.length),callsBeforeBack,'Back never requests search or details');
-    assert.equal(await modal.locator('.pc-civitai-controls button').evaluate(node=>node.getBoundingClientRect().right<=innerWidth),true);
+    assert.equal(await modal.locator('.pc-civitai-controls').evaluate(node=>node.scrollWidth>node.clientWidth),true);
     await page.screenshot({ path: resolve(reviewDirectory, "civitai-narrow.png") });
     await page.setViewportSize({width:1100,height:850});
     await modal.getByRole('combobox',{name:'接続先',exact:true}).selectOption('civitai.com');

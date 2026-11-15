@@ -2,7 +2,11 @@ import { requestJSON, identity, value, applyCandidate, captureTarget } from "./s
 import { SCENE_MODEL_MODES } from "./scene_prompt_state.js";
 
 let settingsModalID = 0;
-const SORTS = ["Most Downloaded", "Most Liked", "Most Collected", "Highest Rated", "Relevancy"];
+const SORTS = ["Relevancy", "Highest Rated", "Most Downloaded", "Most Liked", "Most Collected", "Newest"];
+const IMAGE_METADATA_KEYS = ["width", "height", "createdAt", "seed", "sampler", "steps", "cfgScale"];
+function imageMetadata(...sources) {
+    return Object.fromEntries(IMAGE_METADATA_KEYS.flatMap(key => { const value = sources.find(source => source?.[key] != null)?.[key]; return value != null && typeof value !== "object" ? [[key, value]] : []; }));
+}
 const modals = [];
 const searchViews = new WeakMap();
 let searchViewGeneration = 0;
@@ -137,7 +141,7 @@ export function openCivitaiAuth({ api, host = "civitai.red", onAuthenticated, on
     clear.onclick = () => void submit(true);
     key.focus(); return modal;
 }
-function showCivitaiDownloadError(error, { api, host, query, retry, isCurrent, retryLabel = "再取得", title = "取得に失敗しました" }) {
+function showCivitaiDownloadError(error, { api, host, query, retry, isCurrent, onStatusChanged, retryLabel = "再取得", title = "取得に失敗しました" }) {
     const modal = openModal(title), status = element("p", error.message, "pc-civitai-error"), again = element("button", "再試行", "pc-button");
     modal.dialog.append(element("p", `検索・説明: ${query || "—"}`), status, again);
     again.onclick = () => { modal.dismiss(); if (isCurrent()) void retry(); };
@@ -146,7 +150,7 @@ function showCivitaiDownloadError(error, { api, host, query, retry, isCurrent, r
         const auth = element("button", "認証", "pc-button");
         auth.onclick = () => {
             if (!isCurrent()) return;
-            openCivitaiAuth({ api, host, onAuthenticated: () => {
+            openCivitaiAuth({ api, host, onStatusChanged: data => { if (isCurrent() && modal.overlay.isConnected) onStatusChanged?.(data); }, onAuthenticated: () => {
                 if (!isCurrent() || !modal.overlay.isConnected) return;
                 status.textContent = `認証しました。${retryLabel}してください。`; again.textContent = retryLabel; again.hidden = false;
             } });
@@ -191,9 +195,9 @@ function appendGallery(gallery, incoming) {
     }
 }
 function imageInformation(preview, host) {
-    let meta = preview.meta || {};
+    const flatMeta = preview.meta || {}, nestedMeta = flatMeta.meta && typeof flatMeta.meta === "object" ? flatMeta.meta : {};
+    let meta = flatMeta;
     if (meta.meta && typeof meta.meta === "object") meta = { ...meta, ...meta.meta };
-    const omitted = new Set(["meta", "prompt", "positive", "negativePrompt", "negative_prompt", "negative", "tags", "tag", "resources", "civitaiResources"]);
     const resources = meta.resources || meta.civitaiResources || [];
     return { resources: Array.isArray(resources) ? resources.filter(resource => resource && typeof resource === "object").map(resource => {
         const model = resource.model || {}, modelID = model.id || resource.modelId, versionID = resource.modelVersionId ?? resource.id;
@@ -202,7 +206,7 @@ function imageInformation(preview, host) {
             ...(Number.isSafeInteger(modelID) && modelID > 0 ? { url: `https://${host}/models/${modelID}${Number.isSafeInteger(versionID) && versionID > 0 ? `?modelVersionId=${versionID}` : ""}` } : {}) };
     }) : [], prompt: meta.prompt ?? meta.positive,
         negative_prompt: meta.negativePrompt ?? meta.negative_prompt ?? meta.negative, tags: meta.tags ?? meta.tag,
-        other: Object.fromEntries(Object.entries(meta).filter(([key]) => !omitted.has(key))) };
+        other: imageMetadata(nestedMeta, flatMeta, preview) };
 }
 function displayValue(value) {
     if (value == null || value === "" || Array.isArray(value) && !value.length) return "公開情報なし";
@@ -227,20 +231,19 @@ export function openCivitaiImage({ api, preview, index, host }) {
                     row.append(element("span", [resource.version_name, resource.type, resource.strength == null ? "" : `Strength: ${resource.strength}`].filter(Boolean).join(" · ")));
                     section.append(row);
                 }
-            } else section.append(element("div", displayValue(value), "pc-civitai-data-text"));
+            } else if (heading === "TAG") {
+                const tags = typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(tag => typeof tag === "string" ? [tag] : tag && typeof tag.name === "string" ? [tag.name] : []) : [];
+                const chips = element("div", undefined, "pc-civitai-tags");
+                for (const tag of tags) chips.append(element("span", tag, "pc-civitai-tag"));
+                section.append(tags.length ? chips : element("p", "公開情報なし"));
+            } else if (["PROMPT", "NEGATIVE PROMPT"].includes(heading)) { const pre = element("pre", undefined, "pc-civitai-prompt"), code = element("code", displayValue(value)); pre.append(code); section.append(pre); }
+            else section.append(element("p", "公開情報なし"));
             information.append(section);
         }
         information.append(element("h3", "OTHER METADATA"));
-        const entries = Object.entries(data.other || {});
+        const entries = Object.entries(imageMetadata(data.other));
         if (!entries.length) information.append(element("p", "公開情報なし"));
-        for (const [key, value] of entries) {
-            if (value && typeof value === "object") {
-                const details = element("details"), summary = element("summary", key), pre = element("pre");
-                let rendered = false;
-                details.addEventListener("toggle", () => { if (details.open && !rendered) { rendered = true; pre.textContent = displayValue(value); } });
-                details.append(summary, pre); information.append(details);
-            } else information.append(element("p", `${key}: ${displayValue(value)}`));
-        }
+        for (const [key, value] of entries) information.append(element("p", `${key}: ${displayValue(value)}`));
     }
     render(imageInformation(preview, host));
     if (preview.id) {
@@ -393,66 +396,62 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     const generation = ++searchViewGeneration;
     searchViews.set(node, { ...cached, generation });
     let authRevision = 0, authRequest, gate = "checking";
-    let revision = 0, detailRevision = 0, currentResult = null, downloadBusy = false, searchRequest, optionsRequest, tagRequest, tagTimer, tagRevision = 0;
+    let revision = 0, detailRevision = 0, currentResult = null, downloadBusy = false, searchRequest, optionsRequest;
     const hostOptions = new Map(Object.entries(cached?.hostOptions || {}));
     let gridPosition = cached?.gridPosition || { left: 0, top: 0, modal: 0 };
     function saveView() {
         if (searchViews.get(node)?.generation !== generation) return;
         const result = currentResult ? structuredClone({ snapshot: currentResult.snapshot,
-            items: currentResult.items.map(item => ({ ...item, gallery: (item.gallery || []).map(({ id, url, width, height }) => ({ id, url, width, height })) })) }) : null;
+            items: currentResult.items.map(item => ({ ...item, gallery: (item.gallery || []).map(({ id, url, width, height, createdAt }) => ({ id, url, width, height, createdAt })) })) }) : null;
         searchViews.set(node, { generation, draft: snapshot(), lastSuccessfulResult: result, gridPosition: { ...gridPosition }, hostOptions: structuredClone(Object.fromEntries(hostOptions)) });
     }
     const modal = openModal("Civitai Search", () => {
         revision++; detailRevision++;
         if (!list.hidden) gridPosition = { left: list.scrollLeft, top: list.scrollTop, modal: modal.dialog.scrollTop };
-        saveView(); authRevision++; authRequest?.abort(); searchRequest?.abort(); optionsRequest?.abort(); tagRequest?.abort(); clearTimeout(tagTimer); currentResult?.scope.close(); observer.disconnect(); currentResult = null;
+        saveView(); authRevision++; authRequest?.abort(); searchRequest?.abort(); optionsRequest?.abort(); currentResult?.scope.close(); observer.disconnect(); currentResult = null;
         list.replaceChildren(); detail.replaceChildren();
         if (!modals.some(entry => entry.ownerNode === node)) node.sceneCivitaiSearchCleanup = null;
     });
     modal.ownerNode = node;
     node.sceneCivitaiSearchCleanup = () => { for (const entry of modals.filter(entry => entry.ownerNode === node).reverse()) entry.dismiss(); };
     modal.dialog.classList.add("pc-civitai-search-dialog");
-    const authentication = element("button", "認証", "pc-button"); authentication.onclick = () => openCivitaiAuth({ api, host: host.value, onStatusChanged: data => { if (host.value === "civitai.red" && gateCurrent()) { authRevision++; authRequest?.abort(); setGate(data.configured ? "configured" : "missing"); } } });
+    const authentication = element("button", "認証", "pc-button"); authentication.onclick = () => openCivitaiAuth({ api, host: host.value, onStatusChanged: authenticationChanged });
     const headActions = element("div", undefined, "pc-lora-head-actions"); headActions.append(authentication, modal.close); modal.head.append(headActions);
-    const controls = element("div", undefined, "pc-civitai-controls"), query = element("input"), sort = element("select"), model = element("select"), host = element("select"), modelType = element("select"), category = element("input"), tagList = element("datalist");
+    const controls = element("div", undefined, "pc-civitai-controls"), query = element("input"), sort = element("select"), model = element("select"), host = element("select"), modelType = element("select"), category = element("select");
     query.type = "search"; query.value = state.query || ""; query.placeholder = "モデルを検索"; query.setAttribute("aria-label", "検索語");
     function options(select, label, names, selected) { select.replaceChildren(); select.setAttribute("aria-label", label); for (const name of names) { const option = element("option", name); option.value = name; select.append(option); } select.value = names.includes(selected) ? selected : names[0]; }
-    options(sort, "並び順", SORTS, state.sort); options(model, "Base Model", SCENE_MODEL_MODES, value(node, "model_mode")); options(host, "接続先", ["civitai.red", "civitai.com"], state.host);
+    options(sort, "並び順", SORTS, state.sort || "Most Downloaded"); options(model, "Base Model", SCENE_MODEL_MODES, value(node, "model_mode")); options(host, "接続先", ["civitai.red", "civitai.com"], state.host);
     const allModels = element("option", "All"); allModels.value = ""; model.prepend(allModels);
     if (state.model_mode !== undefined) model.value = state.model_mode;
     options(modelType, "Model Type", [state.model_type || "LORA"], state.model_type || "LORA");
     if (modelType.options[0].value === "LORA") modelType.options[0].textContent = "LoRA";
-    category.setAttribute("role", "combobox"); category.setAttribute("aria-label", "Category"); category.setAttribute("aria-autocomplete", "list"); category.value = state.category || "";
-    category.placeholder = "Category";
-    tagList.id = `pc-civitai-tags-${++settingsModalID}`; category.setAttribute("list", tagList.id);
-    const tagHelp = element("small", "Civitaiのモデルタグ");
-    function setTags(tags) { tagList.replaceChildren(); for (const tag of new Set(["Action", "Style", "Concept", ...tags])) { const option = element("option"); option.value = tag; tagList.append(option); } }
-    setTags([]);
+    let categoriesAfterAuth = false;
+    function setCategories(names, selected = category.value) {
+        if (categoriesAfterAuth && !names.includes(selected)) selected = "";
+        options(category, "Category", ["", ...new Set([...names, ...(selected ? [selected] : [])])], selected);
+        category.options[0].textContent = "Category";
+    }
+    setCategories([], state.category || "");
     async function loadOptions() {
         const selectedHost = host.value;
-        optionsRequest?.abort(); optionsRequest = new AbortController();
+        optionsRequest?.abort(); const request = new AbortController(); optionsRequest = request;
         try {
-            if (!hostOptions.has(selectedHost)) hostOptions.set(selectedHost, await requestJSON(api, `/scene_prompt/civitai/options?${new URLSearchParams({ host: selectedHost })}`, undefined, { signal: optionsRequest.signal }));
+            let data = hostOptions.get(selectedHost);
+            if (!data) {
+                data = await requestJSON(api, `/scene_prompt/civitai/options?${new URLSearchParams({ host: selectedHost })}`, undefined, { signal: request.signal });
+                if (request.signal.aborted || optionsRequest !== request || !modal.overlay.isConnected || selectedHost !== host.value) return;
+                hostOptions.set(selectedHost, data);
+            }
             if (!modal.overlay.isConnected || selectedHost !== host.value) return;
             const selected = modelType.value;
-            options(modelType, "Model Type", hostOptions.get(selectedHost).model_types, selected);
+            options(modelType, "Model Type", data.model_types, selected);
             for (const option of modelType.options) if (option.value === "LORA") option.textContent = "LoRA";
-        } catch (error) { if (error.name !== "AbortError" && selectedHost === host.value && modal.overlay.isConnected) showAPIError(error, "Model Type", () => void loadOptions()); }
+            setCategories(data.categories || []);
+        } catch (error) { if (!request.signal.aborted && selectedHost === host.value && modal.overlay.isConnected) showAPIError(error, "Civitai options", () => void loadOptions()); }
     }
-    category.addEventListener("input", () => {
-        const serial = ++tagRevision, selectedHost = host.value, text = category.value;
-        clearTimeout(tagTimer); tagRequest?.abort();
-        tagTimer = setTimeout(async () => {
-            tagRequest = new AbortController();
-            try {
-                const data = await requestJSON(api, `/scene_prompt/civitai/tags?${new URLSearchParams({ host: selectedHost, query: text })}`, undefined, { signal: tagRequest.signal });
-                if (modal.overlay.isConnected && serial === tagRevision && selectedHost === host.value) setTags(data.items || []);
-            } catch (error) { if (error.name !== "AbortError" && serial === tagRevision && modal.overlay.isConnected) tagHelp.textContent = "Civitaiのモデルタグ（候補を取得できませんでした）"; }
-        }, 250);
-    });
     const search = element("button", "検索", "pc-button"), status = element("p", "", "pc-civitai-status"), list = element("div", undefined, "pc-civitai-results"), detail = element("div", undefined, "pc-civitai-detail");
     status.setAttribute("role", "status"); detail.hidden = true;
-    controls.append(query, host, model, modelType, category, tagList, tagHelp, sort, search); modal.dialog.append(controls, status, list, detail);
+    controls.append(query, host, model, modelType, category, sort, search); modal.dialog.append(controls, status, list, detail);
     const snapshot = () => Object.freeze({ query: query.value.trim(), sort: sort.value, host: host.value, model_mode: model.value, model_type: modelType.value, category: category.value.trim() });
     const authNotice = element("p", undefined, "pc-civitai-status"); controls.after(authNotice);
     const gateCurrent = () => modal.overlay.isConnected && searchViews.get(node)?.generation === generation;
@@ -467,6 +466,14 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         if (gate === "missing") authNotice.textContent = 'civitai.redで検索するには認証が必要です。右上の「認証」からAPIキーを登録してください。';
         else if (gate === "checking") authNotice.textContent = "認証状態を確認中…";
         else { authNotice.append(element("span", "認証状態を確認できませんでした。")); const retry = element("button", "再試行", "pc-button"); retry.onclick = () => void checkGate(); authNotice.append(retry); }
+    }
+    function authenticationChanged(data) {
+        if (!gateCurrent()) return;
+        authRevision++; authRequest?.abort(); revision++; detailRevision++; searchRequest?.abort(); optionsRequest?.abort();
+        currentResult?.scope.close(); observer.disconnect(); currentResult = null; hostOptions.clear(); categoriesAfterAuth = Boolean(data.configured);
+        list.replaceChildren(); detail.replaceChildren(); detail.hidden = true; controls.hidden = false; status.hidden = false; status.textContent = ""; modal.setTitle("Civitai Search");
+        setGate(host.value === "civitai.red" && !data.configured ? "missing" : "configured");
+        saveView(); void loadOptions();
     }
     async function checkGate(afterCheck) {
         const serial = ++authRevision, selectedHost = host.value; authRequest?.abort(); authRequest = new AbortController();
@@ -542,9 +549,10 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
             card.setAttribute("role", "button"); card.tabIndex = 0; card.dataset.identity = identity(item); card.dataset.index = index; card.setAttribute("aria-label", `${item.name} ${item.version_name || ""} の詳細`);
             if (item.image_url) { const image = element("img"); image.src = item.image_url; image.loading = "lazy"; image.alt = ""; card.append(image); }
             else card.append(element("div", "読み込み待ち…", "pc-civitai-no-preview"));
-            card.append(element("span", item.version_name || "—"), element("span", item.base_model || "—"));
-            const footer = element("div", undefined, "pc-civitai-card-footer"), summary = element("div", undefined, "pc-civitai-card-summary"), metrics = element("span", undefined, "pc-civitai-card-stats"), title = element("strong", item.name || "—");
-            title.title = item.name || "—";
+            const title = element("strong", item.name || "—", "pc-civitai-card-title"); title.title = item.name || "—";
+            card.append(title, element("span", item.version_name || "—", "pc-civitai-card-version"));
+            const footer = element("div", undefined, "pc-civitai-card-footer"), summary = element("div", undefined, "pc-civitai-card-summary"), metrics = element("span", undefined, "pc-civitai-card-stats"), base = element("span", item.base_model || "—", "pc-civitai-card-base");
+            base.title = item.base_model || "—";
             const updatedDate = item.updated_at ? new Date(item.updated_at) : null;
             const updated = element("span", `Updated: ${updatedDate && Number.isFinite(updatedDate.getTime()) ? updatedDate.toLocaleDateString("ja-JP") : "—"}`, "pc-civitai-card-updated");
             if (item.updated_at) updated.title = item.updated_at;
@@ -554,7 +562,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                 const text = compact(item.model_stats?.[key]), group = element("span"), symbol = element("span", icon);
                 group.title = `${label}: ${text}`; group.setAttribute("aria-label", `${label}: ${text}`); symbol.setAttribute("aria-hidden", "true"); group.append(symbol, document.createTextNode(` ${text}`)); metrics.append(group);
             }
-            footer.append(title, summary); card.append(footer);
+            footer.append(base, summary); card.append(footer);
             card.onclick = () => showDetails(item, view, card); card.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); showDetails(item, view, card); } }; list.append(card);
             if (!item.image_url) observer.observe(card);
         }
@@ -572,16 +580,15 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
             if (modal.overlay.isConnected && serial === revision) {
                 status.textContent = currentResult ? "検索できませんでした。前の検索結果を表示しています。" : "検索できませんでした。";
                 if (currentResult) { currentResult.serial = serial; currentResult.scope = galleryScope(api); list.inert = false; observeMissingPreviews(); }
-                if (error.status === 401 && requested.host === "civitai.red") {
-                    setGate("missing"); const failedRevision = revision;
-                    showCivitaiDownloadError(error, { api, host: requested.host, query: requested.query, title: "検索に失敗しました", retryLabel: "再検索", retry: () => { setGate("configured"); void load(requested); }, isCurrent: () => gateCurrent() && failedRevision === revision });
+                if (error.status === 401) {
+                    setGate(requested.host === "civitai.red" ? "missing" : "configured"); let failedRevision = revision;
+                    showCivitaiDownloadError(error, { api, host: requested.host, query: requested.query, title: "検索に失敗しました", onStatusChanged: data => { authenticationChanged(data); failedRevision = revision; }, retryLabel: "再検索", retry: () => { setGate("configured"); void load(requested); }, isCurrent: () => gateCurrent() && failedRevision === revision });
                 } else showAPIError(error, requested.query, () => { if (modal.overlay.isConnected && serial === revision) void load(requested); });
             }
         }
     }
-    search.onclick = () => void load(); for (const select of [sort, model, modelType]) select.onchange = () => void load();
-    host.onchange = () => { tagRevision++; clearTimeout(tagTimer); tagRequest?.abort(); setTags([]); void loadOptions(); void checkGate(() => void load()); };
-    category.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); void load(); } };
+    search.onclick = () => void load(); for (const select of [sort, model, modelType, category]) select.onchange = () => void load();
+    host.onchange = () => { void loadOptions(); void checkGate(() => void load()); };
     query.onkeydown = event => { if (event.key === "Enter") void load(); };
     query.focus(); void loadOptions();
     if (cached?.lastSuccessfulResult) {

@@ -722,7 +722,7 @@ def define_routes():
             elif operation == "image":
                 result = await image_details(int(request.query.get("image_id", "0")), host=request.query.get("host", "civitai.red"))
             elif operation == "options":
-                result = await options(host=request.query.get("host", "civitai.red"))
+                result = await options(host=request.query.get("host", "civitai.red"), user_id=_request_user_id(request))
             elif operation == "tags":
                 result = await tags(request.query.get("query", ""), host=request.query.get("host", "civitai.red"))
             elif operation == "directories":

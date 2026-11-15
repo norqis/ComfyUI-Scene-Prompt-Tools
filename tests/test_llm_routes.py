@@ -32,7 +32,7 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         ("gallery", "gallery", (2,), {"host": "civitai.com", "cursor": "next"}),
                         ("details", "details", (1, 2), {"host": "civitai.com"}),
                         ("image", "image_details", (7,), {"host": "civitai.com"}),
-                        ("options", "options", (), {"host": "civitai.com"}),
+                        ("options", "options", (), {"host": "civitai.com", "user_id": "alice"}),
                         ("tags", "tags", ("Style",), {"host": "civitai.com"}),
                     ]:
                         with mock.patch.object(civitai, function, return_value={"fixture": endpoint}) as operation:

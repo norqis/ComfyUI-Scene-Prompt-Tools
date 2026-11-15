@@ -15,7 +15,7 @@ import folder_paths
 from .llm_service import ServiceError, candidate_identity, MODES
 from .lora_metadata import file_identity, file_signature, file_operation
 
-SORTS = ("Most Downloaded", "Most Liked", "Most Collected", "Highest Rated", "Relevancy")
+SORTS = ("Relevancy", "Highest Rated", "Most Downloaded", "Most Liked", "Most Collected", "Newest")
 _NOT_FOUND = object()
 _DOWNLOAD_LOCK = None
 _HASH_CACHE = {}
@@ -48,11 +48,11 @@ async def api_get(path, params=None, *, missing_ok=False, host="civitai.red", to
     url = api_origin(validate_host(host)) + path
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), cookie_jar=aiohttp.DummyCookieJar()) as session:
-            async with session.get(url, params=params, allow_redirects=False, headers={"Authorization": "Bearer " + token} if token and host == "civitai.red" and path == "/api/v1/models" else {}) as response:
+            async with session.get(url, params=params, allow_redirects=False, headers={"Authorization": "Bearer " + token} if token and host in HOSTS and path == "/api/v1/models" else {}) as response:
                 if missing_ok and response.status == 404:
                     return _NOT_FOUND
-                if response.status == 401 and host == "civitai.red" and path == "/api/v1/models":
-                    raise DownloadAccessError("civitai.redの認証を確認してください。")
+                if response.status == 401 and host in HOSTS and path == "/api/v1/models":
+                    raise DownloadAccessError("Civitaiの認証を確認してください。")
                 if response.status != 200:
                     raise ServiceError(f"Civitai API returned HTTP {response.status}.")
                 try:
@@ -145,6 +145,8 @@ def normalize_preview(image):
         image_id = int(match[1]) if parsed.scheme == "https" and parsed.hostname == "image.civitai.com" and match else None
     if image_id:
         preview["id"] = image_id
+    if isinstance(image.get("createdAt"), str):
+        preview["createdAt"] = image["createdAt"]
     if isinstance(image.get("meta"), dict):
         preview["meta"] = image["meta"]
     return preview
@@ -219,12 +221,14 @@ async def gallery(version_id, host="civitai.red", cursor=None):
 
 def _image_information(image, generation, host):
     rest = image.get("meta") if isinstance(image.get("meta"), dict) else {}
+    flat_rest = rest
+    nested_rest = rest.get("meta") if isinstance(rest.get("meta"), dict) else {}
     # The public REST API currently wraps generation fields in meta.meta; older replies are flat.
     if isinstance(rest.get("meta"), dict):
         rest = {**rest, **rest["meta"]}
         rest.pop("meta", None)
     params = generation.get("params") if isinstance(generation.get("params"), dict) else {}
-    sources = (params, rest, image)
+    sources = (params, nested_rest, flat_rest, image)
     def field(*keys):
         return next((source[key] for source in sources for key in keys if source.get(key) is not None), None)
     resources = generation.get("resources")
@@ -245,8 +249,8 @@ def _image_information(image, generation, host):
             if type(version_id) is int and version_id > 0:
                 entry["url"] += f"?modelVersionId={version_id}"
         normalized.append(entry)
-    omitted = {"prompt", "positive", "negativePrompt", "negative_prompt", "negative", "resources", "civitaiResources", "tags", "tag", "meta"}
-    other = {key: value for source in reversed(sources) for key, value in source.items() if key not in omitted}
+    other = {key: value for key in ("width", "height", "createdAt", "seed", "sampler", "steps", "cfgScale")
+             if (value := field(key)) is not None and not isinstance(value, (dict, list))}
     return {"resources": normalized, "prompt": field("prompt", "positive"),
             "negative_prompt": field("negativePrompt", "negative_prompt", "negative"),
             "tags": field("tags", "tag"), "other": other}
@@ -269,6 +273,7 @@ async def image_details(image_id, host="civitai.red"):
             raise ServiceError("Civitai returned invalid generation data.")
     except ServiceError:
         generation, partial = {}, True
+    preview.pop("meta", None)
     return {"image": preview, **_image_information(image, generation, host), "partial": partial}
 
 def normalize(model, mode, host="civitai.red"):
@@ -489,12 +494,42 @@ def _discard_download(download):
             os.unlink(temporary)
 
 
-async def options(host="civitai.red"):
+async def _site_search(query, host, token):
+    url = api_origin(validate_host(host)) + "/api/search/multi-search"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), cookie_jar=aiohttp.DummyCookieJar()) as session:
+            async with session.post(url, json={"queries": [query]}, allow_redirects=False,
+                                    headers={"Authorization": "Bearer " + token} if token else {}) as response:
+                if response.status == 401:
+                    raise DownloadAccessError("Civitaiの認証を確認してください。")
+                if response.status != 200:
+                    raise ServiceError(f"Civitai search returned HTTP {response.status}.")
+                try:
+                    data = json.loads(await response.text())
+                except json.JSONDecodeError as exc:
+                    raise ServiceError(f"Civitai search returned invalid JSON (HTTP {response.status}).") from exc
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        raise ServiceError("Civitai search failed or timed out.") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list) or not data["results"] or not isinstance(data["results"][0], dict):
+        raise ServiceError("Civitai returned invalid search results.")
+    return data["results"][0]
+
+
+async def options(host="civitai.red", user_id="default"):
+    from .civitai_auth import token_snapshot
     host = validate_host(host)
     data = await api_get("/api/v1/enums", host=host)
     if not isinstance(data, dict) or not isinstance(data.get("ModelType"), list):
         raise ServiceError("Civitai returned invalid model types.")
-    return {"model_types": data["ModelType"]}
+    token = await asyncio.to_thread(token_snapshot, user_id)
+    categories = []
+    if token or host != "civitai.red":
+        result = await _site_search({"indexUid": "models_v9", "q": "", "limit": 0, "facets": ["category.name"]}, host, token)
+        facets = result.get("facetDistribution")
+        if not isinstance(facets, dict) or not isinstance(facets.get("category.name"), dict):
+            raise ServiceError("Civitai returned invalid categories.")
+        categories = list(facets["category.name"])
+    return {"model_types": data["ModelType"], "categories": categories}
 
 
 async def tags(query="", host="civitai.red"):
@@ -511,26 +546,51 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", 
         raise ValueError("Unsupported Civitai sort.")
     if model_mode and model_mode not in MODES:
         raise ValueError("Unsupported model_mode.")
-    params = {"query": query, "types": model_type, "limit": 30, "period": "AllTime", "nsfw": "false"}
-    if sort != "Relevancy":
-        params["sort"] = sort
+    from .civitai_auth import token_snapshot
+    token = await asyncio.to_thread(token_snapshot, user_id)
+    if host == "civitai.red" and not token:
+        raise DownloadAccessError("civitai.redで検索するには認証が必要です。")
+    filters = ["type = " + json.dumps(model_type)]
     if model_mode:
-        params["baseModels"] = [model_mode]
+        aliases = [model_mode, model_mode + " XL"] if model_mode in ("Illustrious", "NoobAI") else [model_mode]
+        filters.append("(" + " OR ".join("versions.baseModel = " + json.dumps(alias) for alias in aliases) + ")")
     if category:
-        params["tag"] = category
-    token = ""
-    if host == "civitai.red":
-        from .civitai_auth import token_snapshot
-        token = await asyncio.to_thread(token_snapshot, user_id)
-        if not token:
-            raise DownloadAccessError("civitai.redで検索するには認証が必要です。")
-    data = await api_get("/api/v1/models", params, host=host, token=token)
+        filters.append("category.name = " + json.dumps(category))
+    request = {"indexUid": "models_v9", "q": query, "filter": " AND ".join(filters), "limit": 30,
+               "attributesToRetrieve": ["id", "metrics", "createdAt"]}
+    sort_fields = {"Highest Rated": "metrics.thumbsUpCount", "Most Downloaded": "metrics.downloadCount",
+                   "Most Liked": "metrics.favoriteCount", "Most Collected": "metrics.collectedCount", "Newest": "createdAt"}
+    if sort != "Relevancy":
+        request["sort"] = [sort_fields[sort] + ":desc"]
+    result = await _site_search(request, host, token)
+    if not isinstance(result.get("hits"), list):
+        raise ServiceError("Civitai returned invalid search hits.")
+    ranked = {}
+    for hit in result["hits"][:30]:
+        if isinstance(hit, dict) and type(hit.get("id")) is int and hit["id"] > 0:
+            ranked.setdefault(hit["id"], hit)
+    if not ranked:
+        return {"items": [], "query": query, "sort": sort}
+    data = await api_get("/api/v1/models", {"ids": list(ranked), "limit": 30, "nsfw": "true"}, host=host, token=token)
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ServiceError("Civitai returned an invalid search response.")
-    items = []
-    for model in data["items"][:30]:
+    models = {}
+    for model in data["items"]:
         if not isinstance(model, dict):
             raise ServiceError("Civitai returned an invalid model response.")
+        if type(model.get("id")) is int and model["id"] in ranked:
+            models[model["id"]] = model
+    items = []
+    for model_id, hit in ranked.items():
+        if model_id not in models:
+            continue
+        model = models[model_id]
+        stats = _field(model, "stats", dict, {})
+        count = stats.get("collectedCount")
+        metrics = hit.get("metrics") if isinstance(hit.get("metrics"), dict) else {}
+        collected = metrics.get("collectedCount")
+        if (type(count) not in (int, float) or not count >= 0) and type(collected) in (int, float) and collected >= 0:
+            model = {**model, "stats": {**stats, "collectedCount": collected}}
         if _field(model, "type", str, "") != model_type or _field(model, "mode", str, "") or _field(model, "availability", str, "Public") != "Public":
             continue
         apply_mode = model_mode

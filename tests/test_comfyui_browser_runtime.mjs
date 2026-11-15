@@ -337,7 +337,7 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
         if (path.endsWith("/by-hash") || path.endsWith("/descriptions")) return route.continue();
         if (path.endsWith("/auth")) return route.fulfill({ json: { configured: true, username: "native-fixture" } });
         if (path.endsWith("/directories")) return route.fulfill({ json: { directories: ["", "llm", "local", "local/test"] } });
-        if (path.endsWith("/options")) return route.fulfill({ json: { model_types: ["Checkpoint", "LORA", "CLIP"] } });
+        if (path.endsWith("/options")) return route.fulfill({ json: { model_types: ["Checkpoint", "LORA", "CLIP"], categories: ["Style", "Action", "Concept"] } });
         if (path.endsWith("/tags")) return route.fulfill({ json: { items: ["Style", "Action", "Concept"] } });
         if (path.endsWith("/gallery")) return route.fulfill({ json: { items: [], next_cursor: null } });
         if (path.endsWith("/details")) return route.fulfill({ json: { model_id:12, version_id:23, name:"Native metadata", version_name:"Fixture v1", base_model:"Illustrious",
@@ -2846,7 +2846,7 @@ window.__sceneSeedRuntimeTest = {
     await page.setViewportSize({width:1600,height:950});
     assert.equal(await nativeSearch.locator('.pc-civitai-card').count(),12);
     const nativeCardRows=await nativeSearch.locator('.pc-civitai-card').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().top));
-    assert(nativeCardRows.slice(0,3).every(top=>top===nativeCardRows[0])); assert(nativeCardRows[3]>nativeCardRows[0]);
+    assert(nativeCardRows.slice(0,6).every(top=>top===nativeCardRows[0])); assert(nativeCardRows[6]>nativeCardRows[0]);
     await page.screenshot({path:resolve(screenshotDirectory,'native-search-cards.png')});
     const nativeSearchRequests=llmRequests.length;
     await nativeSearch.locator('.pc-civitai-card').first().focus(); await page.keyboard.press('Enter');

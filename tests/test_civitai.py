@@ -30,7 +30,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.auth_directory = mock.patch.object(civitai_auth, "storage_directory", side_effect=lambda user: self.root / "users" / user)
         self.auth_directory.start()
         self.auth_token = mock.patch.object(civitai_auth, "token_snapshot", return_value="fixture-search-key")
-        self.auth_token.start()
+        self.auth_token_mock = self.auth_token.start()
         folder_paths.get_folder_paths = lambda kind: [str(self.root)]
         folder_paths.filename_list_cache = {"loras": "old"}
         self.content = b"safetensors-test-content"
@@ -43,6 +43,10 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             "images": [{"url": "version-image", "nsfwLevel": 1}], "files": [{"id": 3, "name": "../../unsafe.safetensors", "type": "Model", "hashes": {"SHA256": self.sha}, "downloadUrl": self.origin + "/api/download/models/2"}]}
         self.model = {"id": 1, "name": "cat", "type": "LORA", "modelVersions": [self.version]}
         self.redirect = False
+        self.site_requests = []
+        self.site_hits = None
+        self.ids_parameters = []
+        self.hydrated_models = None
         self.model_requests = []
         self.base_model_parameters = []
         self.download_calls = 0
@@ -66,7 +70,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
 
     async def handle(self, request):
         self.assertIn(request.headers.get("Authorization"), (None, "Bearer fixture-search-key"))
-        if request.path != "/api/v1/models": self.assertIsNone(request.headers.get("Authorization"))
+        if request.path not in ("/api/v1/models", "/api/search/multi-search"): self.assertIsNone(request.headers.get("Authorization"))
         self.assertIsNone(request.headers.get("Cookie"))
         self.assertNotIn("token", request.query)
         if request.path.startswith("/api/v1/model-versions/by-hash/"):
@@ -76,12 +80,23 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             response = web.json_response(self.hash_result, status=self.hash_status)
             response.set_cookie("provider_session", "should-not-be-replayed")
             return response
+        if request.path == "/api/search/multi-search":
+            body = await request.json()
+            self.site_requests.append((body, request.headers.get("Authorization")))
+            if self.api_raw is not None:
+                return web.Response(text=self.api_raw, content_type="application/json", status=self.api_status)
+            query = body["queries"][0]
+            result = {"facetDistribution": {"category.name": {"Style": 12, "Concept": 3}}} if query["limit"] == 0 else {"hits": self.site_hits if self.site_hits is not None else [{"id": self.model["id"], "metrics": self.model.get("stats", {})}]}
+            return web.json_response({"results": [result]}, status=self.api_status)
+        if request.path == "/api/v1/enums":
+            return web.json_response({"ModelType": ["Checkpoint", "LORA", "CLIP"]})
         if request.path.startswith("/api/v1/models"):
             self.model_requests.append((dict(request.query), request.headers.get("Authorization")))
             self.base_model_parameters.append(request.query.getall("baseModels", []))
+            self.ids_parameters.append(request.query.getall("ids", []))
             if self.api_raw is not None:
                 return web.Response(text=self.api_raw, content_type="application/json", status=self.api_status)
-            return web.json_response({"items": [self.model]} if request.path == "/api/v1/models" else self.model, status=self.api_status)
+            return web.json_response({"items": self.hydrated_models if self.hydrated_models is not None else [self.model]} if request.path == "/api/v1/models" else self.model, status=self.api_status)
         if request.path.startswith("/api/download"):
             self.download_calls += 1
             if self.download_status != 200:
@@ -94,10 +109,64 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             return web.Response(body=self.content)
         return await super().handle(request)
 
+    async def test_site_order_hydration_filters_and_bookmarks(self):
+        import copy
+        second, unknown = copy.deepcopy(self.model), copy.deepcopy(self.model)
+        second["id"], unknown["id"] = 2, 99
+        self.model["stats"] = {"collectedCount": 0, "thumbsUpCount": 5, "favoriteCount": 100}
+        second["stats"] = {"thumbsUpCount": 7, "favoriteCount": 88}
+        self.hydrated_models = [self.model, unknown, second]
+        self.site_hits = [{"id": 2, "metrics": {"collectedCount": 233, "favoriteCount": 9999}, "createdAt": "2026-11-15T00:00:00Z"},
+                          {"id": 1, "metrics": {"collectedCount": 229}}, {"id": 2, "metrics": {"collectedCount": 999}}, {"id": 3}, {"id": True}, {"id": "4"}, {"id": -1}]
+        category = 'Concept" OR category.name = "Other'
+        result = await civitai.search("ranked query", "Illustrious", "Relevancy", category=category, user_id="alice")
+        self.auth_token_mock.assert_called_with("alice")
+        self.assertEqual([item["model_id"] for item in result["items"]], [2, 1])
+        self.assertEqual([item["model_stats"]["collectedCount"] for item in result["items"]], [233, 0])
+        self.assertEqual(result["items"][0]["model_stats"]["thumbsUpCount"], 7)
+        self.assertIsNone(result["items"][0]["updated_at"], "createdAt never substitutes for updatedAt")
+        query = self.site_requests[-1][0]["queries"][0]
+        self.assertEqual(query["indexUid"], "models_v9")
+        self.assertEqual(query["q"], "ranked query")
+        self.assertEqual(query["attributesToRetrieve"], ["id", "metrics", "createdAt"])
+        self.assertEqual(query["filter"], 'type = "LORA" AND (versions.baseModel = "Illustrious" OR versions.baseModel = "Illustrious XL") AND category.name = ' + json.dumps(category))
+        self.assertNotIn("sort", query)
+        self.assertEqual(self.ids_parameters[-1], ["2", "1", "3"])
+        self.assertEqual(set(self.model_requests[-1][0]), {"ids", "limit", "nsfw"})
+        self.assertEqual(len(self.site_requests), 1)
+        self.assertEqual(len(self.model_requests), 1)
+        second["stats"] = {}
+        self.site_hits = [{"id": 2}]
+        result = await civitai.search("missing", "Illustrious")
+        self.assertNotIn("collectedCount", result["items"][0]["model_stats"])
+        self.site_hits = []
+        before = len(self.model_requests)
+        self.assertEqual((await civitai.search("empty", "Illustrious"))["items"], [])
+        self.assertEqual(len(self.model_requests), before)
+
+    async def test_official_category_options_and_authenticated_or_anonymous_hosts(self):
+        with mock.patch.object(civitai_auth, "token_snapshot", return_value=""):
+            data = await civitai.options("civitai.red", user_id="alice")
+            self.assertEqual(data["categories"], [])
+            self.assertEqual(self.site_requests, [])
+            self.assertEqual((await civitai.options("civitai.com"))["categories"], ["Style", "Concept"])
+            self.assertIsNone(self.site_requests[-1][1])
+        data = await civitai.options("civitai.red")
+        self.assertEqual(data["categories"], ["Style", "Concept"])
+        query, authorization = self.site_requests[-1]
+        self.assertEqual(query, {"queries": [{"indexUid": "models_v9", "q": "", "limit": 0, "facets": ["category.name"]}]})
+        self.assertEqual(authorization, "Bearer fixture-search-key")
+        await civitai.search("com keyed", "Illustrious", host="civitai.com")
+        self.assertEqual(self.site_requests[-1][1], "Bearer fixture-search-key")
+        self.assertEqual(self.model_requests[-1][1], "Bearer fixture-search-key")
+        self.api_status = 302
+        with self.assertRaisesRegex(civitai.ServiceError, "302"):
+            await civitai.search("no redirect", "Illustrious")
+
     async def test_search_token_is_scoped_to_red_models_only(self):
         await civitai.api_get("/api/v1/models/1", host="civitai.red", token="fixture-search-key")
         await civitai.api_get("/api/v1/models", host="civitai.com", token="fixture-search-key")
-        self.assertEqual([headers for _, headers in self.model_requests], [None, None])
+        self.assertEqual([headers for _, headers in self.model_requests], [None, "Bearer fixture-search-key"])
         await civitai.api_get("/api/v1/models", host="civitai.red", token="fixture-search-key")
         self.assertEqual(self.model_requests[-1][1], "Bearer fixture-search-key")
 
@@ -148,7 +217,8 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             get.assert_not_called()
         await civitai.search("cat", "Illustrious")
         self.assertEqual(self.model_requests[-1][1], "Bearer fixture-search-key")
-        await civitai.search("cat", "Illustrious", host="civitai.com")
+        with mock.patch.object(civitai_auth, "token_snapshot", return_value=""):
+            await civitai.search("cat", "Illustrious", host="civitai.com")
         self.assertIsNone(self.model_requests[-1][1])
         self.api_status = 401
         with self.assertRaises(civitai.DownloadAccessError) as failure:
@@ -260,14 +330,16 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertEqual(result["items"][0]["image_url"], "version-image")
             self.assertTrue(result["items"][0]["model_url"].startswith("https://civitai.red/models/"))
             params, authorization = self.model_requests[-1]
-            self.assertEqual(params["limit"], "30")
-            self.assertEqual(params["period"], "AllTime")
-            if sort == "Relevancy":
-                self.assertNotIn("sort", params)
-            else:
-                self.assertEqual(params["sort"], sort)
+            self.assertEqual(params, {"ids": "1", "limit": "30", "nsfw": "true"})
+            request = self.site_requests[-1][0]["queries"][0]
+            self.assertEqual(request["q"], "cat")
+            self.assertEqual(request["limit"], 30)
+            expected = {"Highest Rated": "metrics.thumbsUpCount:desc", "Most Downloaded": "metrics.downloadCount:desc", "Most Liked": "metrics.favoriteCount:desc", "Most Collected": "metrics.collectedCount:desc", "Newest": "createdAt:desc"}
+            if sort == "Relevancy": self.assertNotIn("sort", request)
+            else: self.assertEqual(request["sort"], [expected[sort]])
+            self.assertIn('versions.baseModel = "Illustrious"', request["filter"])
+            self.assertIn('versions.baseModel = "Illustrious XL"', request["filter"])
             self.assertEqual(authorization, "Bearer fixture-search-key")
-            self.assertEqual(self.base_model_parameters[-1], ["Illustrious"])
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])
 
     async def test_metadata_gallery_and_host_are_bound_to_selected_version(self):
@@ -340,7 +412,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         with mock.patch.object(llm_fixture.aiohttp, "ClientTimeout", wraps=llm_fixture.aiohttp.ClientTimeout) as timeout:
             await civitai.search("cat", "Illustrious")
             await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
-            self.assertEqual(timeout.call_args_list, [mock.call(total=None)] * 3)
+            self.assertEqual(timeout.call_args_list, [mock.call(total=None)] * 4)
 
     async def test_four_model_families_search_and_download_are_separate(self):
         identity = {"model_id": 1, "version_id": 2, "file_id": 3}
@@ -349,7 +421,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
                 with self.subTest(mode=mode, family=family):
                     self.version["baseModel"] = family
                     result = await civitai.search("cat", mode)
-                    self.assertEqual(self.base_model_parameters[-1], [mode])
+                    self.assertIn("versions.baseModel = " + json.dumps(mode), self.site_requests[-1][0]["queries"][0]["filter"])
                     self.assertEqual(len(result["items"]), int(mode == family))
                     if mode == family:
                         self.assertEqual(result["items"][0]["base_model"], family)
@@ -632,7 +704,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
                 await civitai.download({"model_id": 1, "version_id": 2, "file_id": 3}, "Illustrious")
             self.assertEqual(self.storage_headers, [(path, None, None, {"signature": "provider-signature"})
                                                    for path in ("/storage", "/storage-final")])
-            self.assertEqual(sessions.call_count, 4)
+            self.assertEqual(sessions.call_count, 5)
             for call in sessions.call_args_list:
                 self.assertIsInstance(call.kwargs["cookie_jar"], llm_fixture.aiohttp.DummyCookieJar)
                 self.assertNotIn("headers", call.kwargs)
