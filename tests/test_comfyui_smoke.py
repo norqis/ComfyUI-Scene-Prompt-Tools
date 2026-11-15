@@ -216,7 +216,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
                 raise AssertionError("Validation must not execute models or load LoRA weights")
 
         class Combo:
-            RETURN_TYPES = ("COMBO",)
+            RETURN_TYPES = ([os.path.normpath("folder/style.safetensors")],)
             FUNCTION = "produce"
             @classmethod
             def INPUT_TYPES(cls):
