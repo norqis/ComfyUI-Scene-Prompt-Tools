@@ -4055,20 +4055,31 @@ async function openSearchPopup(node, options = {}) {
 }
 
 function hideWidget(widget) {
-    if (!widget) {
-        return;
+    if (!widget) return;
+    const element = widget.inputEl || widget.element || widget.domElement;
+    const container = element?.closest?.(".dom-widget") || element;
+    if (!widget.sceneHiddenState) {
+        widget.sceneHiddenState = {
+            type: widget.type, draw: widget.draw, computeSize: widget.computeSize,
+            hidden: widget.hidden, hiddenOwn: Object.hasOwn(widget, "hidden"),
+            optionsHidden: widget.options?.hidden,
+            optionsHiddenOwn: !!widget.options && Object.hasOwn(widget.options, "hidden"),
+        };
     }
-    widget.sceneHiddenStoredType = widget.sceneHiddenStoredType || widget.type;
-    widget.sceneHiddenStoredComputeSize = widget.sceneHiddenStoredComputeSize || widget.computeSize;
-    widget.sceneHiddenStoredDraw = widget.sceneHiddenStoredDraw || widget.draw;
+    const state = widget.sceneHiddenState;
+    if (state.container !== container) {
+        // DOM widgets can attach or replace their container after node creation.
+        state.container = container;
+        state.display = container?.style?.getPropertyValue("display");
+        state.displayPriority = container?.style?.getPropertyPriority("display");
+        state.ownedClass = !!container?.classList?.contains("scene-prompt-owned-widget");
+    }
     widget.hidden = true;
     widget.options = widget.options || {};
     widget.options.hidden = true;
     widget.type = "hidden";
     widget.computeSize = () => [0, 0];
     widget.draw = () => {};
-    const element = widget.inputEl || widget.element || widget.domElement;
-    const container = element?.closest?.(".dom-widget") || element;
     if (container?.style) {
         container.classList?.add("scene-prompt-owned-widget");
         container.style.setProperty("display", "none", "important");
@@ -4076,28 +4087,25 @@ function hideWidget(widget) {
 }
 
 function showWidget(widget) {
-    if (!widget) {
-        return;
-    }
-    widget.hidden = false;
+    const state = widget?.sceneHiddenState;
+    if (!state) return;
+    widget.type = state.type;
+    widget.draw = state.draw;
+    widget.computeSize = state.computeSize;
+    // Restore through native setters before removing properties we introduced.
+    widget.hidden = state.hidden;
+    if (!state.hiddenOwn) delete widget.hidden;
     if (widget.options) {
-        widget.options.hidden = false;
+        widget.options.hidden = state.optionsHidden;
+        if (!state.optionsHiddenOwn) delete widget.options.hidden;
     }
-    if (widget.sceneHiddenStoredType && widget.sceneHiddenStoredType !== "hidden") {
-        widget.type = widget.sceneHiddenStoredType;
-    }
-    if (widget.sceneHiddenStoredComputeSize) {
-        widget.computeSize = widget.sceneHiddenStoredComputeSize;
-    }
-    if (widget.sceneHiddenStoredDraw) {
-        widget.draw = widget.sceneHiddenStoredDraw;
-    }
-    const element = widget.inputEl || widget.element || widget.domElement;
-    const container = element?.closest?.(".dom-widget") || element;
+    const container = state.container;
     if (container?.style) {
-        container.classList?.remove("scene-prompt-owned-widget");
-        container.style.removeProperty("display");
+        if (!state.ownedClass) container.classList?.remove("scene-prompt-owned-widget");
+        if (state.display) container.style.setProperty("display", state.display, state.displayPriority);
+        else container.style.removeProperty("display");
     }
+    delete widget.sceneHiddenState;
 }
 
 function hideScenePromptWidgets(node) {
@@ -4263,7 +4271,7 @@ function hideInternalDomWidgets() {
             continue;
         }
         for (const widget of node.widgets || []) {
-            if (widget?.hidden || widget?.type === "hidden") {
+            if (widget?.sceneHiddenState) {
                 hideWidget(widget);
             }
         }

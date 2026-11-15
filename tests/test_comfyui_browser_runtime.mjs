@@ -7,6 +7,7 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { chromium } from "playwright";
+import { verifySceneWidgetVisibility } from "./scene_widget_visibility.mjs";
 import { verifySceneWeightHistory } from "./scene_weight_history.mjs";
 import { parseSelectionState } from "../web/scene_prompt_state.js";
 import { verifySceneModalHistory, verifyCandidateReloadSelections, verifyCandidateEditHistory } from "./scene_modal_history.mjs";
@@ -444,6 +445,7 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    await verifySceneWidgetVisibility(page);
     await verifySceneWeightHistory(page);
     await (await import('./scene_public_widget_inputs.mjs')).verifyPublicWidgetInputs(page);
     nativeRunChecks = true;
