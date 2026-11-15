@@ -1,11 +1,8 @@
-"""Per-user Civitai API keys, validated explicitly and used for authenticated red search and downloads."""
-import asyncio
+"""Per-user Civitai API keys, validated explicitly and used for authenticated Civitai API requests and downloads."""
 import json
 import os
 import tempfile
 import threading
-
-import aiohttp
 
 from .storage import storage_directory
 from .llm_service import ServiceError
@@ -72,8 +69,8 @@ def _finish(user_id, owner):
 
 
 async def authenticate(user_id, api_key="", host="civitai.red"):
-    from .civitai import api_origin, validate_host, _file_io
-    origin = api_origin(validate_host(host))
+    from .civitai import validate_host, _file_io, _request_json
+    host = validate_host(host)
     if not isinstance(api_key, str):
         raise ValueError("Civitai APIキーは文字列で指定してください。")
     key = api_key.strip()
@@ -81,17 +78,7 @@ async def authenticate(user_id, api_key="", host="civitai.red"):
         raise ValueError("Civitai APIキーに改行は含められません。")
     key, owner = await _file_io(_begin, user_id, key, cancel_cleanup=lambda result: _finish(user_id, result[1]))
     try:
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), cookie_jar=aiohttp.DummyCookieJar()) as session:
-                async with session.get(origin + "/api/v1/me", headers={"Authorization": "Bearer " + key}, allow_redirects=False) as response:
-                    if response.status != 200:
-                        raise ServiceError(f"Civitai APIキーを確認できませんでした（HTTP {response.status}）。")
-                    try:
-                        data = await response.json(content_type=None)
-                    except ValueError as exc:
-                        raise ServiceError("Civitai認証の応答が不正です。") from exc
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            raise ServiceError("Civitaiに接続できませんでした。") from exc
+        data = await _request_json("GET", "/api/v1/me", host=host, token=key)
         if not isinstance(data, dict) or type(data.get("id")) is not int or data["id"] <= 0 or not isinstance(data.get("username"), str) or not data["username"].strip():
             raise ServiceError("Civitai認証の応答が不正です。")
         return await _file_io(_save, user_id, owner, key, data["username"].strip())

@@ -29,11 +29,11 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                 registered = routes._test_routes
                 with mock.patch.dict(sys.modules, {routes.__package__ + ".civitai": civitai, routes.__package__ + ".civitai_auth": civitai_auth}):
                     for endpoint, function, args, kwargs in [
-                        ("gallery", "gallery", (2,), {"host": "civitai.com", "cursor": "next"}),
+                        ("gallery", "gallery", (2,), {"host": "civitai.com", "cursor": "next", "user_id": "alice"}),
                         ("details", "details", (1, 2), {"host": "civitai.com", "user_id": "alice"}),
-                        ("image", "image_details", (7,), {"host": "civitai.com"}),
+                        ("image", "image_details", (7,), {"host": "civitai.com", "user_id": "alice"}),
                         ("options", "options", (), {"host": "civitai.com", "user_id": "alice"}),
-                        ("tags", "tags", ("Style",), {"host": "civitai.com"}),
+                        ("tags", "tags", ("Style",), {"host": "civitai.com", "user_id": "alice"}),
                     ]:
                         with mock.patch.object(civitai, function, return_value={"fixture": endpoint}) as operation:
                             response = await registered[("GET", "/scene_prompt/civitai/" + endpoint)](request)
@@ -303,7 +303,8 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("civitai_api_key", settings_module.load_settings("alice"))
                     by_hash = registered[("GET", "/scene_prompt/civitai/by-hash")]
                     version = {"id": 2, "modelId": 1, "name": "v1", "baseModel": "Anima", "model": {"name": "model"}, "trainedWords": ["trigger"], "private": "provider body"}
-                    with mock.patch.object(settings_module, "load_settings", side_effect=ValueError("malformed LLM settings")), \
+                    with mock.patch.object(civitai_auth, "token_snapshot", return_value="fixture-key"), \
+                            mock.patch.object(settings_module, "load_settings", side_effect=ValueError("malformed LLM settings")), \
                             mock.patch.object(settings_module, "storage_directory", side_effect=AssertionError("private settings access")), \
                             mock.patch.object(civitai, "api_get", return_value=version) as lookup, \
                             mock.patch.object(civitai, "_sha256", side_effect=AssertionError("local hash")), \
@@ -324,7 +325,7 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         request.query = {"model_id": "1", "version_id": "2"}
                         with mock.patch.object(civitai, "descriptions", return_value={"description": "<code>outfit</code>", "version_description": ""}) as describe:
                             self.assertEqual((await descriptions(request))["payload"]["description"], "<code>outfit</code>")
-                            describe.assert_awaited_once_with(1, 2)
+                            describe.assert_awaited_once_with(1, 2, user_id=request.user_id)
                         for query in ({}, {"model_id": "../1", "version_id": "2"}, {"model_id": "0", "version_id": "2"}):
                             request.query = query
                             self.assertEqual((await descriptions(request))["status"], 400)

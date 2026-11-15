@@ -147,7 +147,7 @@ export function openCivitaiAuth({ api, host = "civitai.red", onAuthenticated, on
     clear.onclick = () => void submit(true);
     key.focus(); return modal;
 }
-function showCivitaiDownloadError(error, { api, host, query, retry, isCurrent, onStatusChanged, retryLabel = "再取得", title = "取得に失敗しました" }) {
+function showCivitaiRequestError(error, { api, host, query, retry, isCurrent, onStatusChanged, retryLabel = "再取得", title = "取得に失敗しました" }) {
     const modal = openModal(title), status = element("p", error.message, "pc-civitai-error"), again = element("button", "再試行", "pc-button");
     modal.dialog.append(element("p", `検索・説明: ${query || "—"}`), status, again);
     again.onclick = () => { modal.dismiss(); if (isCurrent()) void retry(); };
@@ -252,12 +252,20 @@ export function openCivitaiImage({ api, preview, index, host }) {
         for (const [key, value] of entries) information.append(element("p", `${key}: ${displayValue(value)}`));
     }
     render(imageInformation(preview, host));
-    if (preview.id) {
-        const status = element("p", "読み込み中…"); information.prepend(status);
-        requestJSON(api, `/scene_prompt/civitai/image?${new URLSearchParams({ image_id: preview.id, host })}`, undefined, { signal: request.signal }).then(data => {
+    const status = element("p");
+    async function load() {
+        status.replaceChildren(document.createTextNode("読み込み中…")); information.prepend(status);
+        try {
+            const data = await requestJSON(api, `/scene_prompt/civitai/image?${new URLSearchParams({ image_id: preview.id, host })}`, undefined, { signal: request.signal });
             if (!request.signal.aborted) render(data);
-        }).catch(error => { if (!request.signal.aborted) status.textContent = `生成情報を取得できませんでした。 ${error.message}`; });
+        } catch (error) {
+            if (request.signal.aborted) return;
+            status.textContent = `生成情報を取得できませんでした。 ${error.message}`;
+            if (error.status === 401) showCivitaiRequestError(error, { api, host, query: "画像の生成情報", retryLabel: "再試行", retry: load, isCurrent: () => !request.signal.aborted });
+            else { const retry = element("button", "再試行", "pc-button"); retry.onclick = () => { status.remove(); void load(); }; status.append(retry); }
+        }
     }
+    if (preview.id) void load();
     return modal;
 }
 function openCivitaiDownload({ api, item, isCurrent, acquire, onStale }) {
@@ -335,7 +343,7 @@ function openCivitaiDownload({ api, item, isCurrent, acquire, onStale }) {
             download.disabled = select.disabled = input.disabled = toggle.disabled = false;
         }
         if (!current() || acquired === false) { modal.dismiss(); onStale?.(); return; }
-        if (failure) showCivitaiDownloadError(failure, { api, host: item.downloadHost, query: item.name, retry: () => run(apply, directory), isCurrent: current });
+        if (failure) showCivitaiRequestError(failure, { api, host: item.downloadHost, query: item.name, retry: () => run(apply, directory), isCurrent: current });
         else modal.dismiss();
     }
     download.onclick = () => void run(false); select.onclick = () => void run(true);
@@ -375,6 +383,7 @@ function renderCivitaiDetail({ modal, container, item, host, scope, api, onBack,
             if (!isCurrent()) return;
             galleryStatus.replaceChildren(element("span", `画像を取得できませんでした。 ${error.message}`));
             const retry = element("button", "再試行", "pc-button"); retry.onclick = () => void loadGallery(nextCursor); galleryStatus.append(retry);
+            if (error.status === 401) showCivitaiRequestError(error, { api, host, query: item.name, retryLabel: "再試行", retry: () => loadGallery(nextCursor), isCurrent });
         } finally { busy = false; more.disabled = false; }
     }
     previous.onclick = () => { offset -= 2; renderImages(); }; next.onclick = () => { offset += 2; renderImages(); };
@@ -413,6 +422,7 @@ export function openCivitaiDetail({ api, modelID, versionID, host = "civitai.red
             container.replaceChildren(element("p", error.message));
             const back = element("button", "戻る", "pc-button"), retry = element("button", "再試行", "pc-button");
             back.onclick = modal.dismiss; retry.onclick = () => void load(); container.append(back, retry);
+            if (error.status === 401) showCivitaiRequestError(error, { api, host, query: "モデルの詳細", retryLabel: "再試行", retry: load, isCurrent: () => !request.signal.aborted });
         }
     }
     void load(); return modal;
@@ -461,6 +471,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     let optionsReady;
     function loadOptions(retry = false) {
         const selectedHost = host.value;
+        if (selectedHost === "civitai.red" && gate !== "configured") return Promise.resolve(false);
         if (!retry && optionsReady?.host === selectedHost && !optionsReady.request.signal.aborted) return optionsReady.promise;
         optionsRequest?.abort(); const request = new AbortController(); optionsRequest = request;
         const operation = { host: selectedHost, request }; optionsReady = operation;
@@ -483,7 +494,10 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                 }
                 return true;
             } catch (error) {
-                if (!request.signal.aborted && selectedHost === host.value && gateCurrent()) showAPIError(error, "Civitai options", () => void loadOptions(true));
+                if (!request.signal.aborted && selectedHost === host.value && gateCurrent()) {
+                    if (error.status === 401) showCivitaiRequestError(error, { api, host: selectedHost, query: "Civitai options", retryLabel: "再試行", retry: () => void loadOptions(true), onStatusChanged: authenticationChanged, isCurrent: () => gateCurrent() && selectedHost === host.value });
+                    else showAPIError(error, "Civitai options", () => void loadOptions(true));
+                }
                 return false;
             }
         })();
@@ -513,16 +527,16 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         currentResult?.scope.close(); observer.disconnect(); currentResult = null; hostOptions.clear();
         list.replaceChildren(); detail.replaceChildren(); detail.hidden = true; controls.hidden = false; status.hidden = false; status.textContent = ""; modal.setTitle("Civitai Search");
         setGate(host.value === "civitai.red" && !data.configured ? "missing" : "configured");
-        saveView(); void loadOptions();
+        saveView(); if (gate === "configured") void loadOptions();
     }
     async function checkGate(afterCheck) {
         const serial = ++authRevision, selectedHost = host.value; authRequest?.abort(); authRequest = new AbortController();
-        if (selectedHost !== "civitai.red") { setGate("configured"); afterCheck?.(); return; }
+        if (selectedHost !== "civitai.red") { setGate("configured"); if (await loadOptions() && serial === authRevision && selectedHost === host.value) afterCheck?.(); return; }
         setGate("checking");
         try {
             const data = await requestJSON(api, "/scene_prompt/civitai/auth", undefined, { signal: authRequest.signal, cache: "no-store" });
             if (!gateCurrent() || serial !== authRevision || host.value !== selectedHost) return;
-            setGate(data.configured ? "configured" : "missing"); if (data.configured) afterCheck?.();
+            setGate(data.configured ? "configured" : "missing"); if (data.configured && await loadOptions() && serial === authRevision && selectedHost === host.value) afterCheck?.();
         } catch (error) { if (gateCurrent() && serial === authRevision && host.value === selectedHost) setGate("error"); }
     }
     const observer = new IntersectionObserver(entries => {
@@ -537,7 +551,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                 const preview = card.querySelector(".pc-civitai-no-preview");
                 if (item.image_url) { const image = element("img"); image.src = item.image_url; image.loading = "lazy"; image.alt = ""; preview?.replaceWith(image); }
                 else if (preview) preview.textContent = "プレビュー画像はありません。";
-            }).catch(() => { if (currentResult === view && view.serial === revision && card.isConnected) card.querySelector(".pc-civitai-no-preview").textContent = "画像を取得できませんでした。クリックして再試行"; });
+            }).catch(error => { if (currentResult === view && view.serial === revision && card.isConnected) card.querySelector(".pc-civitai-no-preview").textContent = error.status === 401 ? "画像の取得には認証が必要です。右上の認証から登録してください。" : "画像を取得できませんでした。クリックして再試行"; });
         }
     }, { root: list });
     function back(view, card, position) {
@@ -643,15 +657,15 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                 if (currentResult) { currentResult.serial = serial; list.inert = false; observeMissingPreviews(); }
                 if (error.status === 401) {
                     setGate(requested.host === "civitai.red" ? "missing" : "configured"); let failedRevision = revision;
-                    showCivitaiDownloadError(error, { api, host: requested.host, query: requested.query, title: "検索に失敗しました", onStatusChanged: data => { authenticationChanged(data); failedRevision = revision; }, retryLabel: "再検索", retry: () => { setGate("configured"); void load(requested); }, isCurrent: () => gateCurrent() && intent === searchIntent && selectedHost === host.value && failedRevision === revision });
+                    showCivitaiRequestError(error, { api, host: requested.host, query: requested.query, title: "検索に失敗しました", onStatusChanged: data => { authenticationChanged(data); failedRevision = revision; }, retryLabel: "再検索", retry: () => { setGate("configured"); void load(requested); }, isCurrent: () => gateCurrent() && intent === searchIntent && selectedHost === host.value && failedRevision === revision });
                 } else showAPIError(error, requested.query, () => { if (ownsSearch()) void load(requested); });
             }
         }
     }
     search.onclick = () => void load(); for (const select of [sort, model, modelType, category]) select.onchange = () => void load();
-    host.onchange = () => { void loadOptions(); void checkGate(() => void load()); };
+    host.onchange = () => { searchRequest?.abort(); list.inert = false; if (currentResult) currentResult.serial = revision; optionsRequest?.abort(); void checkGate(() => void load()); };
     query.onkeydown = event => { if (event.key === "Enter") void load(); };
-    query.focus(); void loadOptions();
+    query.focus();
     if (cached?.lastSuccessfulResult) {
         const result = structuredClone(cached.lastSuccessfulResult);
         currentResult = { serial: revision, snapshot: Object.freeze(result.snapshot), items: result.items, scope: galleryScope(api) };

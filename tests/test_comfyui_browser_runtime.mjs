@@ -168,7 +168,7 @@ async def civitai_lookup(request):
     fixture = await request.json()
     package = nodes.NODE_CLASS_MAPPINGS["SceneApplyLora"].__module__.rsplit(".", 1)[0]
     civitai = importlib.import_module(package + ".civitai")
-    async def api_get(path, params=None, *, missing_ok=False, host="civitai.red"):
+    async def api_get(path, params=None, *, missing_ok=False, host="civitai.red", token=""):
         lookup_calls.append({"path": path, "missing_ok": missing_ok, "host": host})
         if fixture.get("mode") == "picker":
             if path.endswith("${localHash}"):
@@ -453,6 +453,7 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    await fetch(`${url}/scene_test/civitai_lookup`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:"picker"})});
     // Use the real ComfyUI WebSocket and API listener while the JSON acquisition is pending.
     let startProgress, finishProgress;
     const progressStarted = new Promise(done=>startProgress=done);
@@ -2986,7 +2987,7 @@ window.__sceneSeedRuntimeTest = {
         return { lora: lora.id, expand: expand.id, before };
     });
     const nativeDetail = page.getByRole("dialog", { name: "LoRA 詳細確認", exact: true });
-    await nativeDetail.getByText("Native metadata / Fixture v1", { exact: true }).waitFor();
+    await nativeDetail.getByText("Native metadata / Fixture v1", { exact: true }).waitFor().catch(async error=>{throw new Error(`Native LoRA details: ${await nativeDetail.textContent()}`,{cause:error});});
     await nativeDetail.getByText("Selected outfit notes", { exact: true }).waitFor();
     assert.equal(await nativeDetail.locator("pre code").textContent(), "jacket,\n  blue shirt");
     assert.equal(await nativeDetail.getByText("wrong version", { exact: true }).count(), 0);

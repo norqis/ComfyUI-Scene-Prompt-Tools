@@ -61,6 +61,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.hash_status = 200
         self.hash_raw = False
         self.hash_requests = []
+        self.api_requests = []
         self.hash_result = {"id": 2, "modelId": 1, "name": "version", "model": {"name": "cat", "description": "private provider body"},
                             "trainedWords": ["cat"], "files": [{"downloadUrl": "secret URL"}]}
 
@@ -72,8 +73,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         await super().asyncTearDown()
 
     async def handle(self, request):
-        self.assertIn(request.headers.get("Authorization"), (None, "Bearer fixture-search-key"))
-        if request.path not in ("/api/v1/models", "/api/search/multi-search"): self.assertIsNone(request.headers.get("Authorization"))
+        self.api_requests.append((request.path, request.headers.get("Authorization")))
         self.assertIsNone(request.headers.get("Cookie"))
         self.assertNotIn("token", request.query)
         if request.path.startswith("/api/v1/model-versions/by-hash/"):
@@ -93,6 +93,12 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             return web.json_response({"results": [result]}, status=self.api_status)
         if request.path == "/api/v1/enums":
             return web.json_response({"ModelType": ["Checkpoint", "LORA", "CLIP"]})
+        if request.path == "/api/v1/images":
+            return web.json_response({"items": [{"id": 7, "modelVersionId": 2, "url": "https://image.civitai.com/hash/7.jpeg", "nsfw": False, "nsfwLevel": 1, "meta": {"prompt": "REST"}}]})
+        if request.path == "/api/generation/data":
+            return web.json_response({"params": {"prompt": "generated"}})
+        if request.path == "/api/v1/tags":
+            return web.json_response({"items": [{"name": "Style"}]})
         if request.path.startswith("/api/v1/models"):
             self.model_requests.append((dict(request.query), request.headers.get("Authorization")))
             self.base_model_parameters.append(request.query.getall("baseModels", []))
@@ -155,8 +161,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
 
     async def test_official_category_options_and_authenticated_or_anonymous_hosts(self):
         with mock.patch.object(civitai_auth, "token_snapshot", return_value=""):
-            data = await civitai.options("civitai.red", user_id="alice")
-            self.assertEqual(data["categories"], [])
+            with self.assertRaises(civitai.DownloadAccessError): await civitai.options("civitai.red", user_id="alice")
             self.assertEqual(self.site_requests, [])
             self.assertEqual((await civitai.options("civitai.com"))["categories"], ["Style", "Concept"])
             self.assertIsNone(self.site_requests[-1][1])
@@ -172,10 +177,10 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         with self.assertRaisesRegex(civitai.ServiceError, "302"):
             await civitai.search("no redirect", "Illustrious")
 
-    async def test_search_token_is_scoped_to_red_models_only(self):
+    async def test_transport_token_applies_to_each_official_json_endpoint(self):
         await civitai.api_get("/api/v1/models/1", host="civitai.red", token="fixture-search-key")
         await civitai.api_get("/api/v1/models", host="civitai.com", token="fixture-search-key")
-        self.assertEqual([headers for _, headers in self.model_requests], [None, "Bearer fixture-search-key"])
+        self.assertEqual([headers for _, headers in self.model_requests], ["Bearer fixture-search-key", "Bearer fixture-search-key"])
         await civitai.api_get("/api/v1/models", host="civitai.red", token="fixture-search-key")
         self.assertEqual(self.model_requests[-1][1], "Bearer fixture-search-key")
 
@@ -240,7 +245,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             result = await civitai.by_hash(self.sha.upper())
         self.assertEqual(result, {"found": True, "version": {"id": 2, "modelId": 1, "name": "version",
                                 "baseModel": "", "model": {"name": "cat"}, "trainedWords": ["cat"]}})
-        self.assertEqual(self.hash_requests, [("/api/v1/model-versions/by-hash/" + self.sha, None)])
+        self.assertEqual(self.hash_requests, [("/api/v1/model-versions/by-hash/" + self.sha, "Bearer fixture-search-key")])
         self.assertNotIn("private", str(result))
         self.assertNotIn("secret", str(result))
 
@@ -298,7 +303,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.assertEqual(await civitai.by_hash(self.sha), {"found": False, "version": None})
         for status in (401, 429, 500):
             self.hash_status = status
-            with self.subTest(status=status), self.assertRaisesRegex(civitai.ServiceError, str(status)) as error:
+            with self.subTest(status=status), self.assertRaisesRegex(civitai.ServiceError, "認証" if status == 401 else str(status)) as error:
                 await civitai.by_hash(self.sha)
             self.assertNotIn("secret", str(error.exception))
             self.assertNotIn("private", str(error.exception))
@@ -442,6 +447,46 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertTrue(civitai.compatible(f"{family} XL", family))
             other = "NoobAI" if family == "Illustrious" else "Illustrious"
             self.assertFalse(civitai.compatible(f"{family} XL", other))
+
+    async def test_every_civitai_operation_uses_one_current_user_token_for_all_requests(self):
+        operations = [lambda user,host: civitai.by_hash(self.sha,user_id=user), lambda user,host: civitai.descriptions(1,2,user_id=user),
+            lambda user,host: civitai.details(1,2,host,user_id=user), lambda user,host: civitai.gallery(2,host,user_id=user),
+            lambda user,host: civitai.image_details(7,host,user_id=user), lambda user,host: civitai.options(host,user_id=user),
+            lambda user,host: civitai.tags("Style",host,user_id=user), lambda user,host: civitai.search("cat","Illustrious",host=host,user_id=user),
+            lambda user,host: civitai.download({"model_id":1,"version_id":2,"file_id":3},"Illustrious",host=host,user_id=user)]
+        for user in ("alice", "bob"):
+            for operation in operations:
+                with self.subTest(user=user,operation=operation), mock.patch.object(civitai_auth,"token_snapshot",return_value="key-"+user) as token:
+                    self.api_requests.clear(); await operation(user,"civitai.com")
+                    token.assert_called_once_with(user)
+                    json_requests=[entry for entry in self.api_requests if not entry[0].startswith("/api/download/")]
+                    self.assertTrue(json_requests);self.assertTrue(all(auth=="Bearer key-"+user for _,auth in json_requests))
+        with mock.patch.object(civitai_auth,"token_snapshot",return_value=""):
+            for operation in operations[2:]:
+                self.api_requests.clear()
+                with self.assertRaises(civitai.DownloadAccessError):await operation("anonymous","civitai.red")
+                self.assertEqual(self.api_requests,[],"red without a saved key never sends HTTP")
+            for operation in operations:
+                self.api_requests.clear();await operation("anonymous","civitai.com")
+                self.assertTrue(all(auth is None for _,auth in self.api_requests))
+            with mock.patch.object(civitai,"api_get",return_value=self.hash_result) as get:
+                await civitai.by_hash(self.sha,user_id="anonymous")
+                self.assertEqual(get.await_args.kwargs["host"],"civitai.com")
+            with mock.patch.object(civitai,"api_get",return_value=self.model) as get:
+                await civitai.descriptions(1,2,user_id="anonymous")
+                self.assertEqual(get.await_args.kwargs["host"],"civitai.com")
+
+    async def test_auth_failure_is_not_hidden_by_host_fallback_optional_date_or_partial_generation(self):
+        error=civitai.DownloadAccessError("auth")
+        for function,args in ((civitai.by_hash,(self.sha,)),(civitai.descriptions,(1,2))):
+            with mock.patch.object(civitai,"api_get",side_effect=error) as get,self.assertRaises(civitai.DownloadAccessError):await function(*args)
+            self.assertEqual(get.await_count,1,"401 never retries another host")
+        with mock.patch.object(civitai,"api_get",return_value=self.model),mock.patch.object(civitai,"_site_search",side_effect=error),self.assertRaises(civitai.DownloadAccessError):await civitai.details(1,2)
+        image={"items":[{"id":7,"url":"https://image.civitai.com/hash/7.jpeg"}]}
+        with mock.patch.object(civitai,"api_get",side_effect=[image,error]),self.assertRaises(civitai.DownloadAccessError):await civitai.image_details(7)
+        self.hash_status=401
+        with self.assertRaises(civitai.DownloadAccessError):await civitai.by_hash(self.sha)
+        self.assertEqual(len(self.hash_requests),1,"real HTTP 401 is exposed without host fallback")
 
     async def test_final_download_filename_headers_unicode_and_invalid_names(self):
         from urllib.parse import quote

@@ -712,19 +712,19 @@ def define_routes():
             if operation == "search":
                 result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"), model_type=request.query.get("model_type", "LORA"), category=request.query.get("category", ""), user_id=_request_user_id(request))
             elif operation == "by_hash":
-                result = await by_hash(request.query.get("sha256", ""))
+                result = await by_hash(request.query.get("sha256", ""), user_id=_request_user_id(request))
             elif operation == "descriptions":
-                result = await descriptions(int(request.query.get("model_id", "0")), int(request.query.get("version_id", "0")))
+                result = await descriptions(int(request.query.get("model_id", "0")), int(request.query.get("version_id", "0")), user_id=_request_user_id(request))
             elif operation == "gallery":
-                result = await gallery(int(request.query.get("version_id", "0")), host=request.query.get("host", "civitai.red"), cursor=request.query.get("cursor"))
+                result = await gallery(int(request.query.get("version_id", "0")), host=request.query.get("host", "civitai.red"), cursor=request.query.get("cursor"), user_id=_request_user_id(request))
             elif operation == "details":
                 result = await details(int(request.query.get("model_id", "0")), int(request.query.get("version_id", "0")), host=request.query.get("host", "civitai.red"), user_id=_request_user_id(request))
             elif operation == "image":
-                result = await image_details(int(request.query.get("image_id", "0")), host=request.query.get("host", "civitai.red"))
+                result = await image_details(int(request.query.get("image_id", "0")), host=request.query.get("host", "civitai.red"), user_id=_request_user_id(request))
             elif operation == "options":
                 result = await options(host=request.query.get("host", "civitai.red"), user_id=_request_user_id(request))
             elif operation == "tags":
-                result = await tags(request.query.get("query", ""), host=request.query.get("host", "civitai.red"))
+                result = await tags(request.query.get("query", ""), host=request.query.get("host", "civitai.red"), user_id=_request_user_id(request))
             elif operation == "directories":
                 result = await asyncio.to_thread(directories)
             else:

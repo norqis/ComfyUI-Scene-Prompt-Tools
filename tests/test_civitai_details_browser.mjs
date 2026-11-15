@@ -32,6 +32,7 @@ const server = http.createServer(async (request, response) => {
                 return reply({items:Array.from({length:30},(_,index)=>({...candidate(index+1,url.searchParams.get('query')||''),installable:url.searchParams.get('model_type')==='LORA'}))});
             }
             if(url.pathname.endsWith('/gallery')){
+                if(window.failGalleryAuth)return reply({error:'Gallery authentication required',code:'civitai_auth_required'},401);
                 window.activeGallery++;window.maxGallery=Math.max(window.maxGallery,window.activeGallery);
                 if(window.galleryDelay)await new Promise(done=>window.galleryReleases.push(done));
                 window.activeGallery--;
@@ -39,9 +40,11 @@ const server = http.createServer(async (request, response) => {
                 return reply(url.searchParams.has('cursor')?{items:[preview(103),preview(104)],next_cursor:null}:{items:[preview(101),preview(102),preview(103)],next_cursor:'next'});
             }
             if(url.pathname.endsWith('/image')){
+                if(window.failImageAuth)return reply({error:'Image authentication required',code:'civitai_auth_required'},401);
                 if(window.deferImage){window.deferImage=false;await new Promise(done=>window.releaseImage=done);}
                 return reply({image:preview(Number(url.searchParams.get('image_id'))),resources:[{name:'Resource <img src=x onerror=window.injected=true>',type:'LORA',strength:0.7,url:'https://civitai.red/models/1'}],prompt:'positive only <script>text<'+'/script>',negative_prompt:'negative separate',tags:['public tag',{name:'named <script>tag<'+'/script>'},{bad:'skip'},7],other:{workflow:{nodes:[{id:1}]},width:600,height:800,createdAt:'2026-11-15',seed:0,sampler:'Euler',steps:20,cfgScale:0,user:'excluded',url:'excluded'},partial:false});
             }
+            if(url.pathname.endsWith('/details')&&window.failDetailAuth)return reply({error:'Details authentication required',code:'civitai_auth_required'},401);
             if(url.pathname.endsWith('/details'))return reply({...candidate(1,''),gallery:[preview(101)],image_url:image});
             if(url.pathname.endsWith('/auth/clear')){window.authenticated=false;return reply({configured:false,username:''});}
             if(url.pathname.endsWith('/auth')){
@@ -340,10 +343,12 @@ try {
     assert.equal(await page.evaluate(()=>JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions,catalogRefresh:window.catalogRefresh})),await page.evaluate(()=>window.oldValues));
     await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
     // Red has an inline authentication gate; authentication never starts a search automatically.
+    const optionsBeforeGate=await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/options?')).length);
     const gateBefore = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
     await page.evaluate(()=>{window.node=window.makeNode();window.authenticated=false;window.open();});
     await search.getByText('civitai.redで検索するには認証が必要です。右上の「認証」からAPIキーを登録してください。',{exact:true}).waitFor();
     assert.equal(await search.getByRole('button',{name:'検索',exact:true}).isDisabled(),true);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/options?')).length),optionsBeforeGate,'unconfigured red never loads options');
     assert.equal(await page.getByRole('dialog',{name:'Civitai 認証',exact:true}).count(),0);
     await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByLabel('Civitai APIキー',{exact:true}).fill('gate-key'); await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),gateBefore);
@@ -497,6 +502,34 @@ try {
     await page.getByRole('dialog',{name:'Civitai Image #1',exact:true}).waitFor();
     await page.evaluate(()=>window.localParent.dismiss());
     assert.equal(await page.getByRole('dialog').count(),0,'parent dismissal cascades through detail/image');
+    // API authentication errors from a user-opened Detail/Image/gallery share explicit authentication and retry.
+    async function authenticateRequest() {
+        const failed=page.getByRole('dialog',{name:'取得に失敗しました',exact:true});await failed.waitFor();
+        await failed.getByRole('button',{name:'認証',exact:true}).click();
+        await auth.getByLabel('Civitai APIキー',{exact:true}).fill('metadata-fixture');
+        const before=await page.evaluate(()=>window.calls.length);
+        await auth.getByRole('button',{name:'認証',exact:true}).click();await auth.waitFor({state:'detached'});
+        assert.equal(await page.evaluate(()=>window.calls.length),before+1,'authentication does not repeat the failed operation');
+        return failed;
+    }
+    await page.evaluate(()=>{window.failDetailAuth=true;window.local();window.detail();});
+    let failedMetadata=await authenticateRequest();
+    await page.evaluate(()=>window.failDetailAuth=false);await failedMetadata.getByRole('button',{name:'再試行',exact:true}).click();
+    const standalone=page.getByRole('dialog',{name:'Civitai Detail',exact:true});await standalone.locator('h2').getByText('Model 1',{exact:false}).waitFor();
+    await page.evaluate(()=>window.failImageAuth=true);await standalone.getByRole('button',{name:'Civitai Image #1',exact:true}).click();
+    failedMetadata=await authenticateRequest();await failedMetadata.getByRole('button',{name:'再試行',exact:true}).click();
+    failedMetadata=await authenticateRequest();
+    assert.equal(await page.getByRole('dialog',{name:'Civitai Image #1',exact:true}).locator('.pc-civitai-generation-data > p').filter({hasText:'生成情報を取得できませんでした'}).count(),1,'repeated 401 reuses the one status node');
+    await page.evaluate(()=>window.failImageAuth=false);await failedMetadata.getByRole('button',{name:'再試行',exact:true}).click();
+    await page.getByRole('dialog',{name:'Civitai Image #1',exact:true}).getByText('positive only <script>text<'+'/script>',{exact:true}).waitFor();
+    await page.evaluate(()=>window.localParent.dismiss());
+    await page.evaluate(()=>{window.node=window.makeNode();window.failGalleryAuth=true;window.open();});
+    await cards.first().getByText('画像の取得には認証が必要です。右上の認証から登録してください。',{exact:true}).waitFor();
+    assert.equal(await page.getByRole('dialog',{name:'取得に失敗しました',exact:true}).count(),0,'background gallery failures never open multiple auth popups');
+    await cards.first().click();failedMetadata=await authenticateRequest();
+    await page.evaluate(()=>window.failGalleryAuth=false);await failedMetadata.getByRole('button',{name:'再試行',exact:true}).click();
+    await detail.getByRole('button',{name:'Civitai Image #1',exact:true}).waitFor();await page.keyboard.press('Escape');
+
     assert.deepEqual(errors, []);
     console.log('Civitai gallery sharing, responsive cards, nested image data, auth/retry and in-session search restoration passed. Screenshots: '+screenshots);
 } finally { await browser.close(); await new Promise(done=>server.close(done)); }
