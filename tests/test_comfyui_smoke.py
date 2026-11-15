@@ -224,8 +224,17 @@ class RealComfyUISmokeTests(unittest.TestCase):
             def produce(self):
                 raise AssertionError("Preflight must not execute the linked value")
 
+        class String:
+            RETURN_TYPES = ("STRING",)
+            FUNCTION = "produce"
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {}}
+            def produce(self):
+                raise AssertionError("Preflight must not execute the incompatible linked value")
+
         lora = self.package.NODE_CLASS_MAPPINGS["SceneApplyLora"]
-        mapping = {"SceneApplyLora": lora, "NativeLoraValidationSink": Sink, "NativeLoraCombo": Combo}
+        mapping = {"SceneApplyLora": lora, "NativeLoraValidationSink": Sink, "NativeLoraCombo": Combo, "NativeLoraString": String}
         original = folder_paths.get_filename_list
         graph = {"2": {"class_type": "SceneApplyLora", "inputs": {"lora_name": "folder/style.safetensors", "strength_model": 1.0, "strength_clip": 1.0}},
                  "3": {"class_type": "NativeLoraValidationSink", "inputs": {"scene_prompt": ["2", 0]}}}
@@ -238,9 +247,7 @@ class RealComfyUISmokeTests(unittest.TestCase):
             self.assertTrue(validate()[0])
             graph["2"]["inputs"]["lora_name"] = "missing.safetensors"
             self.assertFalse(validate()[0])
-            primitive = comfy_nodes.NODE_CLASS_MAPPINGS["PrimitiveString"]
-            self.assertIn("value", primitive.INPUT_TYPES()["required"])
-            graph["1"] = {"class_type": "PrimitiveString", "inputs": {"value": "folder/style.safetensors"}}
+            graph["1"] = {"class_type": "NativeLoraString", "inputs": {}}
             graph["2"]["inputs"]["lora_name"] = ["1", 0]
             self.assertFalse(validate()[0], "STRING to COMBO remains an unsupported typed link")
             graph["1"] = {"class_type": "NativeLoraCombo", "inputs": {}}
