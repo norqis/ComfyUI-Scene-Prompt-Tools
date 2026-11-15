@@ -425,29 +425,42 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     if (state.model_mode !== undefined) model.value = state.model_mode;
     options(modelType, "Model Type", [state.model_type || "LORA"], state.model_type || "LORA");
     if (modelType.options[0].value === "LORA") modelType.options[0].textContent = "LoRA";
-    let categoriesAfterAuth = false;
-    function setCategories(names, selected = category.value) {
-        if (categoriesAfterAuth && !names.includes(selected)) selected = "";
+    function setCategories(names, selected = category.value, authoritative = false) {
+        if (authoritative && !names.includes(selected)) selected = "";
         options(category, "Category", ["", ...new Set([...names, ...(selected ? [selected] : [])])], selected);
         category.options[0].textContent = "Category";
     }
     setCategories([], state.category || "");
-    async function loadOptions() {
+    let optionsReady;
+    function loadOptions(retry = false) {
         const selectedHost = host.value;
+        if (!retry && optionsReady?.host === selectedHost && !optionsReady.request.signal.aborted) return optionsReady.promise;
         optionsRequest?.abort(); const request = new AbortController(); optionsRequest = request;
-        try {
-            let data = hostOptions.get(selectedHost);
-            if (!data) {
-                data = await requestJSON(api, `/scene_prompt/civitai/options?${new URLSearchParams({ host: selectedHost })}`, undefined, { signal: request.signal });
-                if (request.signal.aborted || optionsRequest !== request || !modal.overlay.isConnected || selectedHost !== host.value) return;
-                hostOptions.set(selectedHost, data);
+        const operation = { host: selectedHost, request }; optionsReady = operation;
+        operation.promise = (async () => {
+            try {
+                let data = hostOptions.get(selectedHost);
+                if (!data) {
+                    data = await requestJSON(api, `/scene_prompt/civitai/options?${new URLSearchParams({ host: selectedHost })}`, undefined, { signal: request.signal });
+                    if (request.signal.aborted || optionsRequest !== request || !gateCurrent() || selectedHost !== host.value) return false;
+                    hostOptions.set(selectedHost, data);
+                }
+                if (!gateCurrent() || selectedHost !== host.value) return false;
+                options(modelType, "Model Type", data.model_types, modelType.value);
+                for (const option of modelType.options) if (option.value === "LORA") option.textContent = "LoRA";
+                const categories = data.categories || [];
+                setCategories(categories, category.value, Boolean(categories.length || selectedHost !== "civitai.red" || gate === "configured"));
+                if (currentResult) {
+                    if (JSON.stringify(snapshot()) !== JSON.stringify(currentResult.snapshot)) status.textContent = "前回成功した条件の検索結果";
+                    else if (status.textContent === "前回成功した条件の検索結果") status.textContent = "";
+                }
+                return true;
+            } catch (error) {
+                if (!request.signal.aborted && selectedHost === host.value && gateCurrent()) showAPIError(error, "Civitai options", () => void loadOptions(true));
+                return false;
             }
-            if (!modal.overlay.isConnected || selectedHost !== host.value) return;
-            const selected = modelType.value;
-            options(modelType, "Model Type", data.model_types, selected);
-            for (const option of modelType.options) if (option.value === "LORA") option.textContent = "LoRA";
-            setCategories(data.categories || []);
-        } catch (error) { if (!request.signal.aborted && selectedHost === host.value && modal.overlay.isConnected) showAPIError(error, "Civitai options", () => void loadOptions()); }
+        })();
+        return operation.promise;
     }
     const search = element("button", "検索", "pc-button"), status = element("p", "", "pc-civitai-status"), list = element("div", undefined, "pc-civitai-results"), detail = element("div", undefined, "pc-civitai-detail");
     status.setAttribute("role", "status"); detail.hidden = true;
@@ -470,7 +483,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     function authenticationChanged(data) {
         if (!gateCurrent()) return;
         authRevision++; authRequest?.abort(); revision++; detailRevision++; searchRequest?.abort(); optionsRequest?.abort();
-        currentResult?.scope.close(); observer.disconnect(); currentResult = null; hostOptions.clear(); categoriesAfterAuth = Boolean(data.configured);
+        currentResult?.scope.close(); observer.disconnect(); currentResult = null; hostOptions.clear();
         list.replaceChildren(); detail.replaceChildren(); detail.hidden = true; controls.hidden = false; status.hidden = false; status.textContent = ""; modal.setTitle("Civitai Search");
         setGate(host.value === "civitai.red" && !data.configured ? "missing" : "configured");
         saveView(); void loadOptions();
@@ -567,7 +580,13 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
             if (!item.image_url) observer.observe(card);
         }
     }
-    async function load(requested = snapshot()) {
+    let searchIntent = 0;
+    async function load(requested) {
+        const intent = ++searchIntent, selectedHost = host.value, authSerial = authRevision;
+        if (!await loadOptions() || intent !== searchIntent || !gateCurrent() || selectedHost !== host.value || authSerial !== authRevision) return;
+        const categories = hostOptions.get(selectedHost)?.categories || [];
+        setCategories(categories, category.value, Boolean(categories.length || selectedHost !== "civitai.red" || gate === "configured"));
+        requested ??= snapshot();
         if (!gateCurrent() || (requested.host === "civitai.red" && gate !== "configured")) return;
         const serial = ++revision; detailRevision++; searchRequest?.abort(); currentResult?.scope.close(); observer.disconnect(); searchRequest = new AbortController();
         detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = false; modal.setTitle("Civitai Search"); status.textContent = "検索中…"; list.inert = true;

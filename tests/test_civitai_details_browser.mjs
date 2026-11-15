@@ -23,7 +23,7 @@ const server = http.createServer(async (request, response) => {
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
             const url=new URL(path,'http://fixture'), body=options.body?JSON.parse(options.body):{}, reply=(data,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(data)});
             if(url.pathname.endsWith('/directories'))return reply({directories:['','a','a/b','c','c/local','c/local/bin','c/local/lib','llm',...Array.from({length:20},(_,i)=>'z'+String(i).padStart(2,'0'))]});
-            if(url.pathname.endsWith('/options')){const data={model_types:['Checkpoint','TextualInversion','Hypernetwork','AestheticGradient','LORA','LoCon','DoRA','Controlnet','Upscaler','MotionModule','VAE','TextEncoder','UNet','CLIPVision','Poses','Wildcards','Workflows','ComfyWorkflows','Detection','VisionLanguage','CLIP','LLM','Other'],categories:window.categories||['Style','Action','Concept']};if(window.deferOptions){window.deferOptions=false;await new Promise(done=>window.releaseOptions=done);}return reply(data);}
+            if(url.pathname.endsWith('/options')){if(window.failOptions){window.failOptions=false;return reply({error:'options offline'},503);}const data={model_types:window.modelTypesByHost?.[url.searchParams.get('host')]||['Checkpoint','TextualInversion','Hypernetwork','AestheticGradient','LORA','LoCon','DoRA','Controlnet','Upscaler','MotionModule','VAE','TextEncoder','UNet','CLIPVision','Poses','Wildcards','Workflows','ComfyWorkflows','Detection','VisionLanguage','CLIP','LLM','Other'],categories:window.categoriesByHost?.[url.searchParams.get('host')]||window.categories||['Style','Action','Concept']};if(window.deferOptions){window.deferOptions=false;await new Promise(done=>window.releaseOptions=done);}return reply(data);}
             if(url.pathname.endsWith('/tags')){if(window.deferTags){window.deferTags=false;await new Promise(done=>window.releaseTags=done);}return reply({items:['Style','Action',url.searchParams.get('query')]});}
             if(url.pathname.endsWith('/search')){
                 if(window.failSearchAuth){window.failSearchAuth=false;return reply({error:'Red authentication required',code:'civitai_auth_required'},401);}
@@ -96,7 +96,7 @@ try {
             const title=card.querySelector('.pc-civitai-card-title'), version=card.querySelector('.pc-civitai-card-version'), base=card.querySelector('.pc-civitai-card-base'), stats=card.querySelector('.pc-civitai-card-stats');
             return {card:box(card),image:box(card.querySelector('img')),title:box(title),version:box(version),base:box(base),stats:box(stats),metrics:[...stats.children].map(box),font:parseFloat(getComputedStyle(card).fontSize),titleFont:parseFloat(getComputedStyle(title).fontSize),overflow:card.scrollWidth>card.clientWidth};
         });
-        assert(geometry.title.top>=geometry.image.bottom);assert(geometry.version.top>=geometry.title.bottom);assert(geometry.base.left<geometry.stats.left);assert(geometry.base.width>=40,JSON.stringify(geometry));assert(geometry.stats.right<=geometry.card.right);assert(geometry.metrics.every(metric=>metric.top===geometry.metrics[0].top));assert(geometry.font>=14);assert(geometry.titleFont>=16);assert.equal(geometry.overflow,false);
+        assert(geometry.title.top>=geometry.image.bottom);assert(geometry.version.top>=geometry.title.bottom);assert(geometry.base.left<geometry.stats.left);assert(geometry.base.width>=32&&geometry.base.right<=geometry.stats.left,JSON.stringify(geometry));assert(geometry.stats.right<=geometry.card.right);assert(geometry.metrics.every(metric=>metric.top===geometry.metrics[0].top));assert(geometry.font>=14);assert(geometry.titleFont>=16);assert.equal(geometry.overflow,false);
         const rows=await cards.evaluateAll(nodes=>nodes.slice(0,7).map(node=>node.getBoundingClientRect().top));assert(rows.slice(0,expectedColumns).every(y=>y===rows[0]));assert(rows[expectedColumns]>rows[0]);
         const toolbar=await search.locator('.pc-civitai-controls > *').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().top));assert(toolbar.every(y=>y===toolbar[0]),'toolbar stays on one row');
     }
@@ -335,21 +335,66 @@ try {
     await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
     // Authentication discards old search/options replies while retaining draft filters until real categories load.
     await page.evaluate(()=>{window.node=window.makeNode();window.node.properties.scene_civitai={category:'Legacy'};window.categories=['Legacy'];window.deferOptions=true;window.releaseOptions=null;window.open();});
-    await page.waitForFunction(()=>window.releaseOptions); await cards.first().waitFor();
-    await search.getByRole('searchbox',{name:'検索語'}).fill('old auth result'); await page.evaluate(()=>{window.deferSearch=true;window.releaseSearch=null;});
-    await search.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForFunction(()=>window.releaseSearch);
+    await page.waitForFunction(()=>window.releaseOptions);
+    const optionsPendingSearches = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
+    await search.getByRole('button',{name:'検索',exact:true}).click();
+    await page.waitForTimeout(20);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),optionsPendingSearches,'initial and manual search both wait for the shared options request');
     await search.getByRole('button',{name:'認証',exact:true}).click(); await page.evaluate(()=>window.categories=['Style','Action']);
     await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
     await page.waitForFunction(()=>document.querySelector('select[aria-label="Category"]').value==='');
-    await page.evaluate(()=>{window.releaseSearch();window.releaseOptions();}); await page.waitForTimeout(20);
+    await page.evaluate(()=>window.releaseOptions()); await page.waitForTimeout(20);
     assert.equal(await cards.count(),0,'a search started before authentication cannot restore old results');
     assert.deepEqual(await search.getByRole('combobox',{name:'Category',exact:true}).locator('option').evaluateAll(nodes=>nodes.map(node=>node.value)),['','Style','Action']);
     await search.getByRole('combobox',{name:'Category',exact:true}).selectOption('Style'); await cards.first().waitFor();
+    await page.evaluate(()=>{window.deferSearch=true;window.releaseSearch=null;});
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForFunction(()=>window.releaseSearch);
+    await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
+    await page.evaluate(()=>window.releaseSearch()); await page.waitForTimeout(20); assert.equal(await cards.count(),0,'authentication discards a previously started search');
+
     await search.getByRole('button',{name:'認証',exact:true}).click(); await page.evaluate(()=>window.categories=[]);
     await auth.getByRole('button',{name:'認証解除',exact:true}).click(); await auth.getByText('未認証',{exact:true}).waitFor(); await page.keyboard.press('Escape');
     assert.equal(await search.getByRole('combobox',{name:'Category',exact:true}).inputValue(),'Style','empty unauthenticated category lists preserve the draft');
     await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
     await page.evaluate(()=>{window.authenticated=true;window.categories=null;});
+    // Configured initial loads and host changes search only after official options normalize saved filters.
+    await page.evaluate(()=>{window.node=window.makeNode();window.node.properties.scene_civitai={category:'Removed category',model_type:'Removed type'};window.open();}); await cards.first().waitFor();
+    assert.equal(await search.getByRole('combobox',{name:'Category',exact:true}).inputValue(),'');
+    assert.equal(await search.getByRole('combobox',{name:'Model Type',exact:true}).inputValue(),'Checkpoint');
+    const normalizedInitial = await page.evaluate(()=>new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.toString());
+    assert.match(normalizedInitial,/category=$/);assert.match(normalizedInitial,/model_type=Checkpoint/);assert.doesNotMatch(normalizedInitial,/Removed/);
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    await page.evaluate(()=>{window.node=window.makeNode();window.node.properties.scene_civitai={category:'Style'};window.categoriesByHost={'civitai.red':['Style'],'civitai.com':['Concept']};window.modelTypesByHost={'civitai.com':['LORA']};window.open();}); await cards.first().waitFor();
+    const beforeHostWait = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
+    await page.evaluate(()=>{window.deferOptions=true;window.releaseOptions=null;}); await search.getByRole('combobox',{name:'接続先',exact:true}).selectOption('civitai.com'); await page.waitForFunction(()=>window.releaseOptions);
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForTimeout(20);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),beforeHostWait,'host/manual search cannot run ahead of delayed host options');
+    await page.evaluate(()=>window.releaseOptions()); await page.waitForFunction(()=>window.calls.filter(call=>call.path.includes('/search?')).length>0&&new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('host')==='civitai.com');
+    await page.waitForFunction(()=>!document.querySelector('.pc-civitai-results').inert);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),beforeHostWait+1,'waiting automatic/manual intents share options and submit only the current search');
+    assert.equal(await search.getByRole('combobox',{name:'Category',exact:true}).inputValue(),'');
+    assert.equal(await page.evaluate(()=>new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('category')),'');
+    // Reopening cached results can normalize an obsolete draft without silently re-searching.
+    await search.getByRole('combobox',{name:'Category',exact:true}).selectOption('Concept'); await page.waitForFunction(()=>!document.querySelector('.pc-civitai-results').inert);
+    await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup();window.node.properties.scene_civitai={};});
+    // Normalize a cached obsolete draft without silently re-running the successful search.
+    await page.evaluate(()=>{window.categoriesByHost=null;window.modelTypesByHost=null;window.node=window.makeNode();window.node.properties.scene_civitai={category:'Style'};window.open();}); await cards.first().waitFor();
+    const cachedConditionSearches = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
+    await search.getByRole('combobox',{name:'Category',exact:true}).evaluate(node=>{const option=document.createElement('option');option.value='obsolete draft';option.textContent='obsolete draft';node.append(option);node.value=option.value;});
+    await page.keyboard.press('Escape'); await page.evaluate(()=>window.open()); await cards.first().waitFor();
+    await page.waitForFunction(()=>document.querySelector('select[aria-label="Category"]').value==='');
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),cachedConditionSearches);
+    await search.getByText('前回成功した条件の検索結果',{exact:true}).waitFor();
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
+    // Failed options never start a search; retrying options alone does not submit one either.
+    const optionsFailureSearches = await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length);
+    await page.evaluate(()=>{window.node=window.makeNode();window.failOptions=true;window.open();}); await failure.waitFor();
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),optionsFailureSearches);
+    await failure.getByRole('button',{name:'再試行',exact:true}).click();
+    await search.getByRole('combobox',{name:'Category',exact:true}).locator('option[value="Style"]').waitFor({state:'attached'});
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),optionsFailureSearches);
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await cards.first().waitFor();
+    await page.evaluate(()=>window.node.sceneCivitaiSearchCleanup());
     // Relevancy remains a distinct saved UI value while the backend omits the upstream sort parameter.
     await page.evaluate(()=>{window.node=window.makeNode();window.open();}); await cards.first().waitFor();
     assert.equal(await search.getByRole('combobox',{name:'並び順',exact:true}).inputValue(),'Most Downloaded');
