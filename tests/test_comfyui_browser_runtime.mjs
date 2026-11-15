@@ -7,6 +7,7 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { chromium } from "playwright";
+import { verifySceneWeightHistory } from "./scene_weight_history.mjs";
 import { parseSelectionState } from "../web/scene_prompt_state.js";
 import { verifySceneModalHistory, verifyCandidateReloadSelections, verifyCandidateEditHistory } from "./scene_modal_history.mjs";
 
@@ -379,6 +380,7 @@ window.__sceneSeedRuntimeTest = {
             names: node.widgets.filter(widget => names.includes(widget.name)).map(widget => widget.name), values: node.serialize().widgets_values };
     },
     updateLLMExpand(node) { updateSceneExpandButton(node); },
+    expandCounts(node) { return sceneExpandCounts(node); },
     countStats(node) { return scenePromptStats(node); },
     sourceKey(node) { return scenePromptSourceCacheKey(node); },
     latentConfig(node) { return sceneEmptyLatentConfig(node); },
@@ -395,7 +397,10 @@ window.__sceneSeedRuntimeTest = {
     tracker() { return sceneActiveWorkflow()?.changeTracker; },
     openCandidatePicker(id, side = "positive") { return openPromptCandidatePopup(app.graph.getNodeById(id), ["Modal Undo Runtime"], { stateWidgetName: side + "_json" }); },
     reloadCandidateItems() { return loadPromptItems(true); },
-    writeSelection(node, state) { return writeState(node, state, { stateWidgetName: "positive_json" }); },
+    writeSelection(node, state, stateWidgetName = "positive_json") { return writeState(node, state, { stateWidgetName }); },
+    reloadPresets() { return loadScenePresetList(true); },
+    matrixLine(name) { return createMatrixLine(name); },
+    writeMatrix(node, state) { return withSceneUserChange(node, () => writeMatrixState(node, state, { fitHeight: false })); },
     async refreshPresetReference(node) { await loadScenePresetList(true); refreshScenePresetReference(node); },
     async openFavoritePicker(favorites = false) {
         const node = window.LiteGraph.createNode("ScenePrompter");
@@ -439,6 +444,7 @@ window.__sceneSeedRuntimeTest = {
         { timeout: 30_000 },
     );
     await page.keyboard.press("Escape");
+    await verifySceneWeightHistory(page);
     await (await import('./scene_public_widget_inputs.mjs')).verifyPublicWidgetInputs(page);
     nativeRunChecks = true;
     try { await (await import('./scene_public_widget_inputs.mjs')).verifyLinkedInputSemantics(page); }
