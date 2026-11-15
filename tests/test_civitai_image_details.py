@@ -10,6 +10,9 @@ class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
         self.auth = mock.patch.object(civitai_auth, "token_snapshot", return_value="fixture-search-key")
         self.auth.start()
         self.addCleanup(self.auth.stop)
+        self.site = mock.patch.object(civitai, "_site_search", return_value={"hits": [{"id": 1}], "facetDistribution": {"category.name": {"Style": 5, "Action": 3}}})
+        self.site_mock = self.site.start()
+        self.addCleanup(self.site.stop)
 
     def preview(self, **fields):
         return {"id": 7, "url": "https://image.civitai.com/example/7.jpeg", "nsfw": False, "nsfwLevel": 1, **fields}
@@ -64,11 +67,27 @@ class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["tags"], ["public tag"])
         self.assertEqual(result["resources"], [{"name": "LoRA title", "version_name": "v2", "type": "LORA", "strength": 0.7,
                                                 "url": "https://civitai.com/models/88?modelVersionId=99"}])
-        self.assertEqual(result["other"]["workflow"], {"nodes": []})
+        self.assertEqual(result["other"], {"seed": 4, "steps": 20})
         for key in ("prompt", "negativePrompt", "tags", "resources", "meta"):
             self.assertNotIn(key, result["other"])
         self.assertFalse(result["partial"])
+        self.assertNotIn("meta", result["image"])
+        self.assertNotIn("workflow", str(result))
         self.assertEqual(get.await_args.args, ("/api/generation/data", {"type": "image", "id": 7}))
+
+    def test_other_metadata_has_only_seven_scalar_fields_in_order(self):
+        image = {"width": 1024, "height": 768, "createdAt": "image date", "seed": 99, "sampler": "image sampler", "steps": 10, "cfgScale": 9,
+                 "url": "private URL", "user": {"name": "excluded"}, "stats": {"likes": 1}, "workflow": {"nodes": []},
+                 "meta": {"width": 2048, "height": 1536, "createdAt": "flat date", "seed": 8, "sampler": "flat sampler", "steps": 15, "cfgScale": 7,
+                          "meta": {"width": 3072, "height": None, "createdAt": None, "seed": 6, "sampler": "nested sampler", "steps": 18, "cfgScale": 5}}}
+        params = {"width": None, "height": 0, "createdAt": None, "seed": 0, "sampler": None, "steps": None, "cfgScale": 0,
+                  "prompt": "positive", "negativePrompt": "negative", "tags": ["tag"], "workflow": {"nodes": []}, "extra": "excluded"}
+        result = civitai._image_information(image, {"params": params}, "civitai.red")
+        self.assertEqual(list(result["other"]), ["width", "height", "createdAt", "seed", "sampler", "steps", "cfgScale"])
+        self.assertEqual(result["other"], {"width": 3072, "height": 0, "createdAt": "flat date", "seed": 0, "sampler": "nested sampler", "steps": 18, "cfgScale": 0})
+        self.assertEqual(civitai._image_information({"meta": {"seed": [], "steps": {}, "cfgScale": 0}}, {}, "civitai.red")["other"], {"cfgScale": 0})
+        preview = civitai.normalize_preview(self.preview(createdAt="2026-11-15T00:00:00Z"))
+        self.assertEqual(preview["createdAt"], "2026-11-15T00:00:00Z")
 
     async def test_flat_metadata_survives_partial_generation_failure_without_inventing_tags(self):
         image = self.preview(meta={"prompt": "positive", "negativePrompt": "negative", "seed": 5})
@@ -99,10 +118,12 @@ class CivitaiImageDetailsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items"][0]["model_stats"]["downloadCount"], "invalid")
         self.assertEqual(result["items"][0]["updated_at"], "2026-11-15T12:00:00Z")
         self.assertNotIn("baseModels", get.await_args.args[1])
-        self.assertEqual(get.await_args.args[1]["types"], "Checkpoint")
-        self.assertEqual(get.await_args.args[1]["tag"], "Style")
+        query = self.site_mock.await_args.args[0]
+        self.assertIn('type = "Checkpoint"', query["filter"])
+        self.assertIn('category.name = "Style"', query["filter"])
+        self.assertEqual(get.await_args.args[1], {"ids": [1], "limit": 30, "nsfw": "true"})
         with mock.patch.object(civitai, "api_get", return_value={"ModelType": ["Checkpoint", "LORA", "CLIP"]}):
-            self.assertEqual(await civitai.options(), {"model_types": ["Checkpoint", "LORA", "CLIP"]})
+            self.assertEqual(await civitai.options(), {"model_types": ["Checkpoint", "LORA", "CLIP"], "categories": ["Style", "Action"]})
         with mock.patch.object(civitai, "api_get", return_value={"items": [{"name": "Style"}, {"name": "Action"}]}):
             self.assertEqual(await civitai.tags("sty"), {"items": ["Style", "Action"]})
         for function, malformed in ((civitai.options, {}), (civitai.options, {"ModelType": {}}),
