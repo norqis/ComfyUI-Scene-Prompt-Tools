@@ -1286,7 +1286,7 @@ def _scene_node_value_impl(
         }
     else:
         kwargs = {name: value(raw) for name, raw in _node_inputs(node).items()}
-    if class_type in {"ScenePrompter", "SceneMatrix"}:
+    if class_type in {"ScenePrompter", "SceneMatrix", "ScenePath"}:
         kwargs["run_handle"] = run_handle
     if class_type == "SceneMatrix":
         kwargs.update(_resolved_presets=resolved, _preset_stack=preset_stack,

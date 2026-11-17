@@ -52,6 +52,49 @@ def load_nodes(output_dir):
 
 
 class SceneNodePlanSemanticsTests(unittest.TestCase):
+    def test_path_folder_modes_use_one_run_timestamp_without_changing_prompts_or_counts(self):
+        import math
+        from datetime import datetime
+        runs = sys.modules[f"{self.nodes.__package__}.runs"]
+        timestamp = "2026_1117_235959"
+        handle = runs.create_run_context("alice", True, path_timestamp=timestamp)
+        other = runs.create_run_context("alice", path_timestamp="2026_1118_000001")
+        empty = '{"version":1,"categories":{}}'
+        prompt = self.prompt.ScenePrompt().build("A", "alpha", empty, "beta", empty, "", 0, False)[0]
+        prompt = self.nodes.ScenePromptCounter().count(count=3, scene_prompt=prompt)[0]
+        path_node = self.nodes.ScenePath()
+        try:
+            for mode, expected in [("ノード名", "てすと"), ("ノード名+タイムスタンプ", "てすと" + timestamp), ("タイムスタンプ", timestamp)]:
+                with self.subTest(mode=mode), patch.object(self.nodes, "datetime") as clock:
+                    clock.now.side_effect = AssertionError("run timestamp must not read the later clock")
+                    plan = path_node.apply_path("てすと", prompt, folder_name_mode=mode, run_handle=handle)[0]
+                    for index in range(3):
+                        row = self.nodes.item_for_normalized_plan(plan, index)["row"]
+                        self.assertEqual(row["path_parts"], [expected])
+                        self.assertEqual(row["positive_parts"], ["alpha"])
+                        self.assertEqual(row["negative_parts"], ["beta"])
+                    self.assertEqual(plan["total_batches"], 3)
+            first = path_node.apply_path("first", folder_name_mode="タイムスタンプ", run_handle=handle)[0]
+            second = path_node.apply_path("second", first, self.nodes.PATH_APPEND_TO_PREVIOUS,
+                                          folder_name_mode="ノード名+タイムスタンプ", run_handle=handle)[0]
+            self.assertEqual(self.nodes.item_for_normalized_plan(second, 0)["row"]["path_parts"],
+                             [timestamp + "_second" + timestamp])
+            with patch.object(self.nodes, "datetime") as clock:
+                clock.now.side_effect = [datetime(2026, 11, 17, 23, 59, 59), datetime(2026, 11, 18, 0, 0, 1)]
+                direct = [path_node.apply_path("x", folder_name_mode="タイムスタンプ")[0] for _ in range(2)]
+                self.assertNotEqual(direct[0]["rows"][0]["row"]["path_parts"], direct[1]["rows"][0]["row"]["path_parts"])
+            self.assertTrue(math.isnan(path_node.IS_CHANGED("x", folder_name_mode="タイムスタンプ")))
+            self.assertNotEqual(path_node.IS_CHANGED("x", folder_name_mode="タイムスタンプ", run_handle=handle),
+                                path_node.IS_CHANGED("x", folder_name_mode="タイムスタンプ", run_handle=other))
+            self.assertEqual(path_node.IS_CHANGED("x", run_handle=handle), path_node.IS_CHANGED("x", run_handle=other))
+            self.assertEqual(path_node.apply_path("legacy")[0]["rows"][0]["row"]["path_parts"], ["legacy"])
+            schema = path_node.INPUT_TYPES()
+            self.assertEqual(list(schema["required"]), ["path_name", "path_mode"])
+            self.assertEqual(schema["optional"]["folder_name_mode"][1]["default"], "ノード名")
+        finally:
+            runs.release_run_context(handle, "alice")
+            runs.release_run_context(other, "alice")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.nodes, self.prompt = load_nodes(Path(self.temp.name))

@@ -33,7 +33,7 @@ function fixture() {
     const node = { id: 41, widgets };
     node.graph = { getNodeById: () => node };
     const run = {
-        runId: "run-one", runHandle: "handle-one", nodeId: 41, node,
+        runId: "run-one", pathTimestamp: "2026_1117_235959", runHandle: "handle-one", nodeId: 41, node,
         total: 4, nextIndex: 0, waiting: false, queueing: false, pauseRequested: false,
         currentPromptId: "", pendingPromptIds: new Set(), snapshotReady: true,
         firstPromptSnapshot: { output: { "41": { inputs: { prefix: "snapshot", callback_last: null } } } },
@@ -66,7 +66,7 @@ function fixture() {
         releaseSceneBatchPlan(id) { context.released.push(id); },
         activateNextSceneBatchRun() { if (!context.sceneBatchFinalizingRuns.size) context.activated++; },
         async queueSingleScenePrompt() {
-            context.queued.push({ index: run.nextIndex, runId: run.runId, handle: run.runHandle, snapshot: run.firstPromptSnapshot, seed: run.currentSeed });
+            context.queued.push({ index: run.nextIndex, runId: run.runId, pathTimestamp: run.pathTimestamp, handle: run.runHandle, snapshot: run.firstPromptSnapshot, seed: run.currentSeed });
             return { prompt_id: `prompt-${context.queued.length}` };
         },
         scenePromptIdFromValue: (detail) => detail?.prompt_id || "",
@@ -142,6 +142,7 @@ async function testPauseResumeAndLease() {
     assert.equal(pause.name, "一時停止"); assert.equal(pause.disabled, true);
     assert.equal(c.timers.size, 0);
     assert.deepEqual(c.queued.map((item) => item.index), [0, 1, 2, 3]);
+    assert.ok(c.queued.every(item => item.pathTimestamp === "2026_1117_235959"), "all four pause/resume cycles preserve the Path request timestamp");
     assert.ok(c.queued.every((item) => item.runId === run.runId && item.handle === run.runHandle && item.snapshot === snapshot));
     assert.deepEqual(c.queued.map((item) => item.seed), [101, 202, 202, 202]);
     assert.deepEqual(c.released, [run.runId]); assert.equal(c.activated, 1);

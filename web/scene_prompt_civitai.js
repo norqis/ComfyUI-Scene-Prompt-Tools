@@ -27,14 +27,6 @@ function element(tag, text, className) {
     if (className) node.className = className;
     return node;
 }
-function descriptionText(html) {
-    const template = document.createElement("template");
-    template.innerHTML = html || "";
-    for (const node of template.content.querySelectorAll("script,style,iframe")) node.remove();
-    for (const node of template.content.querySelectorAll("br")) node.replaceWith(document.createTextNode("\n"));
-    for (const node of template.content.querySelectorAll("p,div,li,h1,h2,h3,h4,blockquote")) node.append(document.createTextNode("\n"));
-    return template.content.textContent.replace(/\n{3,}/gu, "\n\n").trim();
-}
 export function renderCivitaiDescription(html) {
     const template = document.createElement("template");
     template.innerHTML = html || "";
@@ -403,11 +395,19 @@ function renderCivitaiDetail({ modal, container, item, host, scope, api, onBack,
     pages.append(previous, page, next, more); container.append(images, pages, galleryStatus); renderImages();
     if (!gallery.length) void loadGallery();
     const metadata = element("dl", undefined, "pc-civitai-metadata");
-    function field(label, content) { metadata.append(element("dt", label), element("dd", displayValue(content))); }
+    function field(label, content) {
+        const body = element("dd");
+        if (content instanceof Node) body.append(content);
+        else body.textContent = displayValue(content);
+        metadata.append(element("dt", label), body);
+    }
     function stats(data) { return Object.entries({ downloadCount: "Downloads", thumbsUpCount: "Likes", favoriteCount: "Favorites", collectedCount: "Collected", rating: "Rating", ratingCount: "Ratings", commentCount: "Comments", tippedAmountCount: "Tips" }).filter(([key]) => data?.[key] != null).map(([key, label]) => `${label}: ${data[key]}`).join(" · "); }
     field("AUTHOR", item.creator_name); field("UPDATED", item.updated_at);
     field("BASE MODEL", item.base_model); field("TRIGGER WORDS", (item.triggers || []).join(", "));
-    field("DESCRIPTION", descriptionText(item.description)); field("VERSION DESCRIPTION", descriptionText(item.version_description));
+    for (const [label, html] of [["DESCRIPTION", item.description], ["VERSION DESCRIPTION", item.version_description]]) {
+        const description = renderCivitaiDescription(html);
+        field(label, description.textContent.trim() ? description : "");
+    }
     field("PUBLISHED", item.published_at); field("MODEL STATS", stats(item.model_stats || item.stats)); field("VERSION STATS", stats(item.version_stats));
     if (item.file_name) field("FILE", `${item.file_name} · ${Number(item.size_kb || 0).toLocaleString()} KB`);
     container.append(metadata);
@@ -604,7 +604,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                             const nativeName = (loraWidget?.options?.values || []).find(name => pathIdentity(name) === pathIdentity(downloaded.lora_name)) || downloaded.lora_name;
                             if (apply) {
                                 beginChange(graph); try {
-                                    if (downloaded.candidate) applyCandidate(node, { ...downloaded.candidate, lora_name: nativeName }, { ...view.snapshot, model_mode: applyMode });
+                                    if (downloaded.candidate) applyCandidate(node, { ...downloaded.candidate, lora_name: nativeName }, { ...view.snapshot, model_mode: applyMode, injectTriggers: false });
                                     else loraWidget.value = nativeName;
                                 } finally { endChange(graph); }
                                 updateSelection(view);

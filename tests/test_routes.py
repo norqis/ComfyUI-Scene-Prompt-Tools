@@ -316,12 +316,13 @@ class PromptDataRouteTests(unittest.TestCase):
             user_id = "alice"
 
             async def json(self):
-                return {"api_graph": {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}, "client_id": "desktop-client"}
+                return {"api_graph": {"output": {"1": {"class_type": "ScenePrompter", "inputs": {}}}}, "client_id": "desktop-client", "path_timestamp": "2026_1117_235959"}
 
         prepare = self.routes._test_routes[("POST", "/scene_prompt/runs/prepare")]
         response = asyncio.run(prepare(Request()))
         self.assertNotIn("client_id", response["payload"])
         runs = sys.modules[f"{self.routes.__package__}.runs"]
+        self.assertEqual(runs.require_run_context(response["payload"]["run_handle"])["path_timestamp"], "2026_1117_235959")
         self.assertEqual(runs.get_run_delivery_context(response["payload"]["run_handle"]), {"client_id": "desktop-client", "user_id": "alice"})
 
     def test_corrupt_prompt_data_is_reported_with_filename(self):

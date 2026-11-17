@@ -24,6 +24,21 @@ function fixture() {
 const field = (node, name) => node.widgets.find((widget) => widget.name === name);
 const candidate = (id) => ({ model_id: id, version_id: id + 10, file_id: id + 20, lora_name: `llm/${id}.safetensors`, triggers: [`trigger${id}`] });
 {
+    const { node } = fixture();
+    const lora = node("SceneApplyLora");
+    lora.properties.scene_civitai = { managed_triggers: ["old trigger"] };
+    const original = { positive: " manual,  old trigger, (keep:1.3)\n", negative: " bad,  negative\n" };
+    for (const [name, text] of Object.entries(original)) {
+        Object.defineProperty(field(lora, name), "value", { get: () => text, set: () => assert.fail(`${name} must not be written during manual acquisition`) });
+    }
+    applyCandidate(lora, candidate(7), { injectTriggers: false, model_mode: "Anima" });
+    assert.equal(field(lora, "lora_name").value, "llm/7.safetensors");
+    assert.equal(field(lora, "model_mode").value, "Anima");
+    assert.equal(field(lora, "positive").value, original.positive);
+    assert.equal(field(lora, "negative").value, original.negative);
+    assert.deepEqual(lora.properties.scene_civitai.managed_triggers, []);
+}
+{
     const { graph, node } = fixture();
     const input = node("PrimitiveStringMultiline"), llm = node("ScenePromptLLM", "stale fallback");
     input.widgets = [{ name: "value", value: "" }];

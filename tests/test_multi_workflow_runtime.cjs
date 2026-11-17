@@ -74,6 +74,7 @@ function testStaleStopLabelCannotRequeue() {
     let resetCount = 0;
     let createCount = 0;
     const context = {
+        sceneBatchRunId() { return "2026_1117_235959"; },
         sceneBatchRunForNode() { return null; },
         sceneBatchRunStatus() { return "idle"; },
         sceneBatchNodeRunId() { return "finished-run"; },

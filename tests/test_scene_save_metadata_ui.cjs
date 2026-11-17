@@ -11,7 +11,8 @@ assert.match(source, /seed_base: "開始シード"/u);
 assert.match(source, /counter_position: "連番の位置"/u);
 
 function functionSource(name) {
-    const start = source.indexOf(`function ${name}(`);
+    const asyncStart = source.indexOf(`async function ${name}(`);
+    const start = asyncStart >= 0 ? asyncStart : source.indexOf(`function ${name}(`);
     assert.notEqual(start, -1, `Missing function: ${name}`);
     const bodyStart = source.indexOf(") {", start);
     let depth = 0;
@@ -37,6 +38,86 @@ const context = {
     hideWidget(widget) { widget.hidden = true; },
     showWidget(widget) { widget.hidden = false; },
 };
+
+async function testPathFolderModesAndRequestedTimestamp() {
+    const clickedAt = "2026_1117_235959";
+    const later = "2026_1118_000001";
+    let now = clickedAt;
+    let paint;
+    const graph = { _nodes: [] };
+    const calls = [];
+    const ctx = {
+        Set, Map, Promise, JSON,
+        app: { graph }, api: { clientId: "fixture-client", async fetchApi(_url, options) {
+            calls.push(JSON.parse(options.body)); return { ok: true };
+        } },
+        sceneBatchRunId: () => now, sceneBatchPlanId: () => "opaque-plan", sceneBatchSeedBase: () => 9,
+        sceneBatchRun: null, sceneBatchDetachedRuns: new Map(), sceneBatchFinalizingRuns: new Set(),
+        sceneBatchRunsById: new Map(), sceneBatchPendingRuns: [],
+        sceneBatchRunForNode: () => null, sceneBatchRunStatus: () => "", sceneBatchNodeRunId: () => "",
+        sceneNodeHasCurrentOwner: () => true, waitForModalPaint: () => new Promise(resolve => { paint = resolve; }),
+        findSceneWidget: () => null, updateSceneExpandButton() {}, resetSceneExpandRunControls() {},
+        syncSceneNodeModes() {}, syncAllScenePromptNames() {},
+        sceneExpandCounts() { now = later; return { totalBatches: 3 }; },
+        captureRandomizedSamplerSeedTargets: () => [], sceneGPUController: { snapshot: () => ({}) },
+        isScenePresetReferenceNode: () => false, createSceneBatchPromptSnapshot: async () => ({ output: {} }),
+        setWidgetValue() {}, clearSceneSavePreviews() {}, refreshSceneBatchRunNode() {},
+        prepareSceneBatchRunSnapshot() {}, queueNextSceneBatchItem() {},
+        showSceneBatchError(_message, error) { throw error; },
+        findWidget: (node, name) => node.widgets.find(widget => widget.name === name),
+        scenePrimitiveInputValue: (node, name) => node.linked?.[name],
+        readApiJson: async () => ({ run_handle: "fixture-handle" }),
+        scenePresetReferenceIdsForExpand: () => [], clearScenePresetReferenceErrors() {},
+    };
+    vm.createContext(ctx);
+    for (const name of ["scenePathTitle", "scenePathLabel", "hideScenePathWidgets", "installScenePathWidgetSyncHandlers", "sceneRunTargetNodes", "applySceneRunHandle", "prepareSceneRunContext", "resolveScenePresetsForRun", "createSceneBatchRun", "requestSceneBatchRun", "startSceneBatchRun"])
+        vm.runInContext(functionSource(name), ctx);
+    const node = { id: 1, graph, widgets: [] };
+    const pending = ctx.requestSceneBatchRun(node);
+    now = later;
+    paint();
+    await pending;
+    const run = ctx.sceneBatchRun;
+    assert.equal(run.pathTimestamp, clickedAt, "paint and count computation cannot advance the click timestamp");
+    assert.equal(run.runId, clickedAt + "__opaque-plan");
+    const snapshot = { output: { "2": { class_type: "ScenePath", inputs: {} } } };
+    await ctx.resolveScenePresetsForRun(run, snapshot, 3);
+    assert.equal(calls[0].path_timestamp, clickedAt);
+    assert.equal(snapshot.output["2"].inputs.run_handle, "fixture-handle", "standalone Path gets a run handle");
+    await ctx.resolveScenePresetsForRun(run, snapshot, 3);
+    assert.equal(calls[1].path_timestamp, clickedAt, "later preparation retains the explicit run timestamp");
+    now = clickedAt;
+    const pendingQueued = ctx.requestSceneBatchRun({ id: 2, graph, widgets: [] });
+    now = later;
+    paint();
+    await pendingQueued;
+    const queued = ctx.sceneBatchPendingRuns[0];
+    assert.equal(queued.pathTimestamp, clickedAt);
+    assert.equal(ctx.sceneBatchRun, run, "a queued request cannot replace the active run");
+    await ctx.prepareSceneRunContext(snapshot);
+    assert.equal(calls[2].path_timestamp, later, "ordinary Run captures a fresh request timestamp");
+    assert.equal(ctx.sceneRunTargetNodes({ output: { p: { class_type: "ScenePath" }, x: { class_type: "KSampler" } } }).length, 1);
+    let refreshes = 0;
+    ctx.hideWidget = widget => { widget.hidden = true; };
+    ctx.showWidget = widget => { widget.hidden = false; };
+    ctx.clearSceneComputedCaches = () => { refreshes++; };
+    ctx.refreshDownstreamSceneNodes = () => {};
+    const pathNode = { title: "てすと", widgets: [{ name: "path_name", value: "old" }, { name: "path_mode", value: "フォルダに分ける" },
+        { name: "folder_name_mode", value: "ノード名" }, { name: "run_handle", value: "" }] };
+    // Native configure assigns the two stored legacy values; the new optional combo keeps its default.
+    ["legacy", "フォルダに分ける"].forEach((value, index) => { pathNode.widgets[index].value = value; });
+    assert.equal(ctx.scenePathLabel(pathNode), "てすと");
+    ctx.hideScenePathWidgets(pathNode);
+    assert.deepEqual(pathNode.widgets.map(widget => widget.hidden), [true, false, false, true]);
+    pathNode.widgets[2].value = "ノード名+タイムスタンプ";
+    assert.equal(ctx.scenePathLabel(pathNode), "てすと〈実行時刻〉");
+    pathNode.linked = { folder_name_mode: "タイムスタンプ" };
+    assert.equal(ctx.scenePathLabel(pathNode), "〈実行時刻〉", "linked combo takes precedence");
+    ctx.installScenePathWidgetSyncHandlers(pathNode);
+    pathNode.widgets[2].callback();
+    assert.equal(refreshes, 1);
+}
+testPathFolderModesAndRequestedTimestamp().catch(error => { console.error(error); process.exitCode = 1; });
 vm.createContext(context);
 vm.runInContext(functionSource("hideSceneUtilityWidgets"), context);
 

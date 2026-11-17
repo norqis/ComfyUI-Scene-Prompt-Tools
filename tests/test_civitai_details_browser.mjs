@@ -15,10 +15,11 @@ const server = http.createServer(async (request, response) => {
         const image='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800"><rect width="600" height="800" fill="#36556c"/><circle cx="300" cy="350" r="180" fill="#abcde0"/></svg>');
         window.calls=[];window.downloads=0;window.authenticated=true;window.activeGallery=0;window.maxGallery=0;window.galleryDelay=true;window.galleryReleases=[];
         window.graph={getNodeById:()=>window.node,beforeChange(){window.transactions=(window.transactions||0)+1;},afterChange(){}};
-        window.makeNode=()=>({id:1,graph:window.graph,properties:{},widgets:Object.entries({model_mode:'Illustrious',lora_name:'',positive:'manual'}).map(([name,value])=>({name,value}))});
+        window.makeNode=()=>({id:1,graph:window.graph,properties:{},widgets:Object.entries({model_mode:'Illustrious',lora_name:'',positive:'manual',negative:' negative,  keep\\n'}).map(([name,value])=>({name,value}))});
         window.node=window.makeNode();
         const preview=id=>({id,url:image+'#'+id,width:600,height:800});
-        const candidate=(id,query)=>({model_id:id,version_id:id===2?11:id+10,file_id:id+20,name:'Model '+id+' '+query+' long title for responsive layout',version_name:'v1',creator_name:id===2?'':id===3?'Author with a very long Unicode 名前 which must truncate':'作者 <script>literal<'+'/script>',base_model:id===3?'Illustrious XL with a very long model family name':'Illustrious',model_type:'LORA',installable:true,apply_model_mode:'Illustrious',triggers:['trigger'],gallery:[],image_url:'',model_stats:id===2?{downloadCount:null,collectedCount:'invalid',thumbsUpCount:null}:{downloadCount:5200,collectedCount:1200,thumbsUpCount:0},updated_at:id===2?null:'2026-11-15T12:00:00Z'});
+        const description=prefix=>'<p>'+prefix+' paragraph <code>inline outfit</code></p><pre><code>'+prefix+'1\\n'+prefix+'2 &lt;literal&gt;</code></pre><script>window.descriptionInjected=true<'+'/script><img src="x" onerror="window.descriptionInjected=true"><a href="javascript:window.descriptionInjected=true">unsafe link</a>';
+        const candidate=(id,query)=>({model_id:id,version_id:id===2?11:id+10,file_id:id+20,name:'Model '+id+' '+query+' long title for responsive layout',version_name:'v1',creator_name:id===2?'':id===3?'Author with a very long Unicode 名前 which must truncate':'作者 <script>literal<'+'/script>',base_model:id===3?'Illustrious XL with a very long model family name':'Illustrious',model_type:'LORA',installable:true,apply_model_mode:'Illustrious',triggers:['trigger'],description:description('outfit'),version_description:description('version'),gallery:[],image_url:'',model_stats:id===2?{downloadCount:null,collectedCount:'invalid',thumbsUpCount:null}:{downloadCount:5200,collectedCount:1200,thumbsUpCount:0},updated_at:id===2?null:'2026-11-15T12:00:00Z'});
         window.api={async fetchApi(path,options={}){
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
             const url=new URL(path,'http://fixture'), body=options.body?JSON.parse(options.body):{}, reply=(data,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(data)});
@@ -123,10 +124,27 @@ try {
     assert.equal(await search.getAttribute('aria-label'), 'Civitai Detail');
     assert.match(await search.locator('.pc-civitai-metadata').textContent(), /AUTHOR.*作者 <script>literal<\/script>.*UPDATED.*2026-11-15T12:00:00Z/s);
     const detail = search.locator('.pc-civitai-detail');
+    async function assertDescriptionFormatting(scope) {
+        const descriptions = scope.locator('.pc-civitai-metadata dd .pc-civitai-description');
+        assert.equal(await descriptions.count(), 2);
+        for (const [index, prefix] of ['outfit', 'version'].entries()) {
+            const description = descriptions.nth(index);
+            assert.equal(await description.locator('pre > code').textContent(), prefix + '1\n' + prefix + '2 <literal>');
+            assert.equal(await description.locator('p > code').textContent(), 'inline outfit');
+            assert.match(await description.locator('p').textContent(), new RegExp(prefix + ' paragraph'));
+            assert.equal(await description.locator('script,img,[onerror],a[href^="javascript:"]').count(), 0);
+        }
+        assert.equal(await scope.getByRole('button', { name: '注入', exact: true }).count(), 0);
+        assert.equal(await page.evaluate(() => window.descriptionInjected === true), false);
+    }
+    await assertDescriptionFormatting(detail);
     const acquireAndSelect = async () => {
         if (!await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await detail.getByRole('button',{name:'取得',exact:true}).click();
         await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).click();
     };
+    const assertPromptTextsUnchanged = async () => assert.deepEqual(await page.evaluate(() => Object.fromEntries(
+        window.node.widgets.filter(widget => ['positive', 'negative'].includes(widget.name)).map(widget => [widget.name, widget.value])
+    )), { positive: 'manual', negative: ' negative,  keep\n' });
     await detail.getByRole('button',{name:'Next',exact:true}).click();
     await detail.getByRole('button',{name:'Civitai Image #3',exact:true}).click();
     const image = page.getByRole('dialog',{name:'Civitai Image #3',exact:true});
@@ -206,6 +224,7 @@ try {
     assert.equal(await page.evaluate(()=>window.downloads), downloads);
     await failure.getByRole('button',{name:'再取得',exact:true}).click();
     await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='lora_name').value==='auth/snapshot/fixture.safetensors');
+    await assertPromptTextsUnchanged();
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.directory),'auth/snapshot');
     assert.doesNotMatch(await page.evaluate(()=>JSON.stringify(window.node.properties)), /fixture-secret|gallery|description|image_url/);
     await detail.getByRole('button',{name:'戻る',exact:true}).click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Search');
@@ -335,6 +354,7 @@ try {
     await detail.getByRole('button',{name:'取得',exact:true}).click(); assert.equal(await directory.inputValue(),'new/A/B');
     await directory.fill(''); await destination.getByRole('button',{name:'取得して選択',exact:true}).click(); await destination.waitFor({state:'detached'});
     assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='lora_name').value),'fixture.safetensors');
+    await assertPromptTextsUnchanged();
     // Same-object newer search invalidates an older pending acquisition before any mutation/catalog refresh.
     await detail.getByRole('button',{name:'取得',exact:true}).click();
     await page.evaluate(()=>{window.deferDownload=true;window.releaseDownload=null;window.oldValues=JSON.stringify({widgets:window.node.widgets,properties:window.node.properties,transactions:window.transactions,catalogRefresh:window.catalogRefresh});window.oldWindow=window.current;});
@@ -501,6 +521,8 @@ try {
     await page.keyboard.press('Escape');
     await page.evaluate(()=>{window.local();window.detail();});
     const local = page.getByRole('dialog',{name:'LoRA 詳細確認',exact:true}), localDetail = page.getByRole('dialog',{name:'Civitai Detail',exact:true});
+    await localDetail.locator('.pc-civitai-metadata').waitFor();
+    await assertDescriptionFormatting(localDetail);
     await localDetail.getByRole('button',{name:'Civitai Image #1',exact:true}).click();
     await page.getByRole('dialog',{name:'Civitai Image #1',exact:true}).waitFor();
     await page.evaluate(()=>window.localParent.dismiss());
@@ -562,7 +584,9 @@ try {
     await exists.getByRole('button',{name:'再取得',exact:true}).click();await destination.waitFor({state:'detached'});
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.existing_action),'replace');
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.directory),'a/b');
-    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='positive').value),'manual, trigger');
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='positive').value),'manual');
+    await assertPromptTextsUnchanged();
+    assert.deepEqual(await page.evaluate(()=>window.node.properties.scene_civitai.managed_triggers),[]);
     await detail.getByRole('button',{name:'戻る',exact:true}).click();assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
     await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup();window.acquiredItems=false;window.fileExists=false;});
 

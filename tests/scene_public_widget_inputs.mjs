@@ -118,7 +118,7 @@ export async function verifyPublicWidgetInputs(page) {
         const types = Object.keys(definitions).filter(type => definitions[type].category?.startsWith('Scene/'));
         const add = type => { const node = window.LiteGraph.createNode(type); app.graph.add(node); return node; };
         const legacyFields = {ScenePrompter:['positive_base','negative_base','filename_enabled'],
-            ScenePath:['path_mode'], ScenePrompterQueue:['order_mode','alternate_block_size','downstream_count_mode']};
+            ScenePath:['path_mode','folder_name_mode'], ScenePrompterQueue:['order_mode','alternate_block_size','downstream_count_mode']};
         for (const type of Object.keys(legacyFields)) add(type);
         const legacy = app.graph.serialize();
         for (const node of legacy.nodes) node.inputs = node.inputs.filter(input=>!legacyFields[node.type]?.includes(input.name));
@@ -231,8 +231,9 @@ export async function verifyLinkedInputSemantics(page) {
         await app.loadGraphData(app.graph.serialize(),true,true); const reloadedLayout = layout();
         app.graph.remove(app.graph.getNodeById(switchIds[0])); app.graph.remove(app.graph.getNodeById(switchIds[1]));
         const output = add('ScenePresetOutput'), id = add('PrimitiveString'), title = add('PrimitiveString');
-        const path = add('ScenePath'), order = add('PrimitiveNode'), mode = add('PrimitiveNode'), pathMode = add('PrimitiveNode');
+        const path = add('ScenePath'), order = add('PrimitiveNode'), mode = add('PrimitiveNode'), pathMode = add('PrimitiveNode'), folderMode = add('PrimitiveNode');
         link(order,current('queue'),'order_mode'); link(mode,current('queue'),'downstream_count_mode'); link(pathMode,path,'path_mode');
+        link(folderMode,path,'folder_name_mode'); edit(folderMode,'value','ノード名+タイムスタンプ');
         link(current('later'),path,'scene_prompt');
         edit(output,'preset_id','stale_id'); edit(output,'preset_name','stale title');
         edit(id,'value','linked_native'); edit(title,'value','Linked native title');
@@ -250,7 +251,7 @@ export async function verifyLinkedInputSemantics(page) {
         const response = await api.fetchApi('/scene_presets/load?preset_id=linked_native');
         const stored = await response.json();
         if (response.ok) await app.loadGraphData(stored.workflow,true,true);
-        const comboReload = [order.id,mode.id,pathMode.id].map(id => {
+        const comboReload = [order.id,mode.id,pathMode.id,folderMode.id].map(id => {
             const node = app.graph.getNodeById(id), edges = node?.outputs?.[0]?.links || [];
             return node?.type === 'PrimitiveNode' && edges.length === 1 && !!app.graph.links[edges[0]];
         });
@@ -281,7 +282,7 @@ export async function verifyLinkedInputSemantics(page) {
     assert.equal(result.save.status,200,JSON.stringify(result.save));
     assert.equal(result.save.id,'linked_native'); assert.equal(result.save.name,'Linked native title');
     assert.equal(result.save.storedStatus,200,JSON.stringify(result.save));
-    assert.deepEqual(result.comboReload,[true,true,true], 'Queue and Path native COMBO providers survive Preset save/load');
+    assert.deepEqual(result.comboReload,[true,true,true,true], 'Queue and Path native COMBO providers survive Preset save/load');
     assert.deepEqual(result.llmEmpty,[true,true]); assert.deepEqual(result.llmReady,[false,false]);
     assert.deepEqual(result.llmCleared,[true,true]);
     console.log('real ComfyUI linked Queue counts, fixed/multiply, Reroute/reload, Preset output name save and switch layout/resize/hit-test compatibility passed');

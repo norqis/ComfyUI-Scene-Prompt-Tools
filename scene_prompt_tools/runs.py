@@ -6,6 +6,7 @@ import copy
 import secrets
 import threading
 import time
+from datetime import datetime
 
 
 PREPARED_TTL_SECONDS = 120
@@ -73,7 +74,12 @@ class RunContextStore:
     def _touch_locked(entry, now):
         entry["last_access"] = now
 
-    def create(self, user_id, continuous=False, client_id=""):
+    def create(self, user_id, continuous=False, client_id="", path_timestamp=""):
+        if path_timestamp:
+            if datetime.strptime(str(path_timestamp), "%Y_%m%d_%H%M%S").strftime("%Y_%m%d_%H%M%S") != path_timestamp:
+                raise ValueError("Invalid Scene Path timestamp.")
+        else:
+            path_timestamp = datetime.now().strftime("%Y_%m%d_%H%M%S")
         now = time.monotonic()
         with self._lock:
             expired = self._purge_expired_locked(now)
@@ -91,6 +97,7 @@ class RunContextStore:
                 "state": "prepared",
                 "prompt_id": "",
                 "continuous": bool(continuous),
+                "path_timestamp": path_timestamp,
                 "last_access": now,
             }
         self._notify_expired(expired)
@@ -409,8 +416,8 @@ def set_run_expiration_callback(callback):
     RUN_CONTEXTS.set_expiration_callback(callback)
 
 
-def create_run_context(user_id, continuous=False, client_id=""):
-    return RUN_CONTEXTS.create(user_id, continuous, client_id)
+def create_run_context(user_id, continuous=False, client_id="", path_timestamp=""):
+    return RUN_CONTEXTS.create(user_id, continuous, client_id, path_timestamp)
 
 
 def reconcile_active_run_contexts(live_prompt_ids):

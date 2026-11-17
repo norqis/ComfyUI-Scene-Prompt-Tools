@@ -11,6 +11,24 @@ SPEC.loader.exec_module(RUNS)
 
 
 class RunContextTests(unittest.TestCase):
+    def test_path_timestamp_is_captured_once_and_owned_by_run(self):
+        from datetime import datetime
+        store = RUNS.RunContextStore()
+        with mock.patch.object(RUNS, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 11, 17, 23, 59, 59)
+            first = store.create("alice", continuous=True)
+            clock.now.return_value = datetime(2026, 11, 18, 0, 0, 1)
+            second = store.create("alice")
+        self.assertEqual(store.require(first)["path_timestamp"], "2026_1117_235959")
+        self.assertEqual(store.require(second)["path_timestamp"], "2026_1118_000001")
+        explicit = store.create("alice", path_timestamp="2026_1117_215345")
+        self.assertEqual(store.require(explicit)["path_timestamp"], "2026_1117_215345")
+        for invalid in ["2026_2317_215345", "2026_1117_253545", "2026_117_215345", "2026_1117_215345suffix", 123]:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                store.create("alice", path_timestamp=invalid)
+        store.release(first, "alice")
+        self.assertNotIn(first, store._entries)
+
     def test_consumer_selection_replaces_previous_and_is_released_with_run(self):
         store = RUNS.RunContextStore()
         handle = store.create("alice", continuous=True)
