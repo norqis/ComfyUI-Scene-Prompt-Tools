@@ -173,7 +173,7 @@ export async function verifyPublicWidgetInputs(page) {
     assert.deepEqual(result.before, [], JSON.stringify(result));
     assert.deepEqual(result.reloaded, [], JSON.stringify(result));
     assert.equal(result.types, 25);
-    assert.equal(result.fields, 50, 'exercise all public scalar widgets, including Reference filename toggle');
+    assert.equal(result.fields, 51, 'exercise all public scalar widgets, including Reference filename toggle and Path folder mode');
     console.log(`real ComfyUI public widget inputs: ${result.fields} arguments / ${result.types} node classes retain links and API values after reload`);
 }
 
