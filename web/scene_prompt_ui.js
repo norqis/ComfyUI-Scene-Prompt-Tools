@@ -206,6 +206,7 @@ const SCENE_WIDGET_LABELS = {
     scene_prompt: "scene_prompt",
     matrix: "matrix",
     path_mode: "保存パスの扱い",
+    folder_name_mode: "フォルダ名",
     current_index: "生成番号",
     run_id: "実行ID",
     seed_base: "開始シード",
@@ -4120,7 +4121,7 @@ function hideScenePromptWidgets(node) {
 }
 
 function hideScenePathWidgets(node) {
-    const visibleWidgets = new Set(["path_mode"]);
+    const visibleWidgets = new Set(["path_mode", "folder_name_mode"]);
     for (const widget of node.widgets || []) {
         if (widget?.sceneRole || visibleWidgets.has(widget?.name)) {
             showWidget(widget);
@@ -4173,6 +4174,12 @@ function scenePathTitle(node) {
         return title;
     }
     return title || "Scene Path";
+}
+
+function scenePathLabel(node) {
+    const mode = scenePrimitiveInputValue(node, "folder_name_mode", "string") ?? findWidget(node, "folder_name_mode")?.value;
+    if (mode === "タイムスタンプ") return "〈実行時刻〉";
+    return scenePathTitle(node) + (mode === "ノード名+タイムスタンプ" ? "〈実行時刻〉" : "");
 }
 
 function syncScenePathNameFromTitle(node) {
@@ -6391,18 +6398,18 @@ function installScenePromptWidgetSyncHandlers(node) {
 }
 
 function installScenePathWidgetSyncHandlers(node) {
-    const widget = findWidget(node, "path_mode");
-    if (!widget || widget.scenePathSyncWrapped) {
-        return;
+    for (const name of ["path_mode", "folder_name_mode"]) {
+        const widget = findWidget(node, name);
+        if (!widget || widget.scenePathSyncWrapped) continue;
+        const originalCallback = widget.callback;
+        widget.callback = function () {
+            const result = originalCallback?.apply(this, arguments);
+            clearSceneComputedCaches(node);
+            refreshDownstreamSceneNodes(node);
+            return result;
+        };
+        widget.scenePathSyncWrapped = true;
     }
-    const originalCallback = widget.callback;
-    widget.callback = function () {
-        const result = originalCallback?.apply(this, arguments);
-        clearSceneComputedCaches(node);
-        refreshDownstreamSceneNodes(node);
-        return result;
-    };
-    widget.scenePathSyncWrapped = true;
 }
 
 function scenePromptReverseScope(node) {
@@ -7332,6 +7339,7 @@ function scenePromptSourceLocalCacheKey(node) {
     }
     if (isScenePathNode(node)) {
         return finish({ type: "path", title: scenePathTitle(node),
+            folder_name_mode: scenePrimitiveInputValue(node, "folder_name_mode", "string") ?? findWidget(node, "folder_name_mode")?.value ?? "ノード名",
             path_mode: normalizePathMode(scenePrimitiveInputValue(node, "path_mode", "string") ?? findWidget(node, "path_mode")?.value) });
     }
     if (isScenePromptMergeNode(node)) return finish({ type: "merge" });
@@ -8498,7 +8506,7 @@ function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
                     const title = scenePromptTitle(node);
                     return { ...entry, parts: [...(entry.parts || []), title], row: { ...row, labels: [...(row.labels || []), title] } };
                 }
-                if (isScenePathNode(node)) return { ...entry, row: { ...row, path_parts: appendScenePathPart(row.path_parts || [], scenePathTitle(node), normalizePathMode(scenePrimitiveInputValue(node, "path_mode", "string") ?? findWidget(node, "path_mode")?.value)) } };
+                if (isScenePathNode(node)) return { ...entry, row: { ...row, path_parts: appendScenePathPart(row.path_parts || [], scenePathLabel(node), normalizePathMode(scenePrimitiveInputValue(node, "path_mode", "string") ?? findWidget(node, "path_mode")?.value)) } };
                 return { ...entry, row: { ...row, latent: sceneEmptyLatentConfig(node) } };
             };
             return finish(sceneScheduleMap(base, transform,
@@ -8883,7 +8891,7 @@ function scenePromptLineageKey(node) {
         const scalarNames = isScenePromptCounterNode(current) ? ["count", "enable_downstream_count"]
             : isSceneEmptyLatentNode(current) ? ["width", "height", "batch_size"]
                 : isScenePromptQueueNode(current) ? SCENE_QUEUE_CONTROL_NAMES
-                    : isScenePathNode(current) ? ["path_mode"]
+                    : isScenePathNode(current) ? ["path_mode", "folder_name_mode"]
                     : isSceneSwitch(current) ? ["switch"] : isScenePresetReferenceNode(current) || isPromptMatrixNode(current) ? ["switches"] : [];
         let selectedBranch = "";
         if (isSceneSwitch(current)) { try { selectedBranch = sceneLiveSwitchSelection(current); } catch { /* The control edge carries the unresolved provider. */ } }
@@ -9057,7 +9065,7 @@ function scenePromptPreviewEntries(node, limit = MATRIX_SECTION_VISIBLE_ROWS, se
     }
 
     if (isScenePathNode(node)) {
-        const title = scenePathTitle(node);
+        const title = scenePathLabel(node);
         const pathMode = normalizePathMode(scenePrimitiveInputValue(node, "path_mode", "string") ?? findWidget(node, "path_mode")?.value);
         const upstream = scenePromptInputSource(node);
         const entries = upstream ? scenePromptPreviewEntries(upstream, maxEntries, new Set(seen), memo)
@@ -9857,6 +9865,7 @@ function sceneRunTargetNodes(apiGraph) {
     return Object.values(apiGraph?.output || {}).filter((node) => (
         node?.class_type === "ScenePrompter"
         || node?.class_type === "SceneMatrix"
+        || node?.class_type === "ScenePath"
         || node?.class_type === "ScenePresetReference"
         || node?.class_type === "ScenePrompterExpand"
         || node?.class_type === "ScenePromptToText"
@@ -9867,6 +9876,7 @@ function applySceneRunHandle(apiGraph, runHandle) {
     const targetNodes = Object.values(apiGraph?.output || {}).filter((node) => (
         node?.class_type === "ScenePrompter"
         || node?.class_type === "SceneMatrix"
+        || node?.class_type === "ScenePath"
         || node?.class_type === "ScenePresetReference"
         || node?.class_type === "ScenePrompterExpand"
         || node?.class_type === "ScenePromptToText"
@@ -9879,7 +9889,7 @@ function applySceneRunHandle(apiGraph, runHandle) {
     return apiGraph;
 }
 
-async function prepareSceneRunContext(apiGraph, expandNodeId = null, workflow = null) {
+async function prepareSceneRunContext(apiGraph, expandNodeId = null, workflow = null, pathTimestamp = sceneBatchRunId()) {
     if (!sceneRunTargetNodes(apiGraph).length) {
         return null;
     }
@@ -9887,7 +9897,7 @@ async function prepareSceneRunContext(apiGraph, expandNodeId = null, workflow = 
     const response = await api.fetchApi("/scene_prompt/runs/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId, workflow, client_id: api.clientId || "" }),
+        body: JSON.stringify({ api_graph: apiGraph, expand_node_id: expandNodeId, workflow, client_id: api.clientId || "", path_timestamp: pathTimestamp }),
     });
     const data = await readApiJson(response, "Scene Promptの実行準備に失敗しました");
     if (!response.ok || !data?.run_handle) {
@@ -9994,7 +10004,7 @@ async function resolveScenePresetsForRun(run, snapshot, expandNodeId) {
     const referenceIds = scenePresetReferenceIdsForExpand(snapshot, expandNodeId);
     const targets = { graph: run.graph, nodes: run.presetErrorNodes || [], nodeIds: referenceIds };
     clearScenePresetReferenceErrors(targets);
-    const data = await prepareSceneRunContext(snapshot, expandNodeId);
+    const data = await prepareSceneRunContext(snapshot, expandNodeId, null, run.pathTimestamp);
     if (run.cancelled) {
         releaseSceneRunHandle(data?.run_handle);
         return null;
@@ -11362,7 +11372,7 @@ function activateNextSceneBatchRun() {
     queueNextSceneBatchItem();
 }
 
-function createSceneBatchRun(node, total) {
+function createSceneBatchRun(node, total, requestedTimestamp = sceneBatchRunId()) {
     const planId = sceneBatchPlanId();
     if (!planId) {
         throw new Error("安全な実行IDを作成できませんでした。");
@@ -11377,7 +11387,8 @@ function createSceneBatchRun(node, total) {
         total,
         totalImages: null,
         nextIndex: 0,
-        runId: `${sceneBatchRunId()}__${planId}`,
+        runId: `${requestedTimestamp}__${planId}`,
+        pathTimestamp: requestedTimestamp,
         runHandle: "",
         gpuSettings: sceneGPUController.snapshot(),
         gpuPolicyId: "",
@@ -11545,9 +11556,10 @@ async function queueNextSceneBatchItem() {
 }
 
 async function requestSceneBatchRun(node) {
+    const requestedTimestamp = sceneBatchRunId();
     if (node.sceneBatchStarting) return;
     if (sceneBatchRunForNode(node) || sceneBatchNodeRunId(node)) {
-        startSceneBatchRun(node);
+        startSceneBatchRun(node, requestedTimestamp);
         return;
     }
     const graph = node.graph;
@@ -11558,7 +11570,7 @@ async function requestSceneBatchRun(node) {
     try {
         updateSceneExpandButton(node, { graphChange: false });
         await waitForModalPaint();
-        if (ownsGraph()) startSceneBatchRun(node);
+        if (ownsGraph()) startSceneBatchRun(node, requestedTimestamp);
     } catch (error) {
         showSceneBatchError("連続生成を開始できませんでした。", error);
     } finally {
@@ -11571,7 +11583,7 @@ async function requestSceneBatchRun(node) {
     }
 }
 
-function startSceneBatchRun(node) {
+function startSceneBatchRun(node, requestedTimestamp = sceneBatchRunId()) {
     const existingRun = sceneBatchRunForNode(node);
     const existingStatus = sceneBatchRunStatus(existingRun);
     if (existingStatus === "active") {
@@ -11612,7 +11624,7 @@ function startSceneBatchRun(node) {
         if (counts.error) {
             throw new Error(counts.error);
         }
-        run = createSceneBatchRun(node, counts.totalBatches);
+        run = createSceneBatchRun(node, counts.totalBatches, requestedTimestamp);
         run.preparing = true;
     } catch (error) {
         resetSceneExpandRunControls(node, { mark: false });
@@ -13306,7 +13318,7 @@ function attachScenePath(node) {
     installSceneConnectionWatcher(node);
 
     removeInternalInputSockets(node, {
-        visibleNames: new Set(["scene_prompt", "path_mode"]),
+        visibleNames: new Set(["scene_prompt", "path_mode", "folder_name_mode"]),
         removeAllExceptVisible: true,
     });
     installScenePathWidgetSyncHandlers(node);

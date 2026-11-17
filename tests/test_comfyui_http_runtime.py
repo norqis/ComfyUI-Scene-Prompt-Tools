@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCENE_RUN_NODE_CLASSES = {
     "ScenePrompter",
     "SceneMatrix",
+    "ScenePath",
     "ScenePresetReference",
     "ScenePrompterExpand",
     "ScenePromptToText",
@@ -2554,6 +2555,34 @@ NODE_CLASS_MAPPINGS = {
             self.assertEqual(payload["exec_seed"], original_second["exec_seed"])
             self.assertEqual(payload["exec_current_count"], "1")
             self.assertEqual(payload["exec_total_count"], "1")
+
+    def test_http_path_folder_modes_preserve_one_context_timestamp(self):
+        for index, (mode, expected) in enumerate([(None, "てすと"), ("ノード名", "てすと"),
+                                                ("ノード名+タイムスタンプ", "てすと2026_1117_235959"),
+                                                ("タイムスタンプ", "2026_1117_235959")]):
+            with self.subTest(mode=mode):
+                base = f"path-folder-mode-{index}"
+                graph = _save_graph("ワークフロー全体", base)
+                graph.pop("7")
+                graph["8"] = {"class_type": "ScenePath", "inputs": {
+                    "path_name": "てすと", "path_mode": "フォルダに分ける", "scene_prompt": ["3", 0]}}
+                if mode is not None:
+                    graph["8"]["inputs"]["folder_name_mode"] = mode
+                graph["4"]["inputs"]["scene_prompt"] = ["8", 0]
+                workflow = _workflow_for_graph(graph)
+                prepared = self._request("/scene_prompt/runs/prepare", {
+                    "api_graph": {"output": graph}, "workflow": workflow, "expand_node_id": "4",
+                    "path_timestamp": "2026_1117_235959"})
+                handle = prepared["run_handle"]
+                _apply_run_handle(graph, handle)
+                try:
+                    for current in range(2):
+                        graph["4"]["inputs"]["current_index"] = current
+                        self._queue_callback_graph(graph, handle, workflow, claim_run=current == 0)
+                    destination = self.base / "output" / base / expected
+                    self.assertEqual(len(list(destination.glob("*.png"))), 2)
+                finally:
+                    self._request("/scene_prompt/runs/release", {"run_handle": handle})
 
     def test_http_linked_queue_controls_match_preset_execution_order(self):
         marker = self.base / "linked-queue-text.json"

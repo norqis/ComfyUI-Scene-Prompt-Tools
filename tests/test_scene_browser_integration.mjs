@@ -3394,6 +3394,38 @@ try {
     assert.equal(await randomDialog.getByRole("spinbutton", { name: "scene_prompt2 の確率（%）" }).inputValue(), "16.67");
     await randomDialog.getByRole("button", { name: "閉じる" }).click();
 
+    const pathControls = await page.evaluate(async () => {
+        class PathNode {
+            constructor() {
+                this.id = 9881; this.type = this.comfyClass = "ScenePath"; this.title = "てすと";
+                this.graph = window.app.graph; this.size = [340, 160]; this.mode = 0;
+                this.inputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", link: null }];
+                this.outputs = [{ name: "scene_prompt", type: "SCENE_PROMPT", links: [] }];
+                this.widgets = [
+                    { name: "path_name", value: "", type: "text", options: {} },
+                    { name: "path_mode", value: "フォルダに分ける", type: "combo", options: { values: ["フォルダに分ける", "前のフォルダ名に結合"] } },
+                    { name: "folder_name_mode", value: "ノード名", type: "combo", options: { values: ["ノード名", "ノード名+タイムスタンプ", "タイムスタンプ"] } },
+                    { name: "run_handle", value: "", type: "text", options: {} },
+                ];
+            }
+            setDirtyCanvas() {} setSize(size) { this.size = size; } computeSize() { return this.size; }
+        }
+        await window.__scenePromptExtension.beforeRegisterNodeDef(PathNode, { name: "ScenePath" });
+        const node = new PathNode(); window.app.graph._nodes.push(node); node.onNodeCreated();
+        // The native loader only assigns the saved two values; new widgets retain their default.
+        const stored = { widgets_values: ["legacy name", "前のフォルダ名に結合"], widgets_values_named: { path_name: "legacy name", path_mode: "前のフォルダ名に結合" } };
+        stored.widgets_values.forEach((value, index) => { node.widgets[index].value = value; });
+        node.onConfigure?.(stored);
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const folder = node.widgets.find(widget => widget.name === "folder_name_mode");
+        const legacy = folder.value;
+        for (const value of ["ノード名+タイムスタンプ", "タイムスタンプ"]) { folder.value = value; folder.callback?.(value); }
+        return { legacy, value: folder.value, visible: !folder.hidden && folder.type === "combo", label: folder.label,
+            name: node.widgets.find(widget => widget.name === "path_name").value,
+            hidden: node.widgets.find(widget => widget.name === "run_handle").hidden };
+    });
+    assert.deepEqual(pathControls, { legacy: "ノード名", value: "タイムスタンプ", visible: true, label: "フォルダ名", name: "てすと", hidden: true });
+
     const llmControls = await page.evaluate(async () => {
         class Node {
             constructor(type, id) {

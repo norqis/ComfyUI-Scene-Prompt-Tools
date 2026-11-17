@@ -25,6 +25,7 @@ const context = {
         acceptImage() {}, queueClient: () => context.api, onCleanupError: (error) => { throw error; },
     },
     sceneBatchSeedBase() { return 123456; },
+    sceneBatchRunId() { return "2026_1117_235959"; },
     Date,
     Object,
     JSON,

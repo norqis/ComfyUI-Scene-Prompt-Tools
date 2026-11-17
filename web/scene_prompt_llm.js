@@ -136,13 +136,18 @@ function triggerIdentity(token) {
     while (word.startsWith("(") && word.endsWith(")")) word = word.slice(1, -1).replace(/:\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/u, "").trim();
     return word.toLocaleLowerCase();
 }
-export function applyCandidate(node, candidate, { query = "", sort = "Most Downloaded", host = "civitai.red", model_mode = value(node, "model_mode"), model_type, category, origin } = {}) {
+export function applyCandidate(node, candidate, { query = "", sort = "Most Downloaded", host = "civitai.red", model_mode = value(node, "model_mode"), model_type, category, origin, injectTriggers = true } = {}) {
     const previous = node.properties?.scene_civitai || {};
-    const managed = new Set(previous.managed_triggers || []);
-    const manual = String(value(node, "positive")).split(",").map((token) => token.trim()).filter((token) => token && !managed.has(token));
-    const manualIdentities = new Set(manual.map(triggerIdentity));
-    const triggers = [...new Set((candidate.triggers || []).flatMap((text) => String(text).split(",")).map((token) => token.trim()).filter((token) => token && !manualIdentities.has(triggerIdentity(token))))];
-    for (const [name, next] of Object.entries({ lora_name: candidate.lora_name, model_mode, positive: [...manual, ...triggers].join(", ") })) {
+    const updates = { lora_name: candidate.lora_name, model_mode };
+    let triggers = [];
+    if (injectTriggers) {
+        const managed = new Set(previous.managed_triggers || []);
+        const manual = String(value(node, "positive")).split(",").map((token) => token.trim()).filter((token) => token && !managed.has(token));
+        const manualIdentities = new Set(manual.map(triggerIdentity));
+        triggers = [...new Set((candidate.triggers || []).flatMap((text) => String(text).split(",")).map((token) => token.trim()).filter((token) => token && !manualIdentities.has(triggerIdentity(token))))];
+        updates.positive = [...manual, ...triggers].join(", ");
+    }
+    for (const [name, next] of Object.entries(updates)) {
         if (widget(node, name)) widget(node, name).value = next;
     }
     node.properties ||= {};

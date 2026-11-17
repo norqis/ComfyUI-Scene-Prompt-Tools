@@ -956,7 +956,8 @@ def define_routes():
             if live_prompt_ids is not None:
                 reconcile_active_run_contexts(live_prompt_ids)
             client_id = payload.get("client_id", "") if isinstance(payload, dict) else ""
-            handle = create_run_context(user_id, _is_continuous_scene_run(api_graph, expand_node_id), client_id)
+            path_timestamp = payload.get("path_timestamp", "") if isinstance(payload, dict) else ""
+            handle = create_run_context(user_id, _is_continuous_scene_run(api_graph, expand_node_id), client_id, path_timestamp)
             snapshot = await asyncio.to_thread(
                 snapshot_presets_for_run, handle, api_graph, expand_node_id, user_id, workflow
             )

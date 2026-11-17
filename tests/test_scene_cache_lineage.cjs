@@ -152,7 +152,7 @@ const snapshot = node => JSON.parse(JSON.stringify(ctx.scenePromptStats(node)));
 {
     const stubPreview = ctx.scenePromptPreviewEntries;
     ctx.PATH_MODE_APPEND = "前のフォルダ名に結合"; ctx.PATH_MODE_DIRECTORY = "フォルダに分ける";
-    for (const name of ["scenePromptPreviewEntries", "appendScenePathPart", "normalizePathMode", "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry"])
+    for (const name of ["scenePathLabel", "scenePromptPreviewEntries", "appendScenePathPart", "normalizePathMode", "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry"])
         vm.runInContext(functionSource(name), ctx);
     for (const type of ["ScenePromptPath", "ScenePromptMatrix", "ScenePromptTextDelete", "SceneEmptyLatent", "ScenePromptCounter", "ScenePrompterMerge"]) {
         const g = graph(), start = add(g, type, { matrix_json: "[]", width: 512, height: 512, batch_size: 3, count: 3 });

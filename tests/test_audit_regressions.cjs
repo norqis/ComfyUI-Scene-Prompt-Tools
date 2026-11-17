@@ -769,6 +769,7 @@ function testPendingFifoRunPreparesPresetSnapshotImmediately() {
     const node = { id: 2 };
     const context = {
         Map,
+        sceneBatchRunId: () => "2026_1117_235959",
         sceneBatchRun: active,
         sceneBatchDetachedRuns: new Map(),
         sceneBatchPendingRuns: [],
@@ -1030,7 +1031,7 @@ function testOverflowCountsDoNotStartABatchRun() {
     };
     vm.createContext(context);
     vm.runInContext(functionSource("startSceneBatchRun"), context);
-    context.startSceneBatchRun({ id: 1 });
+    context.startSceneBatchRun({ id: 1 }, "2026_1117_235959");
     assert.deepEqual(errors, [["連続生成を開始できませんでした。", "件数が大きすぎます。"]]);
 }
 
@@ -1122,6 +1123,7 @@ async function testBatchStartPaintAndOwnership() {
         const node = { id: 1, graph };
         const context = vm.createContext({
             Promise, requestAnimationFrame: callback => frames.push(callback), app: { graph },
+            sceneBatchRunId: () => "2026_1117_235959",
             sceneBatchRunForNode: () => scenario === "existing" ? {} : null,
             sceneBatchNodeRunId: () => scenario === "residual" ? "stale" : "",
             findSceneWidget: (_node, role) => role === "expand_run_all" ? button : null,

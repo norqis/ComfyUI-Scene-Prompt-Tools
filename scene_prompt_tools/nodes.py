@@ -2139,7 +2139,7 @@ class SceneMatrix:
 
 
 class ScenePath:
-    DESCRIPTION = """入力された scene_prompt の各行へ、画像保存用のパス要素を追加します。ノード名がフォルダ名として使われます。\n「フォルダに分ける」は新しい階層を追加し、「前のフォルダ名に結合」は直前の名前へアンダースコアで結合します。プロンプト本文は変更しません。\nこのノード自身はフォルダを作成しません。実際のフォルダ作成は、後段の Scene Save Image が画像を保存するときに行われます。"""
+    DESCRIPTION = """入力された scene_prompt の各行へ、画像保存用のパス要素を追加します。「フォルダ名」はノード名、ノード名+タイムスタンプ、タイムスタンプから選べます。名前と日時の間に区切りは追加しません。\n連続生成ではボタンを押した時刻を使い、待機・一時停止・再開やPreset内でも同じ日時を保ちます。\n「フォルダに分ける」は新しい階層を追加し、「前のフォルダ名に結合」は直前の名前へアンダースコアで結合します。プロンプト本文は変更しません。\nこのノード自身はフォルダを作成しません。実際のフォルダ作成は、後段の Scene Save Image が画像を保存するときに行われます。"""
     CATEGORY = "Scene/prompt"
     RETURN_TYPES = (SCENE_PROMPT_TYPE,)
     RETURN_NAMES = ("scene_prompt",)
@@ -2155,8 +2155,13 @@ class ScenePath:
                     {"default": PATH_DIRECTORY, "display_name": "保存パスの扱い", "label": "保存パスの扱い"},
                 ),
             },
-            "optional": {"scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"})},
+            "optional": {
+                "scene_prompt": (SCENE_PROMPT_TYPE, {"display_name": "scene_prompt", "label": "scene_prompt"}),
+                "folder_name_mode": (["ノード名", "ノード名+タイムスタンプ", "タイムスタンプ"],
+                                     {"default": "ノード名", "display_name": "フォルダ名", "label": "フォルダ名"}),
+            },
             "hidden": {
+                "run_handle": ("STRING", {"default": "", "hidden": True}),
                 "unique_id": "UNIQUE_ID",
                 "source_node_id": ("STRING", {"default": "", "hidden": True}),
                 "source_node_name": ("STRING", {"default": "", "hidden": True}),
@@ -2164,18 +2169,25 @@ class ScenePath:
         }
 
     @classmethod
-    def IS_CHANGED(cls, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, **kwargs):
+    def IS_CHANGED(cls, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, folder_name_mode="ノード名", run_handle="", **kwargs):
         del kwargs
+        if folder_name_mode != "ノード名" and not run_handle:
+            return float("nan")
         return "|".join(
             [
                 str(path_name or ""),
                 _scene_prompt_change_key(scene_prompt),
                 _normalize_path_mode(path_mode),
+                folder_name_mode,
+                str(run_handle) if folder_name_mode != "ノード名" else "",
             ]
         )
 
-    def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, unique_id=None, source_node_id="", source_node_name=""):
+    def apply_path(self, path_name, scene_prompt=None, path_mode=PATH_DIRECTORY, unique_id=None, source_node_id="", source_node_name="", folder_name_mode="ノード名", run_handle=""):
         label = str(path_name or "").strip() or "Scene Path"
+        if folder_name_mode != "ノード名":
+            timestamp = require_run_context(run_handle)["path_timestamp"] if run_handle else datetime.now().strftime("%Y_%m%d_%H%M%S")
+            label = label + timestamp if folder_name_mode == "ノード名+タイムスタンプ" else timestamp
         plan = transform(scene_prompt, operation={"kind": "path_add", "payload": [label, path_mode]})
         return (with_source_node(mark_prompt_passthrough(plan), source_node_id or unique_id, source_node_name),)
 

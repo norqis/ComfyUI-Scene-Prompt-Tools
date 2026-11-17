@@ -1589,6 +1589,35 @@ class ScenePresetTests(unittest.TestCase):
             self.save("invalid_count", nodes)
         self.assertEqual(error.exception.node_id, "4")
 
+    def test_nested_preset_paths_share_the_requested_run_timestamp(self):
+        inner = basic_nodes("alpha")
+        inner["4"] = {"class_type": "ScenePath", "inputs": {"path_name": "inside", "path_mode": self.nodes.PATH_DIRECTORY,
+                       "folder_name_mode": "ノード名+タイムスタンプ", "scene_prompt": ["2", 0]}}
+        inner["3"]["inputs"]["scene_prompt"] = ["4", 0]
+        self.save("timestamp-inner", inner, user_id="alice")
+        outer = basic_nodes()
+        outer["2"] = {"class_type": "ScenePresetReference", "inputs": {"preset_id": "timestamp-inner", "scene_prompt": ["1", 0]}}
+        outer["4"] = {"class_type": "ScenePath", "inputs": {"path_name": "outside", "path_mode": self.nodes.PATH_DIRECTORY,
+                       "folder_name_mode": "タイムスタンプ", "scene_prompt": ["2", 0]}}
+        outer["3"]["inputs"]["scene_prompt"] = ["4", 0]
+        self.save("timestamp-outer", outer, user_id="alice")
+        run_graph = graph({"10": {"class_type": "ScenePresetReference", "inputs": {"preset_id": "timestamp-outer"}},
+                           "11": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["10", 0]}}})
+        runs = sys.modules[f"{self.module.__package__}.runs"]
+        handle = runs.create_run_context("alice", continuous=True, path_timestamp="2026_1117_235959")
+        try:
+            self.module.snapshot_presets_for_run(handle, run_graph, "11", "alice")
+            resolved = self.module._RUN_SNAPSHOTS[("alice", handle)]["presets"]
+            with mock.patch.object(self.nodes, "datetime") as clock:
+                clock.now.side_effect = AssertionError("nested preset must use its run context")
+                for _ in range(2):
+                    plan = self.module._scene_node_value(run_graph["output"], "10", resolved, set(), user_id="alice", run_handle=handle)
+                    self.assertEqual(self.nodes.item_for_normalized_plan(plan, 0)["row"]["path_parts"],
+                                     ["inside2026_1117_235959", "2026_1117_235959"])
+        finally:
+            self.module.release_scene_preset_snapshot(handle, "alice")
+            runs.release_run_context(handle, "alice")
+
     def test_save_accepts_only_current_scene_path_choices_and_valid_numeric_range(self):
         choices = self.nodes.ScenePath.INPUT_TYPES()["required"]["path_mode"][0]
         for index, path_mode in enumerate(choices):

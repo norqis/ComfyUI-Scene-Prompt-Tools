@@ -85,7 +85,9 @@ try {
     assert.equal(await detail.locator('.pc-civitai-metadata img').count(),0); assert.equal(await page.evaluate(()=>window.injected),undefined);
     await page.screenshot({ path: resolve(reviewDirectory, "civitai-details.png") });
     await acquireAndSelect();
-    await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='positive').value==='manual, tag1');
+    await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='lora_name').value==='llm/1.safetensors');
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='positive').value),'manual, tag2');
+    assert.deepEqual(await page.evaluate(()=>window.node.properties.scene_civitai.managed_triggers),[]);
     assert.doesNotMatch(await page.evaluate(()=>JSON.stringify(window.node.properties)),/gallery|description|image_url|stats/);
     if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
     await detail.getByRole('button',{name:'戻る',exact:true}).click();
