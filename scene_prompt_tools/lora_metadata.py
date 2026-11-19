@@ -3,6 +3,8 @@
 import hashlib
 import json
 import os
+from pathlib import Path
+import stat
 import struct
 import sys
 import threading
@@ -79,6 +81,13 @@ def canonical_lora_name(name):
     return os.path.normpath(str(name or "").replace("\\", "/"))
 
 
+def cached_sha256(key, signature):
+    """Reuse a metadata digest only for the same physical file revision."""
+    with _CACHE_LOCK:
+        entry = _CACHE.get(key)
+        return entry[1]["sha256"] if entry is not None and entry[0] == signature else None
+
+
 def read_lora_info(name):
     """Resolve an actual ComfyUI LoRA selection, then read its header and hash."""
     name = canonical_lora_name(name)
@@ -139,22 +148,40 @@ def read_lora_info(name):
             return {**result, "name": name, "trigger_phrases": list(result["trigger_phrases"])}
 
 
-def list_loras():
-    """List selectable LoRA paths and file identity without opening model files."""
+def lora_inventory():
+    """Return native picker rows and all physical files, including shadowed roots."""
     global _CATALOG, _CATALOG_GENERATION
     result = []
-    identities = {}
-    for name in folder_paths.get_filename_list("loras"):
+    entries = {}
+    names = folder_paths.get_filename_list("loras")
+
+    def include(path, name=""):
+        try:
+            info = os.stat(path)
+        except OSError:
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        signature = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_dev, info.st_ino)
+        key = file_identity(path)
+        if key not in entries:
+            entries[key] = {"path": Path(path), "key": key, "signature": signature, "lora_name": name}
+        return signature
+
+    # Native resolution decides which physical file a selectable name represents.
+    # Add those first so an identical hidden copy never replaces a usable name.
+    for name in names:
         item = {"path": name, "size": None, "mtime_ns": None}
         path = folder_paths.get_full_path("loras", name)
         if path:
-            try:
-                stat = os.stat(path)
-                item["size"], item["mtime_ns"] = stat.st_size, stat.st_mtime_ns
-                identities[file_identity(path)] = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino)
-            except OSError:
-                pass
+            signature = include(path, name)
+            if signature:
+                item["size"], item["mtime_ns"] = signature[:2]
         result.append(item)
+    for root in folder_paths.get_folder_paths("loras"):
+        for name in names:
+            include(Path(root) / canonical_lora_name(name))
+    identities = {key: entry["signature"] for key, entry in entries.items()}
     with _CACHE_LOCK:
         _CATALOG = identities
         _CATALOG_GENERATION += 1
@@ -167,4 +194,9 @@ def list_loras():
     if acquisition is not None:
         from .civitai import reconcile_lora_hashes
         reconcile_lora_hashes(identities)
-    return result
+    return result, list(entries.values())
+
+
+def list_loras():
+    """List selectable LoRA paths and file identity without opening model files."""
+    return lora_inventory()[0]

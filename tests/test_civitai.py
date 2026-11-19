@@ -18,8 +18,10 @@ package = llm_fixture.package
 with mock.patch.dict(sys.modules, {"folder_paths": folder_paths}):
     civitai = importlib.import_module(package.__name__ + ".civitai")
     civitai_auth = importlib.import_module(package.__name__ + ".civitai_auth")
+    lora_metadata = importlib.import_module(package.__name__ + ".lora_metadata")
 sys.modules[civitai.__name__] = civitai
 sys.modules[civitai_auth.__name__] = civitai_auth
+sys.modules[lora_metadata.__name__] = lora_metadata
 
 
 class CivitaiHttpTest(llm_fixture.HttpFixture):
@@ -32,6 +34,8 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.auth_token = mock.patch.object(civitai_auth, "token_snapshot", return_value="fixture-search-key")
         self.auth_token_mock = self.auth_token.start()
         folder_paths.get_folder_paths = lambda kind: [str(self.root)]
+        folder_paths.get_filename_list = lambda kind: [path.relative_to(self.root).as_posix() for path in self.root.rglob("*.safetensors")]
+        folder_paths.get_full_path = lambda kind, name: str(self.root / name)
         folder_paths.filename_list_cache = {"loras": "old"}
         self.content = b"safetensors-test-content"
         self.sha = hashlib.sha256(self.content).hexdigest()
@@ -39,6 +43,7 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         self.origin_patch = mock.patch.object(civitai, "api_origin", return_value=self.origin)
         self.origin_patch.start()
         civitai._DOWNLOAD_LOCK = None
+        civitai._OWNERSHIP_LOCK = None
         self.version = {"id": 2, "name": "version", "baseModel": "Illustrious", "trainedWords": ["cat"],
             "images": [{"url": "version-image", "nsfwLevel": 1}], "files": [{"id": 3, "name": "Original LoRA.safetensors", "type": "Model", "hashes": {"SHA256": self.sha}, "downloadUrl": self.origin + "/api/download/models/2"}]}
         self.model = {"id": 1, "name": "cat", "type": "LORA", "modelVersions": [self.version]}
@@ -217,7 +222,9 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         third = await civitai.download(ids, "Illustrious", directory="a/b")
         self.assertTrue(third["lora_name"].replace("\\", "/").startswith("a/b/"))
         self.assertEqual(self.download_calls, 2)
-        self.assertEqual((await civitai.search("cat", "Illustrious"))["items"][0]["lora_name"], third["lora_name"].replace("\\", "/"))
+        found = await civitai.search("cat", "Illustrious")
+        self.assertEqual(found["items"][0]["lora_name"], "")
+        self.assertEqual((await civitai.owned(found["items"]))["items"][0]["lora_name"], first["lora_name"])
         destination = self.root / third["lora_name"]
         destination.write_bytes(b"keep-existing")
         self.content = b"invalid-new-content"
@@ -843,16 +850,18 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
         result = await civitai.download(identity, "Illustrious")
         self.version["files"].append({**self.version["files"][0], "id": 4, "primary": True})
         with mock.patch.object(civitai.hashlib, "sha256", wraps=hashlib.sha256) as hash_function:
-            found = await civitai.search("cat", "Illustrious")
+            with mock.patch.object(civitai, "lora_root", side_effect=AssertionError("search accessed local catalog")), \
+                    mock.patch.object(civitai, "_sha256", side_effect=AssertionError("search hashed local file")):
+                found = await civitai.search("cat", "Illustrious")
             self.assertEqual(len(found["items"]), 1)
             self.assertEqual(found["items"][0]["file_id"], 4)
-            self.assertTrue(found["items"][0]["acquired"])
+            self.assertFalse(found["items"][0]["acquired"])
+            self.assertEqual((await civitai.owned(found["items"]))["items"][0]["lora_name"], result["lora_name"].replace("\\", "/"))
             first_count = hash_function.call_count
-            await civitai.search("cat", "Illustrious")
+            await civitai.owned(found["items"])
             self.assertEqual(hash_function.call_count, first_count)
             (self.root / result["lora_name"]).write_bytes(b"modified")
-            found = await civitai.search("cat", "Illustrious")
-            self.assertFalse(found["items"][0]["acquired"])
+            self.assertEqual((await civitai.owned(found["items"]))["items"], [])
             self.assertGreater(hash_function.call_count, first_count)
 
     async def test_refetched_download_url_rejects_untrusted_source(self):

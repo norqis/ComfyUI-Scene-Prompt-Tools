@@ -707,7 +707,7 @@ def define_routes():
             return web.json_response({"error": "Unable to access Scene Prompt LLM settings."}, status=500)
 
     async def civitai_operation(request, operation):
-        from .civitai import ServiceError, search, download, by_hash, descriptions, gallery, details, image_details, options, tags, directories
+        from .civitai import ServiceError, search, download, owned, by_hash, descriptions, gallery, details, image_details, options, tags, directories
         try:
             if operation == "search":
                 result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"), model_type=request.query.get("model_type", "LORA"), category=request.query.get("category", ""), user_id=_request_user_id(request))
@@ -727,6 +727,11 @@ def define_routes():
                 result = await tags(request.query.get("query", ""), host=request.query.get("host", "civitai.red"), user_id=_request_user_id(request))
             elif operation == "directories":
                 result = await asyncio.to_thread(directories)
+            elif operation == "owned":
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Request body must be a JSON object.")
+                result = await owned(payload.get("items"), is_current=lambda: request.transport is not None and not request.transport.is_closing())
             else:
                 payload = await request.json()
                 if not isinstance(payload, dict):
@@ -776,6 +781,10 @@ def define_routes():
     @PromptServer.instance.routes.post("/scene_prompt/civitai/download")
     async def scene_civitai_download(request):
         return await civitai_operation(request, "download")
+
+    @PromptServer.instance.routes.post("/scene_prompt/civitai/owned")
+    async def scene_civitai_owned(request):
+        return await civitai_operation(request, "owned")
 
     @PromptServer.instance.routes.get("/scene_prompt/civitai/descriptions")
     async def scene_civitai_descriptions(request):

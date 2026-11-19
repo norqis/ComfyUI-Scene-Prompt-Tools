@@ -345,6 +345,7 @@ class LoraMetadataTests(unittest.TestCase):
                 "folder/titled.safetensors", "plain.ckpt", "missing.safetensors",
             ]
             folder_paths.get_full_path = lambda category, name: str(root / name)
+            folder_paths.get_folder_paths = lambda category: [str(root)]
             package_name = "scene_lora_catalog_test"
             package = type(sys)(package_name)
             package.__path__ = [str(Path(__file__).resolve().parents[1] / "scene_prompt_tools")]
