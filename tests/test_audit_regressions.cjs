@@ -59,6 +59,8 @@ function presetListRaceContext(...requests) {
         scenePresetListLatestPromise: null,
         scenePresetListCacheCurrent: false,
         sceneGraphNodes: () => [],
+        appliedDefinitions: [],
+        refreshAllScenePresetReferences(presets) { context.appliedDefinitions.push(presets.map(preset => preset.preset_id).join(",")); },
         fetchCount: 0,
         api: { fetchApi: () => {
             context.fetchCount += 1;
@@ -108,6 +110,7 @@ async function testPresetListRaceInNormalResponseOrder() {
     assert.equal(context.scenePresetList[0].preset_id, "new");
     assert.equal(context.scenePresetDisplayGraphs.has("new"), true);
     assert.equal(context.scenePresetDisplayGraphs.has("old"), false);
+    assert.deepEqual(context.appliedDefinitions, ["new"], "only the current response refreshes references");
 }
 
 async function testPresetListRaceInReverseResponseOrder() {
@@ -691,7 +694,7 @@ function testWorkflowLoadDefersWidgetTriggeredRefreshes() {
         setTimeout() { throw new Error("must not schedule a per-widget timer during load"); },
     };
     vm.createContext(context);
-    for (const name of ["refreshDownstreamSceneNodes", "scheduleSceneNodeRefresh", "syncSceneQueueControls"]) {
+    for (const name of ["refreshDownstreamSceneSources", "refreshDownstreamSceneNodes", "scheduleSceneNodeRefresh", "syncSceneQueueControls"]) {
         vm.runInContext(functionSource(name), context);
     }
     context.refreshDownstreamSceneNodes(node);
@@ -1215,7 +1218,87 @@ function testSceneValidationNamesReasonsAndRouting() {
     assert.match(context.sceneErrorNodeLabel({ type: "ScenePrompter", title: "別の編集名", widgets: [{ name: "prompt_name", value: "別のwidget名" }] }, "ScenePrompter", { source_node_name: "提出済みの名前" }), /ノード「提出済みの名前」/u);
 }
 
+async function testPresetListBatchesSharedDownstreamQueues() {
+    const { preparePresetReference } = await import("../web/scene_llm_presets.js");
+    const pending = deferred(), nodes = new Map(), queues = [], references = [], synced = [], cleared = new Map();
+    const graph = { _nodes: [], links: {}, getNodeById: id => nodes.get(String(id)) };
+    function add(node) { node.graph = graph; node.outputs = [{ links: [] }]; node.widgets ||= []; graph._nodes.push(node); nodes.set(String(node.id), node); return node; }
+    for (let index = 0; index < 6; index++) queues.push(add({ id: 100 + index, type: "ScenePrompterQueue" }));
+    for (let index = 0; index < 24; index++) {
+        const reference = add({ id: index + 1, type: "ScenePresetReference", widgets: [{ name: "preset_id", value: "A" }, { sceneRole: "scene_preset_select" }] });
+        const linkId = index + 1; graph.links[linkId] = { target_id: queues[index % 6].id }; reference.outputs[0].links.push(linkId); references.push(reference);
+    }
+    const context = {
+        app: { graph }, scenePresetList: null, scenePresetListErrors: [], scenePresetDisplayGraphs: new Map(),
+        scenePresetListRequestGeneration: 0, scenePresetListPromise: null, scenePresetListLatestPromise: null, scenePresetListCacheCurrent: false,
+        sceneWorkflowLoadDepth: 0, sceneWorkflowLoadSources: new Set(), sceneDownstreamRefreshSources: new Set(), sceneDownstreamRefreshTimer: null,
+        sceneGraphNodes: () => context.app.graph._nodes,
+        fetchCount: 0, prepareCount: 0, scheduled: 0,
+        api: { fetchApi() { context.fetchCount++; return pending.promise; } }, readApiJson: async response => response.payload,
+        preparePresetReference(...args) { context.prepareCount++; return preparePresetReference(...args); },
+        findWidget: (node, name) => node.widgets?.find(widget => widget.name === name),
+        findSceneWidget: (node, role) => node.widgets?.find(widget => widget.sceneRole === role),
+        isScenePresetReferenceNode: node => node.type === "ScenePresetReference", isPromptMatrixNode: () => false,
+        isScenePromptQueueNode: node => node.type === "ScenePrompterQueue", isScenePromptSourceNode: node => ["ScenePresetReference", "ScenePrompterQueue"].includes(node.type),
+        isSceneExpandNode: () => false, isRerouteNode: () => false,
+        clearSceneComputedCaches(node) { cleared.set(node, (cleared.get(node) || 0) + 1); },
+        syncSceneQueueControls(node) { assert(references.every(reference => reference.scenePresetGraph), "all definitions are assigned before a Queue is synchronized"); synced.push(node); },
+        scheduleSceneNodeRefresh() {}, updateSceneExpandCountWidget() {}, clearTimeout() {},
+        setTimeout(_callback, delay) { assert.equal(delay, 100); context.scheduled++; return 1; },
+    };
+    vm.createContext(context);
+    for (const name of ["downstreamNodes", "collectDownstreamSceneNodes", "refreshDownstreamSceneSources", "refreshDownstreamSceneNodes", "flushDownstreamSceneRefreshes", "selectedScenePreset", "refreshScenePresetReference", "refreshAllScenePresetReferences", "refreshScenePresetReferenceList", "loadScenePresetList"]) vm.runInContext(functionSource(name), context);
+    const collecting = context.collectDownstreamSceneNodes;
+    context.collectDownstreamSceneNodes = (...args) => {
+        assert(references.every(reference => reference.scenePresetGraph), "all 24 references are prepared before the union traversal");
+        return collecting(...args);
+    };
+    const definition = id => ({ metadata: { preset_id: id, name: id }, api_graph: { output: {
+        1: { class_type: "ScenePresetInput", inputs: {} }, 2: { class_type: "ScenePresetOutput", inputs: { scene_prompt: ["1", 0] } },
+    } } });
+    const requests = references.map(reference => context.refreshScenePresetReferenceList(reference));
+    assert.equal(context.fetchCount, 1, "24 attached references share one list request");
+    pending.resolve({ ok: true, payload: { presets: [definition("A"), definition("B")], errors: [] } });
+    await Promise.all(requests);
+    assert.equal(context.prepareCount, 24, "a shared response prepares every reference once");
+    assert.equal(context.scheduled, 1, "the complete response schedules one existing flush");
+    assert.equal(synced.length, 0, "Queue work waits for the existing flush");
+    for (const queue of queues) assert.equal(cleared.get(queue), 1, "overlapping sources invalidate each Queue once");
+    context.flushDownstreamSceneRefreshes();
+    assert.deepEqual(synced, queues, "six shared Queues synchronize exactly once");
+    for (const queue of queues) assert.equal(cleared.get(queue), 1, "flush does not invalidate the just-computed cache again");
+
+    references[0].widgets[0].value = "B";
+    context.refreshScenePresetReference(references[0]);
+    assert.equal(references[0].scenePresetGraph.metadata.preset_id, "B");
+    assert.equal(cleared.get(queues[0]), 2, "single selection invalidates downstream immediately");
+    assert.equal(synced.length, 6, "single selection does not synchronize a Queue twice");
+    nodes.delete(String(references[0].id));
+    context.flushDownstreamSceneRefreshes();
+    assert.equal(synced.length, 6, "a removed source does not refresh former descendants");
+    nodes.set(String(references[0].id), references[0]);
+
+    const added = add({ id: 55, type: "ScenePresetReference", widgets: [{ name: "preset_id", value: "B" }, { sceneRole: "scene_preset_select" }] });
+    await context.refreshScenePresetReferenceList(added);
+    assert.equal(added.scenePresetGraph.metadata.preset_id, "B", "a reference added after the response still prepares from the cached list");
+    assert.equal(context.fetchCount, 1);
+    const preparations = context.prepareCount;
+    const cachedRequest = context.refreshScenePresetReferenceList(added);
+    context.app.graph = { _nodes: [], getNodeById: () => null };
+    await cachedRequest;
+    assert.equal(context.prepareCount, preparations, "a cached-list callback cannot reattach a node from another tab");
+    context.sceneDownstreamRefreshSources.add(references[1]);
+    context.flushDownstreamSceneRefreshes();
+    assert.equal(synced.length, 6, "the delayed flush drops old-tab sources");
+    context.app.graph = graph;
+    const beforeFailure = context.prepareCount;
+    context.api.fetchApi = async () => ({ ok: false, payload: { error: "list offline" } });
+    await assert.rejects(context.refreshScenePresetReferenceList(added, true), /list offline/);
+    assert.equal(context.prepareCount, beforeFailure, "failed responses never apply definitions");
+}
+
 Promise.resolve()
+    .then(testPresetListBatchesSharedDownstreamQueues)
     .then(testSceneValidationNamesReasonsAndRouting)
     .then(testBatchStartPaintAndOwnership)
     .then(testLLMSettingsAlwaysLeadWithoutChangingStoredWidgets)

@@ -80,7 +80,8 @@ const applyContext = {
 };
 require("./scene_switches_test_context.cjs").install(applyContext);
 vm.createContext(applyContext);
-for (const name of ["scenePromptSourceLocalCacheKey", "scenePromptStats"]) vm.runInContext(functionSource(name), applyContext);
+applyContext.sceneComputedQueryKeys = null;
+for (const name of ["withSceneComputedQuery", "scenePromptSourceLocalCacheKey", "scenePromptStats"]) vm.runInContext(functionSource(name), applyContext);
 const applyDirect = { id: "model-direct", kind: "apply_model" };
 const applyLeft = { id: "lora-left", kind: "apply_lora", upstream: { id: "left", kind: "prompt", lineage: "left" } };
 const applyRight = { id: "lora-right", kind: "apply_lora", upstream: { id: "right", kind: "prompt", lineage: "right" } };
