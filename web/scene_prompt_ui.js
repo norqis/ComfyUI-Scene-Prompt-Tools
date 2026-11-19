@@ -6944,7 +6944,9 @@ function clearSceneComputedCaches(node) {
 
 function flushDownstreamSceneRefreshes() {
     clearTimeout(sceneDownstreamRefreshTimer);
-    const sources = [...sceneDownstreamRefreshSources];
+    const graph = app.graph;
+    const sources = [...sceneDownstreamRefreshSources]
+        .filter(source => source?.graph === graph && graph?.getNodeById?.(source.id) === source);
     sceneDownstreamRefreshSources.clear();
     sceneDownstreamRefreshTimer = null;
     if (sceneWorkflowLoadDepth > 0) {
@@ -6956,7 +6958,6 @@ function flushDownstreamSceneRefreshes() {
     for (const source of sources) {
         collectDownstreamSceneNodes(source, targets, seen);
     }
-    for (const target of targets) clearSceneComputedCaches(target);
     for (const target of targets) {
         if (isScenePromptQueueNode(target)) syncSceneQueueControls(target);
         scheduleSceneNodeRefresh(target, { fitHeight: false }, 40);
@@ -6964,17 +6965,24 @@ function flushDownstreamSceneRefreshes() {
 }
 
 function refreshDownstreamSceneNodes(node) {
-    if (!node) {
-        return;
+    if (node) refreshDownstreamSceneSources([node]);
+}
+
+function refreshDownstreamSceneSources(sources) {
+    const targets = new Set();
+    const seen = new Set();
+    let queued = false;
+    for (const source of sources) {
+        if (sceneWorkflowLoadDepth > 0) {
+            sceneWorkflowLoadSources.add(source);
+            continue;
+        }
+        collectDownstreamSceneNodes(source, targets, seen);
+        sceneDownstreamRefreshSources.add(source);
+        queued = true;
     }
-    if (sceneWorkflowLoadDepth > 0) {
-        sceneWorkflowLoadSources.add(node);
-        return;
-    }
-    const targets = collectDownstreamSceneNodes(node);
     for (const target of targets) clearSceneComputedCaches(target);
-    for (const target of targets) if (isScenePromptQueueNode(target)) syncSceneQueueControls(target);
-    sceneDownstreamRefreshSources.add(node);
+    if (!queued) return;
     clearTimeout(sceneDownstreamRefreshTimer);
     sceneDownstreamRefreshTimer = setTimeout(flushDownstreamSceneRefreshes, 100);
 }
@@ -12715,12 +12723,7 @@ async function loadScenePresetList(force = false) {
             scenePresetList = entries.map((entry) => entry.metadata).filter(Boolean);
             scenePresetListErrors = Array.isArray(data.errors) ? data.errors : [];
             scenePresetListCacheCurrent = true;
-            for (const sceneNode of sceneGraphNodes()) {
-                if (isScenePromptQueueNode(sceneNode)) syncSceneQueueControls(sceneNode);
-                if (isPromptMatrixNode(sceneNode) && matrixLinesForNode(sceneNode).some(row => row.row_kind === "preset")) {
-                    clearSceneComputedCaches(sceneNode); refreshDownstreamSceneNodes(sceneNode);
-                }
-            }
+            refreshAllScenePresetReferences(scenePresetList);
             return scenePresetList;
         } catch (error) {
             if (generation !== scenePresetListRequestGeneration) {
@@ -12754,7 +12757,7 @@ function presetEditorWorkflow(preset) {
     return workflow;
 }
 
-function refreshScenePresetReference(node, presets = scenePresetList || []) {
+function refreshScenePresetReference(node, presets = scenePresetList || [], changedSources = null) {
     const button = findSceneWidget(node, "scene_preset_select");
     if (!button) {
         return;
@@ -12766,31 +12769,37 @@ function refreshScenePresetReference(node, presets = scenePresetList || []) {
     if (node.scenePresetGraph !== nextGraph) {
         node.scenePresetGraph = nextGraph;
         clearSceneComputedCaches(node);
-        refreshDownstreamSceneNodes(node);
+        if (changedSources) changedSources.add(node);
+        else refreshDownstreamSceneNodes(node);
     }
     button.name = preset ? `Preset: ${preset.name || preset.preset_id}` : "Presetを選択";
     node.setDirtyCanvas?.(true, true);
 }
 
 function refreshAllScenePresetReferences(presets = scenePresetList || []) {
-    for (const node of app.graph?._nodes || []) {
+    const changedSources = new Set();
+    const expands = [];
+    for (const node of sceneGraphNodes()) {
         if (isScenePresetReferenceNode(node)) {
-            refreshScenePresetReference(node, presets);
+            refreshScenePresetReference(node, presets, changedSources);
+        } else if (isPromptMatrixNode(node) && matrixLinesForNode(node).some(row => row.row_kind === "preset")) {
+            clearSceneComputedCaches(node);
+            changedSources.add(node);
         }
+        if (isSceneExpandNode(node)) expands.push(node);
     }
-    for (const node of app.graph?._nodes || []) {
-        if (isScenePromptQueueNode(node)) syncSceneQueueControls(node);
-    }
-    for (const expand of app.graph?._nodes || []) {
-        if (isSceneExpandNode(expand)) {
-            updateSceneExpandCountWidget(expand);
-        }
-    }
+    refreshDownstreamSceneSources(changedSources);
+    for (const expand of expands) updateSceneExpandCountWidget(expand);
 }
 
 async function refreshScenePresetReferenceList(node, force = false) {
+    const definitions = scenePresetDisplayGraphs;
     const presets = await loadScenePresetList(force);
-    refreshScenePresetReference(node, presets);
+    // A fresh response prepared every current reference together before resolving.
+    // Cached lists still need to prepare references added or selected afterward.
+    if (definitions === scenePresetDisplayGraphs && node.graph === app.graph && node.graph?.getNodeById?.(node.id) === node) {
+        refreshScenePresetReference(node, presets);
+    }
     return presets;
 }
 
@@ -12830,7 +12839,6 @@ async function openScenePresetPicker(node, options = {}) {
             "Preset一覧を再取得できませんでした。",
         );
         if (!refreshed) return;
-        refreshAllScenePresetReferences(refreshed);
         openScenePresetPicker(node, options);
     });
     toolbar.appendChild(reload);
@@ -12862,7 +12870,6 @@ async function openScenePresetPicker(node, options = {}) {
                     setWidgetValue(node, "preset_id", preset.preset_id);
                     clearScenePresetReferenceErrors({ nodeIds: [node.id] });
                     refreshScenePresetReference(node, presets);
-                    refreshAllScenePresetReferences(presets);
                     node.graph.change?.();
                 });
             }
@@ -13006,7 +13013,7 @@ async function saveScenePreset(node) {
         const metadata = data.metadata || {};
         scenePresetList = null;
         try {
-            refreshAllScenePresetReferences(await loadScenePresetList(true));
+            await loadScenePresetList(true);
         } catch (listError) {
             console.warn("[Scene Prompt]", listError);
             showSceneBatchError(`Preset「${name}」は保存しましたが、一覧を更新できませんでした。一覧を再読み込みしてください。`, listError);
@@ -13323,9 +13330,14 @@ function attachSceneMatrix(node) {
     ensurePromptMatrixControls(node);
     hidePromptMatrixWidgets(node);
     scheduleHideInternalDomWidgets();
-    if (matrixLinesForNode(node).some(row => row.row_kind === "preset")) loadScenePresetList(false).then(() => {
-        if (sceneNodeHasCurrentOwner(node)) { clearSceneComputedCaches(node); refreshDownstreamSceneNodes(node); }
-    }).catch(error => console.warn("[Scene Prompt]", error));
+    if (matrixLinesForNode(node).some(row => row.row_kind === "preset")) {
+        const definitions = scenePresetDisplayGraphs;
+        loadScenePresetList(false).then(() => {
+            if (definitions === scenePresetDisplayGraphs && node.graph === app.graph && sceneNodeHasCurrentOwner(node)) {
+                clearSceneComputedCaches(node); refreshDownstreamSceneNodes(node);
+            }
+        }).catch(error => console.warn("[Scene Prompt]", error));
+    }
 
     installSceneResizeHandler(node, "simple");
 

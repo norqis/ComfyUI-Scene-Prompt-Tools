@@ -56,7 +56,7 @@ const funcs = ["nodeClassName", "nodeClassNames", "isRerouteNode", "isScenePromp
     "sceneQueueBoundaryInPreset", "sceneQueueBoundaryInNode", "sceneRandomRouteInNode", "sceneQueuePendingInNode", "scenePromptStats",
     "scenePromptInputNumber", "scenePromptQueueInputIndexes", "connectedScenePromptSourcesForQueue", "connectedScenePromptSourcesForMerge", "scenePromptPreviewEntries", "mergeScenePromptEntryPair",
     "multiplyScenePromptEntryCount", "scenePromptEntryBatchSize", "scenePromptEntryImageCount", "sceneQueueDisplayPartsForEntry", "sceneRandomJoinReady", "sceneRandomChoicePlan", "applyScenePresetSwitchBindings",
-    "downstreamNodes", "collectDownstreamSceneNodes", "clearSceneComputedCaches", "flushDownstreamSceneRefreshes", "refreshDownstreamSceneNodes", "sceneQueueLockState", "syncSceneQueueControls", "attachSceneNode"];
+    "downstreamNodes", "collectDownstreamSceneNodes", "clearSceneComputedCaches", "flushDownstreamSceneRefreshes", "refreshDownstreamSceneSources", "refreshDownstreamSceneNodes", "sceneQueueLockState", "syncSceneQueueControls", "attachSceneNode"];
 const scheduleFuncs = [...source.matchAll(/^function (emptyScenePromptStats|sceneStat\w+|sceneStats\w+|sceneCount\w+|sceneSchedule\w+|sceneRandomGuard|sceneRandomZeroArm)\(/gm)]
     .map(match => match[1]).filter(name => !["sceneCounterConfiguredValues", "sceneCounterConfigureValues"].includes(name));
 for (const name of new Set([...funcs, ...scheduleFuncs])) vm.runInContext(functionSource(name), ctx);
@@ -258,7 +258,7 @@ assert.equal(ctx.scenePromptCounterDownstreamEnabled(count), false, "Count reads
 const inputNamesKey = ctx.scenePromptLineageKey(input); set(input, "switch_names_json", '["rename"]');
 assert.equal(ctx.scenePromptLineageKey(input), inputNamesKey, "names never change effective values");
 
-// The actual native Boolean callback must synchronize downstream controls before the delayed draw refresh.
+// The actual native Boolean callback invalidates counts now and batches controls in the existing flush.
 const eventGraph = graph(), eventBool = add(eventGraph, "PrimitiveBoolean", { value: false });
 const eventA = add(eventGraph, "SceneMatrix", { matrix_json: matrix(2) }), eventB = add(eventGraph, "SceneMatrix", { matrix_json: matrix(3) });
 const eventQueueA = add(eventGraph, "ScenePrompterQueue", { order_mode: "input_order", alternate_block_size: 1, downstream_count_mode: "multiply" });
@@ -282,13 +282,17 @@ assert.equal(ctx.scenePromptStats(eventQueueC).total, 12);
 const storedControls = eventQueueC.widgets.map(widget => widget.value);
 const marker = { mouse: "native" };
 assert.strictEqual(eventWidget.callback.call(eventWidget, true, marker), nativeResult);
-assert.equal(eventQueueC.sceneQueueControlLock, "upstream", "Queue A selection disables Queue C immediately, without a draw or polling");
+assert.equal(ctx.scenePromptStats(eventQueueC).total, 2, "the value event invalidates the warm count cache immediately");
+ctx.flushDownstreamSceneRefreshes();
+assert.equal(eventQueueC.sceneQueueControlLock, "upstream", "Queue A selection disables Queue C in the batched flush");
 for (const widget of eventQueueC.widgets) { assert.equal(widget.disabled, true); assert.equal(widget.options.disabled, true); }
 assert.equal(ctx.scenePromptStats(eventQueueC).total, 2, "the value event invalidates the warm count cache");
 assert.deepEqual(eventQueueC.widgets.map(widget => widget.value), storedControls, "locking never overwrites Queue control settings");
 assert.strictEqual(callbackCalls[0].receiver, eventWidget);
 assert.deepEqual(callbackCalls[0].args, [marker]);
 assert.strictEqual(eventWidget.callback.call(eventWidget, false), nativeResult);
+assert.equal(ctx.scenePromptStats(eventQueueC).total, 12, "unlocking changes the count before the UI control refresh");
+ctx.flushDownstreamSceneRefreshes();
 assert.equal(eventQueueC.sceneQueueControlLock, "");
 for (const widget of eventQueueC.widgets) { assert.equal(widget.disabled, false); assert.equal(widget.options.disabled, false); }
 assert.equal(ctx.scenePromptStats(eventQueueC).total, 12);

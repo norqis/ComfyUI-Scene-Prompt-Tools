@@ -559,10 +559,11 @@ assert.deepEqual(Object.keys(count.scenePromptSourceKeyCache).sort(), ["graph", 
 const refreshGraph = graph(), left = add(refreshGraph, "ScenePrompter"), right = add(refreshGraph, "ScenePrompter");
 const shared = add(refreshGraph, "ScenePrompterMerge"), tail = add(refreshGraph, "ScenePrompter"), expand = add(refreshGraph, "ScenePrompterExpand");
 connect(left, shared, "scene_prompt1"); connect(right, shared, "scene_prompt2"); connect(shared, tail, "scene_prompt"); connect(tail, expand, "scene_prompt");
+ctx.app.graph = refreshGraph;
 ctx.sceneDownstreamRefreshSources = new Set([left, right]); refreshGraph.lookups = 0;
 const refreshed = []; ctx.scheduleSceneNodeRefresh = node => refreshed.push(node);
 ctx.flushDownstreamSceneRefreshes();
-assert.equal(refreshGraph.lookups, 4, "shared descendants walk once across source edits");
+assert.equal(refreshGraph.lookups, 6, "two source ownership checks plus one walk of shared descendants");
 assert.deepEqual(refreshed, [shared, tail, expand]);
 const allSeen = new Set(), targets = new Set();
 ctx.collectDownstreamSceneNodes(left, targets, allSeen);
