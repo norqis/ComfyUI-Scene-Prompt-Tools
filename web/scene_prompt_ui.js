@@ -2231,7 +2231,10 @@ function readPopupSelectionState(node, stateWidgetName, data) {
     try {
         return pruneStateToData(node, readStateFromWidget(node, stateWidgetName), data, { stateWidgetName });
     } catch (error) {
-        showSceneBatchError("選択内容を読み込めませんでした。", error);
+        const context = matrixLineDraftContextFor(node, stateWidgetName);
+        const side = (context?.side || stateWidgetName || activeStateWidgetName(node)).includes("negative") ? "ネガティブ" : "ポジティブ";
+        const row = context?.draft?.name ? ` / Matrix行「${context.draft.name}」` : "";
+        showSceneBatchError(`${sceneErrorNodeLabel(node)}${row}の${side}候補を読み込めませんでした。`, error);
         return null;
     }
 }
@@ -9663,14 +9666,28 @@ function showSceneBatchError(message, error = null) {
     }
 }
 
-function sceneNodeDisplayNameFromValidation(nodeId, nodeError) {
-    const classType = String(nodeError?.class_type || "").trim();
-    const node = sceneNodeById(nodeId);
-    const title = String(node?.title || "").trim();
-    if (title && title !== classType && title !== SCENE_NODE_DISPLAY_NAMES[classType]) {
-        return `${title} (${SCENE_NODE_DISPLAY_NAMES[classType] || classType || "Unknown"})`;
+function sceneErrorNodeLabel(node, classType = nodeClassName(node), inputs = {}) {
+    const display = SCENE_NODE_DISPLAY_NAMES[classType] || classType || "Sceneノード";
+    const stringValue = value => typeof value === "string" ? value.trim() : "";
+    const title = stringValue(node?.title);
+    const name = [inputs.source_node_name, inputs.prompt_name, inputs.path_name,
+        title !== classType && title !== display ? title : "", findWidget(node, "prompt_name")?.value, findWidget(node, "path_name")?.value]
+        .map(stringValue).find(Boolean) || display;
+    if (["ScenePresetReference", "ScenePresetOutput"].includes(classType)) {
+        const presetId = stringValue(inputs.preset_id) || stringValue(findWidget(node, "preset_id")?.value);
+        const presetName = stringValue(inputs.preset_name) || stringValue(findWidget(node, "preset_name")?.value)
+            || stringValue(scenePresetList?.find(preset => preset.preset_id === presetId)?.name) || presetId;
+        return presetName ? `Preset「${presetName}」${name !== display ? ` / ノード「${name}」` : ""}` : `Presetノード「${name}」`;
     }
-    return SCENE_NODE_DISPLAY_NAMES[classType] || classType || "Unknown";
+    return `ノード「${name}」${name !== display ? ` (${display})` : ""}`;
+}
+
+function sceneNodeDisplayNameFromValidation(nodeId, nodeError, prompt = null, submittedNodes = null) {
+    const classType = String(nodeError?.class_type || "").trim();
+    const submitted = prompt?.output?.[String(nodeId)];
+    const candidate = prompt ? submittedNodes?.get(String(nodeId)) || { type: submitted?.class_type, title: submitted?._meta?.title } : sceneNodeById(nodeId);
+    const matches = candidate && [classType, SCENE_NODE_DISPLAY_NAMES[classType]].includes(nodeClassName(candidate));
+    return sceneErrorNodeLabel(matches ? candidate : null, classType, submitted?.class_type === classType ? submitted.inputs || {} : {});
 }
 
 function sceneValidationInputName(reason) {
@@ -9681,9 +9698,34 @@ function isScenePromptInputName(name) {
     return /^scene_prompt(?:\d+)?$/.test(String(name || "").trim());
 }
 
-function isSceneMissingPromptReason(reason) {
-    return String(reason?.type || "").trim() === "required_input_missing"
-        && isScenePromptInputName(sceneValidationInputName(reason));
+function sceneValidationInputLabel(name) {
+    if (isScenePromptInputName(name)) return `シーンプロンプト${name.slice("scene_prompt".length) ? ` ${name.slice("scene_prompt".length)}` : ""}`;
+    return ({ width: "画像の幅", height: "画像の高さ", batch_size: "バッチ枚数", matrix: "Matrix", model: "モデル", clip: "CLIP", vae: "VAE", positive_json: "ポジティブ候補", negative_json: "ネガティブ候補", matrix_json: "Matrixの行データ" })[name]
+        || SCENE_WIDGET_LABELS[name] || name || "入力";
+}
+
+function sceneValidationReasonMessage(reason) {
+    const input = sceneValidationInputLabel(sceneValidationInputName(reason));
+    const info = reason?.extra_info || {};
+    const received = info.received_value !== undefined ? ` 現在の値: ${JSON.stringify(info.received_value)}。` : "";
+    switch (reason?.type) {
+        case "required_input_missing":
+            return `必須入力「${input}」がありません。ノードの設定を入力するか、対応する出力を接続してください。`;
+        case "value_not_in_list":
+            return `「${input}」の選択値が現在の候補にありません。${received}「${input}」を開き、利用できる候補から選び直してください。`;
+        case "invalid_input_type": {
+            const expected = info.input_type || info.input_config?.[0];
+            return `「${input}」のデータ形式が一致しません。${expected && typeof expected === "string" ? `必要な形式: ${expected}。` : ""}対応する種類の出力をつなぎ直すか、設定値を確認してください。`;
+        }
+        case "value_smaller_than_min":
+        case "value_bigger_than_max": {
+            const minimum = reason.type === "value_smaller_than_min";
+            const bound = info[minimum ? "min" : "max"] ?? info.input_config?.[1]?.[minimum ? "min" : "max"];
+            return `「${input}」が${minimum ? "最小値より小さい" : "最大値より大きい"}ため使用できません。${received}${bound !== undefined ? `${bound}${minimum ? "以上" : "以下"}の値に変更してください。` : "ノードに表示される範囲内の値に変更してください。"}`;
+        }
+        default:
+            return [reason?.message || reason?.type || "入力を検証できませんでした。", reason?.details].filter(Boolean).join(" / ");
+    }
 }
 
 function scenePromptValidationEntries(payload) {
@@ -9696,8 +9738,7 @@ function scenePromptValidationEntries(payload) {
         if (!SCENE_NODE_DISPLAY_NAMES[classType]) {
             continue;
         }
-        const reasons = (Array.isArray(nodeError?.errors) ? nodeError.errors : [])
-            .filter(isSceneMissingPromptReason);
+        const reasons = Array.isArray(nodeError?.errors) ? nodeError.errors : [];
         if (!reasons.length) {
             continue;
         }
@@ -9706,39 +9747,39 @@ function scenePromptValidationEntries(payload) {
     return entries;
 }
 
-function formatPromptValidationMessage(payload) {
+function formatPromptValidationMessage(payload, prompt = null) {
     const entries = scenePromptValidationEntries(payload);
+    const submittedNodes = prompt?.workflow?.nodes ? new Map(prompt.workflow.nodes.map(node => [String(node.id), node])) : null;
     const lines = [
-        "ワークフローの接続不足で生成できませんでした。",
-        "線がつながっていない Scene ノードがあります。",
+        "Sceneノードの入力を確認してください。生成を開始できませんでした。",
         "",
     ];
 
     for (const { nodeId, nodeError, reasons } of entries) {
-        const nodeName = sceneNodeDisplayNameFromValidation(nodeId, nodeError);
-        lines.push(`・${nodeName} #${nodeId}`);
+        const nodeName = sceneNodeDisplayNameFromValidation(nodeId, nodeError, prompt, submittedNodes);
+        lines.push(`・${nodeName}`);
         for (const reason of reasons) {
-            const inputName = sceneValidationInputName(reason);
-            lines.push(`  - 必須入力「${inputName}」が未接続です。`);
+            lines.push(`  - ${sceneValidationReasonMessage(reason)}`);
         }
-        const outputs = Array.isArray(nodeError?.dependent_outputs)
-            ? nodeError.dependent_outputs.filter((item) => String(item || "").trim())
-            : [];
-        if (outputs.length) {
-            lines.push(`  - 影響する出力: ${outputs.join(", ")}`);
-        }
+    }
+    for (const nodeError of Object.values(payload?.node_errors || {})) {
+        if (SCENE_NODE_DISPLAY_NAMES[nodeError?.class_type]) continue;
+        lines.push(`・${nodeError?.class_type || "その他のノード"}`);
+        for (const reason of nodeError?.errors || []) lines.push(`  - ${[reason?.message, reason?.details].filter(Boolean).join(" / ")}`);
     }
 
     return lines.join("\n").trim();
 }
 
-function maybeShowPromptValidationError(payload) {
+function maybeShowPromptValidationError(payload, prompt = null) {
     const entries = scenePromptValidationEntries(payload);
     if (!entries.length) {
         return false;
     }
 
+    const message = formatPromptValidationMessage(payload, prompt);
     const key = JSON.stringify({
+        message,
         nodes: entries.map(({ nodeId, nodeError, reasons }) => ({
             nodeId,
             class_type: nodeError?.class_type || "",
@@ -9755,11 +9796,11 @@ function maybeShowPromptValidationError(payload) {
     }
     sceneLastPromptValidationErrorKey = key;
     sceneLastPromptValidationErrorAt = now;
-    showSceneBatchError(formatPromptValidationMessage(payload));
+    showSceneBatchError(message);
     return true;
 }
 
-function showPromptValidationErrorFromThrown(error) {
+function showPromptValidationErrorFromThrown(error, prompt = null) {
     const candidates = [
         error?.response,
         error?.responseJson,
@@ -9767,7 +9808,7 @@ function showPromptValidationErrorFromThrown(error) {
         error,
     ];
     for (const candidate of candidates) {
-        if (candidate && typeof candidate === "object" && maybeShowPromptValidationError(candidate)) {
+        if (candidate && typeof candidate === "object" && maybeShowPromptValidationError(candidate, prompt)) {
             return true;
         }
     }
@@ -10465,7 +10506,7 @@ function installSceneBatchPromptCapture() {
             releaseSceneRunHandle(preparedRunHandle);
             if (submissionRun) releaseSceneBatchGPU(submissionRun).catch(sceneGPUController.onCleanupError);
             else sceneGPUController.releaseImage(policyId).catch(sceneGPUController.onCleanupError);
-            showPromptValidationErrorFromThrown(error);
+            showPromptValidationErrorFromThrown(error, prompt);
             throw error;
         }
         const promptId = scenePromptIdFromValue(result);
@@ -12280,7 +12321,13 @@ function createMatrixLineBaseInput(draft, side) {
 
 function openSceneMatrixLinesPopup(node) {
     closeAllPopups();
-    let drafts = matrixLineDraftsForNode(node);
+    let drafts;
+    try {
+        drafts = matrixLineDraftsForNode(node);
+    } catch (error) {
+        showSceneBatchError(`${sceneErrorNodeLabel(node)}のMatrix行を読み込めませんでした。`, error);
+        return;
+    }
     const commitDrafts = () => commitMatrixLineDrafts(node, drafts);
     const popup = openPopupShell(node, "Matrix 行を編集", {
         hideReload: true,
@@ -12795,7 +12842,7 @@ async function openScenePresetPicker(node, options = {}) {
     if (scenePresetListErrors.length) {
         const warning = document.createElement("div");
         warning.className = "pc-candidate-desc";
-        warning.textContent = `読み込めないPreset ${scenePresetListErrors.length}件: ${scenePresetListErrors.map((item) => item.preset_id).join(", ")}`;
+        warning.textContent = `Presetを${scenePresetListErrors.length}件読み込めませんでした。表示された原因を確認し、一覧を再読み込みするか、保存済みPresetを復元してください。\n${scenePresetListErrors.map(item => `Preset「${item.name || item.preset_id}」: ${item.error || "読み込みに失敗しました。"}`).join("\n")}`;
         list.appendChild(warning);
     }
     for (const preset of sortedScenePresetCandidates(presets)) {
@@ -12880,22 +12927,22 @@ async function openScenePresetEditor(node) {
             throw new Error("Preset編集に必要なComfyUI APIが見つかりません。");
         }
         await loadScenePresetList(false);
-        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        if (!editorCurrent()) throw new Error("読み込み中にPresetの選択が変わりました。編集したいPresetを選び直し、もう一度開いてください。");
         operation = createPresetOperation(scenePresetDisplayGraphs, () => scenePresetDisplayGraphs);
         const preset = await loadFullSceneLLMPreset(presetId);
         if (!preset?.metadata?.preset_id || !preset?.workflow) {
-            throw new Error("Presetの応答形式が不正です。");
+            throw new Error("Presetの応答に識別名またはワークフローがありません。Preset一覧を再読み込みしてから、もう一度開いてください。");
         }
-        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        if (!editorCurrent()) throw new Error("読み込み中にPresetの選択が変わりました。編集したいPresetを選び直し、もう一度開いてください。");
         operation.definitions.set(presetId, preset);
         await hydratePresetReference(node, operation, loadFullSceneLLMPreset);
-        if (!editorCurrent()) throw new Error("Preset changed while loading its source.");
+        if (!editorCurrent()) throw new Error("読み込み中にPresetの選択が変わりました。編集したいPresetを選び直し、もう一度開いてください。");
         const localPreset = presetEditorDefinition(node, operation.definitions);
         const workflow = presetEditorWorkflow(localPreset || preset);
         operation.dispose();
         await app.loadGraphData(workflow, true, true, `Preset - ${preset.metadata.name || preset.metadata.preset_id}`);
     } catch (error) {
-        showSceneBatchError("Presetを編集用ワークフローとして開けませんでした。", error);
+        showSceneBatchError(`${sceneErrorNodeLabel(node)}を編集用ワークフローとして開けませんでした。`, error);
     } finally {
         operation?.dispose();
         node.scenePresetEditorLoading = false;
@@ -12914,7 +12961,7 @@ async function saveScenePreset(node) {
     const presetId = String(sceneLLMValue(node, "preset_id")).trim();
     const name = String(sceneLLMValue(node, "preset_name")).trim() || presetId;
     if (!presetId) {
-        showSceneBatchError("Preset IDを入力してください。");
+        showSceneBatchError(`${sceneErrorNodeLabel(node)}のPreset IDを入力してから保存してください。`);
         return;
     }
     let failedReferenceNodeId = "";
@@ -12958,7 +13005,7 @@ async function saveScenePreset(node) {
             refreshAllScenePresetReferences(await loadScenePresetList(true));
         } catch (listError) {
             console.warn("[Scene Prompt]", listError);
-            showSceneBatchError("Presetは保存しましたが、一覧を更新できませんでした。", listError);
+            showSceneBatchError(`Preset「${name}」は保存しましたが、一覧を更新できませんでした。一覧を再読み込みしてください。`, listError);
             return;
         }
         showSceneNotification(`Preset「${metadata.name || name}」を保存しました。`);
@@ -12970,7 +13017,7 @@ async function saveScenePreset(node) {
                 nodeId: failedReferenceNodeId,
             });
         }
-        showSceneBatchError("Presetを保存できませんでした。", error);
+        showSceneBatchError(`Preset「${name}」を保存できませんでした。以下の原因を確認してから、もう一度保存してください。`, error);
     }
 }
 
@@ -13796,7 +13843,7 @@ function scheduleAttachSceneNode(node, nodeName) {
             attachSceneNode(node, nodeName);
         } catch (error) {
             console.error("[Scene Prompt] ノードの初期化に失敗しました", error);
-            showSceneBatchError("Sceneノードを読み込めませんでした。", error);
+            showSceneBatchError(`${sceneErrorNodeLabel(node, nodeName)}を初期化できませんでした。以下の設定を確認してから、ノードを開き直してください。`, error);
         }
     });
 }

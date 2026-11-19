@@ -15,9 +15,9 @@ import {
 assert.deepEqual(SCENE_MODEL_MODES, ["Illustrious", "Anima", "NoobAI", "Pony"]);
 assert.deepEqual(parseSelectionState(null), createSelectionState());
 assert.deepEqual(parseMatrixState(""), createMatrixState());
-assert.throws(() => parseSelectionState('{"version":0,"categories":{}}'), /schema version/u);
-assert.throws(() => parseSelectionState('{"version":1,"categories":[]}'), /categories/u);
-assert.throws(() => parseSelectionState('{broken'), /invalid/u);
+assert.throws(() => parseSelectionState('{"version":0,"categories":{}}'), /形式番号.*対応していません/u);
+assert.throws(() => parseSelectionState('{"version":1,"categories":[]}'), /カテゴリ一覧/u);
+assert.throws(() => parseSelectionState('{broken'), /JSONとして読み取れません.*開き直し/u);
 const selectionItem = {
     id: "a", label: "A", prompt: "alpha, beta", category_path: ["Category"],
     category_key: "Category", category_label: "Category",
@@ -45,15 +45,15 @@ for (const [prompt, parts] of [
 }
 assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{ ...selectionItem,
     selected_parts: [selectionItem.selected_parts[0], selectionItem.selected_parts[0]],
-}] } }), /repeat an index/u, "repeated active selections remain invalid");
+}] } }), /選択位置が重複/u, "repeated active selections remain invalid");
 for (const weight of [-20, 50]) {
     const weighted = { ...selectionItem, selected_parts: [{ index: 0, text: "alpha", weight }] };
     assert.equal(parseSelectionState({ version: 1, categories: { Category: [weighted] } }).categories.Category[0].selected_parts[0].weight, weight);
 }
-assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{ ...selectionItem, weight: "bad" }] } }), /weight/u);
+assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{ ...selectionItem, weight: "bad" }] } }), /候補「A」.*強度と部分選択.*両方/u);
 const { prompt, ...missingPrompt } = selectionItem;
-assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [missingPrompt] } }), /missing/u);
-assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{ ...selectionItem, legacy: true }] } }), /unsupported/u);
+assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [missingPrompt] } }), /候補名・プロンプト.*未対応/u);
+assert.throws(() => parseSelectionState({ version: 1, categories: { Category: [{ ...selectionItem, legacy: true }] } }), /未対応/u);
 const legacySelection = parseSelectionState({
     version: 1,
     categories: { "Outfit > School": [{ label: "Summer", prompt: "summer uniform" }] },
@@ -86,11 +86,11 @@ for (const legacyKeys of ["Outfit::Summer", [], [""], [1]]) {
 assert.throws(() => parseSelectionState({
     version: 1,
     categories: { "Outfit > School": [{ label: "Summer", prompt: "summer uniform", category_key: "Wrong" }] },
-}), /inconsistent/u);
+}), /カテゴリ名と階層が一致しません/u);
 assert.throws(() => parseSelectionState({
     version: 1,
     categories: { Category: [{ label: "A", prompt: "a", legacy_keys: ["Category::A"], unknown: true }] },
-}), /unsupported/u);
+}), /未対応/u);
 
 const line = createMatrixLine("Night");
 assert.equal(line.filename_enabled, false);
@@ -99,17 +99,28 @@ line.negative_base = "daylight";
 const state = { version: 1, sets: [line] };
 assert.deepEqual(parseMatrixState(serializeMatrixState(state)), state);
 assert.equal(parseMatrixState(serializeMatrixState(state)).sets[0].positive_base, "night, forest");
-assert.throws(() => parseMatrixState('{"version":1,"sets":[{"name":"old"}]}'), /unsupported|schema/u);
-assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, enabled: "true" }] }), /boolean/u);
-assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, filename_enabled: "true" }] }), /boolean/u);
+assert.throws(() => parseMatrixState('{"version":1,"sets":[{"name":"old"}]}'), /Matrix行「old」.*識別名.*未対応/u);
+assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, enabled: "true" }] }), /有効・無効.*trueまたはfalse/u);
+assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, filename_enabled: "true" }] }), /ファイル名付与.*trueまたはfalse/u);
 const { positive_base, ...oldLine } = line;
 assert.equal(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].enabled, true);
 assert.equal(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].filename_enabled, false);
 assert.deepEqual(parseMatrixState({ version: 1, sets: [{ row_id: "old", name: "Old", path_label: "Old" }] }).sets[0].display_label_groups, []);
-assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...oldLine, unknown: true }] }), /unsupported/u);
-assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, sceneScheduleRenderSummaries: true }] }), /unsupported/u);
+assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...oldLine, unknown: true }] }), /未対応/u);
+assert.throws(() => parseMatrixState({ version: 1, sets: [{ ...line, sceneScheduleRenderSummaries: true }] }), /未対応/u);
 assert.equal(serializeSelectionState(createSelectionState()), '{"version":1,"categories":{}}');
 assert.equal(formatSceneExpandCounts(2, 6), "2回 / 6枚");
-assert.throws(() => formatSceneExpandCounts(2, 6.5), /integer/u);
+assert.throws(() => formatSceneExpandCounts(2, 6.5), /生成枚数.*0以上の整数/u);
+
+const namedBadSelection = JSON.stringify({ version: 1, categories: { "衣装 > 制服": [{ label: "夏服", prompt: "summer uniform", selected_parts: [{ index: 0, text: "summer uniform", weight: "bad" }] }] } });
+assert.throws(() => parseSelectionState(namedBadSelection), error => {
+    assert.match(error.message, /カテゴリ「衣装 > 制服」.*候補「夏服」.*部分選択 1番目.*強度.*数値/u);
+    assert.match(error.message, /設定を確認.*開き直/u);
+    assert.doesNotMatch(error.message, /must be|corrupt|破損/u);
+    return true;
+});
+const matrixBadSelection = JSON.stringify({ version: 1, sets: [{ ...line, name: "夜の森", negative_json: "{broken" }] });
+assert.throws(() => parseMatrixState(matrixBadSelection), /Matrix行「夜の森」: ネガティブ候補:.*JSONとして読み取れません/u);
+assert.equal(JSON.parse(matrixBadSelection).sets[0].negative_json, "{broken", "reporting does not repair or delete saved data");
 
 console.log("scene prompt state tests passed");

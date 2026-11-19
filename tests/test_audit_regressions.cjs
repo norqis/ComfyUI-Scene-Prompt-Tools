@@ -469,7 +469,7 @@ function testSourceOwnershipBoundaries() {
     const removeIndex = matrixEditor.indexOf('createButton("削除", "pc-danger")');
     assert.ok(negativeIndex >= 0 && negativeIndex < filenameIndex && filenameIndex < duplicateIndex && duplicateIndex < removeIndex);
     assert.match(matrixEditor, /copiedDraft\.row_id = createMatrixLine\(`行 \$\{index \+ 2\}`\)\.row_id/);
-    assert.match(matrixEditor, /let drafts = matrixLineDraftsForNode\(node\)/);
+    assert.match(matrixEditor, /let drafts;/);
     assert.match(matrixEditor, /drafts = matrixLineDraftsForNode\(node\)/);
     assert.match(matrixEditor, /draft\.name = nextName;\s+draft\.path_label = nextName/);
     assert.match(matrixEditor, /drafts\.splice\(index \+ 1, 0, copiedDraft\)/);
@@ -838,7 +838,7 @@ async function testPresetSaveDoesNotClaimRefreshSucceededAfterRefreshFailure() {
     assert.deepEqual(captureOrder, ["commit", "graphToPrompt"]);
     assert.equal(savedPayload.api_graph.output.matrix.inputs.matrix_json, "weight-draft");
     assert.deepEqual(notices, []);
-    assert.deepEqual(errors, [["Presetは保存しましたが、一覧を更新できませんでした。", "refresh offline"]]);
+    assert.deepEqual(errors, [["Preset「Preset A」は保存しましたが、一覧を更新できませんでした。一覧を再読み込みしてください。", "refresh offline"]]);
 }
 
 async function testPresetSaveMarksOnlyTheReferenceReturnedByTheServer() {
@@ -907,7 +907,7 @@ async function testPresetSaveMarksOnlyTheReferenceReturnedByTheServer() {
     assert.equal(failedReference.scenePresetError, "途中の参照 #12 でPresetが選択されていません。");
     assert.equal(otherReference.color, "original-other");
     assert.equal(otherReference.bgcolor, "original-other-bg");
-    assert.deepEqual(errors, [["Presetを保存できませんでした。", "途中の参照 #12 でPresetが選択されていません。"]]);
+    assert.deepEqual(errors, [["Preset「Preset A」を保存できませんでした。以下の原因を確認してから、もう一度保存してください。", "途中の参照 #12 でPresetが選択されていません。"]]);
 }
 
 async function testPresetPickerClearsTheSelectedReferenceError() {
@@ -1153,7 +1153,70 @@ async function testBatchStartPaintAndOwnership() {
     }
 }
 
+function testSceneValidationNamesReasonsAndRouting() {
+    const shown = [];
+    const graph = { _nodes: [{ id: 7, type: "SceneMatrix", title: "別タブの同じID" }], getNodeById(id) { return this._nodes.find(node => String(node.id) === String(id)); } };
+    const context = vm.createContext({ app: { graph }, scenePresetList: [{ preset_id: "night", name: "夜のPreset" }],
+        sceneLastPromptValidationErrorKey: "", sceneLastPromptValidationErrorAt: 0,
+        showSceneBatchError(message) { shown.push(message); } });
+    for (const name of ["SCENE_WIDGET_LABELS", "SCENE_NODE_DISPLAY_NAMES"]) {
+        const start = source.indexOf(`const ${name} = {`);
+        vm.runInContext(source.slice(start, source.indexOf("\n};", start) + 3), context);
+    }
+    for (const name of ["findWidget", "nodeClassName", "sceneNodeById", "sceneErrorNodeLabel", "sceneNodeDisplayNameFromValidation", "sceneValidationInputName", "isScenePromptInputName", "sceneValidationInputLabel", "sceneValidationReasonMessage", "scenePromptValidationEntries", "formatPromptValidationMessage", "maybeShowPromptValidationError", "showPromptValidationErrorFromThrown"]) {
+        vm.runInContext(functionSource(name), context);
+    }
+    const reason = (type, input_name, extra = {}) => ({ type, extra_info: { input_name, ...extra } });
+    const payload = { node_errors: {
+        7: { class_type: "SceneApplyLora", dependent_outputs: [98888], errors: [
+            reason("required_input_missing", "scene_prompt"),
+            reason("required_input_missing", "clip"),
+            reason("value_not_in_list", "lora_name", { received_value: "removed.safetensors" }),
+            reason("invalid_input_type", "model", { input_config: ["MODEL"] }),
+            reason("value_smaller_than_min", "strength_model", { received_value: -2, input_config: ["FLOAT", { min: -1 }] }),
+            reason("value_bigger_than_max", "strength_clip", { received_value: 9, max: 4 }),
+            { type: "unknown_scene_reason", message: "Unrecognized detail", details: "keep this original cause" },
+        ] },
+        8: { class_type: "ScenePresetReference", errors: [reason("required_input_missing", "preset_id")] },
+        9: { class_type: "KSampler", errors: [{ message: "Non-Scene original message", details: "Native details remain" }] },
+    } };
+    const before = JSON.stringify(payload);
+    const prompt = { output: { 7: { class_type: "SceneApplyLora", inputs: {}, _meta: { title: "提出済みLoRA" } }, 8: { class_type: "ScenePresetReference", inputs: { preset_id: "night" } } },
+        workflow: { nodes: [{ id: 7, type: "SceneApplyLora", title: "衣装<script>alert(1)</script>" }, { id: 8, type: "ScenePresetReference", title: "夜の参照" }] } };
+    assert.equal(context.showPromptValidationErrorFromThrown({ response: payload }, prompt), true);
+    const message = shown[0];
+    assert.match(message, /ノード「衣装<script>alert\(1\)<\/script>」/u);
+    assert.match(message, /Preset「夜のPreset」 \/ ノード「夜の参照」/u);
+    assert.match(message, /シーンプロンプト.*接続してください/u);
+    assert.match(message, /必須入力「CLIP」/u);
+    assert.match(message, /LoRA.*選択値.*removed\.safetensors.*選び直/u);
+    assert.match(message, /モデル.*形式が一致しません.*MODEL/u);
+    assert.match(message, /モデル強度.*-2.*-1以上/u);
+    assert.match(message, /CLIP強度.*9.*4以下/u);
+    assert.match(message, /Unrecognized detail \/ keep this original cause/u);
+    assert.match(message, /Non-Scene original message \/ Native details remain/u);
+    assert.doesNotMatch(message, /#7|98888|別タブ/u);
+    assert.equal(JSON.stringify(payload), before, "structured IDs and native payload remain intact");
+    assert.equal(context.maybeShowPromptValidationError(payload, prompt), true);
+    assert.equal(shown.length, 1, "duplicate reports of one validation failure share a dialog");
+    payload.node_errors[7].errors[4].extra_info.received_value = -3;
+    context.maybeShowPromptValidationError(payload, prompt);
+    assert.equal(shown.length, 2, "a changed failing value is not hidden by deduplication");
+    const unknown = { node_errors: { 7: { class_type: "SceneApplyLora", errors: [{ type: "new_reason", message: "Original new reason" }] } } };
+    assert.equal(context.maybeShowPromptValidationError(unknown), true);
+    assert.match(shown.at(-1), /Original new reason/u);
+    assert.doesNotMatch(shown.at(-1), /別タブ/u, "a current-tab class mismatch cannot supply the node name");
+    const nonScene = { node_errors: { 9: payload.node_errors[9] } };
+    assert.equal(context.maybeShowPromptValidationError(nonScene), false, "unrelated native errors retain their original path");
+    assert.match(context.sceneErrorNodeLabel({ type: "ScenePrompter", title: "Scene Prompt", widgets: [{ name: "prompt_name", value: "保存した候補名" }] }), /ノード「保存した候補名」/u);
+    assert.match(context.sceneErrorNodeLabel({ type: "ScenePath", title: "Scene Path", widgets: [{ name: "path_name", value: "保存したパス名" }] }), /ノード「保存したパス名」/u);
+    const linkedNames = context.sceneErrorNodeLabel({ type: "ScenePrompter", title: "Scene Prompt", widgets: [{ name: "prompt_name", value: [123, 0] }] }, "ScenePrompter", { prompt_name: [456, 0] });
+    assert.match(linkedNames, /ノード「Scene Prompt」/u); assert.doesNotMatch(linkedNames, /123|456/u);
+    assert.match(context.sceneErrorNodeLabel({ type: "ScenePrompter", title: "別の編集名", widgets: [{ name: "prompt_name", value: "別のwidget名" }] }, "ScenePrompter", { source_node_name: "提出済みの名前" }), /ノード「提出済みの名前」/u);
+}
+
 Promise.resolve()
+    .then(testSceneValidationNamesReasonsAndRouting)
     .then(testBatchStartPaintAndOwnership)
     .then(testLLMSettingsAlwaysLeadWithoutChangingStoredWidgets)
     .then(testPromptSummariesUseComfyWeights)

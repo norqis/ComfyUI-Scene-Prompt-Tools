@@ -360,6 +360,7 @@ const server = http.createServer(async (request, response) => {
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset, installScenePresetSwitchBindings, prepareSceneRunContext, syncSceneMatrixPromptInputs,\n`
                 + `  ensureSceneExpandControls,\n`
+                + `  maybeShowPromptValidationError, readPopupSelectionState, openSceneMatrixLinesPopup, openScenePresetEditor, scheduleAttachSceneNode,\n`
                 + `  installSceneNodeRemovalCleanup,\n`
                 + `  pendingDesktopNotifications() { return sceneDesktopNotificationRequests.size; },\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
@@ -974,6 +975,8 @@ async function checkPresetSwitchModals(browser, url) {
 
 const browser = await chromium.launch({ headless: true });
 try {
+    const { testReadableSceneErrors } = await import("./scene_error_messages.mjs");
+    await testReadableSceneErrors(browser, `http://127.0.0.1:${address.port}/`);
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${address.port}/`);
     await page.waitForFunction(() => window.__scenePromptBrowserReady === true, null, { timeout: 5_000 });
