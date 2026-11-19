@@ -307,6 +307,7 @@ const sceneDesktopNotificationRequests = new Map();
 const SCENE_DETACHED_RETRY_MS = 30 * 1000;
 let chipMeasureContext = null;
 let sceneDownstreamRefreshTimer = null;
+let sceneComputedQueryKeys = null;
 let sceneQueuePromptSyncPaused = 0;
 let sceneWorkflowLoadDepth = 0;
 const sceneWorkflowLoadSources = new Set();
@@ -6922,6 +6923,7 @@ function clearSceneComputedCaches(node) {
     if (!node) {
         return;
     }
+    if (sceneComputedQueryKeys) sceneComputedQueryKeys = new WeakMap();
     node.scenePromptRevision = (Number(node.scenePromptRevision || 0) + 1) % Number.MAX_SAFE_INTEGER;
     node.sceneMatrixDisplayCache = null;
     node.sceneMatrixRenderCache = null;
@@ -7398,10 +7400,23 @@ function scenePromptSourceLocalCacheKey(node) {
     return finish({ type: nodeClassName(node) });
 }
 
+function withSceneComputedQuery(callback) {
+    if (sceneComputedQueryKeys) return callback();
+    // Only the outer synchronous count/schedule query owns these validated keys.
+    sceneComputedQueryKeys = new WeakMap();
+    try {
+        return callback();
+    } finally {
+        sceneComputedQueryKeys = null;
+    }
+}
+
 function scenePromptSourceCacheKey(node) {
     if (!node) return "";
+    if (sceneComputedQueryKeys?.has(node)) return sceneComputedQueryKeys.get(node);
     const graph = node.graph || app.graph;
     const key = scenePromptLineageKey(node);
+    sceneComputedQueryKeys?.set(node, key);
     if (node.scenePromptSourceKeyCache?.key === key && node.scenePromptSourceKeyCache.graph === graph) {
         return node.scenePromptSourceKeyCache.key;
     }
@@ -7630,6 +7645,7 @@ function sceneStatsQueue(items, hasConnectedSource) {
 }
 
 function scenePromptStats(node, seen = new Set(), memo = new Map()) {
+    if (!sceneComputedQueryKeys) return withSceneComputedQuery(() => scenePromptStats(node, seen, memo));
     if (!node || seen.has(node.id)) {
         return emptyScenePromptStats();
     }
@@ -8432,6 +8448,7 @@ function sceneScheduleForLinkedInput(node, name, seen = new Set()) {
 }
 
 function sceneScheduleForNode(node, seen = new Set(), outputSlot = 0) {
+    if (!sceneComputedQueryKeys) return withSceneComputedQuery(() => sceneScheduleForNode(node, seen, outputSlot));
     if (!node || seen.has(node.id) || isSceneNodeMuted(node)) return sceneSchedulePlan();
     const cacheKey = `${scenePromptSourceCacheKey(node)}:${outputSlot}`;
     if (cacheKey && node.sceneQueueScheduleCache?.cacheKey === cacheKey) return node.sceneQueueScheduleCache.plan;
@@ -8661,6 +8678,7 @@ function sceneQueuePendingInNode(node, visiting = new Set(), completed = new Map
 }
 
 function sceneQueueLockState(node) {
+    if (!sceneComputedQueryKeys) return withSceneComputedQuery(() => sceneQueueLockState(node));
     const sources = connectedScenePromptSourcesForQueue(node);
     const plans = sources.map(({ input }) => sceneScheduleForLinkedInput(node, input.name));
     if (plans.length && sceneRandomJoinReady(plans.filter((plan) => !sceneRandomZeroArm(plan)))) return "random";

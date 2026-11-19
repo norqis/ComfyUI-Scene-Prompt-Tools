@@ -17,7 +17,7 @@ function functionSource(name) {
 }
 
 const ctx = {
-    Array, Map, Set, Object, Number, String, JSON, Math,
+    Array, Map, Set, Object, Number, String, JSON, Math, sceneComputedQueryKeys: null,
     SCENE_PROMPT_QUEUE_INPUT_NAMES: new Set(Array.from({ length: 10 }, (_, i) => `scene_prompt${i + 1}`)),
     SCENE_RANDOM_DEFAULT_WEIGHTS: [10000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     emptyMatrixRow: () => ({}),
@@ -27,7 +27,7 @@ const ctx = {
 require("./scene_switches_test_context.cjs").install(ctx);
 vm.createContext(ctx);
 for (const name of [
-    "emptyScenePromptStats", "sceneStatNumber", "sceneStatProduct", "sceneStatSum", "sceneStatsResult", "sceneStatsMerge",
+    "withSceneComputedQuery", "emptyScenePromptStats", "sceneStatNumber", "sceneStatProduct", "sceneStatSum", "sceneStatsResult", "sceneStatsMerge",
     "sceneSchedulePlan", "sceneScheduleRun", "sceneScheduleWrapper", "sceneScheduleRepeatEach",
     "sceneCountHasHold", "sceneCountPolicyAdd", "sceneCountPolicyProduct", "sceneCountPlanPolicy", "sceneCountUnitPolicy",
     "sceneCountPrefixPlan", "sceneCountPrefixUnit", "sceneCountPrefixUnitUncached", "sceneCountEligibleIndex",

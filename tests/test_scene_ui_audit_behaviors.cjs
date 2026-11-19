@@ -410,6 +410,7 @@ const layoutContext = vm.createContext({ Map, Set, Math, Number, String, JSON,
     closeSceneExpandResources() {}, closeSceneLoraPicker() {}, popupContextReferencesNode() { return false; },
     isSceneExpandNodeName() { return false; },
 });
+layoutContext.sceneComputedQueryKeys = null;
 for (const name of ["selectedListLayoutCacheKey", "cachedSelectedListLayout", "selectedListRenderCacheName", "clearSceneComputedCaches", "installSceneNodeRemovalCleanup"])
     vm.runInContext(functionSource(name), layoutContext);
 const layoutNode = { widgets: Array.from({ length: 12 }, (_, index) => ({ name: `role${index}`, value: `state${index}` })) };
@@ -485,6 +486,7 @@ async function testCurrentDisplayAndRasterOwnership() {
         closeSceneExpandResources() {}, closeSceneLoraPicker() {}, popupContextReferencesNode: () => false, isSceneExpandNodeName: () => false,
     };
     vm.createContext(ctx);
+    ctx.sceneComputedQueryKeys = null;
     for (const name of ["normalizeWeight", "weightForStorage", "itemWeight", "formatWeight", "itemHasPartSelection", "itemHasPartialSelection",
         "itemWeightSuffix", "itemBaseLabel", "stripCountSuffix", "displayCategoryLabel", "itemCategoryKey", "itemKey", "selectedItems", "selectedItemMap",
         "itemSelectionSignature", "savedPromptMatches", "matchedSavedPrompts", "itemsCoveredBySavedPrompts", "uncoveredCategories", "selectedListSections",

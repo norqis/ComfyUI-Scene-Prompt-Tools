@@ -27,7 +27,7 @@ const types = {
     isScenePromptQueueNode: "ScenePrompterQueue", isScenePromptRandomRouteOutputNode: "ScenePromptRandomRouteOutput",
 };
 const ctx = { ...switches, Set, Map, Math, JSON, String, Number, Array, Object, parseMatrixState,
-    app: { graph: null }, scenePresetDisplayGraphs: new Map(),
+    app: { graph: null }, scenePresetDisplayGraphs: new Map(), sceneComputedQueryKeys: null,
     sceneWorkflowLoadDepth: 0, sceneWorkflowLoadSources: new Set(), sceneDownstreamRefreshSources: new Set(), sceneDownstreamRefreshTimer: null,
     setTimeout: () => 1, clearTimeout: () => {}, scheduleSceneNodeRefresh: () => {}, installSceneNodeRemovalCleanup: () => {},
     SCENE_WIDGET_LABELS: { order_mode: "順番", alternate_block_size: "交互ブロック", downstream_count_mode: "Count" },
@@ -48,7 +48,7 @@ for (const [name, type] of Object.entries(types)) ctx[name] = node => node?.type
 ctx.isScenePromptJoinNode = node => ctx.isScenePromptQueueNode(node) || ctx.isScenePromptRandomRouteOutputNode(node);
 ctx.isSceneExpandNode = node => node?.type === "ScenePromptExpand";
 vm.createContext(ctx);
-const funcs = ["nodeClassName", "nodeClassNames", "isRerouteNode", "isScenePromptSourceNode", "liteGraphNodeMode", "sceneNodeMode", "isSceneNodeMuted", "isSceneNodeBypassed", "sceneNodeRevision",
+const funcs = ["withSceneComputedQuery", "nodeClassName", "nodeClassNames", "isRerouteNode", "isScenePromptSourceNode", "liteGraphNodeMode", "sceneNodeMode", "isSceneNodeMuted", "isSceneNodeBypassed", "sceneNodeRevision",
     "linkedInput", "graphLink", "firstLinkedInput", "linkKey", "resolveLinkedSourceFromLink", "resolveLinkedSourceFromInput", "linkedSourceNode",
     "scenePromptInputSource", "sceneBypassInputSource", "scenePromptSourceLocalCacheKey", "scenePromptLineageKey", "scenePromptSourceCacheKey",
     "clampSceneCount", "scenePrimitiveInputValue", "scenePromptCounterCount", "scenePromptCounterDownstreamEnabled", "sceneEmptyLatentConfig", "scenePromptSettingsError",

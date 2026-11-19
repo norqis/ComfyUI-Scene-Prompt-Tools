@@ -26,7 +26,7 @@ const classes = {
     isSceneExpandNode: "ScenePrompterExpand",
 };
 const ctx = {
-    Set, Map, Math, JSON, String, Number, Array, Object, app: { graph: null },
+    Set, Map, Math, JSON, String, Number, Array, Object, app: { graph: null }, sceneComputedQueryKeys: null,
     SCENE_QUEUE_CONTROL_NAMES: ["order_mode", "alternate_block_size", "downstream_count_mode"],
     SCENE_QUEUE_CONTROL_DEFAULTS: { order_mode: "input_order", alternate_block_size: 1, downstream_count_mode: "multiply" },
     SCENE_QUEUE_DISPLAY_PREVIEW_ROWS: 40, MATRIX_SECTION_VISIBLE_ROWS: 40, scenePresetDisplayGraphs: new Map(), MATRIX_DEFAULT_JSON: "{}",
@@ -50,14 +50,14 @@ ctx.isScenePromptJoinNode = node => ctx.isScenePromptQueueNode(node) || ctx.isSc
 ctx.isScenePromptSourceNode = node => Object.entries(classes).some(([name]) => name !== "isSceneExpandNode" && ctx[name](node));
 require("./scene_switches_test_context.cjs").install(ctx);
 vm.createContext(ctx);
-const core = ["nodeClassName", "nodeClassNames", "isRerouteNode", "liteGraphNodeMode", "sceneNodeMode",
+const core = ["withSceneComputedQuery", "nodeClassName", "nodeClassNames", "isRerouteNode", "liteGraphNodeMode", "sceneNodeMode",
     "isSceneNodeMuted", "isSceneNodeBypassed", "sceneNodeRevision", "linkedInput", "graphLink", "firstLinkedInput",
     "linkKey", "resolveLinkedSourceFromLink", "resolveLinkedSourceFromInput", "linkedSourceNode",
     "scenePromptInputSource", "sceneBypassInputSource", "scenePromptSourceLocalCacheKey", "scenePromptLineageKey",
     "scenePromptSourceCacheKey", "scenePromptQueueRowsCacheKey", "clampSceneCount", "scenePrimitiveInputValue",
     "scenePromptCounterCount", "scenePromptCounterDownstreamEnabled", "sceneEmptyLatentConfig", "scenePromptSettingsError",
     "scenePresetGraphNodes", "apiLink", "apiInput", "sceneQueueBoundaryInPreset",
-    "sceneQueueBoundaryInNode", "sceneRandomRouteInNode", "sceneQueuePendingInNode",
+    "sceneQueueBoundaryInNode", "sceneRandomRouteInNode", "sceneQueuePendingInNode", "sceneQueueLockState",
     "scenePromptStats", "scenePromptInputNumber", "scenePromptQueueInputIndexes", "connectedScenePromptSourcesForQueue",
     "connectedScenePromptSourcesForMerge", "sceneScheduleForLinkedInput", "sceneScheduleForNode", "sceneRandomJoinReady", "sceneRandomChoicePlan",
     "clearSceneComputedCaches", "collectDownstreamSceneNodes", "downstreamNodes", "flushDownstreamSceneRefreshes",
@@ -88,7 +88,58 @@ function connect(from, to, name, type = "SCENE_PROMPT", originSlot = 0) {
 }
 const set = (node, name, value) => { ctx.findWidget(node, name).value = value; };
 const key = node => ctx.scenePromptSourceCacheKey(node);
-const snapshot = node => JSON.parse(JSON.stringify(ctx.scenePromptStats(node)));
+const snapshot = node => {
+    const stats = ctx.scenePromptStats(node);
+    assert.equal(ctx.sceneComputedQueryKeys, null, "a count query releases its temporary keys");
+    return JSON.parse(JSON.stringify(stats));
+};
+
+// Share validation only during one synchronous query, including nested count/schedule/lock queries.
+{
+    const g = graph(), prompt = add(g, "ScenePrompter"), count = add(g, "ScenePromptCounter", { count: 3 });
+    const merge = add(g, "ScenePrompterQueue"), queue = add(g, "ScenePrompterQueue");
+    connect(prompt, count, "scene_prompt");
+    connect(count, merge, "scene_prompt1"); connect(count, merge, "scene_prompt2");
+    connect(merge, queue, "scene_prompt1");
+    const lineage = ctx.scenePromptLineageKey, calls = new Map();
+    ctx.scenePromptLineageKey = node => { calls.set(node, (calls.get(node) || 0) + 1); return lineage(node); };
+    ctx.withSceneComputedQuery(() => {
+        const scope = ctx.sceneComputedQueryKeys;
+        assert.equal(ctx.scenePromptStats(queue).total, 6);
+        ctx.sceneScheduleForNode(queue);
+        ctx.sceneQueueLockState(queue);
+        assert.strictEqual(ctx.sceneComputedQueryKeys, scope, "nested roots share the current scope");
+        for (const node of [prompt, count, merge, queue]) {
+            const before = calls.get(node) || 0;
+            const first = key(node); assert.equal(key(node), first);
+            assert.equal(calls.get(node), Math.max(1, before), "each node validates its DAG once per query");
+        }
+        assert.ok([...calls.values()].every(value => value === 1), "shared branches never revalidate the same node key");
+        const lookups = g.lookups;
+        for (let draw = 0; draw < 20; draw++) for (const node of [prompt, count, merge, queue]) key(node);
+        assert.equal(g.lookups, lookups, "reusing validated keys never traverses the DAG again");
+        const oldKey = key(queue);
+        set(count, "count", 4);
+        ctx.clearSceneComputedCaches(count);
+        assert.notStrictEqual(ctx.sceneComputedQueryKeys, scope, "invalidation replaces the whole current scope");
+        assert.notEqual(key(queue), oldKey, "downstream keys cannot retain pre-invalidation lineage");
+        assert.equal(ctx.scenePromptStats(queue).total, 8);
+    });
+    assert.equal(ctx.sceneComputedQueryKeys, null);
+    set(count, "count", 5);
+    assert.equal(snapshot(queue).total, 10, "the next query sees direct widget edits without callbacks");
+    const before = calls.get(queue);
+    ctx.sceneScheduleForNode(queue);
+    assert.equal(calls.get(queue), before + 1, "a separate schedule query revalidates its root");
+    assert.equal(ctx.sceneComputedQueryKeys, null);
+    ctx.scenePromptLineageKey = () => { throw new Error("query fixture failure"); };
+    for (const query of [() => ctx.scenePromptStats(queue), () => ctx.sceneScheduleForNode(queue), () => ctx.sceneQueueLockState(queue)]) {
+        assert.throws(query, /query fixture failure/);
+        assert.equal(ctx.sceneComputedQueryKeys, null, "exception paths release the query scope");
+    }
+    ctx.scenePromptLineageKey = lineage;
+    assert.equal(snapshot(queue).total, 10, "a failed query does not poison later queries");
+}
 
 // Editing prompt content keeps the warmed Queue/Count plan and forwards native callbacks.
 {
@@ -588,6 +639,7 @@ async function testMatrixCurrentStateCache() {
     };
     require("./scene_switches_test_context.cjs").install(matrixContext);
     vm.createContext(matrixContext);
+    matrixContext.sceneComputedQueryKeys = null;
     for (const name of ["serializedMatrixJsonValue", "currentMatrixJsonValue", "cachedMatrixState",
         "normalizeMatrixWidgetValues", "ensureMatrixJsonWidget", "parseMatrixStateValue", "normalizeMatrixState",
         "readMatrixState", "writeMatrixState", "clearSceneComputedCaches"]) vm.runInContext(functionSource(name), matrixContext);

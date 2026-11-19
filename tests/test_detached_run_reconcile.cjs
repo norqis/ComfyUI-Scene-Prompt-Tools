@@ -475,6 +475,7 @@ function testRemovalCleanupRunsOnceAndPreservesPreviousHandler() {
     vm.runInContext(functionSource("popupContextReferencesNode"), context);
     vm.runInContext(functionSource("closeSceneLoraDetails"), context);
     vm.runInContext(functionSource("closeSceneExpandResources"), context);
+    context.sceneComputedQueryKeys = null;
     vm.runInContext(functionSource("clearSceneComputedCaches"), context);
     vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
     context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
@@ -513,6 +514,7 @@ function testWorkflowTabLoadDoesNotCancelExpandRun() {
     vm.createContext(context);
     vm.runInContext(functionSource("closeSceneLoraDetails"), context);
     vm.runInContext(functionSource("closeSceneExpandResources"), context);
+    context.sceneComputedQueryKeys = null;
     vm.runInContext(functionSource("clearSceneComputedCaches"), context);
     vm.runInContext(functionSource("installSceneNodeRemovalCleanup"), context);
     context.installSceneNodeRemovalCleanup(node, "ScenePrompterExpand");
