@@ -1800,7 +1800,8 @@ NODE_CLASS_MAPPINGS = {
             '1': {'class_type': 'TestSceneModelBundle', 'inputs': {'label': 'good-model', 'log_path': str(marker)}},
             '2': {'class_type': 'SceneApplyModel', 'inputs': {'model': ['1', 0], 'clip': ['1', 1], 'vae': ['1', 2]}},
             '383': {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': outer_id, 'scene_prompt': ['2', 0]}},
-            '400': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['383', 0], 'seed_base': 7, 'current_index': 0}},
+            '400': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['383', 0], 'seed_base': 7, 'current_index': 0,
+                'run_id': '', 'timestamp_dir': False}},
             '401': {'class_type': 'TestSceneModelSink', 'inputs': {'model': ['400', 5], 'clip': ['400', 6], 'vae': ['400', 7]}},
         }
         handle, workflow = self._prepare_callback_run(graph, '400')
