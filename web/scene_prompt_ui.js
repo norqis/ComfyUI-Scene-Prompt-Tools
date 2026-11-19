@@ -12193,8 +12193,9 @@ function scenePromptConfigureValues(config, node) {
         return config;
     }
     const named = Object.fromEntries(SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.map((name, index) => [name, stored[index]]));
-    const displayNames = node.widgets.filter(widget => SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.includes(widget.name)).map(widget => widget.name);
-    return { ...config, widgets_values: displayNames.map(name => named[name]) };
+    // Native configure consumes UI-only widget slots as well as scalar fields.
+    const values = node.widgets.map(widget => Object.hasOwn(named, widget.name) ? named[widget.name] : widget.value);
+    return { ...config, widgets_values: values };
 }
 
 function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows, commitDrafts) {
@@ -14243,7 +14244,9 @@ app.registerExtension({
                 args[0] = scenePromptConfigureValues(args[0], this);
                 const result = configure?.apply(this, args);
                 if (stored) {
-                    setWidgetValue(this, "run_handle", stored[9], { silent: true });
+                    for (const [index, name] of SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.entries()) {
+                        setWidgetValue(this, name, stored[index], { silent: true });
+                    }
                 }
                 return result;
             };

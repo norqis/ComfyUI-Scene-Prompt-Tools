@@ -347,7 +347,8 @@ const server = http.createServer(async (request, response) => {
     const asset = assets.get(request.url);
     if (asset) {
         response.writeHead(200, { "content-type": "text/javascript" });
-        let source = await readFile(resolve(root, asset), "utf8");
+        let source = await readFile(asset === "web/scene_prompt_ui.js" && process.env.SCENE_NATIVE_UI_SOURCE
+            ? process.env.SCENE_NATIVE_UI_SOURCE : resolve(root, asset), "utf8");
         if (asset === "web/scene_prompt_ui.js") {
             source += `\nwindow.__scenePromptPopupTestHooks = {\n`
                 + `  openSavePromptPopup, openSceneLoraDetails, openEditPromptItemPopup, closeAllPopups,\n`
@@ -1115,6 +1116,12 @@ try {
             }
         }
         class ScenePromptNode extends LGraphNode {
+            configure(serialized) {
+                for (const [index, value] of (serialized.widgets_values || []).entries()) {
+                    if (this.widgets[index]) this.widgets[index].value = structuredClone(value);
+                }
+                this.widgets_values = structuredClone(serialized.widgets_values || []);
+            }
             constructor() {
                 super();
                 this.id = 1;
@@ -1159,13 +1166,29 @@ try {
         const node = new ScenePromptNode();
         window.app.graph._nodes = [node];
         node.onNodeCreated();
+        // Native configure addresses every widget slot, including UI controls.
+        // Keep a control between scalar widgets to catch positional shifts.
+        const interleaveControl = target => {
+            const buttonIndex = target.widgets.findIndex(widget => widget.sceneRole === 'positive_open');
+            const [button] = target.widgets.splice(buttonIndex, 1);
+            target.widgets.splice(target.widgets.findIndex(widget => widget.name === 'randomize'), 0, button);
+            target.widgets_values = target.widgets.map(widget => widget.value);
+        };
+        interleaveControl(node);
         if (node.widgets[0].name !== "filename_enabled" || node.widgets[0].serialize === false) throw new Error("serialized filename toggle must be first");
         node.widgets[0].value = true;
         node.widgets_values[0] = true;
         const saved = node.serialize();
         const restored = new ScenePromptNode();
         restored.onNodeCreated();
+        interleaveControl(restored);
         restored.configure(saved);
+        for (let iteration = 0; iteration < 3; iteration++) {
+            const serialized = restored.serialize();
+            restored.configure(serialized);
+            if (typeof restored.widgets.find(widget => widget.name === 'randomize').value !== 'boolean') throw new Error('reload shifted randomize');
+            if (restored.widgets.find(widget => widget.name === 'model_mode').value !== 'Anima') throw new Error('reload shifted model mode');
+        }
         const restoredValues = Object.fromEntries(restored.widgets.map((widget, index) => [widget.name, {
             value: widget.value,
             stored: restored.widgets_values[index],
