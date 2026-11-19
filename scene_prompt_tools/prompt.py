@@ -3,7 +3,7 @@ import math
 import random
 import re
 from collections import OrderedDict
-from .plan import transform, with_source_node
+from .plan import transform, with_source_node, PROMPT_MODEL_MODE_ALL, PROMPT_MODEL_MODE_CHOICES
 
 
 DEFAULT_CATEGORY_ORDER = ""
@@ -565,6 +565,7 @@ class _ScenePromptBase:
                     SCENE_PROMPT_TYPE,
                     {"forceInput": True, "display_name": "scene_prompt", "label": "scene_prompt"},
                 ),
+                "model_mode": (PROMPT_MODEL_MODE_CHOICES, {"default": PROMPT_MODEL_MODE_ALL, "display_name": "モデル種別", "label": "モデル種別"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -588,6 +589,7 @@ class _ScenePromptBase:
         run_handle="",
         unique_id=None,
         filename_enabled=False,
+        model_mode=PROMPT_MODEL_MODE_ALL,
         **kwargs,
     ):
         return "|".join(
@@ -601,6 +603,7 @@ class _ScenePromptBase:
                 str(randomize),
                 str(seed),
                 str(bool(filename_enabled)),
+                str(model_mode),
                 _scene_prompt_change_key(scene_prompt),
                 str(run_handle or ""),
             ]
@@ -622,6 +625,7 @@ class _ScenePromptBase:
         source_node_id="",
         source_node_name="",
         filename_enabled=False,
+        model_mode=PROMPT_MODEL_MODE_ALL,
         **kwargs,
     ):
         del kwargs
@@ -641,11 +645,16 @@ class _ScenePromptBase:
             int(seed or 0) ^ 0x5F3759DF,
         )
 
+        payload = [label, positive_parts, negative_parts, bool(filename_enabled)]
+        if model_mode == PROMPT_MODEL_MODE_ALL:
+            plan = transform(scene_prompt, operation={"kind": "prompt_add", "payload": payload})
+            return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
         plan = transform(scene_prompt, operation={
-            "kind": "prompt_add", "payload": [label, positive_parts, negative_parts, bool(filename_enabled)],
+            "kind": "model_prompt_add",
+            "payload": [model_mode, payload, str(source_node_id or unique_id or "").strip(), str(source_node_name or "").strip()],
         })
-        return (with_source_node(plan, source_node_id or unique_id, source_node_name),)
+        return (plan,)
 
 
 class ScenePrompt(_ScenePromptBase):
-    DESCRIPTION = """ポジティブ・ネガティブの基本文と候補画面で選んだプロンプトをまとめ、Scene用の生成計画を出力します。\nscene_prompt を入力すると、入力済みの各生成行へこのノードの内容を追加します。重複するタグはまとめられ、ネガティブ側にも同じタグがある場合、そのポジティブタグは除外されます。\n{A|B|C} 形式の候補は Scene Prompt Expand でシードに基づいて確定します。ノード名は生成計画のラベルとして使われます。"""
+    DESCRIPTION = """ポジティブ・ネガティブの基本文と候補画面で選んだプロンプトをまとめ、Scene用の生成計画を出力します。\nscene_prompt を入力すると、入力済みの各生成行へこのノードの内容を追加します。重複するタグはまとめられ、ネガティブ側にも同じタグがある場合、そのポジティブタグは除外されます。\n{A|B|C} 形式の候補は Scene Prompt Expand でシードに基づいて確定します。ノード名は生成計画のラベルとして使われます。\nモデル種別が「全モデル」なら常に、指定モデルならExpandのモデルと一致するときだけ、このノードのprompt・名前・ファイル名を追加します。不一致でも上流の内容はそのまま通します。"""

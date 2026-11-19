@@ -795,8 +795,8 @@ def _consumer_replay_items(prompt, save_id, scene_info):
             if is_expand:
                 continue
             raise ValueError(f"Scene Save Image の生成経路を保存できません: Scene Prompt To Text {node_id} の実行済み計画がありません。")
-        requested_index, seed, plan = selection
-        item = (_scene_prompt_item_for_index(None, requested_index, normalized=plan, strict=True, seed=seed)
+        requested_index, seed, plan, model_mode = selection
+        item = (_scene_prompt_item_for_index(None, requested_index, normalized=plan, strict=True, seed=seed, model_mode=model_mode)
                 if is_expand else _text_item_for_index(plan, requested_index, seed))
         result[node_id] = {
             "_plan_ref": plan, "row_index": item["row_index"], "repeat_index": item["repeat_index"],
@@ -1612,11 +1612,11 @@ def _scene_count(value):
     return value
 
 
-def _record_consumer_selection(run_handle, unique_id, current_index, seed, plan):
+def _record_consumer_selection(run_handle, unique_id, current_index, seed, plan, model_mode=None):
     if run_handle and unique_id is not None:
         context = get_executing_context()
         set_run_consumer_selection(run_handle, unique_id, current_index, seed, plan,
-                                   context.prompt_id if context else "", (context.list_index or 0) if context else 0)
+                                   context.prompt_id if context else "", (context.list_index or 0) if context else 0, model_mode)
 
 
 def _scene_run_plan(run_handle, scene_prompt=None, unique_id=None):
@@ -1631,10 +1631,10 @@ def _scene_run_plan(run_handle, scene_prompt=None, unique_id=None):
     return set_run_plan_reference(run_handle, unique_id, normalize_plan(scene_prompt))
 
 
-def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False, seed=0):
+def _scene_prompt_item_for_index(scene_prompt, current_index, normalized=None, strict=False, seed=0, model_mode=None):
     plan = normalized if normalized is not None else normalize_plan(scene_prompt)
     try:
-        return item_for_normalized_plan(plan, current_index, seed)
+        return item_for_normalized_plan(plan, current_index, seed, model_mode=model_mode)
     except IndexError:
         if strict:
             if plan["stats"]["total_batches"] == 0:
@@ -3143,7 +3143,7 @@ class ScenePromptExpand:
             current_index = 0
         base_seed = int(seed_base) % SEED_MODULO if _scene_bool(seed_base_literal) else _auto_seed_base(seed_base)
         seed = (base_seed + current_index) % SEED_MODULO
-        item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True, seed=seed)
+        item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True, seed=seed, model_mode=model_mode)
         row = item["row"]
         if row.get("model_links") is None and _connected_expand_resource_outputs(prompt, unique_id):
             raise ValueError(
@@ -3243,7 +3243,7 @@ class ScenePromptExpand:
                 "result": (positive, negative, save_info, seed, latent, model, clip, model_links["vae"]),
                 "expand": graph.finalize(),
             }
-        _record_consumer_selection(run_handle, unique_id, current_index, seed, plan)
+        _record_consumer_selection(run_handle, unique_id, current_index, seed, plan, model_mode)
         return result
 
 

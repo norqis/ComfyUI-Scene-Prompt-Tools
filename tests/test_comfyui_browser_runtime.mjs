@@ -1157,8 +1157,8 @@ window.__sceneSeedRuntimeTest = {
         console.log(`real ComfyUI PNG workflow load passed (${loadResult.nodes} nodes, ${loadResult.loadMilliseconds.toFixed(1)} ms, no LLM/Civitai calls)`);
     }
     const result = await page.evaluate(() => {
-        const names = ["filename_enabled", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "randomize", "run_handle"];
-        const values = [true, "positive, {A|B}", '{"version":1,"categories":{"Outfit":[{"prompt":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"prompt":"calm","label":"Calm"}]}}', "Outfit", 99, false, "new run"];
+        const names = ["filename_enabled", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "randomize", "run_handle", "model_mode"];
+        const values = [true, "positive, {A|B}", '{"version":1,"categories":{"Outfit":[{"prompt":"summer","label":"Summer"}]}}', "negative", '{"version":1,"categories":{"Mood":[{"prompt":"calm","label":"Calm"}]}}', "Outfit", 99, false, "new run", "Pony"];
         const legacyNames = ["prompt_name", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "control_after_generate", "randomize", "run_handle"];
         const legacyValues = ["v0.3 name", "v0.3 positive, {A|B}", '{"version":1,"categories":{"Legacy":[{"label":"Legacy positive","prompt":"old positive"}]}}', "v0.3 negative", '{"version":1,"categories":{"Legacy":[{"label":"Legacy negative","prompt":"old negative"}]}}', "Outfit", 77, "randomize", false, "v0.3 run"];
         const node = window.LiteGraph.createNode("ScenePrompter");
@@ -1182,7 +1182,13 @@ window.__sceneSeedRuntimeTest = {
             return [name, widget?.value];
         }));
         legacyRestored.configure(legacy);
+        const old11 = window.LiteGraph.createNode("ScenePrompter"); window.app.graph.add(old11);
+        old11.configure({ widgets_values: [...legacyValues, true] });
+        const named = window.LiteGraph.createNode("ScenePrompter"); window.app.graph.add(named);
+        named.configure({ widgets_values_named: { ...Object.fromEntries(legacyNames.map((name, i) => [name, legacyValues[i]])), filename_enabled: true, model_mode: "NoobAI" } });
         return {
+            compatibility: [legacyRestored, old11, named].map(n => ({ mode: n.widgets.find(w => w.name === "model_mode").value,
+                positive: n.widgets.find(w => w.name === "positive_base").value, filename: n.widgets.find(w => w.name === "filename_enabled").value })),
             top: node.widgets[0]?.name,
             serialized: serialized.widgets_values,
             values: Object.fromEntries(names.map((name) => {
@@ -1199,6 +1205,12 @@ window.__sceneSeedRuntimeTest = {
         };
     });
     assert.equal(result.top, "filename_enabled");
+    assert.equal(result.serialized.length, 12);
+    assert.deepEqual(result.compatibility, [
+        { mode: "全モデル", positive: "v0.3 positive, {A|B}", filename: false },
+        { mode: "全モデル", positive: "v0.3 positive, {A|B}", filename: true },
+        { mode: "NoobAI", positive: "v0.3 positive, {A|B}", filename: true },
+    ]);
     assert.ok(Array.isArray(result.serialized), "the real LGraphNode must use positional widget values");
     assert.deepEqual(result.values, {
         filename_enabled: true,
@@ -1210,6 +1222,7 @@ window.__sceneSeedRuntimeTest = {
         seed: 99,
         randomize: false,
         run_handle: "new run",
+        model_mode: "Pony",
     });
     assert.deepEqual(result.legacyInput, ["v0.3 name", "v0.3 positive, {A|B}", '{"version":1,"categories":{"Legacy":[{"label":"Legacy positive","prompt":"old positive"}]}}', "v0.3 negative", '{"version":1,"categories":{"Legacy":[{"label":"Legacy negative","prompt":"old negative"}]}}', "Outfit", 77, "randomize", false, "v0.3 run"]);
     assert.deepEqual(result.legacy, {
@@ -1370,6 +1383,29 @@ window.__sceneSeedRuntimeTest = {
                 literal: restored.widgets.find((widget) => widget.name === "seed_base_literal").value,
                 linked: restored.inputs.find((input) => input.name === "model_mode")?.link != null });
         }
+        const linkedPrompts = [];
+        for (const length of [10, 11, 12]) {
+            app.graph.clear();
+            const node = window.LiteGraph.createNode("ScenePrompter"), primitive = window.LiteGraph.createNode("PrimitiveNode");
+            app.graph.add(node); app.graph.add(primitive);
+            const workflow = app.graph.serialize(), stored = workflow.nodes.find(item => String(item.id) === String(node.id));
+            stored.widgets_values = stored.widgets_values.slice(0, length);
+            if (length === 12) stored.widgets_values[11] = null;
+            delete stored.widgets_values_named;
+            stored.inputs = stored.inputs.filter(input => input.name !== "model_mode");
+            const link = workflow.last_link_id + 1, slot = stored.inputs.length;
+            stored.inputs.push({ name: "model_mode", type: "COMBO", link, widget: { name: "model_mode" } });
+            workflow.links.push([link, primitive.id, 0, node.id, slot, "COMBO"]); workflow.last_link_id = link;
+            const value = workflow.nodes.find(item => String(item.id) === String(primitive.id));
+            value.outputs[0] = { ...value.outputs[0], name: "COMBO", type: "COMBO", links: [link] }; value.widgets_values = ["Anima"];
+            await app.loadGraphData(workflow, true, true); await new Promise(done => setTimeout(done, 250));
+            const first = await app.graphToPrompt();
+            await app.loadGraphData(app.graph.serialize(), true, true); await new Promise(done => setTimeout(done, 250));
+            const second = await app.graphToPrompt(), restored = app.graph.getNodeById(node.id);
+            linkedPrompts.push({ length, first: first.output[String(node.id)].inputs.model_mode,
+                second: second.output[String(node.id)].inputs.model_mode,
+                linked: restored.inputs.find(input => input.name === "model_mode")?.link != null });
+        }
         const literal = [];
         for (const mode of ["Illustrious", "Anima", "NoobAI", "Pony"]) {
             app.graph.clear();
@@ -1388,7 +1424,7 @@ window.__sceneSeedRuntimeTest = {
                 api: prompt.output[String(node.id)].inputs.model_mode,
             })) });
         }
-        return { contract, linked, literal };
+        return { contract, linked, literal, linkedPrompts };
     });
     assert.deepEqual(modelModes.contract.expandWidgets.slice(0, 11), ["current_index", "run_id", "seed_base", "timestamp_dir", "prefix",
         "counter_position", "model_mode", "replace_underscores", "convert_anima_weights", "callback_failure_mode", "seed_base_literal"]);
@@ -1405,6 +1441,9 @@ window.__sceneSeedRuntimeTest = {
         assert.equal(result.sameInput, true);
         assert.equal(result.literal, true);
         assert.equal(result.linked, true);
+    }
+    for (const result of modelModes.linkedPrompts) {
+        assert.equal(result.first, "Anima"); assert.equal(result.second, "Anima"); assert.equal(result.linked, true);
     }
     for (const result of modelModes.literal) {
         for (const options of result.options) assert.deepEqual(options, ["Illustrious", "Anima", "NoobAI", "Pony"]);

@@ -287,7 +287,7 @@ class RunContextStore:
         selections = evaluation[1]
         return selections[min(list_index, len(selections) - 1)]
 
-    def set_consumer_selection(self, handle, node_id, index, seed, plan=None, prompt_id="", list_index=0):
+    def set_consumer_selection(self, handle, node_id, index, seed, plan=None, prompt_id="", list_index=0, model_mode=None):
         """Replace the prior evaluation; keep current cached-output references."""
         entry = self.require(handle)
         with self._lock:
@@ -295,7 +295,7 @@ class RunContextStore:
             selections = ([] if evaluation is None or evaluation[0] != prompt_id or list_index == 0
                           else evaluation[1])
             selections.extend([None] * max(0, list_index + 1 - len(selections)))
-            selections[list_index] = (index, seed, plan)
+            selections[list_index] = (index, seed, plan, model_mode)
             entry["consumer_selections"][str(node_id)] = (prompt_id, selections)
 
     def get_delivery_context(self, handle):
@@ -464,8 +464,8 @@ def get_run_consumer_selection(handle, node_id, list_index=0):
     return RUN_CONTEXTS.get_consumer_selection(handle, node_id, list_index)
 
 
-def set_run_consumer_selection(handle, node_id, index, seed, plan=None, prompt_id="", list_index=0):
-    return RUN_CONTEXTS.set_consumer_selection(handle, node_id, index, seed, plan, prompt_id, list_index)
+def set_run_consumer_selection(handle, node_id, index, seed, plan=None, prompt_id="", list_index=0, model_mode=None):
+    return RUN_CONTEXTS.set_consumer_selection(handle, node_id, index, seed, plan, prompt_id, list_index, model_mode)
 
 
 def get_run_delivery_context(handle):

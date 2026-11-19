@@ -347,7 +347,8 @@ const server = http.createServer(async (request, response) => {
     const asset = assets.get(request.url);
     if (asset) {
         response.writeHead(200, { "content-type": "text/javascript" });
-        let source = await readFile(resolve(root, asset), "utf8");
+        let source = await readFile(asset === "web/scene_prompt_ui.js" && process.env.SCENE_NATIVE_UI_SOURCE
+            ? process.env.SCENE_NATIVE_UI_SOURCE : resolve(root, asset), "utf8");
         if (asset === "web/scene_prompt_ui.js") {
             source += `\nwindow.__scenePromptPopupTestHooks = {\n`
                 + `  openSavePromptPopup, openSceneLoraDetails, openEditPromptItemPopup, closeAllPopups,\n`
@@ -1115,6 +1116,12 @@ try {
             }
         }
         class ScenePromptNode extends LGraphNode {
+            configure(serialized) {
+                for (const [index, value] of (serialized.widgets_values || []).entries()) {
+                    if (this.widgets[index]) this.widgets[index].value = structuredClone(value);
+                }
+                this.widgets_values = structuredClone(serialized.widgets_values || []);
+            }
             constructor() {
                 super();
                 this.id = 1;
@@ -1136,6 +1143,7 @@ try {
                     { name: "control_after_generate", type: "combo", value: "randomize", options: {} },
                     { name: "randomize", type: "toggle", value: false, options: {} },
                     { name: "run_handle", type: "text", value: "", options: {} },
+                    { name: "model_mode", type: "combo", value: "Anima", options: {} },
                 ];
                 this.widgets_values = this.widgets.map((widget) => widget.value);
             }
@@ -1158,13 +1166,29 @@ try {
         const node = new ScenePromptNode();
         window.app.graph._nodes = [node];
         node.onNodeCreated();
+        // Native configure addresses every widget slot, including UI controls.
+        // Keep a control between scalar widgets to catch positional shifts.
+        const interleaveControl = target => {
+            const buttonIndex = target.widgets.findIndex(widget => widget.sceneRole === 'positive_open');
+            const [button] = target.widgets.splice(buttonIndex, 1);
+            target.widgets.splice(target.widgets.findIndex(widget => widget.name === 'randomize'), 0, button);
+            target.widgets_values = target.widgets.map(widget => widget.value);
+        };
+        interleaveControl(node);
         if (node.widgets[0].name !== "filename_enabled" || node.widgets[0].serialize === false) throw new Error("serialized filename toggle must be first");
         node.widgets[0].value = true;
         node.widgets_values[0] = true;
         const saved = node.serialize();
         const restored = new ScenePromptNode();
         restored.onNodeCreated();
+        interleaveControl(restored);
         restored.configure(saved);
+        for (let iteration = 0; iteration < 3; iteration++) {
+            const serialized = restored.serialize();
+            restored.configure(serialized);
+            if (typeof restored.widgets.find(widget => widget.name === 'randomize').value !== 'boolean') throw new Error('reload shifted randomize');
+            if (restored.widgets.find(widget => widget.name === 'model_mode').value !== 'Anima') throw new Error('reload shifted model mode');
+        }
         const restoredValues = Object.fromEntries(restored.widgets.map((widget, index) => [widget.name, {
             value: widget.value,
             stored: restored.widgets_values[index],
@@ -1178,6 +1202,23 @@ try {
             }
         }
         window.__scenePromptFilenameRoundTrip = restoredValues;
+        const canonicalNames = ["prompt_name", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "control_after_generate", "randomize", "run_handle", "filename_enabled", "model_mode"];
+        if (saved.widgets_values.length !== 12 || saved.widgets_values[11] !== "Anima") throw new Error("model must be serialized last");
+        if (node.widgets[1].name !== "model_mode" || node.widgets[1].hidden) throw new Error("visible model must precede positive");
+        for (const length of [10, 11]) {
+            const legacy = { widgets_values: saved.widgets_values.slice(0, length) }, original = JSON.stringify(legacy);
+            const migrated = new ScenePromptNode(); migrated.onNodeCreated(); migrated.configure(legacy); migrated.configure(legacy);
+            if (JSON.stringify(legacy) !== original) throw new Error("legacy arrays were mutated");
+            if (migrated.widgets.find(w => w.name === "model_mode").value !== "全モデル") throw new Error("legacy mode default");
+            if (migrated.widgets.find(w => w.name === "positive_base").value !== "positive base, {A|B}") throw new Error("legacy positive shifted");
+            if (migrated.widgets.find(w => w.name === "filename_enabled").value !== (length === 11)) throw new Error("legacy filename shifted");
+        }
+        const named = new ScenePromptNode(); named.onNodeCreated();
+        named.configure({ widgets_values_named: Object.fromEntries(canonicalNames.map((name, i) => [name, saved.widgets_values[i]])) });
+        if (named.widgets.find(w => w.name === "model_mode").value !== "Anima") throw new Error("named model restore");
+        const linkedPrompt = new ScenePromptNode();
+        linkedPrompt.inputs.push({ name: "model_mode", type: "COMBO", link: 42 }); linkedPrompt.onNodeCreated();
+        if (!linkedPrompt.inputs.some(input => input.name === "model_mode" && input.link === 42)) throw new Error("model input link removed");
         class SceneApplyLoraNode extends LGraphNode {
             constructor() {
                 super();

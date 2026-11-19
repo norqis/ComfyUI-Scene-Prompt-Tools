@@ -165,7 +165,9 @@ export async function verifyPublicWidgetInputs(page) {
         await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
         const reloaded = await check();
         app.graph.clear();
-        return { types: types.length, fields: fields.length, legacyMissing, missing, failedLinks, before, reloaded };
+        return { types: types.length, fields: fields.length,
+            fieldNames: fields.map(field => `${field.type}.${field.name}`),
+            legacyMissing, missing, failedLinks, before, reloaded };
     });
     assert.deepEqual(result.missing, [], `public input sockets missing: ${JSON.stringify(result)}`);
     assert.deepEqual(result.legacyMissing, [], `old workflows restore widget inputs: ${JSON.stringify(result)}`);
@@ -173,7 +175,8 @@ export async function verifyPublicWidgetInputs(page) {
     assert.deepEqual(result.before, [], JSON.stringify(result));
     assert.deepEqual(result.reloaded, [], JSON.stringify(result));
     assert.equal(result.types, 25);
-    assert.equal(result.fields, 51, 'exercise all public scalar widgets, including Reference filename toggle and Path folder mode');
+    assert(result.fieldNames.includes('ScenePrompter.model_mode'), 'exercise the Scene Prompt model selector through a Primitive COMBO link and reload');
+    assert.equal(result.fields, 52, 'exercise all public scalar widgets, including Scene Prompt model selector, Reference filename toggle and Path folder mode');
     console.log(`real ComfyUI public widget inputs: ${result.fields} arguments / ${result.types} node classes retain links and API values after reload`);
 }
 

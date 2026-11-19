@@ -51,6 +51,7 @@ class LazyScheduleTests(unittest.TestCase):
 
         payloads = {
             "prompt_add": ["tail", ["(test:1.4)"], ["excluded"], True],
+            "model_prompt_add": ["Anima", ["tail", ["(test:1.4)"], ["excluded"], True], "tail", "末尾"],
             "path_add": ("部屋", "フォルダに分ける"),
             "reverse": "直前のノード", "delete": ("a", "excluded"),
             "model_set": {key: ["loader", index] for index, key in enumerate(("model", "clip", "vae"))},

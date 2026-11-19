@@ -42,7 +42,7 @@ UNIT_KEYS = {
 }
 OPERATION_KINDS = {
     "prompt_add", "path_add", "reverse", "delete", "model_set", "lora_add",
-    "prompt_passthrough", "prompt_whole", "source_node", "callback", "latent_set", "filename_add",
+    "prompt_passthrough", "prompt_whole", "model_prompt_add", "source_node", "callback", "latent_set", "filename_add",
 }
 
 
@@ -473,6 +473,12 @@ def _validate_operation(operation):
         raise ScenePlanError("Scene Prompt map operation kind is invalid.")
     if kind in {"prompt_passthrough", "prompt_whole"}:
         valid = payload is None
+    elif kind == "model_prompt_add":
+        valid = (isinstance(payload, (list, tuple)) and len(payload) == 4
+                 and payload[0] in _old.MODEL_MODE_CHOICES
+                 and all(isinstance(value, str) for value in payload[2:]))
+        if valid:
+            _validate_operation({"kind": "prompt_add", "payload": payload[1]})
     elif kind == "prompt_add":
         valid = (isinstance(payload, (list, tuple)) and len(payload) == 4
                  and isinstance(payload[0], str) and type(payload[3]) is bool
@@ -517,15 +523,23 @@ def _clone_operation(operation):
 def _map_unit(unit, operation):
     if unit["kind"] in {"count_fixed", "count_hold"}:
         return _unit(unit["kind"], unit=_map_unit(unit["unit"], operation))
-    if unit["kind"] == "run":
+    if unit["kind"] == "run" and operation["kind"] != "model_prompt_add":
         return _unit("run", row=_apply_operation(unit["row"], operation), count=unit["count"])
     if unit["kind"] == "map":
         return _unit("map", unit=unit["unit"], operations=[*unit["operations"], operation])
     return _unit("map", unit=unit, operations=[operation])
 
 
-def _apply_operation(row, operation):
+def _apply_operation(row, operation, model_mode=None):
     kind, payload = operation["kind"], operation["payload"]
+    if kind == "model_prompt_add":
+        mode, addition, node_id, node_name = payload
+        active = model_mode is None or mode == model_mode
+        row = _apply_operation(row, {"kind": "prompt_add", "payload": addition} if active
+                               else {"kind": "prompt_passthrough", "payload": None})
+        if node_id:
+            row = _apply_operation(row, {"kind": "source_node", "payload": [node_id, node_name if active else ""]})
+        return row
     if kind == "prompt_add":
         from .prompt import _merge_positive_negative_parts
         label, positive_parts, negative_parts, filename_enabled = payload
@@ -773,6 +787,8 @@ def merge(left, right):
 def _unwrap_run(unit):
     while unit["kind"] in {"count_fixed", "count_hold", "map"}:
         if unit["kind"] == "map":
+            if any(operation["kind"] == "model_prompt_add" for operation in unit["operations"]):
+                return None
             child = _unwrap_run(unit["unit"])
             if child is None:
                 return None
@@ -933,14 +949,14 @@ def _random_arm(weights, gate_id, seed):
     raise ScenePlanError("Scene Prompt Random Route の確率が不正です。")
 
 
-def _select_plan(plan, index, seed=0, memo=None):
+def _select_plan(plan, index, seed=0, memo=None, model_mode=None):
     memo = {} if memo is None else memo
     unit_index = bisect.bisect_right(plan.batch_prefix, index)
     if unit_index >= len(plan["units"]):
         raise IndexError("Generation index is outside the plan.")
     offset = plan.batch_prefix[unit_index - 1] if unit_index else 0
     row_offset = plan.row_prefix[unit_index - 1] if unit_index else 0
-    item = _select_unit(plan["units"][unit_index], index - offset, seed, memo=memo)
+    item = _select_unit(plan["units"][unit_index], index - offset, seed, memo=memo, model_mode=model_mode)
     item["row_index"] += row_offset
     item["event_ref"] = (("top", unit_index), *item["event_ref"])
     return item
@@ -1065,32 +1081,32 @@ def _eligible_index(unit, ordinal, policy, seed, memo=None):
     return lower
 
 
-def _select_unit(unit, index, seed=0, memo=None):
+def _select_unit(unit, index, seed=0, memo=None, model_mode=None):
     # Shared branches reuse work only within this selection. Wrappers may alter
     # item metadata; row transformations always return a new row.
     memo = {} if memo is None else memo
-    key = ("select", id(unit), index, seed)
+    key = ("select", id(unit), index, seed, model_mode)
     if key not in memo:
-        memo[key] = _select_unit_uncached(unit, index, seed, memo)
+        memo[key] = _select_unit_uncached(unit, index, seed, memo, model_mode)
     return dict(memo[key])
 
 
-def _select_unit_uncached(unit, index, seed=0, memo=None):
+def _select_unit_uncached(unit, index, seed=0, memo=None, model_mode=None):
     kind = unit["kind"]
     if kind == "run":
         row = copy.deepcopy(unit["row"])
         return {"row": row, "count": unit["count"], "row_index": 0, "repeat_index": index + 1,
                 "event_ref": (("run", index),)}
     if kind == "sequence":
-        item = _select_plan(unit["plan"], index, seed, memo=memo)
+        item = _select_plan(unit["plan"], index, seed, memo=memo, model_mode=model_mode)
         item["event_ref"] = (("sequence",), *item["event_ref"])
         return item
     if kind == "count_fixed":
-        item = _select_unit(unit["unit"], index, seed, memo=memo)
+        item = _select_unit(unit["unit"], index, seed, memo=memo, model_mode=model_mode)
         item["event_ref"] = (("fixed",), *item["event_ref"])
         return item
     if kind == "count_hold":
-        item = _select_unit(unit["unit"], index, seed, memo=memo)
+        item = _select_unit(unit["unit"], index, seed, memo=memo, model_mode=model_mode)
         item["event_ref"] = (("count_hold",), *item["event_ref"])
         return item
     if kind == "count_scale":
@@ -1109,7 +1125,7 @@ def _select_unit_uncached(unit, index, seed=0, memo=None):
             cycle += 1
             projection = "free"
             local = _eligible_index(child, ordinal, 2, seed, memo=memo)
-        item = _select_unit(child, local, seed, memo=memo)
+        item = _select_unit(child, local, seed, memo=memo, model_mode=model_mode)
         before = _prefix_unit_policy(child, local, seed, memo=memo)[2]
         is_free = _prefix_unit_policy(child, local + 1, seed, memo=memo)[2] > before
         if is_free and factor > 0:
@@ -1120,14 +1136,14 @@ def _select_unit_uncached(unit, index, seed=0, memo=None):
     if kind == "repeat":
         child_count = unit["unit"]["stats"]["total_batches"]
         cycle, local = divmod(index, child_count)
-        item = _select_unit(unit["unit"], local, seed, memo=memo)
+        item = _select_unit(unit["unit"], local, seed, memo=memo, model_mode=model_mode)
         item["repeat_index"] += cycle * item["count"]
         item["count"] *= unit["factor"]
         item["event_ref"] = (("repeat", cycle), *item["event_ref"])
         return item
     if kind in {"repeat_each", "row_repeat"}:
         child_index, within = divmod(index, unit["factor"])
-        item = _select_unit(unit["unit"], child_index, seed, memo=memo)
+        item = _select_unit(unit["unit"], child_index, seed, memo=memo, model_mode=model_mode)
         item["repeat_index"] = (item["repeat_index"] - 1) * unit["factor"] + within + 1
         item["count"] *= unit["factor"]
         item["event_ref"] = ((kind, within), *item["event_ref"])
@@ -1150,7 +1166,7 @@ def _select_unit_uncached(unit, index, seed=0, memo=None):
             amount = min(block, max(0, length - block * round_index))
             if within < amount:
                 local = block * round_index + within
-                item = _select_plan(plan, local, seed, memo=memo)
+                item = _select_plan(plan, local, seed, memo=memo, model_mode=model_mode)
                 item["row_index"] += sum(previous["stats"]["row_count"] for previous in unit["inputs"][:socket])
                 item["event_ref"] = (("alternate", socket, round_index, within), *item["event_ref"])
                 return item
@@ -1159,7 +1175,7 @@ def _select_unit_uncached(unit, index, seed=0, memo=None):
     if kind == "matrix_map":
         size = len(unit["matrix_rows"])
         child_index, matrix_index = divmod(index, size)
-        item = _select_unit(unit["unit"], child_index, seed, memo=memo)
+        item = _select_unit(unit["unit"], child_index, seed, memo=memo, model_mode=model_mode)
         item["row"] = _matrix_row(item["row"], unit["matrix_rows"][matrix_index])
         item["row_index"] = item["row_index"] * size + matrix_index
         item["event_ref"] = (("matrix", matrix_index), *item["event_ref"])
@@ -1167,7 +1183,7 @@ def _select_unit_uncached(unit, index, seed=0, memo=None):
     if kind == "matrix_rows":
         size = len(unit["matrix_rows"])
         probe = index // size
-        item = _select_unit(unit["unit"], probe, seed, memo=memo)
+        item = _select_unit(unit["unit"], probe, seed, memo=memo, model_mode=model_mode)
         start = probe - item["repeat_index"] + 1
         matrix_index, within = divmod(index - start * size, item["count"])
         item["row"] = _matrix_row(item["row"], unit["matrix_rows"][matrix_index])
@@ -1178,11 +1194,11 @@ def _select_unit_uncached(unit, index, seed=0, memo=None):
     if kind == "row_product":
         right_batches = unit["right"]["stats"]["total_batches"]
         left_probe = index // right_batches
-        left = _select_plan(unit["left"], left_probe, seed, memo=memo)
+        left = _select_plan(unit["left"], left_probe, seed, memo=memo, model_mode=model_mode)
         left_start = left_probe - left["repeat_index"] + 1
         local = index - left_start * right_batches
         right_probe = local // left["count"]
-        right = _select_plan(unit["right"], right_probe, seed, memo=memo)
+        right = _select_plan(unit["right"], right_probe, seed, memo=memo, model_mode=model_mode)
         right_start = right_probe - right["repeat_index"] + 1
         within = local - right_start * left["count"]
         return {"row": _old.merge_rows(left["row"], right["row"]), "count": left["count"] * right["count"],
@@ -1192,35 +1208,35 @@ def _select_unit_uncached(unit, index, seed=0, memo=None):
     if kind == "product":
         right_batches = unit["right"]["stats"]["total_batches"]
         left_index, right_index = divmod(index, right_batches)
-        left = _select_plan(unit["left"], left_index, seed, memo=memo)
-        right = _select_plan(unit["right"], right_index, seed, memo=memo)
+        left = _select_plan(unit["left"], left_index, seed, memo=memo, model_mode=model_mode)
+        right = _select_plan(unit["right"], right_index, seed, memo=memo, model_mode=model_mode)
         row = _old.merge_rows(left["row"], right["row"])
         return {"row": row, "count": left["count"] * right["count"],
                 "row_index": left["row_index"] * unit["right"]["stats"]["row_count"] + right["row_index"],
                 "repeat_index": (left["repeat_index"] - 1) * right["count"] + right["repeat_index"],
                 "event_ref": (("product",), left["event_ref"], right["event_ref"])}
     if kind == "map":
-        item = _select_unit(unit["unit"], index, seed, memo=memo)
+        item = _select_unit(unit["unit"], index, seed, memo=memo, model_mode=model_mode)
         for operation in unit["operations"]:
-            item["row"] = _apply_operation(item["row"], operation)
+            item["row"] = _apply_operation(item["row"], operation, model_mode)
         item["event_ref"] = (("map",), *item["event_ref"])
         return item
     if kind == "random_choice":
         arm = unit["selected_arm"]
         if arm is None:
             arm = _random_arm(unit["weights"], unit.get("seed_id", unit["gate_id"]), seed)
-        item = _select_plan(unit["inputs"][arm], index, seed, memo=memo)
+        item = _select_plan(unit["inputs"][arm], index, seed, memo=memo, model_mode=model_mode)
         item["event_ref"] = (("random_choice", unit["gate_id"], arm), *item["event_ref"])
         return item
     raise ScenePlanError("Unsupported Scene Prompt schedule unit.")
 
 
-def item_for_normalized_plan(plan, index, seed=0):
+def item_for_normalized_plan(plan, index, seed=0, model_mode=None):
     if plan["random_guards"]:
         raise ScenePlanError(f"Scene Prompt Random Route Input {plan['random_guards'][-1]['gate_id']} の分岐がOutputまたはQueueで合流していません。")
     if type(index) is not int or not 0 <= index < plan["stats"]["total_batches"]:
         raise IndexError("Generation index is outside the plan.")
-    item = _select_plan(plan, index, seed)
+    item = _select_plan(plan, index, seed, model_mode=model_mode)
     item["label"] = _old.row_label(item["row"])
     item["start_index"] = index - item["repeat_index"] + 1
     item["queue_index"] = 0
@@ -1314,6 +1330,14 @@ def _prune_unit(unit, selected_sources, visible_sources, blocked=False, selected
     return memo[key]
 
 
+def _operation_source_id(operation):
+    if operation["kind"] == "source_node":
+        return operation["payload"][0]
+    if operation["kind"] == "model_prompt_add":
+        return operation["payload"][2]
+    return ""
+
+
 def _prune_unit_uncached(unit, selected_sources, visible_sources, blocked=False, selected_arms=None, memo=None):
     kind = unit["kind"]
     if kind == "run":
@@ -1338,9 +1362,8 @@ def _prune_unit_uncached(unit, selected_sources, visible_sources, blocked=False,
                      left=_prune_plan(unit["left"], selected_sources, visible_sources, blocked, selected_arms, memo=memo),
                      right=_prune_plan(unit["right"], selected_sources, visible_sources, blocked, selected_arms, memo=memo))
     if kind == "map":
-        # Only source_node operations affect pruning; all other maps stay intact.
-        blocked = blocked or any(operation["kind"] == "source_node"
-                                 and str(operation["payload"][0]) in visible_sources - selected_sources
+        # Source IDs describe the structural route even for inactive prompt additions.
+        blocked = blocked or any(str(_operation_source_id(operation)) in visible_sources - selected_sources
                                  for operation in unit["operations"])
         child = _prune_unit(unit["unit"], selected_sources, visible_sources, blocked, selected_arms, memo=memo)
         return _unit("map", unit=child, operations=unit["operations"])
@@ -1482,7 +1505,7 @@ def random_replay_source_ids(plans, gate_ids):
                 sources.update(unit["row"]["source_node_ids"])
             continue
         if preserve and kind == "map":
-            sources.update(operation["payload"][0] for operation in unit["operations"] if operation["kind"] == "source_node")
+            sources.update(source for operation in unit["operations"] if (source := _operation_source_id(operation)))
         if kind == "sequence":
             children = unit["plan"]["units"]
         elif kind in {"alternate", "random_choice"}:

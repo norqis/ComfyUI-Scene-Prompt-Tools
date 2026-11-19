@@ -18,7 +18,7 @@ const server = http.createServer(async (request, response) => {
         window.makeNode=()=>({id:1,graph:window.graph,properties:{},widgets:Object.entries({model_mode:'Illustrious',lora_name:'',positive:'manual',negative:' negative,  keep\\n'}).map(([name,value])=>({name,value}))});
         window.node=window.makeNode();
         const preview=id=>({id,url:image+'#'+id,width:600,height:800});
-        const description=prefix=>'<p>'+prefix+' paragraph <code>inline outfit</code></p><pre><code>'+prefix+'1\\n'+prefix+'2 &lt;literal&gt;</code></pre><script>window.descriptionInjected=true<'+'/script><img src="x" onerror="window.descriptionInjected=true"><a href="javascript:window.descriptionInjected=true">unsafe link</a>';
+        const description=prefix=>'<p>'+prefix+' paragraph <code>inline outfit</code></p><pre><code>'+prefix+'1\\n'+prefix+'2 &lt;literal&gt;</code></pre><script>window.descriptionInjected=true<'+'/script><img src="x" onerror="window.descriptionInjected=true"><a href="javascript:window.descriptionInjected=true">unsafe link</a><a href="https://example.com/reference">Reference</a>';
         const candidate=(id,query)=>({sha256:id.toString(16).padStart(64,'0'),size_kb:10,model_id:id,version_id:id===2?11:id+10,file_id:id+20,name:'Model '+id+' '+query+' long title for responsive layout',version_name:'v1',creator_name:id===2?'':id===3?'Author with a very long Unicode 名前 which must truncate':'作者 <script>literal<'+'/script>',base_model:id===3?'Illustrious XL with a very long model family name':'Illustrious',model_type:'LORA',installable:true,apply_model_mode:'Illustrious',triggers:['trigger'],description:description('outfit'),version_description:description('version'),gallery:[],image_url:'',model_stats:id===2?{downloadCount:null,collectedCount:'invalid',thumbsUpCount:null}:{downloadCount:5200,collectedCount:1200,thumbsUpCount:0},updated_at:id===2?null:'2026-11-15T12:00:00Z'});
         window.api={async fetchApi(path,options={}){
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
@@ -246,6 +246,43 @@ try {
         assert.equal(await page.evaluate(() => window.descriptionInjected === true), false);
     }
     await assertDescriptionFormatting(detail);
+    async function assertMetadataStripes(width) {
+        await page.setViewportSize({ width, height: 1000 });
+        const rows = await detail.locator('.pc-civitai-metadata-row').evaluateAll(nodes => {
+            const rgb = value => value.match(/[\d.]+/g).slice(0, 3).map(Number);
+            const luminance = color => rgb(color).map(value => { value /= 255; return value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4; })
+                .reduce((sum, value, index) => sum + value * [.2126, .7152, .0722][index], 0);
+            const contrast = (front, back) => { const a = luminance(front), b = luminance(back); return (Math.max(a, b) + .05) / (Math.min(a, b) + .05); };
+            return nodes.map(row => {
+                const term = row.querySelector('dt'), value = row.querySelector('dd'), style = getComputedStyle(row);
+                const label = term.getBoundingClientRect(), content = value.getBoundingClientRect(), bounds = row.getBoundingClientRect();
+                return { background: style.backgroundColor, termColor: getComputedStyle(term).color, valueColor: getComputedStyle(value).color,
+                    backgrounds: [term, value].map(node => getComputedStyle(node).backgroundColor),
+                    contrast: [term, value, ...row.querySelectorAll('a')].map(node => contrast(getComputedStyle(node).color, style.backgroundColor)),
+                    inside: label.left >= bounds.left && content.right <= bounds.right + 1,
+                    stacked: content.top >= label.bottom - 1, autoColors: style.forcedColorAdjust };
+            });
+        });
+        assert(rows.length >= 9);
+        assert.notEqual(rows[0].background, rows[1].background);
+        for (const [index, row] of rows.entries()) {
+            assert.equal(row.background, rows[index % 2].background, 'all metadata rows alternate gray fills');
+            assert.equal(row.termColor, row.valueColor, 'term and value share the row foreground');
+            assert.deepEqual(row.backgrounds, ['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)']);
+            assert(row.contrast.every(value => value >= 4.5), `metadata text/link contrast: ${row.contrast}`);
+            assert(row.inside); assert.equal(row.stacked, width <= 520); assert.equal(row.autoColors, 'auto');
+        }
+        await assertDescriptionFormatting(detail);
+        assert.equal(await detail.locator('a[href="https://example.com/reference"]').count(), 2);
+        await detail.locator(".pc-civitai-metadata-row").first().scrollIntoViewIfNeeded();
+        await page.screenshot({ path: resolve(screenshots, `metadata-stripes-${width}.png`) });
+    }
+    await assertMetadataStripes(1600);
+    await assertMetadataStripes(420);
+    await page.emulateMedia({ forcedColors: 'active' });
+    assert.equal(await detail.locator('.pc-civitai-metadata-row').first().evaluate(node => getComputedStyle(node).forcedColorAdjust), 'auto');
+    await page.emulateMedia({ forcedColors: 'none' });
+    await page.setViewportSize({ width: 1600, height: 1000 });
     const acquireAndSelect = async () => {
         if (!await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await detail.getByRole('button',{name:'取得',exact:true}).click();
         await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).click();
