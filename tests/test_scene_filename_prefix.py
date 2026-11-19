@@ -338,7 +338,7 @@ class SceneFilenamePrefixTests(unittest.TestCase):
     def test_matrix_backend_rejects_duplicate_row_ids(self):
         first = _matrix_line("A", row_id="shared")
         second = _matrix_line("B", row_id="shared")
-        with self.assertRaisesRegex(ValueError, "row_id values must be unique"):
+        with self.assertRaisesRegex(ValueError, "行IDが重複.*重複した行を削除.*行を追加.*作り直"):
             self.nodes._parse_matrix_sets(json.dumps({"version": 1, "sets": [first, second]}))
 
     def test_matrix_expands_current_schema_prompt_parts_for_both_sides(self):
