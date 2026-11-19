@@ -1388,7 +1388,7 @@ window.__sceneSeedRuntimeTest = {
             app.graph.clear();
             const node = window.LiteGraph.createNode("ScenePrompter"), primitive = window.LiteGraph.createNode("PrimitiveNode");
             app.graph.add(node); app.graph.add(primitive);
-            const workflow = app.graph.serialize(), stored = workflow.nodes.find(item => item.id === node.id);
+            const workflow = app.graph.serialize(), stored = workflow.nodes.find(item => String(item.id) === String(node.id));
             stored.widgets_values = stored.widgets_values.slice(0, length);
             if (length === 12) stored.widgets_values[11] = null;
             delete stored.widgets_values_named;
@@ -1396,7 +1396,7 @@ window.__sceneSeedRuntimeTest = {
             const link = workflow.last_link_id + 1, slot = stored.inputs.length;
             stored.inputs.push({ name: "model_mode", type: "COMBO", link, widget: { name: "model_mode" } });
             workflow.links.push([link, primitive.id, 0, node.id, slot, "COMBO"]); workflow.last_link_id = link;
-            const value = workflow.nodes.find(item => item.id === primitive.id);
+            const value = workflow.nodes.find(item => String(item.id) === String(primitive.id));
             value.outputs[0] = { ...value.outputs[0], name: "COMBO", type: "COMBO", links: [link] }; value.widgets_values = ["Anima"];
             await app.loadGraphData(workflow, true, true); await new Promise(done => setTimeout(done, 250));
             const first = await app.graphToPrompt();
