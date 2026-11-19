@@ -290,7 +290,7 @@ testQueuedPrefixesStayWithTheirTabs()
     .then(testPresetResolutionKeepsClickFifo)
     .then(testPresetFailureDoesNotQueue)
     .then(testPresetRunCountDisplay)
-    .then(testExpandCountTracksCompletedRuns)
+    .then(testExpandCountTracksCurrentBatch)
     .then(testExpandCountDrawText)
     .then(testRunRefreshAndResetUpdateCount)
     .then(testMismatchedSuccessDoesNotAdvanceExpandProgress)
@@ -511,7 +511,7 @@ async function testPresetRunCountDisplay() {
     assert.equal(node.widgets[0].name, "停止");
 }
 
-async function testExpandCountTracksCompletedRuns() {
+async function testExpandCountTracksCurrentBatch() {
     const run = { preparing: false, snapshotReady: true, nextIndex: 0, total: 80, totalImages: 80 };
     const otherRun = { preparing: false, snapshotReady: true, nextIndex: 11, total: 12, totalImages: 12 };
     const mismatchRun = { preparing: false, snapshotReady: true, nextIndex: 1, total: 2, totalImages: 6, active: true };
@@ -541,22 +541,44 @@ async function testExpandCountTracksCompletedRuns() {
     run.preparing = true;
     assert.equal(displayContext.sceneExpandCountLabel(node), "準備中 80枚");
     run.preparing = false;
-    assert.equal(displayContext.sceneExpandCountLabel(node), "0 / 80");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "生成中 1/80");
     run.nextIndex = 1;
-    assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "only a matching success advances the display");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "生成中 2/80", "display moves to the next generation after a matching success");
     run.status = "pending";
     assert.equal(displayContext.sceneExpandCountLabel(node), "準備中 80枚", "re-queued work is preparation, not prior progress");
     run.status = "active";
     otherRun.active = true;
-    assert.equal(displayContext.sceneExpandCountLabel(otherNode), "11 / 12", "each Expand tab reads its own run");
-    assert.equal(displayContext.sceneExpandCountLabel(mismatchNode), "1 / 2", "progress counts batches rather than generated images");
+    assert.equal(displayContext.sceneExpandCountLabel(otherNode), "生成中 12/12", "each Expand tab reads its own run");
+    assert.equal(displayContext.sceneExpandCountLabel(mismatchNode), "生成中 2/2", "progress counts batches rather than generated images");
     run.status = "stopping";
     assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "stopping preserves completed work without claiming image completion");
     run.status = "blocked";
     assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "blocked cleanup preserves completed work");
+    run.finalizing = true;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "blocked finalization still preserves the completed count");
+    run.status = "stopping";
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "stopping finalization never claims an extra batch");
+    run.finalizing = false;
     run.status = "active";
     run.nextIndex = 80;
-    assert.equal(displayContext.sceneExpandCountLabel(node), "80 / 80", "completion shows completed batches without repeating image totals");
+    assert.equal(displayContext.sceneExpandCountLabel(node), "生成中 80/80", "current batch cannot exceed the total");
+    run.nextIndex = 100;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "生成中 80/80", "an overshot index stays clamped to the total");
+    run.nextIndex = 79; run.finalizing = true;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "80 / 80", "the final Callback retains the last batch without a generating prefix");
+    run.nextIndex = 80;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "80 / 80", "normal completion does not increment past the total");
+    run.status = "finalizing"; run.finalizing = false;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "80 / 80", "a detached final Callback still displays the final count");
+    run.status = "active"; run.nextIndex = 1; run.pauseRequested = true;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "1 / 80", "a fully paused run shows only completed batches");
+    run.waiting = true;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "生成中 2/80", "pause draining still includes the in-flight generation");
+    run.waiting = false; run.queueing = true;
+    assert.equal(displayContext.sceneExpandCountLabel(node), "生成中 2/80", "an in-flight queue submission is still the current generation");
+    run.pauseRequested = false;
+    assert.equal(displayContext.sceneExpandCountLabel(node, { totalBatches: 0, totalImages: 0 }), "生成中 0/0", "an empty run never displays 1/0");
+    assert.equal(run.nextIndex, 1, "display calculation never advances the execution index");
     run.active = false;
     assert.equal(displayContext.sceneExpandCountLabel(node), "80回 / 80枚", "cancelled or failed runs reset to the idle plan count");
 }
@@ -630,10 +652,16 @@ async function testExpandCountDrawText() {
     run.snapshotReady = true;
     run.preparing = false;
     run.status = "active";
-    assert.equal(draw(), "生成 1 / 2");
+    assert.equal(draw(), "生成中 2/2");
 
     run.status = "stopping";
     assert.equal(draw(), "生成 1 / 2");
+    run.status = "active"; run.nextIndex = 0;
+    const beforeRun = JSON.stringify(run);
+    displayContext.sceneExpandCounts = () => ({ totalBatches: 10, totalImages: 30 });
+    displayContext.drawSceneExpandCount(ctx, node, 220, 0, 20);
+    assert.equal(drawn.at(-1), "生成中 1/10", "canvas draws the complete generating label without adding another prefix");
+    assert.equal(JSON.stringify(run), beforeRun, "drawing never changes execution state");
 }
 
 async function testRunRefreshAndResetUpdateCount() {

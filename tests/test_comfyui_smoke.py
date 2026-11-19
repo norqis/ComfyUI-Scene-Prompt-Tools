@@ -246,7 +246,10 @@ class RealComfyUISmokeTests(unittest.TestCase):
             graph["2"]["inputs"]["lora_name"] = "folder\\style.safetensors"
             self.assertTrue(validate()[0])
             graph["2"]["inputs"]["lora_name"] = "missing.safetensors"
-            self.assertFalse(validate()[0])
+            rejected = validate()
+            self.assertFalse(rejected[0])
+            error = next(item for item in rejected[3]["2"]["errors"] if item["type"] == "custom_validation_failed")
+            self.assertIn("指定したLoRAが一覧にありません。「LoRAを選択」で一覧を更新し、利用できるファイルを選び直してください。", error["details"])
             graph["1"] = {"class_type": "NativeLoraString", "inputs": {}}
             graph["2"]["inputs"]["lora_name"] = ["1", 0]
             self.assertFalse(validate()[0], "STRING to COMBO remains an unsupported typed link")

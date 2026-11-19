@@ -366,7 +366,7 @@ class PromptDataRouteTests(unittest.TestCase):
         self.routes._clear_prompt_caches()
         payload = self.routes._load_saved_prompts(with_errors=True)
         self.assertEqual(payload["saved_prompts"], [])
-        self.assertIn("unsupported", payload["errors"][0]["error"])
+        self.assertIn("未対応または不足", payload["errors"][0]["error"])
 
     def test_prompt_data_and_saved_prompts_are_isolated_by_user(self):
         alice_data = self.routes._data_dir("alice")
@@ -540,7 +540,7 @@ class PromptDataRouteTests(unittest.TestCase):
 
         self.assertEqual(response["status"], 400)
         self.assertEqual(response["payload"], {
-            "error": "Preset「Empty Reference」: 途中の参照 #2 でPresetが選択されていません。",
+            "error": "Preset「Empty Reference」: ノード「途中の参照」 でPresetが選択されていません。",
             "node_id": "2",
         })
 

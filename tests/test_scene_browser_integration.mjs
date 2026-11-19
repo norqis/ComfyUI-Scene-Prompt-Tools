@@ -360,6 +360,9 @@ const server = http.createServer(async (request, response) => {
                 + `  applySceneSourceNodeNames,\n`
                 + `  saveScenePreset, installScenePresetSwitchBindings, prepareSceneRunContext, syncSceneMatrixPromptInputs,\n`
                 + `  ensureSceneExpandControls,\n`
+                + `  updateSceneExpandButton,\n`
+                + `  withExpandCountRun(run, paint) { const previous = sceneBatchRun; sceneBatchRun = run; sceneBatchRunsById.set(run.runId, run); try { return paint(); } finally { sceneBatchRun = previous; sceneBatchRunsById.delete(run.runId); } },\n`
+                + `  maybeShowPromptValidationError, readPopupSelectionState, openSceneMatrixLinesPopup, openScenePresetEditor, scheduleAttachSceneNode,\n`
                 + `  installSceneNodeRemovalCleanup,\n`
                 + `  pendingDesktopNotifications() { return sceneDesktopNotificationRequests.size; },\n`
                 + `  clearPromptItemsCache() { promptItems = null; promptItemsPromise = null; promptItemsLatestPromise = null; },\n`
@@ -974,6 +977,8 @@ async function checkPresetSwitchModals(browser, url) {
 
 const browser = await chromium.launch({ headless: true });
 try {
+    const { testReadableSceneErrors } = await import("./scene_error_messages.mjs");
+    await testReadableSceneErrors(browser, `http://127.0.0.1:${address.port}/`);
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${address.port}/`);
     await page.waitForFunction(() => window.__scenePromptBrowserReady === true, null, { timeout: 5_000 });
@@ -3250,6 +3255,26 @@ try {
     assert.deepEqual(resourceSetup.serialized, resourceSetup.before, "the new button does not shift legacy saved settings");
     assert.equal(resourceSetup.infoSerialize, false, "generation info is not serialized");
     assert.deepEqual(resourceSetup.pause, { serialize: false, name: "一時停止", disabled: true }, "idle pause is disabled and does not alter saved settings");
+    const currentBatchPaint = await page.evaluate(() => {
+        const node = window.__sceneResourceExpand, hooks = window.__scenePromptPopupTestHooks;
+        const runId = "browser-current-batch-count", runWidget = { name: "run_id", value: runId };
+        node.widgets.push(runWidget);
+        const run = { runId, nodeId: node.id, node, graph: node.graph, snapshotReady: true, nextIndex: 0, total: 10, totalImages: 30 };
+        const canvas = document.createElement("canvas"); canvas.width = 300; canvas.height = 24;
+        const ctx = canvas.getContext("2d"), fillText = ctx.fillText.bind(ctx), drawn = [];
+        ctx.fillText = (text, ...args) => { drawn.push(text); fillText(text, ...args); };
+        try {
+            return hooks.withExpandCountRun(run, () => {
+                const widget = node.widgets.find(widget => widget.sceneRole === "expand_total_count");
+                widget.draw(ctx, node, 300, 0, 22); hooks.updateSceneExpandButton(node);
+                return { text: drawn.at(-1), value: widget.value, index: run.nextIndex, total: widget.sceneTotalCount, images: widget.sceneTotalImages,
+                    stop: node.widgets.find(widget => widget.sceneRole === "expand_run_all").name,
+                    painted: ctx.getImageData(0, 0, 300, 24).data.some((value, index) => index % 4 === 3 && value > 0) };
+            });
+        } finally { node.widgets.splice(node.widgets.indexOf(runWidget), 1); hooks.ensureSceneExpandControls(node); }
+    });
+    assert.deepEqual(currentBatchPaint, { text: "生成中 1/10", value: "生成中 1/10", index: 0, total: 10, images: 30, stop: "停止", painted: true },
+        "real canvas displays the current batch, keeps image totals separate, and leaves Stop and execution index unchanged");
     const beforePaint = await page.evaluate(async () => {
         const original = window.requestAnimationFrame, frames = [];
         const snapshot = window.app.graphToPrompt;

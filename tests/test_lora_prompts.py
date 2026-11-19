@@ -33,9 +33,8 @@ class SceneLoraPromptTests(unittest.TestCase):
             self.assertIs(cls.VALIDATE_INPUTS("folder/原名.safetensors"), True)
             self.assertIs(cls.VALIDATE_INPUTS("folder\\原名.safetensors"), True)
             self.assertIs(cls.VALIDATE_INPUTS(None), True)
-            self.assertIsInstance(cls.VALIDATE_INPUTS("missing.safetensors"), str)
-            self.assertIsInstance(cls.VALIDATE_INPUTS(123), str)
-            self.assertIsInstance(cls.VALIDATE_INPUTS(""), str)
+            for invalid in ("missing.safetensors", 123, ""):
+                self.assertEqual(cls.VALIDATE_INPUTS(invalid), "指定したLoRAが一覧にありません。「LoRAを選択」で一覧を更新し、利用できるファイルを選び直してください。")
             plan = cls().apply_lora("folder/原名.safetensors")[0]
             self.assertIn("folder\\\\原名.safetensors", json.dumps(plan, ensure_ascii=False))
         import inspect

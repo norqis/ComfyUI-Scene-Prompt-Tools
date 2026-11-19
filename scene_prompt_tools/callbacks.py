@@ -40,10 +40,10 @@ def discord_callback(webhook_url, text, username=""):
 def request_callback(method, url, text="", body_type="text", headers_json=""):
     method = str(method or "GET").upper()
     if method not in {"GET", "POST"}:
-        raise ValueError("Request method must be GET or POST.")
+        raise ValueError("RequestのHTTPメソッドはGETまたはPOSTから選んでください。")
     body_type = str(body_type or "text").lower()
     if body_type not in {"text", "json"}:
-        raise ValueError("Request body_type must be text or json.")
+        raise ValueError("Requestの本文形式はtextまたはjsonから選んでください。")
     return ({
         "kind": "request", "method": method, "url": str(url or ""),
         "text": str(text or ""), "body_type": body_type,
@@ -81,9 +81,9 @@ def _headers(raw, values):
     try:
         decoded = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise SceneCallbackError("Callback headers_json is not valid JSON.") from exc
+        raise SceneCallbackError("CallbackのヘッダーJSONを読み込めません。括弧やカンマを確認してください。") from exc
     if not isinstance(decoded, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in decoded.items()):
-        raise SceneCallbackError("Callback headers_json must be an object of string values.")
+        raise SceneCallbackError("CallbackのヘッダーJSONは、ヘッダー名と文字列の値を持つオブジェクトにしてください。")
     return {key: _replace_text(value, values) for key, value in decoded.items()}
 
 
@@ -164,13 +164,13 @@ def _dispatch_desktop(config, values, timeout, desktop_context):
 def _dispatch_callback(config, values, timeout_seconds, *, desktop_context=None):
     """Render one descriptor and send it.  Callers decide failure policy."""
     if not isinstance(config, dict):
-        raise SceneCallbackError("Callback configuration is invalid.")
+        raise SceneCallbackError("Callbackの設定が不正です。通知設定ノードを接続し直してください。")
     try:
         timeout = int(timeout_seconds)
     except (TypeError, ValueError) as exc:
-        raise SceneCallbackError("Callback timeout is invalid.") from exc
+        raise SceneCallbackError("Callbackのタイムアウトは1秒以上の数値にしてください。") from exc
     if timeout < 1:
-        raise SceneCallbackError("Callback timeout is invalid.")
+        raise SceneCallbackError("Callbackのタイムアウトは1秒以上の数値にしてください。")
     kind = config.get("kind")
     if kind == "discord":
         url = _replace_text(config.get("webhook_url", ""), values, url=True)
@@ -189,7 +189,7 @@ def _dispatch_callback(config, values, timeout_seconds, *, desktop_context=None)
     if kind == "request":
         method = str(config.get("method") or "GET").upper()
         if method not in {"GET", "POST"}:
-            raise SceneCallbackError("Callback method is invalid.")
+            raise SceneCallbackError("CallbackのHTTPメソッドはGETまたはPOSTから選んでください。")
         url = _replace_text(config.get("url", ""), values, url=True)
         headers = _headers(config.get("headers_json", ""), values)
         data = None
@@ -199,7 +199,7 @@ def _dispatch_callback(config, values, timeout_seconds, *, desktop_context=None)
                 try:
                     template = json.loads(str(config.get("text") or ""))
                 except json.JSONDecodeError as exc:
-                    raise SceneCallbackError("Callback JSON body is not valid JSON.") from exc
+                    raise SceneCallbackError("Callbackの本文JSONを読み込めません。括弧やカンマを確認してください。") from exc
                 data = json.dumps(_replace_json(template, values), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 if not any(key.lower() == "content-type" for key in headers):
                     headers["Content-Type"] = "application/json; charset=utf-8"
@@ -208,10 +208,10 @@ def _dispatch_callback(config, values, timeout_seconds, *, desktop_context=None)
                 if not any(key.lower() == "content-type" for key in headers):
                     headers["Content-Type"] = "text/plain; charset=utf-8"
             else:
-                raise SceneCallbackError("Callback body_type is invalid.")
+                raise SceneCallbackError("Callbackの本文形式はtextまたはjsonから選んでください。")
         _open(Request(url, data=data, headers=headers, method=method), timeout)
         return
     if kind == "desktop":
         _dispatch_desktop(config, values, timeout, desktop_context)
         return
-    raise SceneCallbackError("Callback kind is invalid.")
+    raise SceneCallbackError("Callbackの通知種類が不正です。Discord・Request・Desktopの設定ノードを接続し直してください。")

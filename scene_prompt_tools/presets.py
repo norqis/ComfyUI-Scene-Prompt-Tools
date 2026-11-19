@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -319,17 +320,68 @@ def _read_json(path):
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
     except FileNotFoundError:
-        raise ScenePresetNotFoundError(f"Presetが見つかりません: {path.stem}") from None
+        raise ScenePresetNotFoundError(f"Preset「{path.stem}」が見つかりません。参照先を選び直すか、Presetファイルを復元してください。") from None
     except json.JSONDecodeError as exc:
-        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
+        raise ScenePresetError(f"Preset「{path.stem}」のJSONを読み込めません。形式を確認するか、Presetファイルを復元してください。") from exc
     except OSError as exc:
-        raise ScenePresetError(f"Presetファイルを読み込めません: {path.stem}") from exc
+        raise ScenePresetError(f"Preset「{path.stem}」を読み込めません。ファイルの場所と読取り権限を確認してください。") from exc
 
 
 def _node_label(node_id, node):
-    title = str(node.get("_meta", {}).get("title") or node.get("title") or "").strip()
-    class_type = str(node.get("class_type") or "不明なノード")
-    return f"{title or class_type} #{node_id}"
+    del node_id  # Numeric IDs remain available in ScenePresetResolutionError.node_id.
+    inputs = _node_inputs(node)
+    kind = node.get("class_type")
+    default = DEFAULT_SOURCE_NODE_NAMES.get(kind, kind or "名前のないノード")
+    names = [value.strip() for value in (inputs.get("source_node_name"), inputs.get("prompt_name"),
+             node.get("_meta", {}).get("title"), node.get("title")) if isinstance(value, str) and value.strip()]
+    name = next((value for value in names if value not in {default, kind}), names[0] if names else default)
+    return f"ノード「{name}」"
+
+
+def missing_model_message(row, run_handle="", prompt=None, index=0, total=1):
+    """Explain this selected route using frozen occurrence data, only on failure."""
+    user_id = get_run_user_id(run_handle) if run_handle else "default"
+    with _PRESET_LOCK:
+        snapshot = _RUN_SNAPSHOTS.get(_run_cache_key(run_handle, user_id)) if run_handle else None
+        occurrences = snapshot.get("occurrences", {}) if snapshot else {}
+    origins = []
+    sources = row.get("source_node_ids", [])
+    for source in sources:
+        prefix, _separator, local_id = str(source).rpartition("/")
+        preset = occurrences.get(prefix)
+        if prefix and preset is None:
+            continue
+        graph = _preset_nodes(preset) if preset else prompt
+        node = graph.get(local_id or str(source)) if isinstance(graph, dict) else None
+        if not isinstance(node, dict):
+            continue
+        kind = node.get("class_type")
+        if kind in {BOUNDARY_INPUT, BOUNDARY_OUTPUT, "ScenePresetReference", "SceneApplyModel"}:
+            continue
+        cls = SAFE_NODE_CLASSES.get(kind)
+        if cls is None or "scene_prompt" not in inspect.signature(getattr(cls, cls.FUNCTION)).parameters:
+            continue
+        if _node_inputs(node).get("scene_prompt") is not None:
+            continue
+        parts = prefix.split("/")
+        names = [occurrences[path]["metadata"]["name"]
+                 for end in range(1, len(parts) + 1)
+                 if (path := "/".join(parts[:end])) in occurrences]
+        origins.append((names, _node_label(local_id, node)))
+    position = f"生成計画の{index + 1}/{total}件目"
+    if len(origins) == 1 and origins[0][0]:
+        names, node = origins[0]
+        location = " → ".join(f"Preset「{name}」" for name in names)
+        return (f"{location}に未接続の{node}があります。{position}へモデル設定が引き継がれていません。"
+                "このノードのscene_promptにPreset Inputかモデル設定済みの上流を接続してください。")
+    remedy = ("ExpandのMODEL・CLIP・VAE出力を使う経路には、MODEL・CLIP・VAEをすべて接続した"
+              "Scene Apply Modelをつないでください。")
+    if len(origins) == 1:
+        return f"{origins[0][1]}から始まる{position}にモデル設定がありません。{remedy}"
+    names = row.get("source_node_names", {})
+    location = f"（ノード「{names[sources[-1]]}」を含む経路）" if sources and names.get(sources[-1]) else ""
+    return (f"{position}{location}にモデル設定がありません。{remedy}"
+            "Preset内ではPreset Inputからの接続も確認してください。")
 
 
 def _node_inputs(node):
@@ -586,10 +638,18 @@ def _validate_preset_graph(nodes):
 
 def _validate_literal_input(node_id, node, input_name, value, definition):
     declared_type, options = definition[0], definition[1] if len(definition) > 1 else {}
-    label = f"{_node_label(node_id, node)} の {input_name}"
+    field = options.get("display_name") or options.get("label") or {
+        "count": "生成回数", "model_mode": "モデル種別", "lora_name": "LoRA",
+        "width": "幅", "height": "高さ", "batch_size": "バッチサイズ",
+        "positive_json": "ポジティブの選択候補", "negative_json": "ネガティブの選択候補",
+        "randomize": "ランダム選択", "strength_model": "モデル強度", "strength_clip": "CLIP強度",
+    }.get(input_name, input_name)
+    label = f"{_node_label(node_id, node)} の「{field}」"
     if isinstance(declared_type, (list, tuple)):
         if value not in declared_type:
-            raise ScenePresetResolutionError(f"{label} の値が不正です。", node_id)
+            remedy = ("LoRAファイルを配置し、一覧を更新して選び直してください。" if input_name == "lora_name"
+                      else f"{ '、'.join(str(choice) for choice in declared_type) }から選び直してください。")
+            raise ScenePresetResolutionError(f"{label} の選択が無効です。{remedy}", node_id)
         return
     if declared_type == "STRING":
         valid = isinstance(value, str)
@@ -602,14 +662,13 @@ def _validate_literal_input(node_id, node, input_name, value, definition):
     else:
         return
     if not valid:
-        if declared_type == "INT":
-            raise ScenePresetResolutionError(f"{label} must be an integer.", node_id)
-        raise ScenePresetResolutionError(f"{label} の型が不正です。", node_id)
+        expected = {"INT": "整数", "FLOAT": "数値", "BOOLEAN": "ONまたはOFF", "STRING": "文字列"}[declared_type]
+        raise ScenePresetResolutionError(f"{label} は{expected}で指定してください。入力欄または接続元の値を確認してください。", node_id)
     if declared_type in {"INT", "FLOAT"}:
         if "min" in options and value < options["min"]:
-            raise ScenePresetResolutionError(f"{label} は最小値未満です。", node_id)
+            raise ScenePresetResolutionError(f"{label} は{options['min']}以上にしてください。入力欄または接続元の値を修正してください。", node_id)
         if "max" in options and value > options["max"]:
-            raise ScenePresetResolutionError(f"{label} は最大値を超えています。", node_id)
+            raise ScenePresetResolutionError(f"{label} は{options['max']}以下にしてください。入力欄または接続元の値を修正してください。", node_id)
 
 
 def _validate_preset_input_values(nodes):
@@ -1227,7 +1286,8 @@ def _scene_node_value_impl(
             memo[node_id] = result
             return result
         except (TypeError, ValueError) as exc:
-            raise ScenePresetError(f"{_node_label(node_id, node)} の値が不正です。") from exc
+            expected = {int: "整数", float: "数値", str: "文字列", bool: "ONまたはOFF"}[SAFE_VALUE_NODE_CLASSES[class_type]]
+            raise ScenePresetError(f"{_node_label(node_id, node)} の値は{expected}で直接入力してください。") from exc
     if class_type == BOUNDARY_INPUT:
         result = ScenePresetInput().build(**_node_inputs(node))
         memo[node_id] = result

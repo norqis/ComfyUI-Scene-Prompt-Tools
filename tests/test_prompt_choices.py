@@ -273,7 +273,7 @@ class PromptChoiceTests(unittest.TestCase):
                 self.assertEqual(_compose_prompt_parts("", state, "", False, 0), expected)
                 self.assertEqual(_parse_selection_json(json.dumps({"version": 1, "categories": parsed})), parsed)
         duplicate = selection_item("alpha", selected_parts=[{"index": 0, "text": "alpha"}] * 2)
-        with self.assertRaisesRegex(ValueError, "repeat an index"):
+        with self.assertRaisesRegex(ValueError, "タグ番号が重複"):
             _parse_selection_json(json.dumps({"version": 1, "categories": {"Category": [duplicate]}}))
 
     def test_plain_text_returns_original_without_consuming_rng(self):
