@@ -166,7 +166,7 @@ def _unit_stats(unit):
     if kind in {"count_fixed", "count_hold"}:
         return dict(unit["unit"]["stats"])
     if kind == "count_scale":
-        factor = _old._require_int(unit["factor"], "Scene Prompt count factor", 0, MAX_SAFE_INTEGER)
+        factor = _old._require_int(unit["factor"], "生成回数", 0, MAX_SAFE_INTEGER)
         child = unit["unit"]
         stats = child["stats"]
         projection = child.count_policy[0 if factor == 0 else 2]
@@ -444,9 +444,9 @@ def normalize_plan(value):
 
 def validate_random_weights(value):
     if not isinstance(value, list) or len(value) != 10 or any(type(item) is not int or not 0 <= item <= 10000 for item in value):
-        raise ScenePlanError("Scene Prompt Random Route の確率は0.01%単位の10個の整数で指定してください。")
+        raise ScenePlanError("Scene Prompt Random Routeの確率は、各出力を0〜100%にし、0.01%単位で設定してください。JSONでは100%を10000とする10個の整数で指定します。")
     if sum(value) != 10000:
-        raise ScenePlanError("Scene Prompt Random Route の確率合計は100%にしてください。")
+        raise ScenePlanError("Scene Prompt Random Routeの確率合計は100%にしてください。各出力の確率を調整してください。")
     return list(value)
 
 
@@ -685,8 +685,8 @@ def with_source_node(plan, node_id, node_name=""):
 def append_callback(plan, callback_node_id, config, frequency, timeout_seconds, failure_mode):
     node_id = _old._require_string(str(callback_node_id or "").strip(), "Scene Prompt callback node id", allow_empty=False)
     if not isinstance(config, dict):
-        raise ScenePlanError("Scene Prompt callback config must be an object.")
-    timeout = _old._require_int(timeout_seconds, "Scene Prompt callback timeout_seconds", 1)
+        raise ScenePlanError("Callbackの設定が不正です。通知設定ノードを接続し直してください。")
+    timeout = _old._require_int(timeout_seconds, "Callbackのタイムアウト（秒）", 1)
     frequency = {"first": "初回", "every": "毎回"}.get(frequency, frequency)
     failure_mode = {"continue": "続行", "stop": "停止"}.get(failure_mode, failure_mode)
     source = _map_plan(plan, {"kind": "callback", "payload": (node_id, config, frequency, timeout, failure_mode)})
@@ -715,9 +715,9 @@ def _inert_random_arm(plan):
 
 
 def multiply_count(plan, factor, enable_downstream_count=True):
-    amount = _old._require_int(factor, "Scene Prompt count factor", 0, MAX_SAFE_INTEGER)
+    amount = _old._require_int(factor, "生成回数", 0, MAX_SAFE_INTEGER)
     if type(enable_downstream_count) is not bool:
-        raise ScenePlanError("Scene Prompt enable_downstream_count must be a boolean.")
+        raise ScenePlanError("「後続Countを有効化」はONまたはOFFにしてください。接続元の値も確認してください。")
     source = normalize_plan(plan)
     if source["random_guards"] and not _inert_random_arm(source):
         raise ScenePlanError("Scene Prompt Random Route の分岐内で Scene Prompt Count は使えません。")
@@ -807,10 +807,10 @@ def _unwrap_run(unit):
 
 def _validate_queue_controls(order_mode, alternate_block_size, input_repeats_json, downstream_count_mode):
     if order_mode not in ("input_order", "alternate"):
-        raise ScenePlanError("Scene Prompt Queue 並び順 is invalid.")
+        raise ScenePlanError("Scene Prompt Queueの並び順は「入力順」または「交互」から選び直してください。")
     block = _old._require_int(alternate_block_size, "Scene Prompt Queue 1行の回数", 1, MAX_SAFE_INTEGER)
     if downstream_count_mode not in ("multiply", "fixed"):
-        raise ScenePlanError("Scene Prompt Queue 後続Count is invalid.")
+        raise ScenePlanError("Scene Prompt Queueの後続Countは「掛け算」または「固定」から選び直してください。")
     # Keep the old widget argument for serialized workflows; it no longer affects output.
     return order_mode, block, downstream_count_mode
 

@@ -67,11 +67,11 @@ def _require_exact_keys(value, keys, label):
 
 def _require_int(value, label, minimum, maximum=None):
     if type(value) is not int:
-        raise ScenePlanError(f"{label} must be an integer.")
+        raise ScenePlanError(f"{label} は整数で指定してください。入力欄または接続元の値を確認してください。")
     if value < minimum or (maximum is not None and value > maximum):
         if maximum is None:
-            raise ScenePlanError(f"{label} must be at least {minimum}.")
-        raise ScenePlanError(f"{label} must be between {minimum} and {maximum}.")
+            raise ScenePlanError(f"{label} は{minimum}以上にしてください。")
+        raise ScenePlanError(f"{label} は{minimum}〜{maximum}の整数で指定してください。")
     return value
 
 

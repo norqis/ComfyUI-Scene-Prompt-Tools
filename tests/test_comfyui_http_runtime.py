@@ -1775,6 +1775,53 @@ NODE_CLASS_MAPPINGS = {
         self._queue_and_wait(graph)
         self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["before-prompt"])
 
+    def test_nested_preset_missing_model_error_names_third_route_before_loading_models(self):
+        child_id, outer_id = 'error-route-child', 'error-route-outer'
+        child = {
+            '353': {'class_type': 'ScenePresetInput', 'inputs': {}},
+            '354': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'scene_prompt': ['353', 0]}},
+            '355': {'class_type': 'ScenePrompter', 'inputs': {**_scene_prompt_inputs(), 'scene_prompt': ['353', 0]}},
+            '359': {'class_type': 'SceneMatrix', '_meta': {'title': '表情差分'}, 'inputs': {'matrix_json': json.dumps({
+                'version': 1, 'sets': [{'row_id': 'expression', 'name': '表情', 'path_label': '表情'}]})}},
+            '358': {'class_type': 'ScenePrompterQueue', 'inputs': {
+                'scene_prompt1': ['354', 0], 'scene_prompt2': ['355', 0], 'scene_prompt3': ['359', 0]}},
+            '360': {'class_type': 'ScenePresetOutput', 'inputs': {'scene_prompt': ['358', 0]}},
+        }
+        outer = {
+            '353': {'class_type': 'ScenePresetInput', 'inputs': {}},
+            '379': {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': child_id, 'scene_prompt': ['353', 0]}},
+            '360': {'class_type': 'ScenePresetOutput', 'inputs': {'scene_prompt': ['379', 0]}},
+        }
+        for preset_id, name, nodes in [(child_id, 'FANZA_999アへ_差分', child), (outer_id, '外側のセット', outer)]:
+            self._request('/scene_presets/save', {'preset_id': preset_id, 'name': name, 'output_node_id': '360',
+                'api_graph': {'output': nodes}, 'workflow': {'nodes': []}})
+        marker = self.base / 'named-model-error-loader.log'
+        graph = {
+            '1': {'class_type': 'TestSceneModelBundle', 'inputs': {'label': 'good-model', 'log_path': str(marker)}},
+            '2': {'class_type': 'SceneApplyModel', 'inputs': {'model': ['1', 0], 'clip': ['1', 1], 'vae': ['1', 2]}},
+            '383': {'class_type': 'ScenePresetReference', 'inputs': {'preset_id': outer_id, 'scene_prompt': ['2', 0]}},
+            '400': {'class_type': 'ScenePrompterExpand', 'inputs': {'scene_prompt': ['383', 0], 'seed_base': 7, 'current_index': 0}},
+            '401': {'class_type': 'TestSceneModelSink', 'inputs': {'model': ['400', 5], 'clip': ['400', 6], 'vae': ['400', 7]}},
+        }
+        handle, workflow = self._prepare_callback_run(graph, '400')
+        try:
+            for index in (0, 1):
+                graph['400']['inputs']['current_index'] = index
+                self._queue_callback_graph(graph, handle, workflow)
+            self.assertTrue(marker.is_file())
+            before = marker.read_bytes()
+            graph['1']['inputs']['label'] = 'forbidden-third-loader'
+            graph['400']['inputs']['current_index'] = 2
+            queued = self._request('/prompt', {'prompt': graph, 'extra_data': {'extra_pnginfo': {'workflow': workflow}}})
+            history = self._wait_for_prompt_error(queued['prompt_id'])
+            message = next(detail['exception_message'] for kind, detail in history['status']['messages'] if kind == 'execution_error')
+            for text in ('Preset「外側のセット」', 'Preset「FANZA_999アへ_差分」', '未接続のノード「表情差分」', '3/3件目', 'Preset Input', 'scene_prompt'):
+                self.assertIn(text, message)
+            self.assertNotIn('#359', message)
+            self.assertEqual(marker.read_bytes(), before, 'the failing route stops before the model provider runs')
+        finally:
+            self._request('/scene_prompt/runs/release', {'run_handle': handle})
+
     def test_model_route_after_scene_prompt_reaches_expand(self):
         marker = self.base / "model-after-prompt.txt"
         graph = {

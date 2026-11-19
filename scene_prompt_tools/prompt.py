@@ -150,7 +150,7 @@ def _item_weight(item):
         return 1.0
     weight = item["weight"]
     if type(weight) not in (int, float) or isinstance(weight, bool) or not math.isfinite(weight):
-        raise ValueError("Scene Prompt selection weight must be a finite number.")
+        raise ValueError("Scene Promptの候補の重みは有限の数値で指定してください。重みの入力欄を確認してください。")
     return float(weight)
 
 
@@ -293,48 +293,48 @@ def _parse_order(category_order):
 
 def _require_exact_keys(item, required, optional, label):
     if not isinstance(item, dict):
-        raise ValueError(f"{label} must be an object.")
+        raise ValueError(f"{label} の形式が不正です。候補画面から選び直してください。")
     keys = set(item)
     if not required.issubset(keys) or keys - required - optional:
-        raise ValueError(f"{label} has unsupported or missing fields.")
+        raise ValueError(f"{label} に未対応または不足している項目があります。候補画面から選び直してください。")
 
 
 def _require_nonempty_string(value, label):
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{label} must be a non-empty string.")
+        raise ValueError(f"{label} は空欄にせず文字列で指定してください。候補画面から選び直してください。")
     return value
 
 
 def _validate_weight(value, label):
     if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(value):
-        raise ValueError(f"{label} must be a finite number.")
+        raise ValueError(f"{label} は有限の数値で指定してください。重みの入力欄を確認してください。")
     return float(value)
 
 
 def _validate_selected_part(part, prompt_parts, label):
     _require_exact_keys(part, SELECTED_PART_REQUIRED_KEYS, SELECTED_PART_OPTIONAL_KEYS, label)
     if type(part["index"]) is not int or part["index"] < 0:
-        raise ValueError(f"{label} index is invalid.")
+        raise ValueError(f"{label} のタグ番号（index）は0以上の整数にしてください。候補画面から選び直してください。")
     text = _require_nonempty_string(part["text"], f"{label} text")
     missing = part.get("missing", False)
     if "missing" in part and not isinstance(missing, bool):
-        raise ValueError(f"{label} missing must be a boolean.")
+        raise ValueError(f"{label} の未取得状態（missing）はONまたはOFFで指定してください。候補画面から選び直してください。")
     if not missing and (part["index"] >= len(prompt_parts) or prompt_parts[part["index"]] != text):
         missing = True
     result = {"index": part["index"], "text": text}
     if missing:
         result["missing"] = True
     if "weight" in part:
-        result["weight"] = _validate_weight(part["weight"], f"{label} weight")
+        result["weight"] = _validate_weight(part["weight"], f"{label}の重み")
     return result
 
 
 def _validate_selection_item(item, category, label):
     if not isinstance(item, dict):
-        raise ValueError(f"{label} must be an object.")
+        raise ValueError(f"{label} の形式が不正です。候補画面から選び直してください。")
     unknown_keys = set(item) - SELECTION_ITEM_KNOWN_KEYS
     if unknown_keys or not {"label", "prompt"}.issubset(item):
-        raise ValueError(f"{label} has unsupported or missing fields.")
+        raise ValueError(f"{label} に未対応または不足している項目があります。候補画面から選び直してください。")
 
     category_path = _legacy_category_path(category, label)
     for field in ("category_path", "category_key", "category_label"):
@@ -345,15 +345,15 @@ def _validate_selection_item(item, category, label):
             if not isinstance(value, list) or not value or any(
                 not isinstance(part, str) or not part.strip() for part in value
             ):
-                raise ValueError(f"{label} category_path must be a non-empty list of strings.")
+                raise ValueError(f"{label} のカテゴリパスは空欄でない文字列の配列にしてください。候補画面から選び直してください。")
             if value != category_path:
-                raise ValueError(f"{label} category fields are inconsistent.")
+                raise ValueError(f"{label} のカテゴリ名とパスが一致しません。候補画面から選び直してください。")
         elif _require_nonempty_string(item[field], f"{label} {field}") != category:
-            raise ValueError(f"{label} category fields are inconsistent.")
+            raise ValueError(f"{label} のカテゴリ名とパスが一致しません。候補画面から選び直してください。")
 
     result = {
-        "label": _require_nonempty_string(item["label"], f"{label} label"),
-        "prompt": _require_nonempty_string(item["prompt"], f"{label} prompt"),
+        "label": _require_nonempty_string(item["label"], f"{label}の名前"),
+        "prompt": _require_nonempty_string(item["prompt"], f"{label}の本文"),
         "category_path": category_path,
         "category_key": category,
         "category_label": category,
@@ -365,21 +365,21 @@ def _validate_selection_item(item, category, label):
         if not isinstance(legacy_keys, list) or any(
             not isinstance(value, str) or not value.strip() for value in legacy_keys
         ):
-            raise ValueError(f"{label} legacy_keys must be a list of non-empty strings.")
+            raise ValueError(f"{label} の旧カテゴリ名（legacy_keys）の形式が不正です。候補画面から選び直してください。")
     if "description" in item:
         if not isinstance(item["description"], str):
-            raise ValueError(f"{label} description must be a string.")
+            raise ValueError(f"{label} の説明（description）は文字列で指定してください。")
         result["description"] = item["description"]
     if "weight" in item and "selected_parts" in item:
-        raise ValueError(f"{label} cannot contain both weight and selected_parts.")
+        raise ValueError(f"{label} の重みとタグ別の選択状態が重複しています。候補画面から選び直してください。")
     if "weight" in item:
-        result["weight"] = _validate_weight(item["weight"], f"{label} weight")
+        result["weight"] = _validate_weight(item["weight"], f"{label}の重み")
     if "selected_parts" in item:
         if not isinstance(item["selected_parts"], list) or not item["selected_parts"]:
-            raise ValueError(f"{label} selected_parts must be a non-empty list.")
+            raise ValueError(f"{label} のタグ別の選択状態が空欄か不正です。候補画面から選び直してください。")
         prompt_parts = _split_prompt(result["prompt"])
         parts = [
-            _validate_selected_part(part, prompt_parts, f"{label} selected_parts[{index}]")
+            _validate_selected_part(part, prompt_parts, f"{label}のタグ{index + 1}件目")
             for index, part in enumerate(item["selected_parts"])
         ]
         used = {part["index"] for part in parts if not part.get("missing")}
@@ -394,17 +394,17 @@ def _validate_selection_item(item, category, label):
                 next_index += 1
             used.add(part["index"])
         if len({part["index"] for part in parts}) != len(parts):
-            raise ValueError(f"{label} selected_parts must not repeat an index.")
+            raise ValueError(f"{label} の選択したタグ番号が重複しています。候補画面から選び直してください。")
         result["selected_parts"] = parts
     return result
 
 
 def _legacy_category_path(category, label):
     if not isinstance(category, str) or not category.strip():
-        raise ValueError(f"{label} category must be a non-empty string.")
+        raise ValueError(f"{label} のカテゴリ名は空欄でない文字列にしてください。候補画面から選び直してください。")
     path = category.split(" > ")
     if any(not part.strip() for part in path):
-        raise ValueError(f"{label} category is invalid.")
+        raise ValueError(f"{label} のカテゴリ名が不正です。候補画面から選び直してください。")
     return path
 
 
@@ -418,31 +418,31 @@ def _parse_selection_json(selection_json):
     if selection_json is None or (isinstance(selection_json, str) and not selection_json.strip()):
         return OrderedDict()
     if not isinstance(selection_json, str):
-        raise ValueError("Scene Prompt selection JSON must be a string.")
+        raise ValueError("Scene Promptの選択候補はJSON文字列で指定してください。候補画面から選び直してください。")
 
     try:
         data = json.loads(selection_json)
     except json.JSONDecodeError as exc:
-        raise ValueError("Scene Prompt selection JSON is invalid.") from exc
+        raise ValueError("Scene Promptの選択候補を読み込めません。JSONの括弧やカンマを確認するか、候補画面から選び直してください。") from exc
 
     if not isinstance(data, dict) or set(data) != {"version", "categories"}:
-        raise ValueError("Scene Prompt selection JSON must be an object.")
+        raise ValueError("Scene Promptの選択候補の形式が不正です。候補画面から選び直してください。")
     if data["version"] != 1:
-        raise ValueError("Unsupported Scene Prompt selection schema version.")
+        raise ValueError("このScene Promptの選択候補は未対応の版です。拡張機能を更新するか、候補画面から選び直してください。")
 
     raw_categories = data.get("categories")
     if not isinstance(raw_categories, dict):
-        raise ValueError("Scene Prompt selection categories must be an object.")
+        raise ValueError("Scene Promptのカテゴリ別の選択候補（categories）の形式が不正です。候補画面から選び直してください。")
 
     categories = OrderedDict()
     for category, items in raw_categories.items():
         if not isinstance(category, str) or not category.strip():
-            raise ValueError("Scene Prompt selection category names must be non-empty strings.")
+            raise ValueError("Scene Promptのカテゴリ名が空欄か文字列以外です。候補画面から選び直してください。")
         if not isinstance(items, list):
-            raise ValueError("Scene Prompt selection category entries must be lists.")
+            raise ValueError("Scene Promptのカテゴリ内の選択候補は配列にしてください。候補画面から選び直してください。")
         categories[category] = []
         for index, item in enumerate(items):
-            categories[category].append(_validate_selection_item(item, category, f"Scene Prompt selection entry {index}"))
+            categories[category].append(_validate_selection_item(item, category, f"選択候補{index + 1}件目"))
 
     return categories
 
@@ -453,9 +453,12 @@ def _scene_prompt_change_key(value):
     return str(value.get("change_key") or "")
 
 
-def _compose_prompt_parts(base_text, selection_json, category_order, randomize, seed):
+def _compose_prompt_parts(base_text, selection_json, category_order, randomize, seed, label="選択候補"):
     del randomize, seed
-    categories = _parse_selection_json(selection_json)
+    try:
+        categories = _parse_selection_json(selection_json)
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
     order = _parse_order(category_order)
     parts = _split_prompt(base_text or "")
     parts.extend(_selected_prompt_parts(categories, order))
@@ -636,6 +639,7 @@ class _ScenePromptBase:
             category_order,
             bool(randomize),
             int(seed or 0),
+            label="ポジティブの選択候補",
         )
         negative_parts = _compose_prompt_parts(
             negative_base,
@@ -643,6 +647,7 @@ class _ScenePromptBase:
             category_order,
             bool(randomize),
             int(seed or 0) ^ 0x5F3759DF,
+            label="ネガティブの選択候補",
         )
 
         payload = [label, positive_parts, negative_parts, bool(filename_enabled)]

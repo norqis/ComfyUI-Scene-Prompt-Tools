@@ -1556,7 +1556,7 @@ class ScenePresetTests(unittest.TestCase):
         self.assertEqual(error.exception.node_id, "2")
 
     def test_save_reports_empty_reference_with_node_label_and_node_id(self):
-        cases = (("custom", "参照先", "参照先 #4"), ("default", None, "Scene Preset Reference #4"))
+        cases = (("custom", "参照先", "ノード「参照先」"), ("default", None, "ノード「Scene Preset Reference」"))
         for preset_id, title, expected_label in cases:
             with self.subTest(title=title):
                 nodes = basic_nodes()
@@ -1585,7 +1585,7 @@ class ScenePresetTests(unittest.TestCase):
             "inputs": {"scene_prompt": ["2", 0], "count": "not-an-int"},
         }
         nodes["3"]["inputs"]["scene_prompt"] = ["4", 0]
-        with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "integer") as error:
+        with self.assertRaisesRegex(self.module.ScenePresetResolutionError, "生成回数.*整数") as error:
             self.save("invalid_count", nodes)
         self.assertEqual(error.exception.node_id, "4")
 

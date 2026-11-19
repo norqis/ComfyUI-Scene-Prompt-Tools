@@ -1356,16 +1356,16 @@ def _merge_cached_prompt(cached_prompt, current_prompt):
 def _latent_dimension(value, default=512):
     number = default if value is None else value
     if type(number) is not int:
-        raise ScenePlanError("Scene Empty Latent width and height must be integers.")
+        raise ScenePlanError("Scene Empty Latentの幅・高さは整数で指定してください。接続元の値も確認してください。")
     if number < MIN_DIMENSION or number % 8:
-        raise ScenePlanError(f"Scene Empty Latent width and height must be multiples of 8 at least {MIN_DIMENSION}.")
+        raise ScenePlanError(f"Scene Empty Latentの幅・高さは{MIN_DIMENSION}以上、8の倍数にしてください。")
     return number
 
 
 def _latent_batch_size(value, default=1):
     number = default if value is None else value
     if type(number) is not int or number < MIN_BATCH_SIZE:
-        raise ScenePlanError(f"Scene Empty Latent batch_size must be an integer at least {MIN_BATCH_SIZE}.")
+        raise ScenePlanError(f"Scene Empty Latentのバッチサイズは{MIN_BATCH_SIZE}以上の整数にしてください。")
     return number
 
 
@@ -1375,7 +1375,7 @@ def _normalize_latent_config(value=None):
     elif isinstance(value, dict) and set(value) == {"width", "height", "batch_size"}:
         data = value
     else:
-        raise ScenePlanError("Scene Empty Latent settings require width, height, and batch_size.")
+        raise ScenePlanError("Scene Empty Latentの幅・高さ・バッチサイズがそろっていません。ノードの設定を確認してください。")
     return {
         "width": _latent_dimension(data.get("width"), DEFAULT_LATENT["width"]),
         "height": _latent_dimension(data.get("height"), DEFAULT_LATENT["height"]),
@@ -1416,11 +1416,11 @@ def _selection_json_has_items(value):
 
 def _normalize_matrix_line_set(value):
     if not isinstance(value, dict):
-        raise ValueError("Scene Matrix entries must be objects.")
+        raise ValueError("Scene Matrixの行データの形式が不正です。該当する行を編集し直してください。")
     if not MATRIX_LINE_REQUIRED_LEGACY_KEYS.issubset(value) or set(value) - MATRIX_LINE_KEYS:
-        raise ValueError("Scene Matrix entry has unsupported or missing fields.")
+        raise ValueError("Scene Matrixの行データに必要な項目がありません。該当する行を編集し直してください。")
     if value.get("type", MATRIX_LINE_TYPE) != MATRIX_LINE_TYPE or value.get("version", 1) != 1:
-        raise ValueError("Unsupported Scene Matrix entry schema.")
+        raise ValueError("このScene Matrixの行データの版は未対応です。拡張機能を更新し、該当する行を編集し直してください。")
 
     required_string_fields = (
         "row_id",
@@ -1535,27 +1535,31 @@ def _parse_matrix_data(matrix_json):
     if matrix_json is None or (isinstance(matrix_json, str) and not matrix_json.strip()):
         return {"version": 1, "sets": []}
     if not isinstance(matrix_json, str):
-        raise ValueError("Scene Matrix JSON must be a string.")
+        raise ValueError("Scene Matrixの行データはJSON文字列で指定してください。「行を編集」から設定し直してください。")
     try:
         data = json.loads(matrix_json)
     except json.JSONDecodeError as exc:
-        raise ValueError("Scene Matrix JSON is invalid.") from exc
+        raise ValueError("Scene Matrixの行データを読み込めません。JSONの括弧やカンマを確認するか、「行を編集」から設定し直してください。") from exc
     if not isinstance(data, dict) or set(data) != {"version", "sets"}:
-        raise ValueError("Scene Matrix JSON must be an object.")
+        raise ValueError("Scene Matrixの行データの形式が不正です。「行を編集」から設定し直してください。")
     if data.get("version") != 1:
-        raise ValueError("Unsupported Scene Matrix schema version.")
+        raise ValueError("このScene Matrixの行データは未対応の版です。拡張機能を更新するか、「行を編集」から設定し直してください。")
     if not isinstance(data.get("sets"), list):
-        raise ValueError("Scene Matrix sets must be a list.")
+        raise ValueError("Scene Matrixの行一覧（sets）は配列にしてください。「行を編集」から設定し直してください。")
     return data
 
 
 def _normalize_matrix_sets(raw_sets):
     sets = []
     row_ids = set()
-    for raw_set in raw_sets:
-        matrix_line = _normalize_matrix_line_set(raw_set)
+    for index, raw_set in enumerate(raw_sets, 1):
+        try:
+            matrix_line = _normalize_matrix_line_set(raw_set)
+        except ValueError as exc:
+            label = raw_set.get("name") if isinstance(raw_set, dict) else None
+            raise ValueError(f"Scene Matrix行「{label or str(index) + '行目'}」: {exc}") from exc
         if matrix_line["row_id"] in row_ids:
-            raise ValueError("Scene Matrix row_id values must be unique.")
+            raise ValueError("Scene Matrixの行IDが重複しています。重複した行を削除し、「行を追加」で作り直してください。")
         row_ids.add(matrix_line["row_id"])
         sets.append(matrix_line)
     return sets
@@ -1608,7 +1612,7 @@ def _metadata_count(value, label, maximum, default=0):
 
 def _scene_count(value):
     if type(value) is not int or not 0 <= value <= MAX_SAFE_INTEGER:
-        raise ScenePlanError("Scene Prompt count must be a nonnegative JavaScript-safe integer.")
+        raise ScenePlanError(f"生成回数は0〜{MAX_SAFE_INTEGER}の整数で指定してください。接続元の値も確認してください。")
     return value
 
 
@@ -2233,7 +2237,7 @@ class ScenePromptRandomRoute:
             }
             missing = [str(index + 1) for index, weight in enumerate(weights) if weight and index not in connected]
             if missing:
-                raise ScenePlanError(f"Scene Prompt Random Route Input #{gate_id}: 出力{', '.join(missing)}が未接続です。")
+                raise ScenePlanError(f"Random Route Input「{source_node_name or 'Scene Prompt Random Route Input'}」の出力{', '.join(missing)}が未接続です。確率が0%でない経路を同じOutputまたはQueueへ接続してください。")
         plan = with_source_node(scene_prompt, gate_id, source_node_name)
         return random_route(plan, weights, gate_id, preserve_join=_scene_bool(preserve_join), seed_id=seed_source_id or None)
 
@@ -2727,7 +2731,7 @@ class SceneApplyLora:
     def apply_lora(self, lora_name, strength_model=1.0, strength_clip=1.0, scene_prompt=None, unique_id=None, source_node_id="", source_node_name="", model_mode=MODEL_MODE_ILLUSTRIOUS, positive="", negative="", positive_json=DEFAULT_SELECTED_JSON, negative_json=DEFAULT_SELECTED_JSON, category_order=DEFAULT_CATEGORY_ORDER):
         name = str(lora_name or "").strip()
         if not name:
-            raise ValueError("LoRAを選択してください。")
+            raise ValueError("LoRAが選択されていません。「LoRAを選択」からファイルを選んでください。")
         name = canonical_lora_name(name)
         positive_parts = _compose_prompt_parts(positive, positive_json, category_order, True, 0)
         negative_parts = _compose_prompt_parts(negative, negative_json, category_order, True, 0)
@@ -2840,11 +2844,11 @@ class ScenePromptCallback:
         if callback is None:
             return (with_source_node(mark_prompt_passthrough(normalize_plan(scene_prompt)), source_node_id or unique_id),)
         if not isinstance(callback, dict):
-            raise ValueError("Scene callback setting is invalid.")
+            raise ValueError("Callbackの設定が不正です。Discord・Request・Desktopの設定ノードを接続し直してください。")
         if frequency not in {CALLBACK_FREQUENCY_FIRST, CALLBACK_FREQUENCY_EVERY}:
-            raise ValueError("Scene callback frequency is invalid.")
+            raise ValueError("Callbackの実行頻度は「初回」または「毎回」から選んでください。")
         if failure_mode not in {CALLBACK_FAILURE_CONTINUE, CALLBACK_FAILURE_STOP}:
-            raise ValueError("Scene callback failure mode is invalid.")
+            raise ValueError("Callbackの失敗時の動作は「続行」または「停止」から選んでください。")
         plan = append_callback(
             scene_prompt,
             source_node_id or unique_id,
@@ -2951,7 +2955,7 @@ def _dispatch_expand_callback(config, callback_id, timeout_seconds, failure_mode
     if config is None:
         return
     if not isinstance(config, dict):
-        raise ValueError("Scene callback setting is invalid.")
+        raise ValueError("Callbackの設定が不正です。Discord・Request・Desktopの設定ノードを接続し直してください。")
     if once and not claim_callback_attempt(run_handle, callback_id):
         return
     try:
@@ -3146,9 +3150,8 @@ class ScenePromptExpand:
         item = _scene_prompt_item_for_index(None, current_index, normalized=plan, strict=True, seed=seed, model_mode=model_mode)
         row = item["row"]
         if row.get("model_links") is None and _connected_expand_resource_outputs(prompt, unique_id):
-            raise ValueError(
-                "Scene Prompt ExpandのMODEL、CLIP、VAE出力を使うには、同じScene経路にScene Apply Modelを接続してください。"
-            )
+            from .presets import missing_model_message
+            raise ValueError(missing_model_message(row, run_handle, prompt, item["global_index"], total_batches))
         global_index = int(item.get("global_index", 0) or 0)
         seed = (base_seed + global_index) % SEED_MODULO
         positive_parts, negative_parts = _resolve_prompt_parts(
