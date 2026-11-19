@@ -9297,9 +9297,13 @@ function sceneExpandCountLabel(node, counts = sceneExpandCounts(node)) {
     if (status === "pending" || run.preparing || !run.snapshotReady) {
         return totalImages === null ? "準備中" : `準備中 ${totalImages}枚`;
     }
-    if (status === "active" || status === "stopping" || status === "blocked") {
-        const completed = Math.min(Math.max(0, Number(run.nextIndex)), totalBatches);
-        return `${completed} / ${totalBatches}`;
+    if (status === "active" || status === "stopping" || status === "blocked" || status === "finalizing") {
+        const finalizing = run.finalizing || status === "finalizing";
+        const paused = run.pauseRequested && !run.waiting && !run.queueing;
+        const generating = status === "active" && !paused && !finalizing;
+        const showCurrent = status === "active" && (!paused || finalizing) || status === "finalizing";
+        const current = Math.min(Math.max(0, Number(run.nextIndex) + (showCurrent ? 1 : 0)), totalBatches);
+        return generating ? `生成中 ${current}/${totalBatches}` : `${current} / ${totalBatches}`;
     }
     return totalLabel;
 }
@@ -9619,7 +9623,7 @@ function drawSceneExpandCount(ctx, node, width, y, height) {
         widget.value = sceneExpandCountLabel(node, counts);
     }
     const label = widget?.value || "0回";
-    const text = label.startsWith("準備中") ? `生成${label}` : `生成 ${label}`;
+    const text = label.startsWith("生成中 ") ? label : label.startsWith("準備中") ? `生成${label}` : `生成 ${label}`;
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, y, drawWidth, height);
