@@ -16,11 +16,13 @@ export async function verifySceneWidgetVisibility(page) {
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
         field(lora, 'strength_model').value = 0.65; field(lora, 'strength_clip').value = 0.85;
         field(prompt, 'positive_base').value = 'visible prompt';
+        field(prompt, 'model_mode').value = 'Anima';
+        const cloned = prompt.clone(); app.graph.add(cloned); cloned.pos = [30, 520];
         app.canvas.ds.scale = 0.85; app.canvas.ds.offset = [0, 0];
         await new Promise(done => setTimeout(done, 350));
         const a = app.extensionManager.workflow.activeWorkflow; a.changeTracker.captureCanvasState();
         window.__sceneVisibility = {
-            ids: { prompt: prompt.id, lora: lora.id, queue: queue.id, count: count.id },
+            ids: { prompt: prompt.id, cloned: cloned.id, lora: lora.id, queue: queue.id, count: count.id },
             inspect() {
                 const node = app.graph.getNodeById(this.ids.lora); app.canvas.draw(true, true);
                 const fields = ['strength_model', 'strength_clip'].map(name => {
@@ -45,7 +47,12 @@ export async function verifySceneWidgetVisibility(page) {
                     }));
                 const buttons = node.widgets.filter(widget => ['lora_details', 'positive_open', 'negative_open'].includes(widget.sceneRole))
                     .map(widget => ({ role: widget.sceneRole, bottom: (widget.last_y ?? widget.y) + 24 }));
-                return { fields, sockets, internals, publicFields, buttons, height: node.size[1] };
+                const prompt = app.graph.getNodeById(this.ids.prompt), mode = field(prompt, 'model_mode');
+                return { fields, sockets, internals, publicFields, buttons, height: node.size[1],
+                    promptMode: { value: mode.value, owned: !!mode.sceneHiddenState, hidden: mode.hidden,
+                        abovePositive: prompt.widgets.indexOf(mode) < prompt.widgets.indexOf(field(prompt, 'positive_base')),
+                        linked: prompt.inputs.find(input => input.name === 'model_mode')?.link != null },
+                    cloneMode: field(app.graph.getNodeById(this.ids.cloned), 'model_mode').value };
             },
             drawLabels() {
                 const labels = ['モデル強度', 'CLIP強度'], texts = [], prototype = CanvasRenderingContext2D.prototype;
@@ -76,8 +83,14 @@ export async function verifySceneWidgetVisibility(page) {
     assert.equal(names.length, 2, `native workflow tabs: ${names.join(', ')}`);
     const a = tabs.nth(0), b = tabs.nth(1);
     const read = () => page.evaluate(() => window.__sceneVisibility.inspect());
+    let expectedPromptMode = "Anima";
     const check = async (stage, connected) => {
         const value = await read();
+        assert.equal(value.promptMode.value, expectedPromptMode, `${stage}: Scene Prompt model survives`);
+        assert.equal(value.promptMode.linked, false, `${stage}: model COMBO link survives`);
+        assert.equal(value.promptMode.owned, false); assert.equal(value.promptMode.abovePositive, true);
+        assert.equal(!!value.promptMode.hidden, false);
+        assert.equal(value.cloneMode, 'Anima', `${stage}: cloned model remains independent`);
         for (const widget of value.fields) {
             assert.equal(widget.type, 'number', `${stage}: ${widget.name} native type`);
             assert.equal(widget.sceneOwned, false, `${stage}: Scene must not own native hiding`);
@@ -105,6 +118,7 @@ export async function verifySceneWidgetVisibility(page) {
         const app = window.app, node = app.graph.getNodeById(ids.lora), tracker = window.__sceneSeedRuntimeTest.tracker();
         tracker.captureCanvasState(); app.graph.beforeChange(); app.canvas.emitBeforeChange();
         try {
+            const mode = app.graph.getNodeById(ids.prompt).widgets.find(widget => widget.name === 'model_mode'); mode.value = 'Pony'; mode.callback?.('Pony');
             for (const [i, name] of ['strength_model', 'strength_clip'].entries()) {
                 const widget = node.widgets.find(widget => widget.name === name); widget.value = [0.7, 0.9][i]; widget.callback?.(widget.value);
             }
@@ -113,6 +127,7 @@ export async function verifySceneWidgetVisibility(page) {
     await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().undo());
     assert.deepEqual((await check('unconnected undo', false)).fields.map(widget => widget.value), [0.65, 0.85]);
     await page.evaluate(() => window.__sceneSeedRuntimeTest.tracker().redo());
+    expectedPromptMode = 'Pony';
     await check('unconnected redo', false);
     await page.evaluate(ids => {
         const app = window.app, node = app.graph.getNodeById(ids.lora);

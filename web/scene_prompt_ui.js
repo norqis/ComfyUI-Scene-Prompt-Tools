@@ -191,6 +191,7 @@ const SCENE_PROMPT_SERIALIZED_WIDGET_NAMES = [
     "randomize",
     "run_handle",
     "filename_enabled",
+    "model_mode",
 ];
 const PATH_MODE_DIRECTORY = "フォルダに分ける";
 const PATH_MODE_APPEND = "前のフォルダ名に結合";
@@ -4110,7 +4111,7 @@ function showWidget(widget) {
 }
 
 function hideScenePromptWidgets(node) {
-    const visibleWidgets = new Set(["positive_base", "negative_base"]);
+    const visibleWidgets = new Set(["model_mode", "positive_base", "negative_base"]);
     for (const widget of node.widgets || []) {
         if (widget?.sceneRole || visibleWidgets.has(widget?.name)) {
             showWidget(widget);
@@ -6381,7 +6382,7 @@ function writeMatrixState(node, state, options = {}) {
 }
 
 function installScenePromptWidgetSyncHandlers(node) {
-    for (const widgetName of ["filename_enabled", "positive_base", "negative_base", "category_order"]) {
+    for (const widgetName of ["model_mode", "filename_enabled", "positive_base", "negative_base", "category_order"]) {
         const widget = findWidget(node, widgetName);
         if (!widget || widget.scenePromptSyncWrapped) {
             continue;
@@ -12175,22 +12176,25 @@ function scenePromptSerializedWidgetValues(node) {
 
 function scenePromptStoredWidgetValues(config) {
     const values = config?.widgets_values;
-    if (!Array.isArray(values)) {
-        return null;
+    const named = config?.widgets_values_named;
+    if (named && typeof named === "object") {
+        return SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.map((name, index) => named[name] ?? values?.[index]
+            ?? (name === "model_mode" ? "全モデル" : name === "filename_enabled" ? false : undefined));
     }
-    return values.length === SCENE_PROMPT_V030_WIDGET_VALUE_COUNT
-        ? [...values, false]
-        : values.length === SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.length
-            ? values
-            : null;
+    if (!Array.isArray(values)) return null;
+    if (values.length === SCENE_PROMPT_V030_WIDGET_VALUE_COUNT) return [...values, false, "全モデル"];
+    if (values.length === SCENE_PROMPT_V030_WIDGET_VALUE_COUNT + 1) return [...values, "全モデル"];
+    return values.length === SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.length ? values : null;
 }
 
-function scenePromptConfigureValues(config) {
+function scenePromptConfigureValues(config, node) {
     const stored = scenePromptStoredWidgetValues(config);
     if (!stored) {
         return config;
     }
-    return { ...config, widgets_values: [stored[stored.length - 1], ...stored.slice(0, -1)] };
+    const named = Object.fromEntries(SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.map((name, index) => [name, stored[index]]));
+    const displayNames = node.widgets.filter(widget => SCENE_PROMPT_SERIALIZED_WIDGET_NAMES.includes(widget.name)).map(widget => widget.name);
+    return { ...config, widgets_values: displayNames.map(name => named[name]) };
 }
 
 function openMatrixLineSelectionPopup(node, drafts, index, side, renderRows, commitDrafts) {
@@ -13227,10 +13231,20 @@ function attachScenePrompt(node) {
     installSceneConnectionWatcher(node);
 
     removeInternalInputSockets(node, {
-        visibleNames: new Set(["scene_prompt", "positive_base", "negative_base", "filename_enabled"]),
+        visibleNames: new Set(["scene_prompt", "model_mode", "positive_base", "negative_base", "filename_enabled"]),
         removeAllExceptVisible: true,
     });
     ensureSceneFilenameToggle(node);
+    const model = findWidget(node, "model_mode");
+    if (model && node.widgets.indexOf(model) > 1) {
+        const index = node.widgets.indexOf(model);
+        node.widgets.splice(index, 1);
+        node.widgets.splice(1, 0, model);
+        if (Array.isArray(node.widgets_values) && index < node.widgets_values.length) {
+            const [value] = node.widgets_values.splice(index, 1);
+            node.widgets_values.splice(1, 0, value);
+        }
+    }
     ensurePromptSelectionControls(node);
     installScenePromptWidgetSyncHandlers(node);
     hideScenePromptWidgets(node);
@@ -14226,7 +14240,7 @@ app.registerExtension({
             const serialize = nodeType.prototype.serialize;
             nodeType.prototype.configure = function (...args) {
                 const stored = scenePromptStoredWidgetValues(args[0]);
-                args[0] = scenePromptConfigureValues(args[0]);
+                args[0] = scenePromptConfigureValues(args[0], this);
                 const result = configure?.apply(this, args);
                 if (stored) {
                     setWidgetValue(this, "run_handle", stored[9], { silent: true });

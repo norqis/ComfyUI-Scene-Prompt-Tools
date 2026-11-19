@@ -1136,6 +1136,7 @@ try {
                     { name: "control_after_generate", type: "combo", value: "randomize", options: {} },
                     { name: "randomize", type: "toggle", value: false, options: {} },
                     { name: "run_handle", type: "text", value: "", options: {} },
+                    { name: "model_mode", type: "combo", value: "Anima", options: {} },
                 ];
                 this.widgets_values = this.widgets.map((widget) => widget.value);
             }
@@ -1178,6 +1179,23 @@ try {
             }
         }
         window.__scenePromptFilenameRoundTrip = restoredValues;
+        const canonicalNames = ["prompt_name", "positive_base", "positive_json", "negative_base", "negative_json", "category_order", "seed", "control_after_generate", "randomize", "run_handle", "filename_enabled", "model_mode"];
+        if (saved.widgets_values.length !== 12 || saved.widgets_values[11] !== "Anima") throw new Error("model must be serialized last");
+        if (node.widgets[1].name !== "model_mode" || node.widgets[1].hidden) throw new Error("visible model must precede positive");
+        for (const length of [10, 11]) {
+            const legacy = { widgets_values: saved.widgets_values.slice(0, length) }, original = JSON.stringify(legacy);
+            const migrated = new ScenePromptNode(); migrated.onNodeCreated(); migrated.configure(legacy); migrated.configure(legacy);
+            if (JSON.stringify(legacy) !== original) throw new Error("legacy arrays were mutated");
+            if (migrated.widgets.find(w => w.name === "model_mode").value !== "全モデル") throw new Error("legacy mode default");
+            if (migrated.widgets.find(w => w.name === "positive_base").value !== "positive base, {A|B}") throw new Error("legacy positive shifted");
+            if (migrated.widgets.find(w => w.name === "filename_enabled").value !== (length === 11)) throw new Error("legacy filename shifted");
+        }
+        const named = new ScenePromptNode(); named.onNodeCreated();
+        named.configure({ widgets_values_named: Object.fromEntries(canonicalNames.map((name, i) => [name, saved.widgets_values[i]])) });
+        if (named.widgets.find(w => w.name === "model_mode").value !== "Anima") throw new Error("named model restore");
+        const linkedPrompt = new ScenePromptNode();
+        linkedPrompt.inputs.push({ name: "model_mode", type: "COMBO", link: 42 }); linkedPrompt.onNodeCreated();
+        if (!linkedPrompt.inputs.some(input => input.name === "model_mode" && input.link === 42)) throw new Error("model input link removed");
         class SceneApplyLoraNode extends LGraphNode {
             constructor() {
                 super();

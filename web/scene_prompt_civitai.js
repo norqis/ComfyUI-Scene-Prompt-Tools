@@ -399,7 +399,9 @@ function renderCivitaiDetail({ modal, container, item, host, scope, api, onBack,
         const body = element("dd");
         if (content instanceof Node) body.append(content);
         else body.textContent = displayValue(content);
-        metadata.append(element("dt", label), body);
+        const row = element("div", undefined, "pc-civitai-metadata-row");
+        row.append(element("dt", label), body);
+        metadata.append(row);
     }
     function stats(data) { return Object.entries({ downloadCount: "Downloads", thumbsUpCount: "Likes", favoriteCount: "Favorites", collectedCount: "Collected", rating: "Rating", ratingCount: "Ratings", commentCount: "Comments", tippedAmountCount: "Tips" }).filter(([key]) => data?.[key] != null).map(([key, label]) => `${label}: ${data[key]}`).join(" · "); }
     field("AUTHOR", item.creator_name); field("UPDATED", item.updated_at);

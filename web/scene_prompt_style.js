@@ -45,7 +45,10 @@ export function injectStyle() {
         .pc-civitai-data-text, .pc-civitai-generation-data pre { white-space: pre-wrap; overflow-wrap: anywhere; }
         .pc-civitai-resource { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
         .pc-civitai-pages, .pc-civitai-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 12px 0; }
-        .pc-civitai-metadata { display: grid; grid-template-columns: minmax(100px, 140px) minmax(0, 1fr); gap: 10px; }
+        .pc-civitai-metadata { display: flex; flex-direction: column; }
+        .pc-civitai-metadata-row { display: grid; grid-template-columns: minmax(100px, 140px) minmax(0, 1fr); gap: 10px; padding: 10px; color: #eee; }
+        .pc-civitai-metadata-row:nth-child(odd) { background: #25282e; }
+        .pc-civitai-metadata-row:nth-child(even) { background: #353941; }
         .pc-civitai-metadata dt { font-weight: bold; }
         .pc-civitai-metadata dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
         .pc-civitai-search-dialog [hidden] { display: none; }
@@ -67,7 +70,7 @@ export function injectStyle() {
         .pc-connection-actions { display: flex; flex-wrap: wrap; gap: 8px; }
         .pc-connection-settings button[aria-pressed=true] { color: #fff; background: #863b35; border-color: #ff8175; }
         @media (max-width: 520px) { .pc-connection-settings label { align-items: stretch; flex-direction: column; gap: 5px; } .pc-civitai-dialog .pc-connection-settings label input { width: 100%; } }
-        @media (max-width: 520px) { .pc-civitai-metadata { grid-template-columns: minmax(0, 1fr); gap: 5px; } .pc-civitai-metadata dd { margin-bottom: 8px; } }
+        @media (max-width: 520px) { .pc-civitai-metadata-row { grid-template-columns: minmax(0, 1fr); gap: 5px; } }
         @media (max-width: 1399px) { .pc-civitai-results { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
         @media (max-width: 959px) { .pc-civitai-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
         @media (max-width: 519px) { .pc-civitai-results { grid-template-columns: minmax(0, 1fr); } }

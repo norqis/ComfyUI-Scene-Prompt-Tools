@@ -15,7 +15,7 @@ function extract(name) {
     throw new Error(name);
 }
 const clone = value => JSON.parse(JSON.stringify(value));
-const promptNames = ['prompt_name', 'positive_base', 'positive_json', 'negative_base', 'negative_json', 'category_order', 'seed', 'control_after_generate', 'randomize', 'run_handle', 'filename_enabled'];
+const promptNames = ['prompt_name', 'positive_base', 'positive_json', 'negative_base', 'negative_json', 'category_order', 'seed', 'control_after_generate', 'randomize', 'run_handle', 'filename_enabled', 'model_mode'];
 const loraNames = ['lora_name', 'strength_model', 'strength_clip', 'model_mode', 'positive', 'negative', 'positive_json', 'negative_json', 'category_order'];
 const selection = weight => JSON.stringify({ version: 1, categories: { Test: [{ id: 'x', prompt: 'tag', weight }] } });
 
@@ -125,6 +125,7 @@ async function main() {
         t => { t.nodes[0].pos[0]++; }, t => { t.nodes[0].mode = 4; }, t => { t.links.push([1, 1, 0, 2, 0, 'SCENE_PROMPT']); },
         t => { t.nodes.push(clone(t.nodes[0])); }, t => { t.nodes.pop(); }, t => { t.nodes.reverse(); },
         t => { t.groups.push({ title: 'group' }); }, t => { t.extra.zoom = 1.5; },
+        t => edit(t, 0, 'model_mode', 'Anima'),
         t => edit(t, 1, 'strength_model', 0.5), t => { t.nodes[1].size[1]++; },
         t => { t.nodes[0].widgets_values_named.positive_json = selection(5); },
         t => { t.nodes[0].widgets_values[2] = null; t.nodes[0].widgets_values_named.positive_json = null; },
