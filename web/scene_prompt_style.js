@@ -23,7 +23,9 @@ export function injectStyle() {
         .pc-civitai-card-summary { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
         .pc-civitai-card-updated { color: #bbc4d2; font-size: 14px; text-align: right; }
         .pc-civitai-card-stats { display: flex; justify-content: flex-end; flex-wrap: nowrap; gap: 6px; flex-shrink: 0; }
-        .pc-civitai-card-base { position: absolute; left: 0; top: 0; max-width: 100%; box-sizing: border-box; padding: 4px 6px; background: #000b; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pc-civitai-card-labels { position: absolute; left: 0; top: 0; max-width: 100%; display: flex; flex-direction: column; align-items: flex-start; }
+        .pc-civitai-card-base, .pc-civitai-card-owned { max-width: 100%; box-sizing: border-box; padding: 4px 6px; background: #000b; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pc-civitai-card-owned { background: #174f2e; font-weight: 700; }
         .pc-civitai-card-stats span { white-space: nowrap; color: #bbc4d2; }
         .pc-civitai-no-preview { display: grid; place-items: center; color: #aeb7c5; background: #292d35; }
         .pc-civitai-status:empty { display: none; }

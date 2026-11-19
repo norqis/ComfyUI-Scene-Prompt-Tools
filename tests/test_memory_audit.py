@@ -297,6 +297,7 @@ class FileMetadataMemoryTests(unittest.TestCase):
         self.catalogs = {"loras": {}, "checkpoints": {}, "diffusion_models": {}}
         self.metadata.folder_paths.get_filename_list = lambda kind: list(self.catalogs[kind])
         self.metadata.folder_paths.get_full_path = lambda kind, name: self.catalogs[kind].get(name)
+        self.metadata.folder_paths.get_folder_paths = lambda kind: [str(self.root)]
 
     def tearDown(self):
         self.temp.cleanup()

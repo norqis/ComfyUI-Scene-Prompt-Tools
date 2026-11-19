@@ -19,11 +19,18 @@ const server = http.createServer(async (request, response) => {
         window.node=window.makeNode();
         const preview=id=>({id,url:image+'#'+id,width:600,height:800});
         const description=prefix=>'<p>'+prefix+' paragraph <code>inline outfit</code></p><pre><code>'+prefix+'1\\n'+prefix+'2 &lt;literal&gt;</code></pre><script>window.descriptionInjected=true<'+'/script><img src="x" onerror="window.descriptionInjected=true"><a href="javascript:window.descriptionInjected=true">unsafe link</a>';
-        const candidate=(id,query)=>({model_id:id,version_id:id===2?11:id+10,file_id:id+20,name:'Model '+id+' '+query+' long title for responsive layout',version_name:'v1',creator_name:id===2?'':id===3?'Author with a very long Unicode 名前 which must truncate':'作者 <script>literal<'+'/script>',base_model:id===3?'Illustrious XL with a very long model family name':'Illustrious',model_type:'LORA',installable:true,apply_model_mode:'Illustrious',triggers:['trigger'],description:description('outfit'),version_description:description('version'),gallery:[],image_url:'',model_stats:id===2?{downloadCount:null,collectedCount:'invalid',thumbsUpCount:null}:{downloadCount:5200,collectedCount:1200,thumbsUpCount:0},updated_at:id===2?null:'2026-11-15T12:00:00Z'});
+        const candidate=(id,query)=>({sha256:id.toString(16).padStart(64,'0'),size_kb:10,model_id:id,version_id:id===2?11:id+10,file_id:id+20,name:'Model '+id+' '+query+' long title for responsive layout',version_name:'v1',creator_name:id===2?'':id===3?'Author with a very long Unicode 名前 which must truncate':'作者 <script>literal<'+'/script>',base_model:id===3?'Illustrious XL with a very long model family name':'Illustrious',model_type:'LORA',installable:true,apply_model_mode:'Illustrious',triggers:['trigger'],description:description('outfit'),version_description:description('version'),gallery:[],image_url:'',model_stats:id===2?{downloadCount:null,collectedCount:'invalid',thumbsUpCount:null}:{downloadCount:5200,collectedCount:1200,thumbsUpCount:0},updated_at:id===2?null:'2026-11-15T12:00:00Z'});
         window.api={async fetchApi(path,options={}){
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
             const url=new URL(path,'http://fixture'), body=options.body?JSON.parse(options.body):{}, reply=(data,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(data)});
             if(url.pathname.endsWith('/directories'))return reply({directories:['','a','a/b','c','c/local','c/local/bin','c/local/lib','llm',...Array.from({length:20},(_,i)=>'z'+String(i).padStart(2,'0'))]});
+            if(url.pathname.endsWith('/owned')){
+                const matches=body.items.filter(item=>window.acquiredItems||(window.ownedItems||[]).includes(parseInt(item.sha256,16))).map(item=>({sha256:item.sha256,owned:true,lora_name:window.hiddenOwned===parseInt(item.sha256,16)?'':'folder/'+parseInt(item.sha256,16)+'.safetensors'}));
+                window.ownershipSignals||=[];window.ownershipSignals.push(options.signal);
+                if(window.deferOwned){window.deferOwned=false;await new Promise(done=>window.releaseOwned=done);}
+                if(window.failOwned)return reply({error:'ownership offline'},500);
+                return reply({items:matches});
+            }
             if(url.pathname.endsWith('/options')){if(window.failOptions){window.failOptions=false;return reply({error:'options offline'},503);}const data={model_types:window.modelTypesByHost?.[url.searchParams.get('host')]||['Checkpoint','TextualInversion','Hypernetwork','AestheticGradient','LORA','LoCon','DoRA','Controlnet','Upscaler','MotionModule','VAE','TextEncoder','UNet','CLIPVision','Poses','Wildcards','Workflows','ComfyWorkflows','Detection','VisionLanguage','CLIP','LLM','Other'],categories:window.categoriesByHost?.[url.searchParams.get('host')]||window.categories||['Style','Action','Concept']};if(window.deferOptions){window.deferOptions=false;await new Promise(done=>window.releaseOptions=done);}if(window.failOptionsAfterWait){window.failOptionsAfterWait=false;return reply({error:'delayed options offline'},503);}return reply(data);}
             if(url.pathname.endsWith('/tags')){if(window.deferTags){window.deferTags=false;await new Promise(done=>window.releaseTags=done);}return reply({items:['Style','Action',url.searchParams.get('query')]});}
             if(url.pathname.endsWith('/search')){
@@ -77,7 +84,108 @@ await new Promise(done => server.listen(0, "127.0.0.1", done));
 const browser = await chromium.launch({ headless: true });
 const screenshots = resolve(tmpdir(), "scene-civitai-details-review");
 await mkdir(screenshots, { recursive: true });
+async function verifyOwnership() {
+    const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(() => window.ready);
+    await page.evaluate(() => { window.galleryDelay=false; window.deferOwned=true; window.ownedItems=[1,2]; window.hiddenOwned=2; window.node.widgets.find(widget=>widget.name==='lora_name').value='folder/1.safetensors'; window.beforeOwned=JSON.stringify(window.node); });
+    await page.getByRole('button',{name:'Open',exact:true}).click();
+    const search=page.locator('.pc-civitai-search-dialog'), cards=search.locator('.pc-civitai-card'), badges=cards.locator('.pc-civitai-card-owned:visible');
+    await page.waitForFunction(()=>window.releaseOwned);
+    assert.equal(await cards.count(),30,'grid renders before local hash lookup completes');
+    assert.equal(await badges.count(),0);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/owned')).length),1,'one ownership batch for the result');
+    assert.equal(await page.evaluate(()=>window.calls.find(call=>call.path.endsWith('/owned')).body.items.length),30);
+    await cards.nth(3).focus();
+    await page.evaluate(()=>{window.focusedOwned=document.activeElement;window.firstOwned=document.querySelector('.pc-civitai-card');window.releaseOwned();});
+    await badges.first().waitFor();
+    assert.equal(await badges.count(),2);
+    assert.match(await cards.first().getAttribute('aria-label'),/所持済み/);
+    assert.equal(await cards.first().evaluate(card=>card===window.firstOwned),true,'ownership updates the existing card');
+    assert.equal(await page.evaluate(()=>document.activeElement===window.focusedOwned),true,'ownership preserves keyboard focus');
+    assert.equal(await cards.first().evaluate(card=>card.classList.contains('pc-lora-selected')),true);
+    assert.equal(await cards.nth(1).evaluate(card=>card.classList.contains('pc-lora-selected')),false,'hidden root ownership does not select a wrong path');
+    assert.equal(await badges.locator('button,a,[tabindex]').count(),0,'static owned badge has no extra tab stop');
+    assert.equal(await page.evaluate(()=>JSON.stringify(window.node)===window.beforeOwned),true,'ownership does not apply LoRA, triggers, or graph edits');
+    for (const width of [1600,420]) {
+        await page.setViewportSize({width,height:1000});
+        const geometry=await cards.first().evaluate(card=>{
+            const rect=node=>{const r=node.getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom};};
+            return {preview:rect(card.querySelector('.pc-civitai-card-preview')),badge:rect(card.querySelector('.pc-civitai-card-owned')),base:rect(card.querySelector('.pc-civitai-card-base')),overflow:card.scrollWidth>card.clientWidth};
+        });
+        assert.equal(geometry.badge.left,geometry.preview.left); assert.equal(geometry.badge.top,geometry.preview.top);
+        assert(geometry.base.top>=geometry.badge.bottom,'base model label sits below the owned badge'); assert.equal(geometry.overflow,false);
+        await page.screenshot({path:resolve(screenshots,`owned-${width}.png`)});
+    }
+    await page.setViewportSize({width:1600,height:1000});
+    // A cached reopen rechecks disk state, including deletion, without repeating provider search.
+    await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup();window.ownedItems=[];window.open();});
+    await cards.first().waitFor(); await page.waitForFunction(()=>window.calls.filter(call=>call.path.endsWith('/owned')).length===2);
+    assert.equal(await badges.count(),0);
+    assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),1);
+    await page.evaluate(()=>window.failOwned=true); await search.getByRole('button',{name:'検索',exact:true}).click();
+    await search.locator('.pc-civitai-ownership-status').filter({hasText:'確認できませんでした'}).waitFor();
+    assert.equal(await page.getByRole('dialog').count(),1,'local lookup errors stay inline');
+    assert.equal(await badges.count(),0);
+    await page.evaluate(()=>{window.failOwned=false;window.deferOwned=true;window.ownedItems=[1];window.releaseOwned=null;});
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForFunction(()=>window.releaseOwned);
+    await page.evaluate(()=>{window.oldOwnedRelease=window.releaseOwned;window.oldOwnedSignal=window.ownershipSignals.at(-1);window.ownedItems=[3];});
+    await search.getByRole('searchbox',{name:'検索語'}).fill('replacement'); await search.getByRole('button',{name:'検索',exact:true}).click();
+    await cards.nth(2).locator('.pc-civitai-card-owned').waitFor({state:'visible'});
+    await page.evaluate(()=>window.oldOwnedRelease());
+    assert.equal(await page.evaluate(()=>window.oldOwnedSignal.aborted),true);
+    assert.equal(await cards.first().locator('.pc-civitai-card-owned').isVisible(),false,'replaced search ignores a late ownership reply');
+    assert.equal(await cards.nth(2).locator('.pc-civitai-card-owned').isVisible(),true);
+    // Close/reopen cannot publish the prior generation's response.
+    await page.evaluate(()=>{window.deferOwned=true;window.ownedItems=[1];window.releaseOwned=null;});
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForFunction(()=>window.releaseOwned);
+    await page.evaluate(()=>{window.oldOwnedRelease=window.releaseOwned;window.oldOwnedSignal=window.ownershipSignals.at(-1);window.node.sceneCivitaiSearchCleanup();window.ownedItems=[];window.open();});
+    await cards.first().waitFor(); await page.evaluate(()=>window.oldOwnedRelease());
+    assert.equal(await page.evaluate(()=>window.oldOwnedSignal.aborted),true);
+    assert.equal(await badges.count(),0,'closed generation cannot restore stale ownership');
+    // Download-only success is immediately owned; a pre-download lookup cannot clear it.
+    await page.evaluate(()=>{window.deferOwned=true;window.releaseOwned=null;});
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForFunction(()=>window.releaseOwned);
+    await page.evaluate(()=>{window.oldOwnedRelease=window.releaseOwned;window.oldOwnedSignal=window.ownershipSignals.at(-1);});
+    await cards.first().click();
+    await search.getByRole('button',{name:'取得',exact:true}).click();
+    const destination=page.getByRole('dialog',{name:'LoRAを取得',exact:true});
+    await destination.getByRole('button',{name:'取得',exact:true}).click();
+    await destination.waitFor({state:'detached'});
+    await page.evaluate(()=>window.oldOwnedRelease());
+    await search.getByRole('button',{name:'戻る',exact:true}).click();
+    await cards.first().locator('.pc-civitai-card-owned').waitFor({state:'visible'});
+    assert.equal(await page.evaluate(()=>window.oldOwnedSignal.aborted),true);
+    assert.equal(await cards.first().evaluate(card=>card.classList.contains('pc-lora-selected')),false,'download-only does not select the acquired file');
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='lora_name').value),'folder/1.safetensors');
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='positive').value),'manual');
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='negative').value),' negative,  keep\n');
+    // A failed download resumes a fresh ownership check for every result item.
+    await cards.nth(1).click(); await search.getByRole('button',{name:'取得',exact:true}).click();
+    const before=await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/owned')).length);
+    await page.evaluate(()=>{window.downloadError=true;window.ownedItems=[2];});
+    await destination.getByRole('button',{name:'取得',exact:true}).click();
+    await page.waitForFunction(before=>window.calls.filter(call=>call.path.endsWith('/owned')).length>before,before);
+    await page.getByRole('dialog',{name:'取得に失敗しました',exact:true}).getByRole('button',{name:'閉じる',exact:true}).click();
+    await page.keyboard.press('Escape'); await search.getByRole('button',{name:'戻る',exact:true}).click();
+    await cards.nth(1).locator('.pc-civitai-card-owned').waitFor({state:'visible'});
+    assert.equal(await cards.nth(1).evaluate(card=>card.classList.contains('pc-lora-selected')),false);
+    // Authentication changes abort and discard local ownership work too.
+    await page.evaluate(()=>{window.deferOwned=true;window.ownedItems=[1];window.releaseOwned=null;});
+    await search.getByRole('button',{name:'検索',exact:true}).click(); await page.waitForFunction(()=>window.releaseOwned);
+    await page.evaluate(()=>{window.oldOwnedRelease=window.releaseOwned;window.oldOwnedSignal=window.ownershipSignals.at(-1);});
+    await search.getByRole('button',{name:'認証',exact:true}).click();
+    const auth=page.getByRole('dialog',{name:'Civitai 認証',exact:true});
+    await auth.getByRole('button',{name:'認証解除',exact:true}).click();
+    await auth.getByText('未認証',{exact:true}).waitFor(); await page.keyboard.press('Escape');
+    await page.evaluate(()=>window.oldOwnedRelease());
+    assert.equal(await page.evaluate(()=>window.oldOwnedSignal.aborted),true);
+    assert.equal(await cards.count(),0,'authentication change discards the prior result');
+    assert.deepEqual(errors,[]);
+    await page.close();
+}
 try {
+    await verifyOwnership();
     const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
     const errors = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(() => window.ready);

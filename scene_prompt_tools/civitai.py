@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -13,11 +14,12 @@ import aiohttp
 import folder_paths
 
 from .llm_service import ServiceError, candidate_identity, MODES
-from .lora_metadata import canonical_lora_name, file_identity, file_signature, file_operation
+from .lora_metadata import canonical_lora_name, file_identity, file_signature, file_operation, cached_sha256, lora_inventory
 
 SORTS = ("Relevancy", "Highest Rated", "Most Downloaded", "Most Liked", "Most Collected", "Newest")
 _NOT_FOUND = object()
 _DOWNLOAD_LOCK = None
+_OWNERSHIP_LOCK = None
 _HASH_CACHE = {}
 _HASH_LOCK = threading.Lock()
 _HASH_CATALOG = {}
@@ -404,11 +406,13 @@ def _sha256(path):
             if cached is not None:
                 value = cached[1]
             else:
-                digest = hashlib.sha256()
-                with path.open("rb") as stream:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                value = digest.hexdigest()
+                value = cached_sha256(key, signature)
+                if value is None:
+                    digest = hashlib.sha256()
+                    with path.open("rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    value = digest.hexdigest()
             with _HASH_LOCK:
                 try:
                     current_signature = file_signature(path)
@@ -431,6 +435,52 @@ def reconcile_lora_hashes(identities):
         for key, entry in list(_HASH_CACHE.items()):
             if identities.get(key) != entry[0]:
                 _HASH_CACHE.pop(key)
+
+
+async def owned(items, is_current=lambda: True):
+    """Match displayed file hashes locally without delaying provider search results."""
+    global _OWNERSHIP_LOCK
+    if not isinstance(items, list):
+        raise ValueError("items must be a list of LoRA file hashes.")
+    remaining = {}
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("sha256"), str) or not re.fullmatch(r"[0-9a-fA-F]{64}", item["sha256"]):
+            raise ValueError("Each item must contain a SHA256 hash.")
+        size = item.get("size_kb")
+        if size is not None and (type(size) not in (int, float) or not math.isfinite(size) or size < 0):
+            raise ValueError("size_kb must be a nonnegative finite number.")
+        remaining.setdefault(item["sha256"].lower(), []).append(size)
+    matches = []
+    if not remaining or not is_current():
+        return {"items": matches}
+    if _OWNERSHIP_LOCK is None:
+        _OWNERSHIP_LOCK = asyncio.Lock()
+    async with _OWNERSHIP_LOCK:
+        if not is_current():
+            return {"items": matches}
+        _, entries = await _file_io(lora_inventory)
+        for entry in entries:
+            if not remaining or not is_current():
+                break
+            key, signature = entry["key"], entry["signature"]
+            with _HASH_LOCK:
+                cached = _HASH_CACHE.get(key)
+                known = cached[1] if cached is not None and cached[0] == signature else None
+            known = known or cached_sha256(key, signature)
+            if known is not None:
+                if known not in remaining:
+                    continue
+            elif not any(size is None or size == 0 or abs(signature[0] - size * 1024) <= 1024
+                         for sizes in remaining.values() for size in sizes):
+                continue
+            try:
+                digest = await _file_io(_sha256, entry["path"])
+            except FileNotFoundError:
+                continue
+            if digest in remaining:
+                matches.append({"sha256": digest, "owned": True, "lora_name": entry["lora_name"]})
+                remaining.pop(digest)
+    return {"items": matches}
 
 
 def _manifest(root):
@@ -661,15 +711,6 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", 
             if version is not None:
                 _positive_ids(model.get("id"), version.get("id"))
                 items.append({**_presentation(model, version, host, hit), "installable": False})
-    acquired_items = [item for item in items if item["installable"]]
-    if acquired_items:
-        root = lora_root()
-        def mark_acquired():
-            manifest = _manifest(root)
-            for item in acquired_items:
-                item["lora_name"] = _existing(item, root, manifest)
-                item["acquired"] = bool(item["lora_name"])
-        await asyncio.to_thread(mark_acquired)
     return {"items": items, "query": query, "sort": sort}
 
 class DownloadAccessError(ServiceError):

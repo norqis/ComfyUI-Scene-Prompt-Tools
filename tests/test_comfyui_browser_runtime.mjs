@@ -191,14 +191,16 @@ async def civitai_lookup(request):
 @PromptServer.instance.routes.post("/scene_test/nested_lora")
 async def nested_lora(request):
     import folder_paths
+    import hashlib
     import os
     from pathlib import Path
     original = Path(folder_paths.get_full_path("loras", "runtime-hat.safetensors"))
     path = original.parent / "nested" / "衣装.safetensors"
     path.parent.mkdir(exist_ok=True)
-    path.write_bytes(original.read_bytes())
+    # Different bytes from the original prove ownership follows the renamed file.
+    path.write_bytes(original.read_bytes() + b"nested ownership fixture")
     folder_paths.filename_list_cache.pop("loras", None)
-    return web.json_response({"lora_name": os.path.normpath("nested/衣装.safetensors")})
+    return web.json_response({"lora_name": os.path.normpath("nested/衣装.safetensors"), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size_kb": path.stat().st_size / 1024})
 class TestSceneTextImage:
     @classmethod
     def INPUT_TYPES(cls):
@@ -352,7 +354,7 @@ NODE_CLASS_MAPPINGS = {"TestSceneTextImage": TestSceneTextImage, "TestScenePause
     await page.route("**/scene_prompt/civitai/**", async (route) => {
         const path = new URL(route.request().url()).pathname.replace(/^\/api/u, "");
         if (path.endsWith("/settings")) { settingsRequests.push(path); return route.continue(); }
-        if (path.endsWith("/by-hash") || path.endsWith("/descriptions")) return route.continue();
+        if (path.endsWith("/by-hash") || path.endsWith("/descriptions") || path.endsWith("/owned")) return route.continue();
         if (path.endsWith("/auth")) return route.fulfill({ json: { configured: true, username: "native-fixture" } });
         if (path.endsWith("/directories")) return route.fulfill({ json: { directories: ["", "llm", "local", "local/test"] } });
         if (path.endsWith("/options")) return route.fulfill({ json: { model_types: ["Checkpoint", "LORA", "CLIP"], categories: ["Style", "Action", "Concept"] } });
@@ -3770,6 +3772,10 @@ window.__sceneSeedRuntimeTest = {
     // A nested Unicode acquisition must survive real native validation and CPU execution after reload.
     const nestedFixture = await nativeBodyRequest('/scene_test/nested_lora', {});
     nativeDownloadName = nestedFixture.lora_name.replaceAll('\\','/');
+    const originalCandidateHash=runtimeCandidate.sha256, originalCandidateSize=runtimeCandidate.size_kb;
+    runtimeCandidate.sha256=nestedFixture.sha256;runtimeCandidate.size_kb=nestedFixture.size_kb;
+    const nativeOwned=await nativeBodyRequest('/scene_prompt/civitai/owned',{items:[{sha256:nestedFixture.sha256,size_kb:nestedFixture.size_kb}]});
+    assert.deepEqual(nativeOwned.items,[{sha256:nestedFixture.sha256,owned:true,lora_name:nestedFixture.lora_name}],'real local endpoint finds a renamed nested Unicode file');
     const nestedNode = await page.evaluate(async()=>{
         const {app}=await import('/scripts/app.js');app.graph.clear();
         const lora=window.LiteGraph.createNode('SceneApplyLora');app.graph.add(lora);
@@ -3777,7 +3783,14 @@ window.__sceneSeedRuntimeTest = {
         await lora.widgets.find(widget=>widget.sceneRole==='lora_select').callback();return lora.id;
     });
     await page.getByRole('dialog',{name:'LoRAを選択',exact:true}).getByRole('button',{name:'Civitai Search',exact:true}).click();
-    const nestedSearch=page.locator('.pc-civitai-search-dialog');await nestedSearch.locator('.pc-civitai-card').first().click();
+    const nestedSearch=page.locator('.pc-civitai-search-dialog');
+    const ownedCard=nestedSearch.locator('.pc-civitai-card').first();await ownedCard.locator('.pc-civitai-card-owned').waitFor({state:'visible'});
+    assert.match(await ownedCard.getAttribute('aria-label'),/所持済み/);
+    assert.equal(await ownedCard.evaluate(card=>card.classList.contains('pc-lora-selected')),false,'native ownership never applies a LoRA');
+    const ownedLayout=await ownedCard.evaluate(card=>{const badge=card.querySelector('.pc-civitai-card-owned').getBoundingClientRect(),base=card.querySelector('.pc-civitai-card-base').getBoundingClientRect(),preview=card.querySelector('.pc-civitai-card-preview').getBoundingClientRect();return {left:badge.left===preview.left,top:badge.top===preview.top,separate:base.top>=badge.bottom};});
+    assert.deepEqual(ownedLayout,{left:true,top:true,separate:true});
+    await page.screenshot({path:resolve(screenshotDirectory,'native-owned-renamed.png')});
+    await ownedCard.click();
     await nestedSearch.getByRole('button',{name:'取得',exact:true}).click();
     await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).getByRole('button',{name:'取得して選択',exact:true}).click();
     await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).waitFor({state:'detached'});await page.keyboard.press('Escape');
@@ -3802,6 +3815,7 @@ window.__sceneSeedRuntimeTest = {
     assert.equal(nestedResources.loras[0].name,nestedFixture.lora_name);
     assert.deepEqual(await nativeBodyRequest('/scene_test/model_executions'),[],'nested acquisition CPU plans never load weights');
     nativeDownloadName=null;
+    runtimeCandidate.sha256=originalCandidateHash;runtimeCandidate.size_kb=originalCandidateSize;
     assert.deepEqual(pageErrors, []);
     console.log("real ComfyUI local metadata HTTP, nested Unicode acquire/reload/validate/CPU execution, retry and Matrix inputs passed");
 }

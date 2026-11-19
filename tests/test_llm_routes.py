@@ -14,6 +14,42 @@ aiohttp = llm_fixture.aiohttp
 service, settings_module = llm_fixture.service, llm_fixture.settings_module
 
 class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
+    async def test_owned_route_is_local_and_checks_live_transport(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_modules = dict(sys.modules)
+            try:
+                routes = load_routes(Path(temporary))
+                class Request:
+                    transport = types.SimpleNamespace(is_closing=lambda: False)
+                    payload = {"items": [{"sha256": "a" * 64}]}
+                    async def json(self):
+                        return self.payload
+                request = Request()
+                endpoint = routes._test_routes[("POST", "/scene_prompt/civitai/owned")]
+                with mock.patch.dict(sys.modules, {routes.__package__ + ".civitai": civitai}), \
+                        mock.patch.object(civitai, "_token", side_effect=AssertionError("local lookup read token")), \
+                        mock.patch.object(civitai, "api_get", side_effect=AssertionError("local lookup used network")), \
+                        mock.patch.object(civitai, "owned", return_value={"items": []}) as owned:
+                    self.assertEqual((await endpoint(request))["payload"], {"items": []})
+                    owned.assert_awaited_once()
+                    self.assertEqual(owned.await_args.args, (request.payload["items"],))
+                    current = owned.await_args.kwargs["is_current"]
+                    self.assertTrue(current())
+                    request.transport.is_closing = lambda: True
+                    self.assertFalse(current())
+                    request.transport = None
+                    self.assertFalse(current())
+                    request.payload = []
+                    self.assertEqual((await endpoint(request))["status"], 400)
+                with mock.patch.dict(sys.modules, {routes.__package__ + ".civitai": civitai}):
+                    request.payload = {"items": [{"sha256": "bad"}]}
+                    self.assertEqual((await endpoint(request))["status"], 400)
+            finally:
+                for name in list(sys.modules):
+                    if name not in original_modules:
+                        del sys.modules[name]
+                sys.modules.update(original_modules)
+
     async def test_civitai_browse_and_auth_routes_keep_user_identity_and_no_store(self):
         with tempfile.TemporaryDirectory() as temporary:
             original_modules = dict(sys.modules)

@@ -445,7 +445,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     const generation = ++searchViewGeneration;
     searchViews.set(node, { ...cached, generation });
     let authRevision = 0, authRequest, gate = "checking";
-    let revision = 0, detailRevision = 0, currentResult = null, downloadBusy = false, searchRequest, optionsRequest;
+    let revision = 0, detailRevision = 0, currentResult = null, downloadBusy = false, searchRequest, optionsRequest, ownershipRequest;
     const hostOptions = new Map(Object.entries(cached?.hostOptions || {}));
     let gridPosition = cached?.gridPosition || { left: 0, top: 0, modal: 0 };
     function saveView() {
@@ -457,7 +457,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     const modal = openModal("Civitai Search", () => {
         revision++; detailRevision++;
         if (!list.hidden) gridPosition = { left: list.scrollLeft, top: list.scrollTop, modal: modal.dialog.scrollTop };
-        saveView(); authRevision++; authRequest?.abort(); searchRequest?.abort(); optionsRequest?.abort(); currentResult?.scope.close(); observer.disconnect(); currentResult = null;
+        saveView(); authRevision++; authRequest?.abort(); searchRequest?.abort(); optionsRequest?.abort(); ownershipRequest?.abort(); currentResult?.scope.close(); observer.disconnect(); currentResult = null;
         list.replaceChildren(); detail.replaceChildren();
         if (!modals.some(entry => entry.ownerNode === node)) node.sceneCivitaiSearchCleanup = null;
     }, document.activeElement, null);
@@ -515,9 +515,9 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         })();
         return operation.promise;
     }
-    const search = element("button", "検索", "pc-button"), status = element("p", "", "pc-civitai-status"), list = element("div", undefined, "pc-civitai-results"), detail = element("div", undefined, "pc-civitai-detail");
-    status.setAttribute("role", "status"); detail.hidden = true;
-    controls.append(query, host, model, modelType, category, sort, search); modal.dialog.append(controls, status, list, detail);
+    const search = element("button", "検索", "pc-button"), status = element("p", "", "pc-civitai-status"), ownershipStatus = element("p", "", "pc-civitai-status pc-civitai-ownership-status"), list = element("div", undefined, "pc-civitai-results"), detail = element("div", undefined, "pc-civitai-detail");
+    status.setAttribute("role", "status"); ownershipStatus.setAttribute("aria-live", "polite"); detail.hidden = true;
+    controls.append(query, host, model, modelType, category, sort, search); modal.dialog.append(controls, status, ownershipStatus, list, detail);
     const snapshot = () => Object.freeze({ query: query.value.trim(), sort: sort.value, host: host.value, model_mode: model.value, model_type: modelType.value, category: category.value.trim() });
     const authNotice = element("p", undefined, "pc-civitai-status"); controls.after(authNotice);
     const gateCurrent = () => modal.overlay.isConnected && searchViews.get(node)?.generation === generation;
@@ -527,7 +527,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         search.disabled = blocked;
         authNotice.replaceChildren();
         if (!blocked) { if (detail.hidden) list.hidden = false; if (wasBlocked && currentResult) { currentResult.serial = revision; currentResult.scope = galleryScope(api); render(currentResult); } return; }
-        revision++; detailRevision++; searchRequest?.abort(); currentResult?.scope.close(); observer.disconnect();
+        revision++; detailRevision++; searchRequest?.abort(); ownershipRequest?.abort(); ownershipStatus.textContent = ""; currentResult?.scope.close(); observer.disconnect();
         controls.hidden = false; status.hidden = false; list.hidden = true; detail.hidden = true; detail.replaceChildren(); modal.setTitle("Civitai Search");
         if (gate === "missing") authNotice.textContent = 'civitai.redで検索するには認証が必要です。右上の「認証」からAPIキーを登録してください。';
         else if (gate === "checking") authNotice.textContent = "認証状態を確認中…";
@@ -535,7 +535,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
     }
     function authenticationChanged(data) {
         if (!gateCurrent()) return;
-        authRevision++; authRequest?.abort(); revision++; detailRevision++; searchRequest?.abort(); optionsRequest?.abort();
+        authRevision++; authRequest?.abort(); revision++; detailRevision++; searchRequest?.abort(); optionsRequest?.abort(); ownershipRequest?.abort(); ownershipStatus.textContent = "";
         currentResult?.scope.close(); observer.disconnect(); currentResult = null; hostOptions.clear();
         list.replaceChildren(); detail.replaceChildren(); detail.hidden = true; controls.hidden = false; status.hidden = false; status.textContent = ""; modal.setTitle("Civitai Search");
         setGate(host.value === "civitai.red" && !data.configured ? "missing" : "configured");
@@ -567,7 +567,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         }
     }, { root: list });
     function back(view, card, position) {
-        detailRevision++; detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = false; modal.setTitle("Civitai Search");
+        detailRevision++; detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = ownershipStatus.hidden = false; modal.setTitle("Civitai Search");
         if (currentResult !== view) return;
         updateSelection(view);
         list.scrollLeft = position.left; list.scrollTop = position.top; modal.dialog.scrollTop = position.modal; card.focus({ preventScroll: true });
@@ -576,7 +576,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         if (currentResult !== view || view.serial !== revision) return;
         const position = { left: list.scrollLeft, top: list.scrollTop, modal: modal.dialog.scrollTop }, serial = ++detailRevision;
         gridPosition = position;
-        controls.hidden = true; list.hidden = true; status.hidden = true; detail.hidden = false; modal.setTitle("Civitai Detail");
+        controls.hidden = true; list.hidden = true; status.hidden = ownershipStatus.hidden = true; detail.hidden = false; modal.setTitle("Civitai Detail");
         const ownsAction = () => searchViews.get(node)?.generation === generation && modal.overlay.isConnected && currentResult === view && revision === view.serial && detailRevision === serial;
         renderCivitaiDetail({ modal, container: detail, item, host: view.snapshot.host, scope: view.scope, api, onBack: () => back(view, card, position), isCurrent: ownsAction,
             onChoose: item.installable === false ? null : () => {
@@ -584,7 +584,8 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                     acquire: async ({ apply, directory, existingAction, existingName, isCurrent, onProgress }) => {
                         if (downloadBusy) return false;
                         const graph = node.graph, lora = value(node, "lora_name"), current = captureTarget({ node, graph, ownerGraph: graph }, activeGraph);
-                        downloadBusy = true;
+                        downloadBusy = true; ownershipRequest?.abort(); ownershipStatus.textContent = "";
+                        let verifiedDownload = false;
                         try {
                             const applyMode = item.apply_model_mode || view.snapshot.model_mode;
                             const downloadID = crypto.randomUUID();
@@ -596,7 +597,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                             } finally { api.removeEventListener("scene_prompt_civitai_download_progress", listener); }
                             if (!isCurrent() || !current() || value(node, "lora_name") !== lora) return false;
                             if (!downloaded.lora_name || !downloaded.candidate && existingAction !== "select") throw new Error("Civitai取得結果が無効です。");
-                            if (downloaded.candidate) { item.acquired = true; item.lora_name = downloaded.lora_name; }
+                            if (downloaded.candidate) { item.owned = item.acquired = true; item.lora_name = downloaded.lora_name; verifiedDownload = true; updateSelection(view); saveView(); }
                             await onAcquired?.(node, downloaded, () => isCurrent() && current() && value(node, "lora_name") === lora);
                             if (!isCurrent() || !current() || value(node, "lora_name") !== lora) return false;
                             const loraWidget = node.widgets.find(widget => widget.name === "lora_name");
@@ -614,17 +615,45 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
                         } catch (error) {
                             if (!isCurrent() || !current() || value(node, "lora_name") !== lora) return false;
                             throw error;
-                        } finally { downloadBusy = false; }
+                        } finally { downloadBusy = false; if (currentResult && ownsView(currentResult)) void checkOwnership(currentResult, verifiedDownload && currentResult === view ? item : null); }
                     } });
             } });
     }
     function observeMissingPreviews() { for (const card of list.querySelectorAll(".pc-civitai-card")) if (!currentResult.items[Number(card.dataset.index)].image_url) observer.observe(card); }
+    const ownsView = view => gateCurrent() && currentResult === view && view.serial === revision;
+    async function checkOwnership(view, preservedItem = null) {
+        ownershipRequest?.abort();
+        if (!ownsView(view) || downloadBusy) return;
+        const request = new AbortController(); ownershipRequest = request;
+        const items = view.items.filter(item => item !== preservedItem && item.installable !== false && /^[0-9a-f]{64}$/i.test(item.sha256 || ""));
+        for (const item of items) { item.owned = item.acquired = false; item.lora_name = ""; }
+        updateSelection(view); ownershipStatus.textContent = "";
+        if (!items.length) return;
+        // Keep checking passive; announce a failure without turning every badge into a live region.
+        ownershipStatus.setAttribute("aria-live", "off"); ownershipStatus.textContent = "所持状況を確認中…";
+        const current = () => !request.signal.aborted && ownershipRequest === request && ownsView(view);
+        try {
+            const result = await requestJSON(api, "/scene_prompt/civitai/owned", { items: items.map(({ sha256, size_kb }) => ({ sha256, size_kb })) }, { signal: request.signal });
+            if (!current()) return;
+            if (!Array.isArray(result.items)) throw new Error("無効な所持確認応答です。");
+            const matches = new Map(result.items.map(item => [item.sha256, item]));
+            for (const item of items) {
+                const match = matches.get(item.sha256.toLowerCase());
+                item.owned = match?.owned === true; item.lora_name = item.owned ? match.lora_name || "" : ""; item.acquired = Boolean(item.lora_name);
+            }
+            ownershipStatus.textContent = ""; updateSelection(view); saveView();
+        } catch (error) {
+            if (current()) { ownershipStatus.setAttribute("aria-live", "polite"); ownershipStatus.textContent = "所持状況を確認できませんでした。再検索すると再確認します。"; }
+        }
+    }
     function updateSelection(view) {
         const path = name => String(name || "").replaceAll("\\", "/");
         const selectedPath = path(value(node, "lora_name")), saved = node.properties?.scene_civitai;
         const selected = selectedPath && path(saved?.lora_name) === selectedPath ? saved : null;
         for (const card of list.querySelectorAll(".pc-civitai-card")) {
             const item = view.items[Number(card.dataset.index)];
+            card.querySelector(".pc-civitai-card-owned").hidden = !item.owned;
+            card.setAttribute("aria-label", `${item.name} ${item.version_name || ""}${item.owned ? " 所持済み" : ""} の詳細`);
             card.classList.toggle("pc-lora-selected", Boolean(selected && identity(item) === identity(selected) || selectedPath && item.acquired && path(item.lora_name) === selectedPath));
         }
     }
@@ -643,7 +672,8 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
             else preview.append(element("div", "読み込み待ち…", "pc-civitai-no-preview"));
             const title = element("strong", item.name || "—", "pc-civitai-card-title"); title.title = item.name || "—";
             const base = element("span", item.base_model || "—", "pc-civitai-card-base"); base.title = item.base_model || "—";
-            preview.append(base); card.append(preview, title, element("span", item.version_name || "—", "pc-civitai-card-version"));
+            const labels = element("div", undefined, "pc-civitai-card-labels"), owned = element("span", "✓ 所持済み", "pc-civitai-card-owned"); owned.hidden = !item.owned;
+            labels.append(owned, base); preview.append(labels); card.append(preview, title, element("span", item.version_name || "—", "pc-civitai-card-version"));
             const footer = element("div", undefined, "pc-civitai-card-footer"), summary = element("div", undefined, "pc-civitai-card-summary"), metrics = element("span", undefined, "pc-civitai-card-stats"), author = element("span", item.creator_name || "—", "pc-civitai-card-author");
             author.title = item.creator_name || "—";
             const updatedDate = item.updated_at ? new Date(item.updated_at) : null;
@@ -660,11 +690,12 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
             if (!item.image_url) observer.observe(card);
         }
         updateSelection(view);
+        void checkOwnership(view);
     }
     let searchIntent = 0;
     async function load(requested) {
         const intent = ++searchIntent, selectedHost = host.value, authSerial = authRevision;
-        searchRequest?.abort(); list.inert = false;
+        searchRequest?.abort(); ownershipRequest?.abort(); ownershipStatus.textContent = ""; list.inert = false;
         if (currentResult) { currentResult.serial = revision; observeMissingPreviews(); }
         if (!await loadOptions() || intent !== searchIntent || !gateCurrent() || selectedHost !== host.value || authSerial !== authRevision) return;
         const categories = hostOptions.get(selectedHost)?.categories || [];
@@ -673,7 +704,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         if (!gateCurrent() || (requested.host === "civitai.red" && gate !== "configured")) return;
         const serial = ++revision; detailRevision++; searchRequest = new AbortController();
         const ownsSearch = () => gateCurrent() && intent === searchIntent && selectedHost === host.value && authSerial === authRevision && serial === revision;
-        detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = false; modal.setTitle("Civitai Search"); status.textContent = "検索中…"; list.inert = true;
+        detail.replaceChildren(); detail.hidden = true; controls.hidden = false; list.hidden = false; status.hidden = ownershipStatus.hidden = false; modal.setTitle("Civitai Search"); status.textContent = "検索中…"; list.inert = true;
         try {
             const result = await requestJSON(api, `/scene_prompt/civitai/search?${new URLSearchParams(requested)}`, undefined, { signal: searchRequest.signal });
             if (!ownsSearch()) return;
@@ -683,7 +714,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         } catch (error) {
             if (ownsSearch()) {
                 status.textContent = currentResult ? "検索できませんでした。前の検索結果を表示しています。" : "検索できませんでした。";
-                if (currentResult) { currentResult.serial = serial; list.inert = false; observeMissingPreviews(); }
+                if (currentResult) { currentResult.serial = serial; list.inert = false; observeMissingPreviews(); void checkOwnership(currentResult); }
                 if (error.status === 401) {
                     setGate(requested.host === "civitai.red" ? "missing" : "configured"); let failedRevision = revision;
                     showCivitaiRequestError(error, { api, host: requested.host, query: requested.query, title: "検索に失敗しました", onStatusChanged: data => { authenticationChanged(data); failedRevision = revision; }, retryLabel: "再検索", retry: () => { setGate("configured"); void load(requested); }, isCurrent: () => gateCurrent() && intent === searchIntent && selectedHost === host.value && failedRevision === revision });
@@ -692,7 +723,7 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, activeGraph 
         }
     }
     search.onclick = () => void load(); for (const select of [sort, model, modelType, category]) select.onchange = () => void load();
-    host.onchange = () => { searchRequest?.abort(); list.inert = false; if (currentResult) currentResult.serial = revision; optionsRequest?.abort(); void checkGate(() => void load()); };
+    host.onchange = () => { searchRequest?.abort(); ownershipRequest?.abort(); ownershipStatus.textContent = ""; list.inert = false; if (currentResult) currentResult.serial = revision; optionsRequest?.abort(); void checkGate(() => void load()); };
     query.onkeydown = event => { if (event.key === "Enter") void load(); };
     query.focus();
     if (cached?.lastSuccessfulResult) {
