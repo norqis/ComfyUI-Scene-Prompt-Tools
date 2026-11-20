@@ -106,9 +106,10 @@ export async function testMatrixPresetRows(page) {
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
         app.graph.getNodeById(ids.target).flags.collapsed = true;
         const original = app.graph.serialize();
-        const originalTarget = original.nodes.find(node => String(node.id) === String(ids.target));
+        let submittedWorkflow;
         const execute = async () => {
             const graph = await app.graphToPrompt();
+            submittedWorkflow = structuredClone(graph.workflow);
             const queued = await api.queuePrompt(0, graph);
             const deadline = Date.now() + 20_000;
             while (Date.now() < deadline) {
@@ -134,6 +135,7 @@ export async function testMatrixPresetRows(page) {
             field(app.graph.getNodeById(ids.save), 'metadata_mode').value = mode;
             field(app.graph.getNodeById(ids.save), 'expand_preset_contents').value = expanded;
             let outputs = await execute();
+            const sourceTarget = submittedWorkflow.nodes.find(node => String(node.id) === String(ids.target));
             const first = outputs[String(ids.image)].text[0], firstNegative = outputs[String(ids.image)].text[1], saved = outputs[String(ids.save)].images[0];
             const blob = await (await fetch(`/view?${new URLSearchParams(saved)}`)).blob();
             const loadGraphData = app.loadGraphData;
@@ -153,8 +155,9 @@ export async function testMatrixPresetRows(page) {
             if (expanded) {
                 const root = pngWorkflow.nodes.find(node => String(node.id) === String(ids.target));
                 if (root?.type !== 'ScenePrompterMerge') throw new Error('Expanded PNG must lower the Matrix Preset rows');
-                if (JSON.stringify(root.flags) !== JSON.stringify(originalTarget.flags) || root.order !== originalTarget.order) {
-                    throw new Error('Expanded PNG must preserve the original Matrix flags and execution order');
+                if (JSON.stringify(root.flags) !== JSON.stringify(sourceTarget.flags) || root.order !== sourceTarget.order) {
+                    throw new Error(`Expanded PNG must preserve the submitted Matrix flags and execution order: ${JSON.stringify({ mode,
+                        submitted: { flags: sourceTarget.flags, order: sourceTarget.order }, saved: { flags: root.flags, order: root.order } })}`);
                 }
                 if (!pngWorkflow.nodes.some(node => node.type === 'ScenePromptRandomRouteOutput')) {
                     throw new Error('Expanded PNG must contain the generated Matrix row join');
