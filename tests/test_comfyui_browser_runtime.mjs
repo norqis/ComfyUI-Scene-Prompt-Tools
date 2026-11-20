@@ -1044,7 +1044,16 @@ window.__sceneSeedRuntimeTest = {
     await page.route('**/prompt', allowPngReplayQueue);
     nativeRunChecks = true;
     try {
-        await (await import('./scene_matrix_presets_runtime.mjs')).testMatrixPresetRows(page);
+        const matrixSchemaWarnings = [];
+        const captureMatrixSchemaWarning = message => {
+            if (/Invalid workflow against zod schema/iu.test(message.text())) matrixSchemaWarnings.push(message.text());
+        };
+        page.on('console', captureMatrixSchemaWarning);
+        try { await (await import('./scene_matrix_presets_runtime.mjs')).testMatrixPresetRows(page); }
+        finally { page.off('console', captureMatrixSchemaWarning); }
+        assert.deepEqual(matrixSchemaWarnings, [], 'Matrix Preset PNG workflows must pass native Zod validation');
+        assert(!/Invalid workflow against zod schema/iu.test(await page.locator('body').innerText()),
+            'Matrix Preset PNG loading must not leave a workflow schema warning');
         await (await import('./scene_random_png_replay.mjs')).testPresetReferenceFilenames(page);
         await (await import('./scene_random_png_replay.mjs')).testRandomPngReplay(page);
     } finally {
