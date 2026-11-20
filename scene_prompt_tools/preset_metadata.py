@@ -815,6 +815,8 @@ def _inline_matrix_presets(prompt, workflow, node_id, source_ids, state):
             names = [f"scene_prompt{number}" for number in range(1, 11)]
             widgets = []
         workflow["nodes"].append({"id": _workflow_id(new_id), "type": kind, "mode": 0,
+            "flags": copy.deepcopy(original.get("flags", {})) if key == node_id else {},
+            "order": original.get("order", 0) if key == node_id else 0,
             "title": original.get("title", "Scene Matrix") if key == node_id else copied.get("_meta", {}).get("title", kind),
             "pos": [original.get("pos", [0, 0])[0] + 180 * (index % 4), original.get("pos", [0, 0])[1] + 120 * (index // 4)],
             "size": [240, 120], "properties": {"Node name for S&R": kind}, "widgets_values": widgets,

@@ -15,12 +15,21 @@ export async function testMatrixPresetRows(page) {
             body: JSON.stringify({ preset_id: 'matrix-child', name: 'MatrixChild', output_node_id: String(output.id), api_graph: graph, workflow: graph.workflow }) });
         if (!response.ok) throw new Error(await response.text());
         app.graph.clear();
+        const passInput = add('ScenePresetInput'), passOutput = add('ScenePresetOutput');
+        link(passInput, passOutput);
+        const passthrough = await app.graphToPrompt();
+        const savedPassthrough = await fetch('/scene_presets/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ preset_id: 'matrix-schema-passthrough', name: 'MatrixSchemaPassthrough', output_node_id: String(passOutput.id),
+                api_graph: passthrough, workflow: passthrough.workflow }) });
+        if (!savedPassthrough.ok) throw new Error(await savedPassthrough.text());
+        app.graph.clear();
         const upstream = add('SceneMatrix'), target = add('SceneMatrix'), maker = add('ScenePromptMakeSwitch'), expand = add('ScenePrompterExpand');
-        const image = add('TestSceneTextImage'), save = add('SceneSaveImage');
+        const image = add('TestSceneTextImage'), save = add('SceneSaveImage'), reference = add('ScenePresetReference');
+        set(reference, 'preset_id', 'matrix-schema-passthrough');
         set(upstream, 'matrix_json', rows(['A', 'B'])); set(target, 'matrix_json', rows(['X']));
         set(maker, 'switch_values_json', '[true,false,false,false,false,false,false,false,false,false]');
         set(expand, 'timestamp_dir', false); set(expand, 'prefix', 'MATRIX');
-        link(upstream, target); link(maker, target, 'switches'); link(target, expand); link(expand, image, 'positive'); link(expand, image, 'negative', 1); link(image, save, 'images'); link(expand, save, 'scene_info', 2);
+        link(upstream, reference); link(reference, target); link(maker, target, 'switches'); link(target, expand); link(expand, image, 'positive'); link(expand, image, 'negative', 1); link(image, save, 'images'); link(expand, save, 'scene_info', 2);
         await window.__sceneSeedRuntimeTest.refreshPresetReference(target);
         target.widgets.find(widget => widget.sceneRole === 'matrix_rows').callback();
         return { target: target.id, expand: expand.id, image: image.id, save: save.id };
@@ -95,9 +104,12 @@ export async function testMatrixPresetRows(page) {
     const result = await page.evaluate(async ids => {
         const app = window.app, { api } = await import('/scripts/api.js');
         const field = (node, name) => node.widgets.find(widget => widget.name === name);
+        app.graph.getNodeById(ids.target).flags.collapsed = true;
         const original = app.graph.serialize();
+        let submittedWorkflow;
         const execute = async () => {
             const graph = await app.graphToPrompt();
+            submittedWorkflow = structuredClone(graph.workflow);
             const queued = await api.queuePrompt(0, graph);
             const deadline = Date.now() + 20_000;
             while (Date.now() < deadline) {
@@ -123,9 +135,34 @@ export async function testMatrixPresetRows(page) {
             field(app.graph.getNodeById(ids.save), 'metadata_mode').value = mode;
             field(app.graph.getNodeById(ids.save), 'expand_preset_contents').value = expanded;
             let outputs = await execute();
+            const sourceTarget = submittedWorkflow.nodes.find(node => String(node.id) === String(ids.target));
             const first = outputs[String(ids.image)].text[0], firstNegative = outputs[String(ids.image)].text[1], saved = outputs[String(ids.save)].images[0];
             const blob = await (await fetch(`/view?${new URLSearchParams(saved)}`)).blob();
-            await app.handleFile(new File([blob], 'matrix-preset.png', { type: 'image/png' }));
+            const loadGraphData = app.loadGraphData;
+            let pngWorkflow;
+            app.loadGraphData = async function (workflow, ...args) {
+                pngWorkflow = structuredClone(workflow);
+                return loadGraphData.call(this, workflow, ...args);
+            };
+            try { await app.handleFile(new File([blob], 'matrix-preset.png', { type: 'image/png' })); }
+            finally { app.loadGraphData = loadGraphData; }
+            if (!pngWorkflow) throw new Error('PNG loading did not pass its workflow to the native loader');
+            for (const node of pngWorkflow.nodes) {
+                if (!node.flags || typeof node.flags !== 'object' || Array.isArray(node.flags) || typeof node.order !== 'number') {
+                    throw new Error(`Saved PNG node ${node.id} (${node.type}) has invalid flags/order: ${JSON.stringify(node)}`);
+                }
+            }
+            if (expanded) {
+                const root = pngWorkflow.nodes.find(node => String(node.id) === String(ids.target));
+                if (root?.type !== 'ScenePrompterMerge') throw new Error('Expanded PNG must lower the Matrix Preset rows');
+                if (JSON.stringify(root.flags) !== JSON.stringify(sourceTarget.flags) || root.order !== sourceTarget.order) {
+                    throw new Error(`Expanded PNG must preserve the submitted Matrix flags and execution order: ${JSON.stringify({ mode,
+                        submitted: { flags: sourceTarget.flags, order: sourceTarget.order }, saved: { flags: root.flags, order: root.order } })}`);
+                }
+                if (!pngWorkflow.nodes.some(node => node.type === 'ScenePromptRandomRouteOutput')) {
+                    throw new Error('Expanded PNG must contain the generated Matrix row join');
+                }
+            }
             outputs = await execute();
             replay.push({ mode, expanded, first, firstNegative, second: outputs[String(ids.image)].text[0], secondNegative: outputs[String(ids.image)].text[1], filenames: [saved.filename, outputs[String(ids.save)].images[0].filename] });
         }

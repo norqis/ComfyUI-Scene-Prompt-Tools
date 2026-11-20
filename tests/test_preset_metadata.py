@@ -86,6 +86,10 @@ def workflow_node(node_id, node_type, position, inputs=(), outputs=1):
         "type": node_type,
         "pos": list(position),
         "size": [220, 120],
+        "flags": {},
+        "order": 0,
+        "mode": 0,
+        "properties": {},
         "inputs": [{"name": name, "type": "SCENE_PROMPT", "link": None} for name in inputs],
         "outputs": [{"name": "scene_prompt", "type": "SCENE_PROMPT", "links": []} for _ in range(outputs)],
         "widgets_values": [node_type],
@@ -952,6 +956,95 @@ class PresetMetadataTests(unittest.TestCase):
             ["1", "2/11", "2", "4"],
         )
         self.assertEqual(sum(node["class_type"] == "SceneMatrix" for node in saved_prompt.values()), 1)
+
+    def test_matrix_preset_workflow_nodes_keep_required_fields_and_replay_order(self):
+        child = simple_preset("child", name="inside")
+        parent = simple_preset("parent")
+        parent["api_graph"]["output"]["11"] = {
+            "class_type": "ScenePresetReference", "inputs": {"preset_id": "child", "scene_prompt": ["10", 0]}}
+        parent["workflow"]["nodes"][1]["type"] = "ScenePresetReference"
+        snapshots = {"child": child, "parent": parent}
+        for nested, preset_rows in ((False, 1), (False, 2), (True, 2)):
+            with self.subTest(nested=nested, preset_rows=preset_rows):
+                rows = [{"row_id": "normal", "name": "normal", "path_label": "normal", "positive_base": "normal"}]
+                rows.extend({"row_id": f"preset-{index}", "name": f"row-{index}", "path_label": f"row-{index}",
+                             "row_kind": "preset", "preset_id": "parent" if nested else "child"}
+                            for index in range(preset_rows))
+                prompt = {"1": scene_prompt("outside"),
+                    "4": {"class_type": "SceneMatrix", "inputs": {
+                        "scene_prompt": ["1", 0], "matrix_json": json.dumps({"version": 1, "sets": rows})}},
+                    "8": {"class_type": "ScenePrompterExpand", "inputs": {"scene_prompt": ["4", 0]}},
+                    "9": {"class_type": "SceneSaveImage", "inputs": {"scene_info": ["8", 2]}}}
+                workflow = outer_workflow(prompt)
+                original = next(node for node in workflow["nodes"] if node["id"] == 4)
+                original.update(flags={"collapsed": True, "pinned": True}, order=37)
+                before = copy.deepcopy((prompt, workflow, snapshots))
+                runtime = self.presets._scene_node_value(prompt, "4", snapshots, set())
+                expanded, saved, _aliases = self.metadata_module.expand_preset_references(prompt, workflow, snapshots)
+                self.assertEqual((prompt, workflow, snapshots), before)
+                self.assertFalse(any(node["class_type"] == "ScenePresetReference" for node in expanded.values()))
+                for node in saved["nodes"]:
+                    for field in ("id", "type", "pos", "size", "flags", "order", "mode", "properties"):
+                        self.assertIn(field, node, (node["id"], field))
+                    self.assertIn(type(node["id"]), (int, str))
+                    self.assertIsInstance(node["type"], str)
+                    for field in ("pos", "size"):
+                        self.assertIsInstance(node[field], list)
+                        self.assertEqual(len(node[field]), 2)
+                        self.assertTrue(all(type(value) in (int, float) for value in node[field]))
+                    self.assertIsInstance(node["flags"], dict)
+                    self.assertIn(type(node["order"]), (int, float))
+                    self.assertIn(type(node["mode"]), (int, float))
+                    self.assertIsInstance(node["properties"], dict)
+                root = next(node for node in saved["nodes"] if node["id"] == 4)
+                self.assertEqual(root["flags"], original["flags"])
+                self.assertIsNot(root["flags"], original["flags"])
+                self.assertEqual(root["order"], 37)
+                generated = [node for node in saved["nodes"] if str(node["id"]) not in prompt]
+                self.assertTrue(generated)
+                for node in generated:
+                    self.assertEqual(node["flags"], {})
+                    self.assertEqual(node["order"], 0)
+                root["flags"]["collapsed"] = False
+                self.assertTrue(original["flags"]["collapsed"])
+                for node in workflow["nodes"]:
+                    if node["id"] != 4:
+                        copied = next(item for item in saved["nodes"] if item["id"] == node["id"])
+                        for field in ("flags", "order", "pos", "size", "widgets_values"):
+                            self.assertEqual(copied[field], node[field])
+                saved_nodes = {str(node["id"]): node for node in saved["nodes"]}
+                for link_id, source, source_slot, target, target_slot, _kind in saved["links"]:
+                    self.assertIn(link_id, saved_nodes[str(source)]["outputs"][source_slot]["links"])
+                    self.assertEqual(saved_nodes[str(target)]["inputs"][target_slot]["link"], link_id)
+                replay = self.presets._scene_node_value(expanded, "4", {}, set())
+                expected = ["outside, normal", *("outside, inside" for _ in range(preset_rows))]
+                for plan in (runtime, replay):
+                    self.assertEqual(plan["stats"]["total_batches"], len(expected))
+                    self.assertEqual([self.nodes.ScenePromptExpand().expand(scene_prompt=plan, current_index=index)[0]
+                                      for index in range(len(expected))], expected)
+
+    def test_matrix_lowering_copies_replaced_root_flags_and_defaults_missing_fields(self):
+        matrix = {"class_type": "SceneMatrix", "inputs": {"matrix_json": json.dumps({"version": 1,
+            "sets": [{"row_id": "preset", "name": "preset", "path_label": "preset", "row_kind": "preset", "preset_id": "child"}]})}}
+        for flags, order in (({"collapsed": True}, 37), (None, None)):
+            with self.subTest(flags=flags):
+                prompt = {"4": copy.deepcopy(matrix)}
+                workflow = outer_workflow(prompt)
+                original = workflow["nodes"][0]
+                if flags is None:
+                    original.pop("flags")
+                    original.pop("order")
+                else:
+                    original.update(flags=flags, order=order)
+                state = {"inserted": set(), "physical_links": []}
+                self.assertTrue(self.metadata_module._inline_matrix_presets(prompt, workflow, "4", {}, state))
+                root = next(node for node in workflow["nodes"] if node["id"] == 4)
+                self.assertEqual(root["flags"], flags or {})
+                self.assertEqual(root["order"], order or 0)
+                self.assertIsNot(root["flags"], flags)
+                root["flags"]["collapsed"] = False
+                if flags is not None:
+                    self.assertTrue(flags["collapsed"])
 
     def test_nested_and_repeated_references_have_distinct_nodes(self):
         child = simple_preset("child", name="child")
