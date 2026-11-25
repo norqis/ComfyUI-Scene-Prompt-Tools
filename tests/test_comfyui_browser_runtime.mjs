@@ -3822,8 +3822,13 @@ window.__sceneSeedRuntimeTest = {
     nativeDownloadName = nestedFixture.lora_name.replaceAll('\\','/');
     const originalCandidateHash=runtimeCandidate.sha256, originalCandidateSize=runtimeCandidate.size_kb;
     runtimeCandidate.sha256=nestedFixture.sha256;runtimeCandidate.size_kb=nestedFixture.size_kb;
+    const nativeOwnedCatalog=await nativeBodyRequest('/scene_prompt/loras/list');
+    const nestedOwnedFile=nativeOwnedCatalog.find(item=>item.path.replaceAll('\\','/')===nestedFixture.lora_name.replaceAll('\\','/'));
+    assert(nestedOwnedFile,'native catalog contains the renamed nested Unicode file');
+    assert.equal(typeof nestedOwnedFile.file_revision,'string');
+    assert(nestedOwnedFile.file_revision.length>0,'native catalog exposes the exact file revision');
     const nativeOwned=await nativeBodyRequest('/scene_prompt/civitai/owned',{items:[{sha256:nestedFixture.sha256,size_kb:nestedFixture.size_kb}]});
-    assert.deepEqual(nativeOwned.items,[{sha256:nestedFixture.sha256,owned:true,lora_name:nestedFixture.lora_name}],'real local endpoint finds a renamed nested Unicode file');
+    assert.deepEqual(nativeOwned.items,[{sha256:nestedFixture.sha256,owned:true,lora_name:nestedFixture.lora_name,file_revision:nestedOwnedFile.file_revision}],'real local endpoint finds the exact renamed nested Unicode file and catalog revision');
     const nestedNode = await page.evaluate(async()=>{
         const {app}=await import('/scripts/app.js');app.graph.clear();
         const lora=window.LiteGraph.createNode('SceneApplyLora');app.graph.add(lora);
@@ -3833,10 +3838,10 @@ window.__sceneSeedRuntimeTest = {
     await page.getByRole('dialog',{name:'LoRAを選択',exact:true}).getByRole('button',{name:'Civitai Search',exact:true}).click();
     const nestedSearch=page.locator('.pc-civitai-search-dialog');
     const ownedCard=nestedSearch.locator('.pc-civitai-card').first();await ownedCard.locator('.pc-civitai-card-owned').waitFor({state:'visible'});
-    assert.match(await ownedCard.getAttribute('aria-label'),/所持済み/);
+    assert.match(await ownedCard.getAttribute('aria-label'),/取得済み/);
     assert.equal(await ownedCard.evaluate(card=>card.classList.contains('pc-lora-selected')),false,'native ownership never applies a LoRA');
-    const ownedLayout=await ownedCard.evaluate(card=>{const badge=card.querySelector('.pc-civitai-card-owned').getBoundingClientRect(),base=card.querySelector('.pc-civitai-card-base').getBoundingClientRect(),preview=card.querySelector('.pc-civitai-card-preview').getBoundingClientRect();return {left:badge.left===preview.left,top:badge.top===preview.top,separate:base.top>=badge.bottom};});
-    assert.deepEqual(ownedLayout,{left:true,top:true,separate:true});
+    const ownedLayout=await ownedCard.evaluate(card=>{const badge=card.querySelector('.pc-civitai-card-owned').getBoundingClientRect(),base=card.querySelector('.pc-civitai-card-base').getBoundingClientRect(),preview=card.querySelector('.pc-civitai-card-preview').getBoundingClientRect();return {right:badge.right===preview.right,top:badge.top===preview.top,baseLeft:base.left===preview.left&&base.top===preview.top,separate:base.right<=badge.left};});
+    assert.deepEqual(ownedLayout,{right:true,top:true,baseLeft:true,separate:true});
     await page.screenshot({path:resolve(screenshotDirectory,'native-owned-renamed.png')});
     await ownedCard.click();
     await nestedSearch.getByRole('button',{name:'取得',exact:true}).click();
