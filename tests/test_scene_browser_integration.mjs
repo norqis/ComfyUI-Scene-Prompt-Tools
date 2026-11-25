@@ -180,6 +180,7 @@ export const api = {
   fetchApi: async (url, options = {}) => {
     calls.push({ url, options });
     if (url.startsWith("/scene_prompt/civitai/")) return fetch(url, options);
+    if (url === "/scene_prompt/loras/delete") return fetch(url, options);
     if (url === "/scene_prompt/loras/list" && window.__delayNextSceneLoraList) {
       window.__delayNextSceneLoraList = false;
       await new Promise((resolveDelay) => { releaseDelayedLoraList = resolveDelay; });
@@ -1595,7 +1596,21 @@ try {
     await loraDialog.getByRole('button',{name:'Civitai で確認',exact:true}).click();
     const remoteDetail=page.getByRole('dialog',{name:'Civitai Detail',exact:true});
     await remoteDetail.getByRole('button',{name:'選択する',exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector('.pc-civitai-select').disabled);
     assert.equal(await page.evaluate(()=>JSON.stringify(window.__sceneLoraTestNode.serialize().widgets_values)),bridgeBefore,'actual local Detail selection preserves prompt widgets');
+    const selectionHistory=await page.evaluate(()=>window.__scenePromptUndoHistoryWorkflows.activeWorkflow.changeTracker.undoQueue.length);
+    await page.evaluate(()=>window.__delayNextSceneLoraList=true);
+    await remoteDetail.getByRole('button',{name:'選択する',exact:true}).click();await page.waitForFunction(()=>window.__sceneLoraListDelayed());
+    await page.evaluate(()=>{window.__sceneLoraTestNode.widgets.find(w=>w.name==='lora_name').value='folder/other.safetensors';window.__releaseSceneLoraList();});
+    await remoteDetail.getByRole('status').filter({hasText:'選択対象またはLoRAファイルが変わりました'}).waitFor();
+    assert.equal(await page.evaluate(()=>window.__scenePromptUndoHistoryWorkflows.activeWorkflow.changeTracker.undoQueue.length),selectionHistory,'standalone selection rechecks the node after catalog refresh');
+    await page.evaluate(()=>window.__sceneLoraTestNode.widgets.find(w=>w.name==='lora_name').value='style.safetensors');
+    await page.evaluate(()=>window.__sceneLoraCatalog[0].file_revision='replaced-with-same-name');
+    await remoteDetail.getByRole('button',{name:'選択する',exact:true}).click();
+    await remoteDetail.getByRole('status').filter({hasText:'LoRAファイルが変わりました'}).waitFor();
+    assert.equal(await page.evaluate(()=>JSON.stringify(window.__sceneLoraTestNode.serialize().widgets_values)),bridgeBefore,'fresh catalog rejects a replaced physical file before selection');
+    assert.equal(await page.evaluate(()=>window.__scenePromptUndoHistoryWorkflows.activeWorkflow.changeTracker.undoQueue.length),selectionHistory,'stale standalone selection creates no Undo');
+    await page.evaluate(()=>window.__sceneLoraCatalog[0].file_revision='style-revision');
     await remoteDetail.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     assert.equal(await loraDialog.isVisible(),true,'standalone Back restores the local details');
     await loraDialog.getByRole('button',{name:'Civitai で確認',exact:true}).click();
@@ -1609,6 +1624,47 @@ try {
     assert.equal(await authorSearch.getByRole('combobox',{name:'検索対象',exact:true}).inputValue(),'Users');
     assert.equal(await authorSearch.getByRole('searchbox',{name:'検索語'}).inputValue(),'Author 名前 "literal"');
     await page.keyboard.press('Escape');
+    // A completed filesystem deletion refreshes global caches even after the owning graph/node goes stale.
+    for (const mode of ['graph','node']) {
+        const path=`deferred-delete-${mode}.safetensors`;
+        await page.evaluate(path=>{
+            window.__sceneLoraCatalog.push({path,size:100,mtime_ns:1,file_revision:'delete-revision'});
+            window.__deleteNode=window.__sceneLoraTestNode;window.__deleteGraph=window.app.graph;window.__deleteNodes=[...window.app.graph._nodes];
+            window.__deletePreviousLora=window.__deleteNode.widgets.find(w=>w.name==='lora_name').value;
+            window.__deleteNode.widgets.find(w=>w.name==='lora_name').value=path;
+            window.__deleteNode.widgets.find(w=>w.sceneRole==='lora_details').callback();
+        },path);
+        await loraDialog.getByRole('button',{name:'Civitai で確認',exact:true}).waitFor();
+        await loraDialog.getByText('Selected version notes',{exact:true}).waitFor();
+        assert.equal(await page.evaluate(path=>JSON.parse(localStorage.getItem('scene_prompt_lora_names_v1')).some(entry=>entry.path===path),path),true,'deletion fixture has cached metadata before deletion');
+        const pendingDeletion=page.waitForRequest(request=>request.url().endsWith('/loras/delete'));
+        let releaseDeletion;
+        const deletionReply=new Promise(resolve=>releaseDeletion=resolve);
+        await page.route('**/scene_prompt/loras/delete',async route=>{await deletionReply;return route.fulfill({json:{deleted:path,items:await page.evaluate(()=>window.__sceneLoraCatalog)}});},{times:1});
+        await loraDialog.getByRole('button',{name:'削除',exact:true}).click();
+        const deletion=page.getByRole('dialog',{name:'LoRAを削除',exact:true});await deletion.getByRole('button',{name:'削除',exact:true}).click();
+        await pendingDeletion;
+        const beforeDeleteUI=await loraDialog.locator('.pc-lora-content').innerHTML();
+        await page.evaluate(({mode,path})=>{
+            const node=window.__deleteNode;
+            window.__deleteOriginalState=JSON.stringify(node.widgets.map(({name,value,options})=>({name,value,options})));
+            window.__deleteRenderCalls=0;node.sceneLoraPickerRender=()=>window.__deleteRenderCalls++;
+            window.__deleteOtherNode={id:node.id,graph:window.__deleteGraph,widgets:[{name:'lora_name',value:'other.safetensors',options:{values:['other.safetensors']}}]};
+            if(mode==='graph')window.app.graph={_nodes:[window.__deleteOtherNode],getNodeById(id){return this._nodes.find(node=>node.id===id);}};
+            else window.__deleteGraph._nodes=window.__deleteNodes.map(entry=>entry===node?window.__deleteOtherNode:entry);
+            window.__sceneLoraCatalog.splice(window.__sceneLoraCatalog.findIndex(entry=>entry.path===path),1);
+        },{mode,path});
+        releaseDeletion();await deletion.waitFor({state:'detached'});
+        assert.equal(await page.evaluate(()=>JSON.stringify(window.__deleteNode.widgets.map(({name,value,options})=>({name,value,options})))===window.__deleteOriginalState),true,`${mode} change prevents old-node widget updates`);
+        assert.deepEqual(await page.evaluate(()=>window.__deleteOtherNode.widgets),[{name:'lora_name',value:'other.safetensors',options:{values:['other.safetensors']}}]);
+        assert.equal(await page.evaluate(()=>window.__deleteRenderCalls),0,'stale picker is not rerendered');
+        assert.equal(await loraDialog.locator('.pc-lora-content').innerHTML(),beforeDeleteUI,'stale detail body stays unchanged');
+        assert.equal(await page.evaluate(path=>JSON.parse(localStorage.getItem('scene_prompt_lora_names_v1')).some(entry=>entry.path===path),path),false,'global metadata cache still removes the deleted file');
+        await page.evaluate(()=>{
+            window.app.graph=window.__deleteGraph;window.__deleteGraph._nodes=window.__deleteNodes;window.__deleteNode.sceneLoraPickerRender=null;
+            window.__deleteNode.sceneLoraDetailsCleanup();window.__deleteNode.widgets.find(w=>w.name==='lora_name').value=window.__deletePreviousLora;
+        });
+    }
     await page.evaluate(()=>window.__sceneLoraTestNode.widgets.find(widget=>widget.sceneRole==='lora_details').callback());
     await loraDialog.getByRole('button',{name:'Civitai で確認',exact:true}).waitFor();
     await loraDialog.getByText("Selected version notes", { exact: true }).waitFor();
@@ -1646,8 +1702,8 @@ try {
     assert.equal(await page.evaluate(() => localStorage.getItem("scene_prompt_lora_names_v1").includes("Selected version notes")), false);
     assert.equal(await loraDialog.getByRole("button", { name: "Civitai で確認" }).count(), 1);
     assert.equal(await loraDialog.locator(".pc-lora-word").count(), 5, "local and Civitai words are deduplicated");
-    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), loraInfoCalls,
-        "details reuse the selected LoRA cache");
+    assert.equal(await page.evaluate(() => window.__scenePromptCalls.filter((call) => call.url.startsWith("/scene_prompt/loras/info?")).length), loraInfoCalls + 3,
+        "only the changed file revision and two new deletion fixtures require fresh metadata");
     const injectWord = async (word) => loraDialog.locator(".pc-lora-word")
         .filter({ has: page.locator("span").filter({ hasText: new RegExp(`^${word}$`, "i") }) })
         .getByRole("button", { name: "注入" }).click();

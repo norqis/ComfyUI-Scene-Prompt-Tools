@@ -364,7 +364,7 @@ export function openCivitaiDelete({ api, item, owner, onDeleted, isCurrent = () 
         modal.setBusy(true); owner?.setBusy(true);
         try {
             const result = await requestJSON(api, "/scene_prompt/loras/delete", { name: item.path, file_revision: item.file_revision });
-            await onDeleted(result);
+            await onDeleted(result, isCurrent);
             modal.setBusy(false); owner?.setBusy(false); modal.dismiss();
         } catch (error) { status.textContent = error.message; }
         finally { modal.setBusy(false); owner?.setBusy(false); }
@@ -460,8 +460,9 @@ function renderCivitaiDetail({ container, item, host, scope, api, onAuthor, onSe
     updateSelection(); actions.append(select, remove, source); container.append(actions, selectionStatus);
     return updateSelection;
 }
-export function openCivitaiDetail({ api, modelID, versionID, host = "civitai.red", onAuthor, onSelect, onDeleted, localItem }) {
+export function openCivitaiDetail({ api, modelID, versionID, host = "civitai.red", onAuthor, onSelect, onDeleted, localItem, isCurrent = () => true }) {
     const request = new AbortController(), scope = galleryScope(api);
+    const current = () => !request.signal.aborted && isCurrent();
     const modal = openModal("Civitai Detail", () => { request.abort(); scope.close(); });
     modal.dialog.classList.add("pc-civitai-detail-dialog");
     const back = element("button", "戻る", "pc-button"); back.type = "button"; back.onclick = modal.dismiss; modal.head.prepend(back); back.focus();
@@ -473,9 +474,9 @@ export function openCivitaiDetail({ api, modelID, versionID, host = "civitai.red
             if (request.signal.aborted) return;
             const detailItem = { ...item, lora_name: localItem?.path, file_revision: localItem?.file_revision, local_file: localItem };
             const update = renderCivitaiDetail({ container, item: detailItem, host, scope, api, onSelect,
-                onDelete: onDeleted && (() => openCivitaiDelete({ api, item: localItem, owner: modal, isCurrent: () => !request.signal.aborted,
-                    onDeleted: async result => { await onDeleted(result); detailItem.lora_name = ""; detailItem.local_file = null; detailItem.deleted = true; update(); } })),
-                onAuthor: onAuthor && (author => { modal.dismiss(); onAuthor(author, host); }), isCurrent: () => !request.signal.aborted });
+                onDelete: onDeleted && (() => openCivitaiDelete({ api, item: localItem, owner: modal, isCurrent: current,
+                    onDeleted: async (result, ownsUI) => { await onDeleted(result, ownsUI); if (!ownsUI()) return; detailItem.lora_name = ""; detailItem.local_file = null; detailItem.deleted = true; update(); } })),
+                onAuthor: onAuthor && (author => { modal.dismiss(); onAuthor(author, host); }), isCurrent: current });
         } catch (error) {
             if (request.signal.aborted) return;
             container.replaceChildren(element("p", error.message));
@@ -652,9 +653,11 @@ export function openCivitaiSearch({ node, api, refresh, onAcquired, getCatalog, 
             },
             onDelete: onDeleted && (() => {
                 if (!ownsAction() || !item.local_file || item.local_file.file_revision !== item.file_revision) return;
-                const local = item.local_file;
-                openCivitaiDelete({ api, item: local, owner: modal, isCurrent: ownsAction, onDeleted: async result => {
-                    await onDeleted(node, result);
+                const local = item.local_file, graph = node.graph;
+                const current = () => ownsAction() && activeGraph() === graph && node.graph === graph && graph.getNodeById(node.id) === node;
+                openCivitaiDelete({ api, item: local, owner: modal, isCurrent: current, onDeleted: async (result, ownsUI) => {
+                    await onDeleted(node, result, ownsUI);
+                    if (!ownsUI()) return;
                     item.local_file = null; item.owned = item.acquired = false; item.lora_name = ""; item.file_revision = ""; item.deleted = true;
                     updateSelection(view); saveView(); if (ownsView(view)) void checkOwnership(view);
                 } });

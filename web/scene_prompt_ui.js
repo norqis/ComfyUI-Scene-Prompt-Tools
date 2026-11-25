@@ -5403,14 +5403,16 @@ function sceneLoraCacheKey(item) {
     return `${sceneLoraPathIdentity(item.path || item.name)}\u0000${item.size ?? ""}\u0000${item.mtime_ns ?? ""}${item.file_revision ? `\u0000${item.file_revision}` : ""}`;
 }
 
-function applySceneLoraDeletion(node, result) {
+function applySceneLoraDeletion(node, result, isCurrent = () => true) {
     sceneLoraCatalogRevision++;
     sceneLoraCatalog = result.items;
     reconcileSceneLoraTitles(sceneLoraCatalog);
+    if (!isCurrent()) return false;
     const widget = findWidget(node, "lora_name");
     if (widget?.options) widget.options.values = sceneLoraCatalog.map(item => item.path);
     syncSceneLoraSelectLabel(node);
     node.sceneLoraPickerRender?.();
+    return true;
 }
 
 function readSceneLoraCache() {
@@ -5806,8 +5808,9 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
     localActions.className = "pc-civitai-detail-actions"; localStatus.setAttribute("role", "status"); dialog.insertBefore(localActions, content); dialog.insertBefore(localStatus, content);
     const graph = node.graph;
     const ownsLocal = () => node.sceneLoraDetailsCleanup === cleanup && app.graph === graph && node.graph === graph && graph?.getNodeById(node.id) === node;
-    const deletedLocal = result => {
-        applySceneLoraDeletion(node, result); descriptionRequest.abort();
+    const deletedLocal = (result, isCurrent = ownsLocal) => {
+        if (!applySceneLoraDeletion(node, result, () => isCurrent() && ownsLocal())) return;
+        descriptionRequest.abort();
         localActions.replaceChildren(); content.replaceChildren(); localStatus.textContent = "ローカルのLoRAを削除しました。選択中のファイル名は変更していません。";
     };
     let resultIdentity;
@@ -5868,14 +5871,19 @@ async function openSceneLoraDetails(node, previewItem = null, returnFocus = docu
             link.textContent = "Civitai で確認";
             link.onclick = () => {
                 const graph = node.graph, selected = findWidget(node, "lora_name")?.value;
-                openCivitaiDetail({ api, modelID: Number(result.modelId), versionID: Number(result.versionId), localItem: item, onDeleted: deletedLocal,
+                openCivitaiDetail({ api, modelID: Number(result.modelId), versionID: Number(result.versionId), localItem: item, onDeleted: deletedLocal, isCurrent: ownsLocal,
                     onAuthor: (author, host) => { closeSceneLoraDetails(node); closeSceneLoraPicker(node); openSceneCivitaiSearch(node, { search_type: "Users", query: author, host }); },
-                    onSelect: () => {
-                        if (app.graph !== graph || node.graph !== graph || graph?.getNodeById(node.id) !== node
-                            || findWidget(node, "lora_name")?.value !== selected || !currentSceneLoraResult(item, result)) throw new Error("選択対象またはLoRAファイルが変わりました。詳細を開き直してください。");
+                    onSelect: async () => {
+                        const current = () => app.graph === graph && node.graph === graph && graph?.getNodeById(node.id) === node
+                            && findWidget(node, "lora_name")?.value === selected && currentSceneLoraResult(item, result);
+                        if (!current()) throw new Error("選択対象またはLoRAファイルが変わりました。詳細を開き直してください。");
+                        const catalog = await loadSceneLoraCatalog();
+                        if (!current()) throw new Error("選択対象またはLoRAファイルが変わりました。詳細を開き直してください。");
+                        const local = catalog.find(entry => sceneLoraPathIdentity(entry.path) === sceneLoraPathIdentity(item.path));
+                        if (!item.file_revision || local?.file_revision !== item.file_revision) throw new Error("LoRAファイルが更新されました。詳細を開き直してください。");
                         const widget = findWidget(node, "lora_name");
-                        const nativeName = (widget?.options?.values || []).find(name => sceneLoraPathIdentity(name) === sceneLoraPathIdentity(item.path));
-                        if (!nativeName) throw new Error("LoRAファイルが見つかりません。再表示してください。");
+                        if (widget?.options) widget.options.values = catalog.map(entry => entry.path);
+                        const nativeName = local.path;
                         beginSceneGraphChange(graph); try { widget.value = nativeName; } finally { endSceneGraphChange(graph); }
                         syncSceneLoraSelectLabel(node); clearSceneComputedCaches(node); refreshDownstreamSceneNodes(node);
                     } });

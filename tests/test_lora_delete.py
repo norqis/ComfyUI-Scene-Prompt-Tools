@@ -2,7 +2,7 @@
 import concurrent.futures
 from contextlib import contextmanager
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import tempfile
 import threading
 import unittest
@@ -103,7 +103,7 @@ class DeleteLoraTests(unittest.TestCase):
         for name, revision in ((None, "x"), ("", "x"), ([], "x"), (target.name, None),
                 (target.name, ""), ("../selected.safetensors", "x"),
                 ("nested/../selected.safetensors", "x"), (str(target), "x"),
-                ("C:\\selected.safetensors", "x"), ("C:selected.safetensors", "x"),
+                (str(PureWindowsPath("C:") / "/selected.safetensors"), "x"), ("C:selected.safetensors", "x"),
                 ("\\selected.safetensors", "x"), ("/selected.safetensors", "x")):
             with self.subTest(name=name, revision=revision), \
                     mock.patch.object(folder_paths, "get_full_path", side_effect=AssertionError("invalid resolution")):
