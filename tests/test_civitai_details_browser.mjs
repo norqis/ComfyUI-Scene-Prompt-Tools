@@ -24,8 +24,9 @@ const server = http.createServer(async (request, response) => {
             window.calls.push({path,body:options.body?JSON.parse(options.body):null});
             const url=new URL(path,'http://fixture'), body=options.body?JSON.parse(options.body):{}, reply=(data,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(data)});
             if(url.pathname.endsWith('/directories'))return reply({directories:['','a','a/b','c','c/local','c/local/bin','c/local/lib','llm',...Array.from({length:20},(_,i)=>'z'+String(i).padStart(2,'0'))]});
+            if(url.pathname.endsWith('/delete')){window.deleteCalls=(window.deleteCalls||0)+1;if(window.deferDelete){window.deferDelete=false;await new Promise(done=>window.releaseDelete=done);}if(window.failDelete)return reply({error:'file changed'},409);window.deletedPaths=[...(window.deletedPaths||[]),body.name];window.ownedItems=(window.ownedItems||[]).filter(id=>'folder/'+id+'.safetensors'!==body.name);return reply({deleted:body.name,items:window.catalog()});}
             if(url.pathname.endsWith('/owned')){
-                const matches=body.items.filter(item=>window.acquiredItems||(window.ownedItems||[]).includes(parseInt(item.sha256,16))).map(item=>({sha256:item.sha256,owned:true,lora_name:window.hiddenOwned===parseInt(item.sha256,16)?'':'folder/'+parseInt(item.sha256,16)+'.safetensors'}));
+                const matches=body.items.filter(item=>window.acquiredItems||(window.ownedItems||[]).includes(parseInt(item.sha256,16))).map(item=>({sha256:item.sha256,owned:true,file_revision:'revision-'+parseInt(item.sha256,16),lora_name:window.hiddenOwned===parseInt(item.sha256,16)?'':window.ownedNames?.[parseInt(item.sha256,16)]||'folder/'+parseInt(item.sha256,16)+'.safetensors'}));
                 window.ownershipSignals||=[];window.ownershipSignals.push(options.signal);
                 if(window.deferOwned){window.deferOwned=false;await new Promise(done=>window.releaseOwned=done);}
                 if(window.failOwned)return reply({error:'ownership offline'},500);
@@ -53,6 +54,7 @@ const server = http.createServer(async (request, response) => {
                 return reply({image:preview(Number(url.searchParams.get('image_id'))),resources:[{name:'Resource <img src=x onerror=window.injected=true>',type:'LORA',strength:0.7,url:'https://civitai.red/models/1'}],prompt:'positive only <script>text<'+'/script>',negative_prompt:'negative separate',tags:['public tag',{name:'named <script>tag<'+'/script>'},{bad:'skip'},7],other:{workflow:{nodes:[{id:1}]},width:600,height:800,createdAt:'2026-11-15',seed:0,sampler:'Euler',steps:20,cfgScale:0,user:'excluded',url:'excluded'},partial:false});
             }
             if(url.pathname.endsWith('/details')&&window.failDetailAuth)return reply({error:'Details authentication required',code:'civitai_auth_required'},401);
+            if(url.pathname.endsWith('/details')&&window.deferDetails){window.deferDetails=false;await new Promise(done=>window.releaseDetails=done);}
             if(url.pathname.endsWith('/details'))return reply({...candidate(1,''),gallery:[preview(101)],image_url:image});
             if(url.pathname.endsWith('/auth/clear')){window.authenticated=false;return reply({configured:false,username:''});}
             if(url.pathname.endsWith('/auth')){
@@ -68,14 +70,15 @@ const server = http.createServer(async (request, response) => {
                 if(!window.authenticated)return reply({error:'Authentication required',code:'civitai_auth_required'},401);
                 if(window.fileExists&&body.existing_action==='ask')return reply({error:'既に存在します。再取得しますか？',code:'civitai_file_exists',existing_name:(body.directory?body.directory+'/':'')+'fixture.safetensors'},409);
                 if(window.fileExists&&body.existing_action==='select'&&window.existingDifferent)return reply({candidate:null,lora_name:body.existing_name});
-                return reply({candidate:candidate(body.model_id,''),lora_name:(body.directory?body.directory+'/':'')+'fixture.safetensors'});
+                window.ownedItems=[...new Set([...(window.ownedItems||[]),body.model_id])];window.ownedNames||={};window.ownedNames[body.model_id]=(body.directory?body.directory+'/':'')+'fixture.safetensors';return reply({candidate:candidate(body.model_id,''),lora_name:(body.directory?body.directory+'/':'')+'fixture.safetensors'});
             }
             throw new Error('Unexpected API '+path);
         }};
         const events=new EventTarget(); window.api.clientId="fixture-client"; window.progressListeners=new Set(); window.api.addEventListener=(name,listener)=>{window.progressListeners.add(listener);events.addEventListener(name,listener);}; window.api.removeEventListener=(name,listener)=>{window.progressListeners.delete(listener);events.removeEventListener(name,listener);}; window.progress=data=>events.dispatchEvent(new CustomEvent("scene_prompt_civitai_download_progress",{detail:data}));
-        window.open=()=>window.current=openCivitaiSearch({node:window.node,api:window.api,activeGraph:()=>window.graph,onAcquired:()=>{window.catalogRefresh=(window.catalogRefresh||0)+1;}});
+        window.catalog=()=>Array.from({length:30},(_,index)=>({path:window.ownedNames?.[index+1]||'folder/'+(index+1)+'.safetensors',file_revision:window.catalogRevision||'revision-'+(index+1)})).filter(item=>!(window.deletedPaths||[]).includes(item.path));
+        window.open=()=>window.current=openCivitaiSearch({node:window.node,api:window.api,activeGraph:()=>window.graph,getCatalog:async()=>window.catalog(),onDeleted:async(_node,result)=>{window.deletedPaths=[...(window.deletedPaths||[]),result.deleted];window.node.widgets.find(widget=>widget.name==='lora_name').options={values:result.items.map(item=>item.path)};},onAcquired:async(target,downloaded,current)=>{window.catalogRefresh=(window.catalogRefresh||0)+1;if(window.deferCatalog){window.deferCatalog=false;await new Promise(done=>window.releaseCatalog=done);}if(!current())return;const catalog=window.catalog();if(!downloaded.candidate)window.node.widgets.find(widget=>widget.name==='lora_name').options={values:catalog.map(item=>item.path.replaceAll('/','\\\\'))};return catalog;}});
         window.local=()=>window.localParent=openModal('LoRA 詳細確認');
-        window.detail=()=>openCivitaiDetail({api:window.api,modelID:1,versionID:11});
+        window.detail=(callbacks={})=>openCivitaiDetail({api:window.api,modelID:1,versionID:11,...callbacks});
         window.noID=()=>openCivitaiImage({api:window.api,preview:{url:image,width:600,height:800,createdAt:'preview date',meta:{width:null,height:0,createdAt:null,seed:0,steps:{bad:1},workflow:{nodes:[]},meta:{seed:null},prompt:'fallback positive',negativePrompt:'fallback negative',resources:[{name:'untrusted',url:'javascript:window.injected=true'},{model:{id:4,name:'safe resource'},modelVersionId:12,id:13},{modelId:5,id:14},{modelId:6,modelVersionId:'15',id:16},{modelId:7,modelVersionId:0},{modelId:8,modelVersionId:-1},{modelId:9,modelVersionId:2.5},{modelId:10,modelVersionId:null,id:20},{modelId:11,modelVersionId:9007199254740992}]}},index:9,host:'civitai.red'});
         document.querySelector('#launch').onclick=window.open;window.ready=true;
     </script></body>`);
@@ -100,7 +103,7 @@ async function verifyOwnership() {
     await page.evaluate(()=>{window.focusedOwned=document.activeElement;window.firstOwned=document.querySelector('.pc-civitai-card');window.releaseOwned();});
     await badges.first().waitFor();
     assert.equal(await badges.count(),2);
-    assert.match(await cards.first().getAttribute('aria-label'),/所持済み/);
+    assert.match(await cards.first().getAttribute('aria-label'),/取得済み/);
     assert.equal(await cards.first().evaluate(card=>card===window.firstOwned),true,'ownership updates the existing card');
     assert.equal(await page.evaluate(()=>document.activeElement===window.focusedOwned),true,'ownership preserves keyboard focus');
     assert.equal(await cards.first().evaluate(card=>card.classList.contains('pc-lora-selected')),true);
@@ -113,8 +116,8 @@ async function verifyOwnership() {
             const rect=node=>{const r=node.getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom};};
             return {preview:rect(card.querySelector('.pc-civitai-card-preview')),badge:rect(card.querySelector('.pc-civitai-card-owned')),base:rect(card.querySelector('.pc-civitai-card-base')),overflow:card.scrollWidth>card.clientWidth};
         });
-        assert.equal(geometry.badge.left,geometry.preview.left); assert.equal(geometry.badge.top,geometry.preview.top);
-        assert(geometry.base.top>=geometry.badge.bottom,'base model label sits below the owned badge'); assert.equal(geometry.overflow,false);
+        assert.equal(geometry.badge.right,geometry.preview.right); assert.equal(geometry.badge.top,geometry.preview.top);
+        assert.equal(geometry.base.top,geometry.preview.top); assert(geometry.base.right<=geometry.badge.left,'base and ownership badges never overlap'); assert.equal(geometry.overflow,false);
         await page.screenshot({path:resolve(screenshots,`owned-${width}.png`)});
     }
     await page.setViewportSize({width:1600,height:1000});
@@ -184,8 +187,75 @@ async function verifyOwnership() {
     assert.deepEqual(errors,[]);
     await page.close();
 }
+async function verifyAuthorSelectionAndDeletion() {
+    const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(() => window.ready);
+    await page.evaluate(() => { window.galleryDelay=false;window.deferOwned=true;window.ownedItems=[1,2];window.hiddenOwned=2;window.open(); });
+    const search=page.locator('.pc-civitai-search-dialog'), cards=search.locator('.pc-civitai-card'), head=search.locator('.pc-lora-head'), detail=search.locator('.pc-civitai-detail');
+    await cards.first().click(); await page.waitForFunction(()=>window.releaseOwned);
+    await detail.locator('h2').evaluate(node=>window.detailTitle=node);
+    await head.getByRole('button',{name:'戻る',exact:true}).focus();
+    await page.evaluate(()=>{window.detailFocus=document.activeElement;window.releaseOwned();});
+    await detail.getByRole('button',{name:'選択する',exact:true}).waitFor();
+    assert.equal(await detail.locator('h2').evaluate(node=>node===window.detailTitle),true,'late ownership preserves detail DOM');
+    assert.equal(await page.evaluate(()=>document.activeElement===window.detailFocus),true,'late ownership preserves focus');
+    assert.equal(await head.getByRole('button',{name:'認証',exact:true}).count(),0);
+    const before=await page.evaluate(()=>({downloads:window.downloads,positive:window.node.widgets.find(w=>w.name==='positive').value,negative:window.node.widgets.find(w=>w.name==='negative').value}));
+    await detail.getByRole('button',{name:'選択する',exact:true}).click();
+    await page.waitForFunction(()=>window.transactions===1);
+    assert.equal(await page.evaluate(()=>window.node.widgets.find(w=>w.name==='lora_name').value),'folder\\1.safetensors','selection uses native widget option separators');
+    assert.deepEqual(await page.evaluate(()=>({downloads:window.downloads,positive:window.node.widgets.find(w=>w.name==='positive').value,negative:window.node.widgets.find(w=>w.name==='negative').value})),before);
+    await page.evaluate(()=>{window.deferCatalog=true;window.releaseCatalog=null;});
+    await detail.getByRole('button',{name:'選択する',exact:true}).click();await page.waitForFunction(()=>window.releaseCatalog);
+    await page.evaluate(()=>{window.node.widgets.find(w=>w.name==='lora_name').value='changed.safetensors';window.releaseCatalog();});
+    await detail.getByText('選択対象が変わりました。詳細を開き直してください。',{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.transactions),1,'late selection cannot overwrite changed node');
+    await page.evaluate(()=>window.node.widgets.find(w=>w.name==='lora_name').value='folder\\1.safetensors');
+    await detail.evaluate(node=>node.scrollTop=node.scrollHeight);
+    const fixed=await head.getByRole('button',{name:'戻る',exact:true}).boundingBox(), dialog=await search.boundingBox();
+    assert(fixed.y>=dialog.y&&fixed.y+fixed.height<dialog.y+100,'Back stays in fixed header while detail scrolls');
+    await page.screenshot({path:resolve(screenshots,'detail-owned-select-fixed-back.png')});
+    await head.getByRole('button',{name:'戻る',exact:true}).click();
+    assert.equal(await cards.first().evaluate(node=>node===document.activeElement&&node.classList.contains('pc-lora-selected')),true);
+    await cards.nth(1).click();assert.equal(await detail.getByRole('button',{name:'選択する',exact:true}).count(),0,'external-root-only ownership has no selection');await head.getByRole('button',{name:'戻る',exact:true}).click();
+    await search.getByRole('combobox',{name:'Category',exact:true}).selectOption('Style');
+    await search.getByRole('combobox',{name:'並び順',exact:true}).selectOption('Newest');
+    await cards.first().click();
+    const author=await detail.locator('.pc-civitai-author').textContent();
+    await detail.locator('.pc-civitai-author').click();
+    await page.waitForFunction(author=>{const p=new URL(window.calls.filter(c=>c.path.includes('/search?')).at(-1).path,'http://fixture').searchParams;return p.get('search_type')==='Users'&&p.get('query')===author;},author);
+    assert.equal(await search.getByRole('combobox',{name:'検索対象',exact:true}).inputValue(),'Users');
+    assert.equal(await search.getByRole('searchbox',{name:'検索語'}).inputValue(),author);
+    for(const [label,value] of [['Category','Style'],['並び順','Newest'],['Model Type','LORA'],['Base Model','Illustrious'],['接続先','civitai.red']])assert.equal(await search.getByRole('combobox',{name:label,exact:true}).inputValue(),value);
+    assert.equal(await head.getByRole('button',{name:'認証',exact:true}).count(),1);
+    await cards.first().click();await head.getByRole('button',{name:'戻る',exact:true}).click();
+    const calls=await page.evaluate(()=>window.calls.filter(c=>c.path.includes('/search?')).length);
+    await page.evaluate(()=>{window.current.dismiss();window.open();});await cards.first().waitFor();
+    assert.equal(await search.getByRole('combobox',{name:'検索対象',exact:true}).inputValue(),'Users');assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.path.includes('/search?')).length),calls);
+    await cards.first().click();await detail.getByRole('button',{name:'削除',exact:true}).click();
+    const confirm=page.getByRole('dialog',{name:'LoRAを削除',exact:true});
+    assert.match(await confirm.textContent(),/folder\/1.safetensors/);await confirm.getByRole('button',{name:'キャンセル',exact:true}).click();assert.equal(await page.evaluate(()=>window.deleteCalls||0),0);
+    await detail.getByRole('button',{name:'削除',exact:true}).click();await page.evaluate(()=>window.failDelete=true);await confirm.getByRole('button',{name:'削除',exact:true}).click();await confirm.getByRole('status').filter({hasText:'file changed'}).waitFor();assert.equal(await search.getAttribute('aria-busy'),'false');await confirm.getByRole('button',{name:'キャンセル',exact:true}).click();await page.evaluate(()=>window.failDelete=false);
+    await detail.getByRole('button',{name:'削除',exact:true}).click();await page.evaluate(()=>window.deferDelete=true);await confirm.getByRole('button',{name:'削除',exact:true}).click();await page.waitForFunction(()=>window.releaseDelete);
+    assert.equal(await search.getAttribute('aria-busy'),'true');await page.evaluate(()=>window.current.dismiss());assert.equal(await search.count(),1,'pending deletion holds owning modal');await page.evaluate(()=>window.releaseDelete());await confirm.waitFor({state:'detached'});
+    await detail.getByText('ローカルのLoRAを削除しました。選択中のファイル名は変更していません。',{exact:true}).waitFor();
+    assert.equal(await detail.getByRole('button',{name:'選択する',exact:true}).count(),0);assert.equal(await page.evaluate(()=>window.transactions),1,'deletion never creates graph Undo');assert.deepEqual(await page.evaluate(()=>({downloads:window.downloads,positive:window.node.widgets.find(w=>w.name==='positive').value,negative:window.node.widgets.find(w=>w.name==='negative').value})),before);
+    await head.getByRole('button',{name:'戻る',exact:true}).click();assert.equal(await cards.first().locator('.pc-civitai-card-owned').isVisible(),false);
+    await page.evaluate(()=>{window.current.dismiss();window.deletedPaths=[];window.ownedItems=[1];window.catalogRevision='different';window.open();});await cards.first().click();
+    await detail.getByText('LoRAファイルが更新されたか見つかりません。再検索してください。',{exact:true}).waitFor();assert.equal(await detail.getByRole('button',{name:'選択する',exact:true}).count(),0);assert.equal(await detail.getByRole('button',{name:'削除',exact:true}).count(),0);
+    await page.evaluate(()=>window.current.dismiss());
+    // Standalone Back is available before any provider reply and after failure.
+    await page.evaluate(()=>{window.deferDetails=true;window.detail();});await page.waitForFunction(()=>window.releaseDetails);
+    let standalone=page.getByRole('dialog',{name:'Civitai Detail',exact:true});await standalone.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();await page.evaluate(()=>window.releaseDetails());
+    await page.evaluate(()=>{window.failDetailAuth=true;window.detail();});const failure=page.getByRole('dialog',{name:'取得に失敗しました',exact:true});await failure.waitFor();await page.keyboard.press('Escape');await standalone.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
+    await page.evaluate(()=>{window.failDetailAuth=false;window.detail({localItem:{path:'local.safetensors',file_revision:'local-revision'},onSelect:()=>window.localSelected=true,onAuthor:(author,host)=>window.authorCallback={author,host}});});
+    await standalone.getByRole('button',{name:'選択する',exact:true}).click();assert.equal(await page.evaluate(()=>window.localSelected),true);await standalone.locator('.pc-civitai-author').click();assert.equal(await standalone.count(),0);assert.deepEqual(await page.evaluate(()=>window.authorCallback),{author,host:'civitai.red'});
+    assert.deepEqual(errors,[]);await page.close();
+}
 try {
     await verifyOwnership();
+    await verifyAuthorSelectionAndDeletion();
     const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
     const errors = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(() => window.ready);
@@ -205,7 +275,7 @@ try {
     assert.equal(await cards.nth(1).locator(".pc-civitai-card-updated").textContent(), 'Updated: —');
     const boxes = await cards.evaluateAll(nodes => nodes.slice(0,7).map(node => node.getBoundingClientRect().y));
     assert(boxes.slice(0,6).every(y => y === boxes[0])); assert(boxes[6] > boxes[0]);
-    assert.deepEqual(await search.locator('.pc-civitai-controls select,.pc-civitai-controls [role=combobox]').evaluateAll(nodes => nodes.map(node=>node.getAttribute('aria-label'))), ['接続先','Base Model','Model Type','Category','並び順']);
+    assert.deepEqual(await search.locator('.pc-civitai-controls select,.pc-civitai-controls [role=combobox]').evaluateAll(nodes => nodes.map(node=>node.getAttribute('aria-label'))), ['検索対象','接続先','Base Model','Model Type','Category','並び順']);
     async function checkCardGeometry(expectedColumns) {
         const geometry = await cards.first().evaluate(card=>{
             const box = node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width};};
@@ -372,7 +442,7 @@ try {
     await assertPromptTextsUnchanged();
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.directory),'auth/snapshot');
     assert.doesNotMatch(await page.evaluate(()=>JSON.stringify(window.node.properties)), /fixture-secret|gallery|description|image_url/);
-    await detail.getByRole('button',{name:'戻る',exact:true}).click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Search');
+    await search.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Search');
     await search.locator('.pc-civitai-results').evaluate(node=>node.scrollTop=650);
     const scroll = await search.locator('.pc-civitai-results').evaluate(node=>node.scrollTop);
     await page.evaluate(()=>window.originalGrid=document.querySelector('.pc-civitai-results'));
@@ -402,12 +472,12 @@ try {
     await acquireAndSelect();
     await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value==='Illustrious');
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.model_mode),'Illustrious');
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await search.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     assert.equal(await search.getByRole('combobox',{name:'Base Model',exact:true}).inputValue(),'');
     await search.getByRole('combobox',{name:'Model Type',exact:true}).selectOption('Checkpoint');
     await page.waitForFunction(()=>new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('model_type')==='Checkpoint');
     await cards.first().click(); assert.equal(await detail.getByRole('button',{name:'取得',exact:true}).count(),0);
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await search.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     assert.equal(await search.locator('input[aria-label="Category"],datalist,small').count(),0);
     await search.getByRole('combobox',{name:'Category',exact:true}).selectOption('Style');
     await page.waitForFunction(()=>new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('category')==='Style');
@@ -463,7 +533,7 @@ try {
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),searchesAfterLate);
     await page.keyboard.press('Escape');
     // Destination picker supports typed/new folders, tree keys, root and download-only without undo.
-    await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup?.();window.node=window.makeNode();window.authenticated=true;window.open();});
+    await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup?.();window.node=window.makeNode();window.ownedItems=[];window.ownedNames={};window.authenticated=true;window.open();});
     await cards.first().click(); await detail.getByRole('button',{name:'取得',exact:true}).click();
     const destination = page.getByRole('dialog',{name:'LoRAを取得',exact:true}), directory = destination.getByRole('combobox',{name:'保存先',exact:true});
     await destination.getByText('空欄はLoRAフォルダ直下。新しい保存先も入力できます。',{exact:true}).waitFor();
@@ -521,6 +591,8 @@ try {
     await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByLabel('Civitai APIキー',{exact:true}).fill('gate-key'); await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),gateBefore);
     await search.getByRole('button',{name:'検索',exact:true}).click(); await cards.first().click();
+    assert.equal(await search.getByRole('button',{name:'認証',exact:true}).count(),0);
+    await search.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByRole('button',{name:'認証',exact:true}).click(); await auth.waitFor({state:'detached'});
     assert.equal(await search.getAttribute('aria-label'),'Civitai Search'); assert.equal(await cards.count(),0,'authentication changes discard previous result ownership');
     await search.getByRole('button',{name:'認証',exact:true}).click(); await auth.getByRole('button',{name:'認証解除',exact:true}).click(); await auth.getByText('未認証',{exact:true}).waitFor(); await page.keyboard.press('Escape');
@@ -620,9 +692,9 @@ try {
     await page.evaluate(()=>window.releaseSearch()); await page.waitForTimeout(20);
     assert.match(await cards.first().locator('strong').textContent(),/stable baseline/);
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),beforeOldHostRelease);
-    await cards.first().click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Detail'); await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await cards.first().click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Detail'); await search.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     await page.evaluate(optionsFail=>{window.failOptionsAfterWait=optionsFail;window.releaseOptions();},optionsFail);
-    if (optionsFail) { await failure.waitFor(); await page.keyboard.press('Escape'); assert.match(await cards.first().locator('strong').textContent(),/stable baseline/); assert.equal(await search.locator('.pc-civitai-results').evaluate(node=>node.inert),false); await cards.first().click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Detail'); await detail.getByRole('button',{name:'戻る',exact:true}).click(); assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),beforeOldHostRelease); }
+    if (optionsFail) { await failure.waitFor(); await page.keyboard.press('Escape'); assert.match(await cards.first().locator('strong').textContent(),/stable baseline/); assert.equal(await search.locator('.pc-civitai-results').evaluate(node=>node.inert),false); await cards.first().click(); assert.equal(await search.getAttribute('aria-label'),'Civitai Detail'); await search.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click(); assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.includes('/search?')).length),beforeOldHostRelease); }
     else {
     await page.waitForFunction(()=>!document.querySelector('.pc-civitai-results').inert);
     await page.waitForFunction(()=>window.calls.filter(call=>call.path.includes('/search?')).length>0&&new URL(window.calls.filter(call=>call.path.includes('/search?')).at(-1).path,'http://fixture').searchParams.get('host')==='civitai.com');
@@ -701,10 +773,10 @@ try {
     await detail.getByRole('button',{name:'Civitai Image #1',exact:true}).waitFor();await page.keyboard.press('Escape');
 
     // Actual selected local paths, rather than provenance alone, determine the green card.
-    await page.evaluate(()=>{window.node=window.makeNode();window.acquiredItems=true;window.node.widgets.find(widget=>widget.name==='lora_name').value='folder\\1.safetensors';window.open();});
+    await page.evaluate(()=>{window.node=window.makeNode();window.acquiredItems=true;window.ownedNames={};window.node.widgets.find(widget=>widget.name==='lora_name').value='folder\\1.safetensors';window.open();});
     await cards.first().waitFor();
     assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
-    await cards.first().click();await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await cards.first().click();await search.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
     await page.keyboard.press('Escape');await page.evaluate(()=>window.open());await cards.first().waitFor();
     assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
@@ -732,7 +804,7 @@ try {
     assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='positive').value),'manual');
     await assertPromptTextsUnchanged();
     assert.deepEqual(await page.evaluate(()=>window.node.properties.scene_civitai.managed_triggers),[]);
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
+    await search.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();assert.equal(await cards.first().evaluate(node=>node.classList.contains('pc-lora-selected')),true);
     await page.evaluate(()=>{window.node.sceneCivitaiSearchCleanup();window.acquiredItems=false;window.fileExists=false;});
 
     // A delayed collision belongs to its download modal, not a newer independent root.

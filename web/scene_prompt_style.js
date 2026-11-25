@@ -4,6 +4,8 @@ export function injectStyle() {
     style.textContent = `
         .pc-lora-dialog.pc-civitai-dialog { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
         .pc-lora-dialog.pc-civitai-search-dialog { width: calc(100vw - 32px); display: flex; flex-direction: column; overflow: hidden; }
+        .pc-lora-dialog.pc-civitai-detail-dialog { display: flex; flex-direction: column; overflow: hidden; }
+        .pc-civitai-search-dialog > .pc-lora-head, .pc-civitai-detail-dialog > .pc-lora-head { flex-shrink: 0; }
         .pc-civitai-controls { display: flex; flex-wrap: nowrap; flex-shrink: 0; gap: 8px; padding: 8px 0; overflow-x: auto; align-items: stretch; }
         .pc-civitai-controls > * { flex-shrink: 0; }
         .pc-civitai-controls input[type=search] { flex: 1 0 160px; width: auto; }
@@ -23,9 +25,10 @@ export function injectStyle() {
         .pc-civitai-card-summary { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
         .pc-civitai-card-updated { color: #bbc4d2; font-size: 14px; text-align: right; }
         .pc-civitai-card-stats { display: flex; justify-content: flex-end; flex-wrap: nowrap; gap: 6px; flex-shrink: 0; }
-        .pc-civitai-card-labels { position: absolute; left: 0; top: 0; max-width: 100%; display: flex; flex-direction: column; align-items: flex-start; }
+        .pc-civitai-card-labels { position: absolute; inset: 0 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px; }
         .pc-civitai-card-base, .pc-civitai-card-owned { max-width: 100%; box-sizing: border-box; padding: 4px 6px; background: #000b; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .pc-civitai-card-owned { background: #174f2e; font-weight: 700; }
+        .pc-civitai-card-base { justify-self: start; }
         .pc-civitai-card-stats span { white-space: nowrap; color: #bbc4d2; }
         .pc-civitai-no-preview { display: grid; place-items: center; color: #aeb7c5; background: #292d35; }
         .pc-civitai-status:empty { display: none; }
@@ -51,7 +54,7 @@ export function injectStyle() {
         .pc-civitai-metadata-row:nth-child(even) { background: #353941; }
         .pc-civitai-metadata dt { font-weight: bold; }
         .pc-civitai-metadata dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-        .pc-civitai-search-dialog [hidden] { display: none; }
+        .pc-civitai-search-dialog [hidden], .pc-civitai-detail-dialog [hidden] { display: none; }
         .pc-civitai-directory { display: grid; grid-template-columns: minmax(0, 1fr) auto; flex: 1; min-width: 0; }
         .pc-civitai-dialog label.pc-civitai-directory-label { align-items: flex-start; }
         .pc-civitai-dialog label .pc-civitai-directory input:not([type=checkbox]) { width: 100%; }
@@ -61,6 +64,7 @@ export function injectStyle() {
         .pc-civitai-directory-option:hover, .pc-civitai-directory-option[aria-selected=true] { background: #354f70; }
         .pc-civitai-download-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 20px; }
         .pc-civitai-error { color: #ffb0a7; }
+        .pc-button.pc-civitai-delete { color: #ffb0a7; border-color: #ba4d47; }
         .pc-civitai-dialog form { display: flex; flex-direction: column; gap: 10px; }
         .pc-civitai-dialog label { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
         .pc-civitai-dialog label input:not([type=checkbox]), .pc-civitai-dialog label select { width: 65%; }

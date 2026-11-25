@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
 import stat
@@ -23,6 +24,10 @@ _FILE_OPERATIONS = weakref.WeakValueDictionary()
 _FILE_OPERATIONS_LOCK = threading.Lock()
 
 
+class StaleLoRAFileError(ValueError):
+    """The selected catalog row no longer identifies the current file."""
+
+
 @contextmanager
 def file_operation(key):
     """Share one operation lock while callers own or wait for a physical file."""
@@ -42,6 +47,10 @@ def file_identity(path):
 def file_signature(path):
     stat = os.stat(path)
     return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino
+
+
+def file_revision(signature):
+    return ":".join(str(value) for value in signature)
 
 
 def _trigger_phrases(metadata):
@@ -145,7 +154,8 @@ def read_lora_info(name):
                 if generation != _CATALOG_GENERATION and _CATALOG.get(key) != signature:
                     continue
                 _CACHE[key] = (signature, result)
-            return {**result, "name": name, "trigger_phrases": list(result["trigger_phrases"])}
+            return {**result, "name": name, "trigger_phrases": list(result["trigger_phrases"]),
+                    "file_revision": file_revision(signature)}
 
 
 def lora_inventory():
@@ -177,6 +187,7 @@ def lora_inventory():
             signature = include(path, name)
             if signature:
                 item["size"], item["mtime_ns"] = signature[:2]
+                item["file_revision"] = file_revision(signature)
         result.append(item)
     for root in folder_paths.get_folder_paths("loras"):
         for name in names:
@@ -200,3 +211,43 @@ def lora_inventory():
 def list_loras():
     """List selectable LoRA paths and file identity without opening model files."""
     return lora_inventory()[0]
+
+
+def delete_lora(name, file_revision):
+    """Delete only the selected native LoRA file if its revision still matches."""
+    if not isinstance(name, str) or not name.strip() or not isinstance(file_revision, str) or not file_revision:
+        raise ValueError("Select an available LoRA and its file revision.")
+    if name.startswith(("/", "\\")) or ntpath.splitdrive(name)[0] or ".." in name.replace("\\", "/").split("/"):
+        raise ValueError("Select a relative LoRA name.")
+    canonical_name = canonical_lora_name(name)
+    native_name = next((item for item in folder_paths.get_filename_list("loras")
+                        if canonical_lora_name(item) == canonical_name), None)
+    if native_name is None:
+        raise FileNotFoundError("Selected LoRA was not found.")
+    path = folder_paths.get_full_path("loras", native_name)
+    if not path:
+        raise FileNotFoundError("Selected LoRA was not found.")
+    key = file_identity(path)
+    with file_operation(key):
+        current_path = folder_paths.get_full_path("loras", native_name)
+        if not current_path:
+            raise FileNotFoundError("Selected LoRA was not found.")
+        if file_identity(current_path) != key:
+            raise StaleLoRAFileError("Selected LoRA changed. Refresh the local LoRA list.")
+        target = Path(current_path)
+        if target.is_symlink():
+            raise ValueError("A linked LoRA file cannot be deleted.")
+        resolved = target.resolve(strict=True)
+        if not any(resolved.is_relative_to(Path(root).resolve()) for root in folder_paths.get_folder_paths("loras")):
+            raise ValueError("Selected LoRA is outside the configured LoRA folders.")
+        info = target.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("Select a regular LoRA file.")
+        signature = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_dev, info.st_ino)
+        if ":".join(map(str, signature)) != file_revision:
+            raise StaleLoRAFileError("Selected LoRA changed. Refresh the local LoRA list.")
+        target.unlink()
+        native_cache = getattr(folder_paths, "filename_list_cache", None)
+        if native_cache is not None:
+            native_cache.pop("loras", None)
+    return {"deleted": native_name, "items": list_loras()}

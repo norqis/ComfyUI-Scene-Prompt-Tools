@@ -90,7 +90,7 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.node.properties.scene_civitai.managed_triggers),[]);
     assert.doesNotMatch(await page.evaluate(()=>JSON.stringify(window.node.properties)),/gallery|description|image_url|stats/);
     if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await modal.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     assert.equal(await page.evaluate(()=>document.querySelector('.pc-civitai-card')===window.originalCard && document.querySelector('.pc-civitai-results')===window.originalGrid),true);
     assert.equal(await cards.first().evaluate(node=>node===document.activeElement),true);
     assert.equal(await modal.locator('.pc-lora-selected strong').textContent(),'LoRA 1 civitai.red');
@@ -99,7 +99,7 @@ try {
         assert.equal(await detail.locator('.pc-civitai-gallery img').count(),count);
         assert.equal(await detail.getByRole('button',{name:'Next',exact:true}).isDisabled(),true);
         if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await modal.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     }
     await page.setViewportSize({ width: 360, height: 740 });
     assert.equal(await modal.evaluate(node=>node.scrollWidth<=node.clientWidth),true);
@@ -109,7 +109,7 @@ try {
     const callsBeforeBack=await page.evaluate(()=>window.calls.length);
     await cards.nth(4).evaluate(node=>node.click());
     if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await modal.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     assert.deepEqual(await modal.locator('.pc-civitai-results').evaluate(node=>[node.scrollLeft,node.scrollTop]),scrolled);
     assert.equal(await page.evaluate(()=>window.calls.length),callsBeforeBack,'Back never requests search or details');
     assert.equal(await modal.locator('.pc-civitai-controls').evaluate(node=>node.scrollWidth>node.clientWidth),true);
@@ -132,7 +132,7 @@ try {
     await page.evaluate(()=>window.finishDownload());
     await busyDownload.waitFor({state:'detached'});
     assert.equal(await page.evaluate(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value),'Anima','completed selection uses the captured model');
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await modal.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     await cards.first().click(); await acquireAndSelect();
     await page.waitForFunction(()=>window.node.widgets.find(widget=>widget.name==='model_mode').value==='Anima');
     assert.deepEqual(await page.evaluate(()=>[window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.host,window.node.properties.scene_civitai.host]),['civitai.com','civitai.com']);
@@ -145,7 +145,7 @@ try {
     assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.model_mode),'Anima');
 
     if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await modal.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     await modal.getByRole('combobox',{name:'並び順'}).selectOption('Highest Rated');
     assert.deepEqual(await modal.getByRole('combobox',{name:'Base Model',exact:true}).locator('option').evaluateAll(items=>items.map(item=>item.value)),
         ['','Illustrious','Anima','NoobAI','Pony']);
@@ -157,7 +157,7 @@ try {
         await page.waitForFunction(mode=>window.node.widgets.find(widget=>widget.name==='model_mode').value===mode,mode);
         assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.path.endsWith('/download')).at(-1).body.model_mode),mode);
         if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await modal.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     }
     await page.waitForFunction(()=>window.calls.some(call=>call.path.includes('sort=Highest+Rated')));
     await modal.getByRole('searchbox',{name:'検索語'}).fill('different');
@@ -169,7 +169,7 @@ try {
     await cards.first().click(); assert.equal(await detail.isVisible(),true,'previous cards remain usable after a failed search');
     assert.match(await detail.getByRole('link',{name:'公式サイトを開く'}).getAttribute('href'),/^https:\/\/civitai.com\//);
     if (await page.getByRole('dialog',{name:'LoRAを取得',exact:true}).count()) await page.keyboard.press('Escape');
-    await detail.getByRole('button',{name:'戻る',exact:true}).click();
+    await modal.locator('.pc-lora-head').getByRole('button',{name:'戻る',exact:true}).click();
     await page.evaluate(()=>window.fail=false); await modal.getByRole('button',{name:'検索',exact:true}).click();
     await page.waitForFunction(()=>!document.querySelector('.pc-civitai-results').inert);
     for(const raw of [{status:200,text:''},{status:200,text:'{"items":['},{status:502,text:'<html>upstream error</html>'},{status:404,text:''}]) {

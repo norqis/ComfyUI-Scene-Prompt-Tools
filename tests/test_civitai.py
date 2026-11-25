@@ -366,6 +366,33 @@ class CivitaiHttpTest(llm_fixture.HttpFixture):
             self.assertEqual(authorization, "Bearer fixture-search-key")
         self.assertEqual(civitai.normalize(self.model, "Anima"), [])
 
+    async def test_author_search_uses_exact_escaped_filter_without_more_requests(self):
+        author = '作者 "quoted" \\ name'
+        for host in civitai.HOSTS:
+            for sort in civitai.SORTS:
+                before = len(self.site_requests), len(self.model_requests)
+                result = await civitai.search(author, "Illustrious", sort, host=host, category="Style", search_type="Users")
+                self.assertEqual(len(result["items"]), 1)
+                self.assertEqual((len(self.site_requests), len(self.model_requests)), (before[0] + 1, before[1] + 1))
+                request = self.site_requests[-1][0]["queries"][0]
+                self.assertEqual(request["q"], "")
+                self.assertIn("user.username = " + json.dumps(author), request["filter"])
+                self.assertIn('type = "LORA"', request["filter"])
+                self.assertIn('category.name = "Style"', request["filter"])
+                self.assertIn('versions.baseModel = "Illustrious XL"', request["filter"])
+                self.assertEqual(request["limit"], 30)
+                self.assertEqual(self.model_requests[-1][0]["nsfw"], "true")
+                self.assertEqual(self.model_requests[-1][1], "Bearer fixture-search-key")
+        for search_type, query in [("Models", author), ("Users", "")]:
+            await civitai.search(query, "", search_type=search_type)
+            request = self.site_requests[-1][0]["queries"][0]
+            self.assertEqual(request["q"], query)
+            self.assertNotIn("user.username", request["filter"])
+        before = len(self.site_requests)
+        with self.assertRaises(ValueError):
+            await civitai.search(author, "Illustrious", search_type="Unknown")
+        self.assertEqual(len(self.site_requests), before)
+
     async def test_metadata_gallery_and_host_are_bound_to_selected_version(self):
         self.model.update(description="Model description", stats={"downloadCount": 90})
         self.version.update(description="Version description", publishedAt="2026-08-02", createdAt="2026-07-01", stats={"downloadCount": 12})
