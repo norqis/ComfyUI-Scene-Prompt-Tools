@@ -14,6 +14,35 @@ aiohttp = llm_fixture.aiohttp
 service, settings_module = llm_fixture.service, llm_fixture.settings_module
 
 class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lora_delete_route_uses_revision_and_preserves_error_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_modules = dict(sys.modules)
+            try:
+                routes = load_routes(Path(temporary))
+                class Request:
+                    payload = {"name": "folder/local.safetensors", "file_revision": "revision"}
+                    async def json(self):
+                        return self.payload
+                request = Request()
+                endpoint = routes._test_routes[("POST", "/scene_prompt/loras/delete")]
+                result = {"deleted": request.payload["name"], "items": []}
+                with mock.patch.object(routes, "delete_lora", return_value=result) as delete:
+                    self.assertEqual((await endpoint(request))["payload"], result)
+                    delete.assert_called_once_with("folder/local.safetensors", "revision")
+                for failure, status in [(routes.StaleLoRAFileError("changed"), 409), (ValueError("invalid"), 400),
+                                        (FileNotFoundError("missing"), 404), (OSError("failed"), 422)]:
+                    with mock.patch.object(routes, "delete_lora", side_effect=failure):
+                        self.assertEqual((await endpoint(request))["status"], status)
+                request.payload = []
+                with mock.patch.object(routes, "delete_lora") as delete:
+                    self.assertEqual((await endpoint(request))["status"], 400)
+                    delete.assert_not_called()
+            finally:
+                for name in list(sys.modules):
+                    if name not in original_modules:
+                        del sys.modules[name]
+                sys.modules.update(original_modules)
+
     async def test_owned_route_is_local_and_checks_live_transport(self):
         with tempfile.TemporaryDirectory() as temporary:
             original_modules = dict(sys.modules)
@@ -377,10 +406,15 @@ class LlmRoutesTest(unittest.IsolatedAsyncioTestCase):
                         request.query = {"query": "hat", "model_mode": "Anima", "sort": "Highest Rated"}
                         with mock.patch.object(civitai, "search", return_value={"items": []}) as search:
                             self.assertEqual((await registered[("GET", "/scene_prompt/civitai/search")](request))["payload"], {"items": []})
-                            search.assert_awaited_once_with("hat", "Anima", "Highest Rated", host="civitai.red", model_type="LORA", category="", user_id=request.user_id)
+                            search.assert_awaited_once_with("hat", "Anima", "Highest Rated", host="civitai.red", model_type="LORA", category="", user_id=request.user_id, search_type="Models")
                             request.query["host"] = "civitai.com"
                             await registered[("GET", "/scene_prompt/civitai/search")](request)
                             self.assertEqual(search.await_args.kwargs["host"], "civitai.com")
+                            request.query["search_type"] = "Users"
+                            await registered[("GET", "/scene_prompt/civitai/search")](request)
+                            self.assertEqual(search.await_args.kwargs["search_type"], "Users")
+                        request.query["search_type"] = "Unknown"
+                        self.assertEqual((await registered[("GET", "/scene_prompt/civitai/search")](request))["status"], 400)
                         request.payload = {"model_id": 1, "version_id": 2, "file_id": 3, "model_mode": "Anima"}
                         with mock.patch.object(civitai, "download", return_value={"lora_name": "llm/public.safetensors"}) as download:
                             self.assertEqual((await registered[("POST", "/scene_prompt/civitai/download")](request))["status"], 200)

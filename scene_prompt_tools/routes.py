@@ -37,7 +37,7 @@ from .presets import (
     snapshot_presets_for_run,
 )
 from .storage import prompt_data_directory, is_windows_reserved_name
-from .lora_metadata import list_loras, read_lora_info
+from .lora_metadata import list_loras, read_lora_info, delete_lora, StaleLoRAFileError
 from .resource_info import connected_resources, read_model_hash
 
 
@@ -710,7 +710,7 @@ def define_routes():
         from .civitai import ServiceError, search, download, owned, by_hash, descriptions, gallery, details, image_details, options, tags, directories
         try:
             if operation == "search":
-                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"), model_type=request.query.get("model_type", "LORA"), category=request.query.get("category", ""), user_id=_request_user_id(request))
+                result = await search(request.query.get("query", ""), request.query.get("model_mode", "Illustrious"), request.query.get("sort", "Most Downloaded"), host=request.query.get("host", "civitai.red"), model_type=request.query.get("model_type", "LORA"), category=request.query.get("category", ""), user_id=_request_user_id(request), search_type=request.query.get("search_type", "Models"))
             elif operation == "by_hash":
                 result = await by_hash(request.query.get("sha256", ""), user_id=_request_user_id(request))
             elif operation == "descriptions":
@@ -866,6 +866,22 @@ def define_routes():
         except FileNotFoundError as exc:
             return web.json_response({"error": str(exc)}, status=404)
         except (OSError, json.JSONDecodeError) as exc:
+            return web.json_response({"error": str(exc)}, status=422)
+
+    @PromptServer.instance.routes.post("/scene_prompt/loras/delete")
+    async def scene_prompt_lora_delete(request):
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Invalid LoRA deletion request.")
+            return web.json_response(await asyncio.to_thread(delete_lora, body.get("name"), body.get("file_revision")))
+        except StaleLoRAFileError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except FileNotFoundError as exc:
+            return web.json_response({"error": str(exc)}, status=404)
+        except OSError as exc:
             return web.json_response({"error": str(exc)}, status=422)
 
     @PromptServer.instance.routes.post("/scene_prompt/expand/resources")

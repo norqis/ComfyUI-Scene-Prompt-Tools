@@ -54,13 +54,13 @@ class OwnedLoraTests(unittest.IsolatedAsyncioTestCase):
         self.write("duplicate.safetensors", root=1)
         expected = self.candidate()
         result = await civitai.owned([expected, expected, self.candidate(b"unavailable")])
-        self.assertEqual(result, {"items": [{"sha256": expected["sha256"], "owned": True, "lora_name": "nested/改名.safetensors"}]})
+        self.assertEqual(result, {"items": [{"sha256": expected["sha256"], "owned": True, "lora_name": "nested/改名.safetensors", "file_revision": ":".join(map(str, lora_metadata.file_signature(self.roots[0] / "nested/改名.safetensors")))}]})
 
     async def test_hidden_root_file_is_owned_without_wrong_selectable_name(self):
         self.write("nested/same.safetensors", b"selected wrong contents")
         hidden = self.write("nested/same.safetensors", root=1)
         result = await civitai.owned([self.candidate()])
-        self.assertEqual(result["items"], [{"sha256": self.candidate()["sha256"], "owned": True, "lora_name": ""}])
+        self.assertEqual(result["items"], [{"sha256": self.candidate()["sha256"], "owned": True, "lora_name": "", "file_revision": ":".join(map(str, lora_metadata.file_signature(hidden)))}])
         with mock.patch.object(Path, "open", side_effect=AssertionError("picker evicted hidden digest")):
             self.assertEqual(lora_metadata.list_loras()[0]["size"], len(b"selected wrong contents"))
             self.assertEqual(await civitai.owned([self.candidate(size_kb=999999)]), result)
@@ -76,6 +76,20 @@ class OwnedLoraTests(unittest.IsolatedAsyncioTestCase):
         self.extra["custom/name.safetensors"] = str(external)
         result = await civitai.owned([self.candidate(external.read_bytes())])
         self.assertEqual(result["items"][0]["lora_name"], "custom/name.safetensors")
+
+    async def test_deleted_between_hash_and_stat_does_not_fail_other_matches(self):
+        removed = self.write("a-removed.safetensors", b"removed fixture")
+        kept = self.write("b-kept.safetensors", b"kept fixture")
+        original_hash = civitai._sha256
+        def hash_then_delete(path):
+            digest = original_hash(path)
+            if path == removed:
+                path.unlink()
+            return digest
+        with mock.patch.object(civitai, "_sha256", side_effect=hash_then_delete):
+            result = await civitai.owned([self.candidate(b"removed fixture"), self.candidate(b"kept fixture")])
+        self.assertEqual(result["items"], [{"sha256": self.candidate(b"kept fixture")["sha256"], "owned": True,
+                                           "lora_name": kept.name, "file_revision": ":".join(map(str, lora_metadata.file_signature(kept)))}])
 
     async def test_metadata_and_acquisition_hashes_are_reused_even_with_approximate_sizes(self):
         header = b'{"__metadata__": {"modelspec.trigger_phrase": "local"}}'

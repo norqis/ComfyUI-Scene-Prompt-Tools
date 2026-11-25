@@ -475,10 +475,11 @@ async def owned(items, is_current=lambda: True):
                 continue
             try:
                 digest = await _file_io(_sha256, entry["path"])
+                current_signature = await _file_io(file_signature, entry["path"])
             except FileNotFoundError:
                 continue
-            if digest in remaining:
-                matches.append({"sha256": digest, "owned": True, "lora_name": entry["lora_name"]})
+            if digest in remaining and current_signature == signature:
+                matches.append({"sha256": digest, "owned": True, "lora_name": entry["lora_name"], "file_revision": ":".join(map(str, signature))})
                 remaining.pop(digest)
     return {"items": matches}
 
@@ -640,8 +641,10 @@ async def tags(query="", host="civitai.red", user_id="default"):
     return {"items": [item["name"] for item in data["items"] if isinstance(item, dict) and isinstance(item.get("name"), str)]}
 
 
-async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", model_type="LORA", category="", user_id="default"):
+async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", model_type="LORA", category="", user_id="default", search_type="Models"):
     host = validate_host(host)
+    if search_type not in ("Models", "Users"):
+        raise ValueError("Unsupported Civitai search_type.")
     if sort not in SORTS:
         raise ValueError("Unsupported Civitai sort.")
     if model_mode and model_mode not in MODES:
@@ -653,7 +656,9 @@ async def search(query, model_mode, sort="Most Downloaded", host="civitai.red", 
         filters.append("(" + " OR ".join("versions.baseModel = " + json.dumps(alias) for alias in aliases) + ")")
     if category:
         filters.append("category.name = " + json.dumps(category))
-    request = {"indexUid": "models_v9", "q": query, "filter": " AND ".join(filters), "limit": 30,
+    if search_type == "Users" and query:
+        filters.append("user.username = " + json.dumps(query))
+    request = {"indexUid": "models_v9", "q": query if search_type == "Models" else "", "filter": " AND ".join(filters), "limit": 30,
                "attributesToRetrieve": ["id", "metrics", "createdAt", "lastVersionAt"]}
     sort_fields = {"Highest Rated": "metrics.thumbsUpCount", "Most Downloaded": "metrics.downloadCount",
                    "Most Liked": "metrics.favoriteCount", "Most Collected": "metrics.collectedCount", "Newest": "createdAt"}
