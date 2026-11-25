@@ -357,9 +357,11 @@ class LoraMetadataTests(unittest.TestCase):
                 self.assertEqual(metadata.list_loras(), catalog)
             self.assertEqual(catalog, [
                 {"path": "folder/titled.safetensors", "size": nested.stat().st_size,
-                 "mtime_ns": nested.stat().st_mtime_ns},
+                 "mtime_ns": nested.stat().st_mtime_ns,
+                 "file_revision": metadata.file_revision(metadata.file_signature(nested))},
                 {"path": "plain.ckpt", "size": plain.stat().st_size,
-                 "mtime_ns": plain.stat().st_mtime_ns},
+                 "mtime_ns": plain.stat().st_mtime_ns,
+                 "file_revision": metadata.file_revision(metadata.file_signature(plain))},
                 {"path": "missing.safetensors", "size": None, "mtime_ns": None},
             ])
 
@@ -386,6 +388,7 @@ class LoraMetadataTests(unittest.TestCase):
             self.assertEqual(info["trigger_phrases"], ["local trigger", "trained word"])
             self.assertEqual(len(info["sha256"]), 64)
             self.assertEqual((info["size"], info["mtime_ns"]), (path.stat().st_size, path.stat().st_mtime_ns))
+            self.assertEqual(info["file_revision"], metadata.file_revision(metadata.file_signature(path)))
             self.assertEqual(metadata.read_lora_info(path.name), info)
             with self.assertRaises(ValueError):
                 metadata.read_lora_info("missing.safetensors")
